@@ -34,7 +34,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -606,9 +606,43 @@ function backup(file) {
 
 function atomicWrite(file, text) {
   const dir = path.dirname(file);
-  const tmp = path.join(dir, `.${path.basename(file)}.tmp-${process.pid}`);
-  fs.writeFileSync(tmp, text, { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  let stat = null;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (stat && stat.isSymbolicLink()) {
+    throw new Error(`refusing to write through a symlink at ${file}`);
+  }
+  // `wx` is O_CREAT|O_EXCL: a pre-created symlink at the predictable
+  // `<name>.tmp-<pid>` name can no longer receive the bytes, and a leftover
+  // file is not silently clobbered.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const tmp = path.join(dir,
+      `.${path.basename(file)}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`);
+    let fd;
+    try {
+      fd = fs.openSync(tmp, 'wx', 0o600);
+    } catch (error) {
+      if (error.code === 'EEXIST') continue;
+      throw error;
+    }
+    try {
+      fs.writeFileSync(fd, text);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    try {
+      fs.renameSync(tmp, file);
+    } catch (error) {
+      try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+      throw error;
+    }
+    return;
+  }
+  throw new Error(`could not create a unique temporary beside ${file}`);
 }
 
 function verifyComposition({ dshBin, profile, env, patchFile, original }) {
@@ -647,8 +681,29 @@ function main() {
     opts.codexHome = path.dirname(opts.config);
   }
 
-  const profileDir = path.join(opts.dshHome, 'profiles', opts.profile);
+  // --profile is a PROFILE NAME, never a path: `--profile ../../outside` used
+  // to join out of <dsh-home>/profiles and write the managed block anywhere
+  // the user could write. Reject separators, `..` and the empty name, then
+  // require the resolved directory to stay inside the profiles root.
+  if (!opts.profile || opts.profile === '.' || opts.profile === '..'
+      || opts.profile.includes('/') || opts.profile.includes('\\')
+      || path.isAbsolute(opts.profile)) {
+    die(`invalid --profile ${JSON.stringify(opts.profile)}: use a profile NAME ` +
+        `(no path separators, no "..")`);
+  }
+  const profilesRoot = path.resolve(opts.dshHome, 'profiles');
+  const profileDir = path.resolve(profilesRoot, opts.profile);
+  if (profileDir !== profilesRoot && !profileDir.startsWith(profilesRoot + path.sep)) {
+    die(`invalid --profile ${JSON.stringify(opts.profile)}: it resolves outside ${profilesRoot}`);
+  }
   const patchFile = path.join(profileDir, 'cordis.patch.yml');
+  try {
+    if (fs.lstatSync(patchFile).isSymbolicLink()) {
+      die(`${patchFile} is a symlink; refusing to write through it`);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
   if (!fs.existsSync(profileDir)) {
     die(`DSH profile "${opts.profile}" does not exist at ${profileDir}`);
   }

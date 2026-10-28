@@ -259,7 +259,9 @@ def docx_is_readable(path: Path) -> tuple:
     """
     try:
         with zipfile.ZipFile(path) as z:
-            xml = z.read("word/document.xml")
+            xml = _docx_xml_part(z, "word/document.xml")
+        if xml is None:
+            return False, "word/document.xml is over the size/entity budget"
         ET.fromstring(xml)
         return True, "readable OOXML (word/document.xml parses)"
     except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
@@ -306,7 +308,9 @@ def _serialize_document(root, raw: bytes) -> bytes:
 
 def _docx_root(path: Path):
     with zipfile.ZipFile(path) as z:
-        raw = z.read("word/document.xml")
+        raw = _docx_xml_part(z, "word/document.xml")
+    if raw is None:
+        raise OSError("word/document.xml is over the size/entity budget")
     head = raw[:6000].decode("utf-8", "replace")
     for m in re.finditer(r'xmlns:([A-Za-z0-9_]+)="([^"]+)"', head):
         try:
@@ -688,11 +692,25 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     def same_para_xml(a, b) -> bool:
         """Paragraph CONTENT equality: the tail (inter-paragraph whitespace)
         is not part of the paragraph, and a different pretty-print must not
-        turn every equal paragraph into a whole-paragraph change."""
+        turn every equal paragraph into a whole-paragraph change.
+
+        Word stamps a new w:rsidR/w:rsidRPr/w:rsidP (and may renumber
+        paraId/textId) on every save, even when no character changed. Comparing
+        the raw serialisation made a resaved, unchanged manuscript one giant
+        delete+insert, which the fidelity check then reported as over-marking.
+        Those ids are per-save bookkeeping, not content: strip them (and the
+        proofing marks) before the comparison.
+        """
+        _volatile = re.compile(
+            rb"\s(?:[A-Za-z0-9_]+:)?(?:rsid[A-Za-z]*|paraId|textId|durableId)=\"[^\"]*\"")
+
         def body(el):
             cp = copy.deepcopy(el)
             cp.tail = None
-            return ET.tostring(cp)
+            raw = ET.tostring(cp)
+            raw = _volatile.sub(b"", raw)
+            raw = re.sub(rb"<w:proofErr\b[^>]*/>", b"", raw)
+            return raw
         return body(a) == body(b)
 
     flush_anchored()                                    # before the first revised para
@@ -746,15 +764,17 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
         base_body.append(child)
     payload = _serialize_document(base_root, base_raw)
     out_docx.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_docx.with_suffix(".docx.tmp")
-    with zipfile.ZipFile(base_docx) as zin, \
-            zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if item.filename == "word/document.xml":
-                data = payload
-            zout.writestr(item, data)
-    os.replace(tmp, out_docx)
+
+    def _write_zip(f) -> None:
+        with zipfile.ZipFile(base_docx) as zin, \
+                zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "word/document.xml":
+                    data = payload
+                zout.writestr(item, data)
+
+    _atomic_write_bytes(tmp_path_for(out_docx), out_docx, _write_zip, binary=True)
     info = {"paragraphs_inserted": n_ins, "paragraphs_deleted": n_del,
             "revision_ids": counter[0],
             "non_paragraph_changed": non_paragraph_changed}
@@ -865,6 +885,22 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
     else:
         order = [tool] + (["redline-cmd"] if cmd_template else [])
     out.parent.mkdir(parents=True, exist_ok=True)      # external tools need the directory
+
+    # OUT must never be one of the INPUTS: drop_stale_out() unlinks it before
+    # the first backend, so an operator typo or a caller deriving OUT from an
+    # input destroyed the manuscript the diff was about. paper_redlines_adapter
+    # already refuses this; the in-tree backend chain did not.
+    for label, src in (("base", base), ("revised", revised)):
+        try:
+            same = out.resolve() == src.resolve()
+            if not same and out.exists() and src.exists():
+                same = os.path.samefile(out, src)
+        except OSError:
+            same = False
+        if same:
+            return [{"backend": "input-guard", "cmd": [], "rc": None, "ok": False,
+                     "detail": f"refusing to use the {label} file as OUT: it would be "
+                               f"deleted before the diff"}]
 
     def drop_stale_out(backend_name: str):
         """Claim OUT for the next attempt; returns an attempt record on failure.

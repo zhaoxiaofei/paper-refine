@@ -561,7 +561,11 @@ def test_f29_f33_f37_f38() -> None:
     (future / "revised").mkdir(parents=True)
     (future / "revision_audit").mkdir()
     (future / "revision_audit" / "REPAIR_PLAN.json").write_text(
-        json.dumps({"rows": [{"id": "RP-004", "file": "new/passage.md"}]}),
+        json.dumps({"rows": [{"id": "RP-004", "file": "new/passage.md",
+                              "location": "new section", "wrong": "",
+                              "correct": "text", "basis": "review finding F-001",
+                              "edit": "add the passage",
+                              "evidence": "review/findings.json F-001"}]}),
         encoding="utf-8")
     check("F29 a plan row naming a file that does not exist yet is accepted",
           pp._revision_plan_rows(future) is not None,

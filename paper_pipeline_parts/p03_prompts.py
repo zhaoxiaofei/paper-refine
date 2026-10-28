@@ -862,18 +862,19 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
 2. ATTACK THE DISPOSITIONS. The seeded tables (work/ and review/artifacts/) contain rows the
    reviewer closed as `OK — <reason>`. For every row whose rule is FINDING-TIER (the tier column of
    work/FORMAT_SCAN.json, and the rule list in your evidence pack), ask: is the reason about THIS
-   row's bar, or is it boilerplate? If the row is a real defect, raise it as your own finding with
-   an `AU-` id and the full finding shape (location, category, check, severity, evidence quote,
-   problem). Do not merely restate the reviewer's rows: add the finding the reviewer should have
-   written. Rows the reviewer disposed with a rule-specific reason stand.
+   row's bar, or is it boilerplate? If the row is a real defect, record it in
+   `audit/UNRESOLVED.md` as an observation with the location and re-runnable evidence; this audit
+   adds no findings (`adds` stays `[]`). Do not merely restate the reviewer's rows: the observation
+   is the defect the reviewer should have written. Rows the reviewer disposed with a rule-specific
+   reason stand.
 2b. RE-DERIVE THE FORMATTING/WHITESPACE STATE YOURSELF. Run the public scanner on base/ with the
    venue policy (`python paper_docx_format.py scan base --policy format_policy.json`) and check
    the MECHANICAL classes the review's seeded work/FORMAT_SCAN.json records: break-only
    paragraph/blank page, stray empty paragraph (FMT-S6/S8: a blank line attached to a heading, a
    run beyond the cap), a space rendering at the start/end of a visual line (FMT-P4), a doubled word, an embedded
    image off its own width-to-height ratio (FMT-IM1). The orchestrator repairs these before the review, so
-   a row that is STILL present in base/ is a real defect the revisers must fix -- raise it as
-   your own `AU-` finding (check `M20`) with the rule id in the evidence. Also attack the
+   a row that is STILL present in base/ is a real defect the revisers must fix -- record it in
+   `audit/UNRESOLVED.md` as an observation (check `M20` in the evidence) with the rule id. Also attack the
    EDITORIAL formatting rows the reviewer closed: for a doubled space / space-before-punctuation
    / bracket-spacing / zero-width mark / possible lowercase sentence start / mixed direct font /
    paragraph spacing, indentation or alignment drift / heading-level jump, "no journal rule" and
@@ -884,14 +885,14 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    AN FMT-CL1 ROW (the cover letter formatted in the MANUSCRIPT template) closed `OK` is the
    same class of boilerplate UNLESS the reviewer quoted the journal's own template/guideline
    text that REQUIRES the letter to be formatted that way: "the run carries the letter in the
-   journal's styles" is the pipeline's rule, not the journal's. Attack such a closure and add
-   an `AU-` finding (check `M20`) naming the rule id and the letter.
+   journal's styles" is the pipeline's rule, not the journal's. Attack such a closure and record
+   it in `audit/UNRESOLVED.md` as an observation (check `M20`) naming the rule id and the letter.
 3. CHECK THE COVERAGE GAPS the reviewer cannot see: a row whose disposition cell is EMPTY; a
    `searchable` hand-off marker that was carried forward although work/PLACEHOLDER_LOOKUP.md
    answers it (verdict found/absent) or work/IDENTIFIERS.md verifies/refutes the locator; a number
    in the abstract or a legend whose `source` cell is empty in work/NUMBERS_LEDGER.md while the
    shipped data files prove it; a term family competing for one concept (work/M24_concepts.md).
-   Each becomes an `AU-` finding when it is a defect, not a note.
+   Each is recorded in `audit/UNRESOLVED.md` as an observation when it is a defect, not a note.
 3g. ATTACK THE DISCOVERY ROUND'S PROBE DISPOSITIONS. When the frozen review carries
    review/round2/probe_results.md, every probe row is a disposition the reviewer wrote and
    nothing has audited: a probe closed `no anomalies -- checked: <locations>` with no locations,
@@ -899,11 +900,10 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    answer its own question is a boilerplate closure of the same kind task 2 attacks. For every
    probe row, re-locate its evidence and judge whether the disposition is about THAT probe's own
    bar, then record one row in `audit/PROBE_AUDIT.md` (probe id | reviewer's disposition | your
-   verdict | evidence): `stands` (rule-specific and supported by the named locations), `promoted
-   to AU-xxx` (a real anomalous value/label the closure hid -- add the `AU-` finding with the
-   full finding shape), or `needs-evidence` (the closure does not show its checked locations or
-   evidence -- say exactly what is missing). The orchestrator requires one row per probe id and
-   refuses a promotion whose `AU-xxx` id audit.json's `adds` does not define.
+   verdict | evidence): `stands` (rule-specific and supported by the named locations) or
+   `needs-evidence` (the closure does not show its checked locations or evidence -- say exactly
+   what is missing). This audit adds no findings: a probe defect the closure hid is recorded in
+   `audit/UNRESOLVED.md` as an observation, never as an `AU-` row.
 @@REWRITE_PARITY@@
 @@HIERARCHY_RECONCILE@@
 
@@ -913,30 +913,29 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
        {"round": @@ROUND@@,
         "dispositions": [{"id": "F-001", "verdict": "confirm|drop", "reason": "...",
                           "evidence": "verbatim quote or file:line", "severity_after": "..."}],
-        "adds": [{"id": "AU-001", "location": "...", "category": 0, "check": "M20|J3|...",
-                  "severity": "Critical|Major|Minor|Fatal", "evidence": "...", "problem": "..."}],
-        "counts": {"confirmed": N, "dropped": N, "added": N},
+        "adds": [],
+        "counts": {"confirmed": N, "dropped": N, "added": 0},
         "coverage": [{"check": "M1", "disposition": "..."}],   # your own coverage table
         "notes": "..."}
-   * `AUDIT.md` — the same, human-readable: one section per dropped finding (with the evidence),
-     one per added finding, and the disposition-audit table (rule | row | reviewer's reason |
-     your verdict | your finding id).
+   * `AUDIT.md` — the same, human-readable: one section per dropped finding (with the evidence)
+     and the disposition-audit table (rule | row | reviewer's reason |
+     your verdict).
    * `audit/DISPOSITION_AUDIT.md` — one row per finding-tier scan row you examined, with your
-     verdict (`stands` / `promoted to AU-xxx` / `needs-evidence`).
+     verdict (`stands` / `needs-evidence`).
    * `audit/PROBE_AUDIT.md` — when the frozen review carries review/round2/probe_results.md,
      one row per probe (probe id | reviewer's disposition | your verdict
-     `stands`/`promoted to AU-xxx`/`needs-evidence` | evidence).
-6. State in `audit.json` → `notes` how many finding-tier rows you examined and how many you
-   promoted. A run that examined none must say so explicitly (that is a legitimate, auditable
-   outcome when the reviewer's reasons are specific).
+     `stands`/`needs-evidence` | evidence).
+6. State in `audit.json` → `notes` how many finding-tier rows you examined. A run that examined
+   none must say so explicitly (that is a legitimate, auditable outcome when the reviewer's
+   reasons are specific).
 
 === COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
 
 @@MARKER_ROOT@@
 Write `_pipeline_done.json` there as the very last step, after the self-check below, carrying
 `{"stage": "audit", "status": "complete", "error": null,
-  "findings_total": N, "confirmed": N, "dropped": N, "added": N,
-  "finding_tier_rows_examined": N, "promoted": N}`. Your deliverables (`audit.json`, `AUDIT.md`,
+  "findings_total": N, "confirmed": N, "dropped": N, "added": 0,
+  "finding_tier_rows_examined": N, "promoted": 0}`. Your deliverables (`audit.json`, `AUDIT.md`,
 `DISPOSITION_AUDIT.md`, `work/`)
 live in `audit/`; the MARKER does not -- it is the orchestrator's completion signal, not one of
 your records, and a marker inside `audit/` is invisible to the orchestrator (the stage is then
@@ -949,9 +948,10 @@ treated as unfinished).
 * You never edit the corpus, the review, or a candidate package; you only read them and write your
   records in `audit/` (the completion marker goes in the sandbox ROOT, not in `audit/`). The
   orchestrator verifies base/, non_revised/ and review/ are byte-identical after you.
-* An added finding is a NORMAL finding: one instance, a verbatim quote, a category, a check id, a
-  severity, and a 1-2 sentence problem statement. Never aggregate ("several sentences are long" is
-  not a finding).
+* This audit adds no findings. A defect you notice outside the frozen list is an OBSERVATION in
+  `audit/UNRESOLVED.md` (location + re-runnable evidence), never an `AU-` row; the next review
+  files it on the shared scale. An observation must name one instance, not aggregate ("several
+  sentences are long" is not an observation).
 * A `drop` of a category-2 (writing quality, logic, repetition) or category-4 finding needs your
   own evidence for WHY it is not a defect: quote the text and show that the reading is CORRECT as
   written -- it is not worse than the alternative on any shared prose criterion (precision, idiom,
@@ -974,13 +974,14 @@ AUDIT_TAIL = """
 === END-OF-PROMPT REMINDER ===
 
 You are the auditor, not the reviewer and not the reviser: dispose every frozen finding (confirm or
-drop-with-evidence), promote the reviewer's boilerplate closures into real findings with `AU-` ids
-when they are defects, keep base/, non_revised/ and review/ byte-identical, write every record
+drop-with-evidence), record any defect you notice outside the frozen list as an OBSERVATION in
+`audit/UNRESOLVED.md` (never as an `AU-` finding: `audit.json`'s `adds` stays `[]`), keep base/,
+non_revised/ and review/ byte-identical, write every record
 inside `audit/`, and finish with `_pipeline_done.json` (stage="audit") IN THE SANDBOX ROOT --
 next to PROMPT.md, NOT inside `audit/` -- carrying
 `{"stage": "audit", "status": "complete", "error": null,
-  "findings_total": N, "confirmed": N, "dropped": N, "added": N,
-  "finding_tier_rows_examined": N, "promoted": N}`.
+  "findings_total": N, "confirmed": N, "dropped": N, "added": 0,
+  "finding_tier_rows_examined": N, "promoted": 0}`.
 """
 
 

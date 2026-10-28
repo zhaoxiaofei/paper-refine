@@ -978,7 +978,7 @@ def _revision_audit_stub(sb: Path) -> int:
         if targets:
             rel = targets[0].relative_to(sb / "revised").as_posix()
             rows = [{"id": "RP-001", "finding": "none", "file": rel,
-                     "location": "stub", "wrong": "", "correct": "",
+                     "location": "stub", "wrong": "", "correct": "stub-correct",
                      "basis": "stub", "edit": "append the stub repair marker",
                      "evidence": "stub"}]
     write_json(out / "REPAIR_PLAN.json", {"rows": rows})
@@ -998,10 +998,12 @@ def _revision_repair_stub(sb: Path) -> int:
             ledger.append({"id": row.get("id"), "verdict": "rejected",
                            "reason": "file not found", "files": []})
             continue
-        target.write_text(target.read_text(encoding="utf-8")
-                          + "\n<!-- stub bounded repair -->\n", encoding="utf-8")
+        old_text = target.read_text(encoding="utf-8")
+        new_text = old_text + "\n<!-- stub bounded repair -->\n"
+        target.write_text(new_text, encoding="utf-8")
         ledger.append({"id": row.get("id"), "verdict": "confirmed", "reason": "stub",
-                       "before": "", "after": "", "files": [str(row.get("file"))],
+                       "before": old_text, "after": new_text,
+                       "files": [str(row.get("file"))],
                        "basis": "stub"})
     write_json(sb / "revised" / "REPAIR_LEDGER.json", {"rows": ledger})
     return 0

@@ -11,8 +11,11 @@ from __future__ import annotations
 
 def write_text_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_path_for(path)
-    _atomic_write_bytes(tmp, path, lambda p: p.write_text(text, encoding="utf-8"))
+
+    def do(f) -> None:
+        f.write(text)
+
+    _atomic_write_bytes(tmp_path_for(path), path, do)
 
 
 def _tbl(rows: list, header: list) -> str:

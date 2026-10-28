@@ -1241,15 +1241,46 @@ def tmp_path_for(path: Path) -> Path:
     raise OSError(f"could not create a unique temporary for {path}")
 
 
-def _atomic_write_bytes(tmp: Path, dst: Path, write) -> None:
-    """write(tmp) -> fsync -> os.replace(tmp, dst); remove tmp on any failure."""
+def _open_reserved_tmp(tmp: Path, mode: str = "wb", encoding: str = "utf-8",
+                       newline=None):
+    """Open the file tmp_path_for created, WITHOUT following a path swap.
+
+    tmp_path_for reserves the name, but the writer reopens it: an attacker can
+    unlink it and plant a symlink in between (F01). O_NOFOLLOW makes that open
+    fail, and fstat rejects anything but a regular single-link file. The writer
+    gets this file object only, so no reopen-by-path can undo the check.
+    """
+    flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags)
     try:
-        write(tmp)
-        try:
-            with open(tmp, "rb") as f:
-                os.fsync(f.fileno())
-        except OSError:
-            pass                     # fsync is best-effort (some mounts refuse it)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise OSError(f"refusing to write through an unsafe temporary: {tmp}")
+    except BaseException:
+        os.close(fd)
+        raise
+    kwargs = {} if "b" in mode else {"encoding": encoding, "newline": newline}
+    return os.fdopen(fd, mode, **kwargs)
+
+
+def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
+                        encoding: str = "utf-8", newline=None,
+                        fsync: bool = True) -> None:
+    """write(open tmp) -> fsync -> os.replace(tmp, dst); drop tmp on failure.
+
+    `write` gets the OPEN file object, never the path: reopening is the TOCTOU
+    this helper exists to close.
+    """
+    try:
+        with _open_reserved_tmp(tmp, "wb" if binary else "w",
+                                encoding=encoding, newline=newline) as f:
+            write(f)
+            f.flush()
+            if fsync:
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass             # fsync is best-effort (some mounts refuse it)
         os.replace(tmp, dst)
     except BaseException:
         try:
@@ -1264,10 +1295,8 @@ def write_json_atomic(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path_for(path)
 
-    def do(p: Path) -> None:
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(_json_safe(obj), f, indent=2, ensure_ascii=False)
-            f.flush()
+    def do(f) -> None:
+        json.dump(_json_safe(obj), f, indent=2, ensure_ascii=False)
 
     _atomic_write_bytes(tmp, path, do)
 
@@ -1280,20 +1309,37 @@ def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path_for(path)
 
-    def do(p: Path) -> None:
-        with open(p, "w", encoding=encoding) as f:
-            f.write(text)
+    def do(f) -> None:
+        f.write(text)
 
-    _atomic_write_bytes(tmp, path, do)
+    _atomic_write_bytes(tmp, path, do, encoding=encoding)
 
 
 def append_text_no_follow(path: Path, text: str, encoding: str = "utf-8") -> None:
-    """Append to a log without following a symlink planted at its path."""
+    """Append to a log without following a symlink planted at its path.
+
+    O_NOFOLLOW is applied to the OPEN itself, not to a separate is_symlink()
+    probe: the old check-then-open let a writer swap the path between the two
+    calls and the append followed the link (the 2026-10-28 audit's F10).
+    """
     path = Path(path)
-    if path.is_symlink():
-        path.unlink()
-    with open(path, "a", encoding=encoding) as f:
-        f.write(text)
+    flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT
+             | getattr(os, "O_NOFOLLOW", 0))
+    for _ in range(3):
+        try:
+            fd = os.open(path, flags, 0o666)
+        except OSError:
+            if path.is_symlink():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            raise
+        with os.fdopen(fd, "a", encoding=encoding) as f:
+            f.write(text)
+        return
+    raise OSError(f"could not append without following a link at {path}")
 
 
 def write_csv_atomic(path, fields, rows) -> Path:
@@ -1307,13 +1353,12 @@ def write_csv_atomic(path, fields, rows) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path_for(path)
 
-    def do(p: Path) -> None:
-        with open(p, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(fields))
-            w.writeheader()
-            w.writerows(rows)
+    def do(f) -> None:
+        w = csv.DictWriter(f, fieldnames=list(fields))
+        w.writeheader()
+        w.writerows(rows)
 
-    _atomic_write_bytes(tmp, path, do)
+    _atomic_write_bytes(tmp, path, do, newline="")
     return path
 
 
@@ -1461,6 +1506,42 @@ def read_json(path: Path, revive: bool = True, lenient: bool = False):
     return _json_revive(obj) if revive else obj
 
 
+def read_text_bounded(path: Path, errors: str = "replace"):
+    """A UTF-8 text file inside the agent-output byte budget, or None.
+
+    Agent-written TEXT artifacts (feedback, tables, MANUAL_STEPS, ...) were read
+    with an unbounded `read_text()`, so the documented cap applied to JSON only
+    and a runaway session could still make the orchestrator allocate gigabytes
+    (the 2026-10-28 audit's F06). lstat/`S_ISREG` plus O_NOFOLLOW also refuse a
+    planted FIFO/symlink at the path.
+    """
+    path = Path(path)
+    try:
+        st = path.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            return None
+        if st.st_size > MAX_JSON_BYTES:
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        try:
+            chunks, remaining = [], MAX_JSON_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.close(fd)
+        raw = b"".join(chunks)
+    except OSError:
+        return None
+    if len(raw) > MAX_JSON_BYTES:
+        return None
+    return raw.decode("utf-8", errors)
+
+
 # Agent-written JSON is untrusted input of unbounded size: a runaway agent can
 # write a multi-gigabyte findings.json/scores.json, and json.loads() would either
 # exhaust memory (crashing the orchestrator, which is never acceptable) or spend
@@ -1552,12 +1633,8 @@ def count_manual_steps(path: Path):
     never cost a package a round). This stays a heuristic: prose paragraphs are
     not counted, and nested bullets are counted individually.
     """
-    try:
-        # errors="replace", like every sibling reader: a non-UTF-8 byte raises
-        # UnicodeDecodeError (a ValueError, NOT an OSError) and crashed a count
-        # that exists to REPORT how much work is handed to the author.
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    text = read_text_bounded(path)
+    if text is None:
         return None
     lines = text.splitlines()
     # A numbered item is at most two digits: `2024. We repeated the assay.` is a
@@ -2144,13 +2221,20 @@ LENGTH_SECTION_KIND_RES = (
 
 
 def _length_heading_text(line: str) -> str:
-    """A heading line with a Markdown ATX prefix removed.
+    """A heading line with a Markdown ATX prefix or emphasis removed.
 
     The M19 scan reads .md too, and `## Methods` is the same heading as
     `Methods`; the anchored patterns saw the hashes as text and never matched,
-    so the excluded section stayed in the count.
+    so the excluded section stayed in the count. The same holds for emphasis
+    used AS the heading marker (`**Abstract**`, `__Methods__`, `*Introduction*`):
+    a Markdown manuscript built that way matched no heading regex and reported
+    no M19 rows at all (the 2026-10-28 audit's F38).
     """
-    return re.sub(r"^\s*#{1,6}\s+", "", (line or "").strip())
+    text = re.sub(r"^\s*#{1,6}\s+", "", (line or "").strip())
+    m = re.match(r"^(\*\*|__|\*|_)(\S.*?)\1(.*)$", text)
+    if m and m.group(2).strip():
+        text = (m.group(2) + m.group(3)).strip()
+    return text
 
 
 def _length_section_kind(line: str) -> str:
@@ -2169,8 +2253,38 @@ LENGTH_KEYWORDS_RE = re.compile(
     # that this twin used to reject: "2 Keywords: ..." was body text here and a
     # keyword boundary there, so the two M19 counters disagreed on the abstract.
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:key\s?words?)\s*(?:[:.\u2014\u2013-]|$)", re.I)
+
+
+def _length_keyword_continuation(line: str) -> bool:
+    """Does this line continue the keyword LIST, or start the body?
+
+    A comma/semicolon list of short items is a continuation; a comma-bearing
+    sentence is body; a short lowercase unpunctuated line is a list.
+    """
+    text = (line or "").strip()
+    if not text:
+        return False
+    words = text.split()
+    if "," in text or ";" in text:
+        parts = [p.strip() for p in re.split(r"[,;]", text) if p.strip()]
+        return (bool(parts) and not re.search(r"[.!?]\s*$", text)
+                and (text[:1].islower() or len(parts[0].split()) <= 1)
+                and 2 <= len(parts) <= 20 and len(words) <= 24
+                and all(len(p.split()) <= 4 for p in parts))
+    if re.search(r"[.!?]\s*$", text):
+        return False
+    return len(words) <= 4 and text[:1].islower()
+
+
 LENGTH_COVER_SALUTATION_RE = re.compile(
     r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
+# An authored REPLY is not a cover letter, whatever its name also contains.
+# The formatter's is_cover_letter_doc has always excluded these; this predicate
+# did not, so `cover-letter-response.docx` was a cover letter to M19 and not to
+# FMT-CL1 (the 2026-10-28 audit's F77).
+LENGTH_COVER_REPLY_RE = re.compile(
+    r"response|repl(?:y|ies)|rebuttal|point[\s_-]?by[\s_-]?point|"
+    r"decision[\s_-]?(?:letter|notice)|referee|reviewer", re.I)
 LENGTH_COVER_CLOSING_RE = re.compile(
     # A closing phrase must END the line's sentence: `\b` alone matched a body
     # line that merely STARTS with "Regards the statistical concern, ..." or
@@ -2304,6 +2418,52 @@ def text_source_paragraphs(path: Path) -> list:
     return [p for p in paras if p]
 
 
+TEX_INCLUDE_RE = re.compile(r"\\(?:input|include|subfile)\s*\{([^{}]+)\}")
+
+
+def _tex_include_path(base: Path, arg: str):
+    """The .tex file an \\input/\\include/\\subfile argument names, or None."""
+    arg = str(arg or "").strip().strip('"')
+    if not arg:
+        return None
+    cand = Path(arg)
+    if cand.suffix.lower() not in (".tex", ".ltx"):
+        cand = Path(str(cand) + ".tex")
+    path = cand if cand.is_absolute() else (base / cand)
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(base.resolve())
+    except (OSError, ValueError):
+        return None                     # a path outside the manuscript directory
+    return resolved if resolved.is_file() else None
+
+
+def _tex_expand_includes(text: str, base: Path, seen=None):
+    """Inline \\input/\\include/\\subfile children so a multi-file paper counts.
+
+    The scan iterated each .tex file independently: the master's
+    `\\input{intro}` was stripped as scaffolding, so the master had no body,
+    while `intro.tex` had no Abstract/Introduction heading and was skipped. A
+    multi-file manuscript was reported as 0 body words (F36). Includes expand
+    once (cycle-safe); comments are stripped first; an unresolved include is
+    named as a gap by the caller.
+    """
+    seen = set() if seen is None else seen
+
+    def repl(match):
+        child = _tex_include_path(base, match.group(1))
+        if child is None or child in seen:
+            return match.group(0)
+        seen.add(child)
+        try:
+            child_text = child.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return match.group(0)
+        return _tex_expand_includes(child_text, base, seen)
+
+    return TEX_INCLUDE_RE.sub(repl, strip_tex_comment(text or ""))
+
+
 def _tex_length_scan(text: str):
     """(lines, caption_spans, abstract_end) for a LaTeX source.
 
@@ -2352,12 +2512,14 @@ def _tex_length_scan(text: str):
                     out.append(after)
             continue
         if re.search(r"\\begin\s*\{thebibliography\}", line) \
-                or re.search(r"\\bibliography\s*\{", line):
+                or re.search(r"\\bibliography\s*\{", line) \
+                or re.search(r"\\printbibliography\b", line):
             # The reference list is not main text when the venue excludes
             # references. `\begin{thebibliography}` is stripped as an environment
-            # token and `\bibliography{...}` as scaffold, so without this heading
-            # every entry stayed inside the main-text span (the count_words twin
-            # already inserted it).
+            # token, `\bibliography{...}` as scaffold and biblatex's
+            # `\printbibliography[heading=...]` (optional args included) matched
+            # neither; without this heading every entry stayed inside the
+            # main-text span (the 2026-10-28 audit's F37).
             out.append("References")
             continue
         m = re.match(r"\\(?:sub)*section\*?(?:\[[^\]]*\])?\{([^{}]*)\}", line)
@@ -2443,6 +2605,13 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
             break
         if LENGTH_ABSTRACT_HEAD_RE.match(heading):
             abs_start = i + 1
+            break
+        # "Summary" is also a common CLOSING heading. Once a body heading has
+        # appeared (Introduction/Background or any excluded section kind), a
+        # later "Summary" is a concluding section, not a second abstract: the
+        # old whole-document search took it as abs_start=end-of-document and
+        # removed the body before it (the 2026-10-28 audit's F35).
+        if LENGTH_MAIN_START_RE.match(heading) or _length_section_kind(heading):
             break
     if abs_start is not None:
         if abstract_end is not None:
@@ -2542,18 +2711,26 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
             # A Keywords line is a boundary, not a section kind: the generic
             # branch below reset `excluded_now` for it, which put the keyword
             # list (and any Methods prose after it) back into the main-text
-            # count. count_words.py's M19 counter already keeps the state; this
+            # count. count_words.py's M19 counter keeps the same state; this
             # is the same rule for the deterministic scan.
             in_keyword_block = True
             excluded_now = True
             continue
-        if in_keyword_block and not heading:
+        if in_keyword_block:
+            if not line:
+                in_keyword_block = False
+                excluded_now = False
+                continue
+            if _length_keyword_continuation(line):
+                continue                # a wrapped keyword list is not prose
+            # A non-empty line that is not a keyword continuation ends the
+            # block AND is body text. The old branch kept skipping every such
+            # line until a blank or a heading, so a Brief Communication written
+            # as "Keywords: ..." immediately followed by its body (no blank
+            # line, no headings) lost the whole body and reported 0 main-text
+            # words (the 2026-10-28 audit's F34).
             in_keyword_block = False
             excluded_now = False
-            continue
-        if in_keyword_block and not (LENGTH_SECTION_BOUND_RE.match(heading)
-                                     or LENGTH_MAIN_START_RE.match(heading)):
-            continue
         if LENGTH_SECTION_BOUND_RE.match(heading) or \
                 LENGTH_MAIN_START_RE.match(heading):
             in_keyword_block = False
@@ -2615,6 +2792,9 @@ def _is_cover_letter_lines(lines: list, name: str = "", manuscript_names=()) -> 
     so the selected type's own document name outranks the salutation test.
     """
     if _name_is_article_type_manuscript(name, manuscript_names):
+        return False
+    base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if LENGTH_COVER_REPLY_RE.search(base):
         return False
     tokens = _document_role_tokens(name)
     if "cover" in tokens or "coverletter" in tokens or "letter" in tokens:
@@ -2720,6 +2900,22 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
+        # Multi-file LaTeX: a master .tex carries only \input/\include lines and
+        # its children carry the prose. Cache every source and remember which
+        # files are INCLUDED by another, so the master counts the expanded text
+        # and a child is not counted a second time on its own (F36).
+        tex_cache, tex_included = {}, set()
+        for q in _iter_tree_files(src):
+            if q.suffix.lower() not in LENGTH_TEX_EXTS:
+                continue
+            qtext = read_text_bounded(q)
+            if qtext is None:
+                continue
+            tex_cache[q.resolve()] = qtext
+            for inc in TEX_INCLUDE_RE.finditer(strip_tex_comment(qtext)):
+                child = _tex_include_path(q.parent, inc.group(1))
+                if child is not None and child != q.resolve():
+                    tex_included.add(child)
         for p in _iter_tree_files(src):
             # `_iter_tree_files` is the corpus walker: a file symlink is not
             # package content (copy_into refuses it), so a scan that followed
@@ -2753,11 +2949,14 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                                  in _caption_units(paras, with_spans=True,
                                                    kinds=caption_kinds)]
             elif ext in LENGTH_TEX_EXTS:
-                try:
-                    text = p.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    text = ""
-                lines, caption_spans, abstract_end = _tex_length_scan(text)
+                if p.resolve() in tex_included:
+                    skipped.append(doc)     # counted in the master that includes it
+                    continue
+                text = tex_cache.get(p.resolve(), "")
+                expanded = _tex_expand_includes(text, p.parent)
+                for inc in TEX_INCLUDE_RE.finditer(expanded):
+                    unparsed.append(f"{doc}: unresolved include {inc.group(1)}")
+                lines, caption_spans, abstract_end = _tex_length_scan(expanded)
             elif ext in LENGTH_TEXT_EXTS:
                 try:
                     text = p.read_text(encoding="utf-8", errors="replace")
@@ -3251,7 +3450,10 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
             rows.extend(info.get("rows") or [])
             try:
                 with zipfile.ZipFile(p) as z:
-                    dxml = z.read("word/document.xml").decode("utf-8", "replace")
+                    raw = _docx_xml_part(z, "word/document.xml")
+                if raw is None:
+                    continue
+                dxml = raw.decode("utf-8", "replace")
                 claim_docs.append((prefix + rel, "\n".join(
                     mod.text_of(pp[2]) for pp in mod.paragraphs(dxml))))
             except (KeyError, zipfile.BadZipFile, OSError, RuntimeError,
@@ -3458,7 +3660,10 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                             continue
                         try:
                             with zipfile.ZipFile(p) as z:
-                                dxml = z.read("word/document.xml").decode("utf-8", "replace")
+                                raw = _docx_xml_part(z, "word/document.xml")
+                            if raw is None:
+                                continue
+                            dxml = raw.decode("utf-8", "replace")
                             texts.append("\n".join(mod.text_of(pp[2])
                                                     for pp in mod.paragraphs(dxml)))
                         except (KeyError, zipfile.BadZipFile, OSError, RuntimeError,
@@ -3615,7 +3820,10 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
     mod = _format_module()
     if mod is None:
         return {"file": path.name, "error": f"{DOCX_FORMAT_MODULE} not found"}
-    tmp = path.with_name(f".{path.name}.paperfmt{os.getpid()}.tmp")
+    # UNIQUE reserved siblings, not `<name>.paperfmt<pid>.tmp`: the corpus
+    # directory is writable by the sessions, and a predictable temp name can be
+    # pre-created as a symlink to an outside file.
+    tmp = tmp_path_for(path)
     try:
         rep = mod.fix_package(path, tmp, policy)
     except Exception as e:                                        # noqa: BLE001
@@ -3658,7 +3866,7 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
     tpl_tmp = None
     redo = None
     if template is not None:
-        tpl_tmp = path.with_name(f".{path.name}.papertpl{os.getpid()}.tmp")
+        tpl_tmp = tmp_path_for(path)
         try:
             template_report = mod.apply_word_template(base, tpl_tmp, Path(template),
                                                       containers=containers)
@@ -3679,7 +3887,7 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
             # Re-run the mechanical pass ON the restyled package so the file the
             # pipeline delivers satisfies the template AND the policy, and let
             # the second pass's verification be the one the report carries.
-            redo = path.with_name(f".{path.name}.paperfmt2{os.getpid()}.tmp")
+            redo = tmp_path_for(path)
             try:
                 rep2 = mod.fix_package(base, redo, policy)
             except Exception as e:                                # noqa: BLE001
@@ -4695,9 +4903,18 @@ def _docx_hf_signature(path: Path) -> dict:
     try:
         with zipfile.ZipFile(path) as z:
             names = z.namelist()
-            doc = z.read("word/document.xml").decode("utf-8", "replace")
-            hf = {n: z.read(n).decode("utf-8", "replace") for n in names
-                  if re.search(r"word/(header|footer)\w*\.xml$", n)}
+            raw_doc = _docx_xml_part(z, "word/document.xml")
+            if raw_doc is None:
+                return {}
+            doc = raw_doc.decode("utf-8", "replace")
+            hf = {}
+            for n in names:
+                if not re.search(r"word/(header|footer)\w*\.xml$", n):
+                    continue
+                raw_hf = _docx_xml_part(z, n)
+                if raw_hf is None:
+                    return {}
+                hf[n] = raw_hf.decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return {}
     # A self-closing `<w:sectPr .../>` (a legal empty section) must match as the
@@ -4749,7 +4966,10 @@ def _style_usage(docx: Path) -> set:
         return set()
     try:
         with zipfile.ZipFile(docx) as z:
-            xml = z.read("word/document.xml").decode("utf-8", "replace")
+            raw = _docx_xml_part(z, "word/document.xml")
+        if raw is None:
+            return set()
+        xml = raw.decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
     return {sid for sid in re.findall(r'<w:pStyle w:val="([^"]+)"', xml) if sid}
@@ -4775,7 +4995,10 @@ def _manuscript_front_matter_styles(template: Path) -> set:
 def _defined_styles(docx: Path) -> set:
     try:
         with zipfile.ZipFile(docx) as z:
-            styles = z.read("word/styles.xml").decode("utf-8", "replace")
+            raw = _docx_xml_part(z, "word/styles.xml")
+        if raw is None:
+            return set()
+        styles = raw.decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
     return set(re.findall(r'w:styleId="([^"]+)"', styles))
@@ -4859,7 +5082,10 @@ def _superscripts_by_paragraph(path: Path) -> dict:
         return out
     try:
         with zipfile.ZipFile(path) as z:
-            xml = z.read("word/document.xml").decode("utf-8", "replace")
+            raw = _docx_xml_part(z, "word/document.xml")
+        if raw is None:
+            return out
+        xml = raw.decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return out
     for _p0, _p1, frag in mod.paragraphs(xml):
@@ -4910,10 +5136,9 @@ def _template_ledger_exceptions(ledger: Path) -> tuple:
     path = Path(ledger)
     if not path.is_file():
         return [], []
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        return [], [f"unreadable: {e}"]
+    text = read_text_bounded(path)
+    if text is None:
+        return [], ["unreadable: not a regular file, or over the agent-output size cap"]
     out, problems = [], []
     # Only ```json blocks are the machine-readable accounting; a fenced example
     # of anything else must never make the stage fail as "unparsable ledger".
@@ -5299,9 +5524,12 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
     for doc in out_docs:
         try:
             with zipfile.ZipFile(doc) as z:
-                have = set(re.findall(r'w:styleId="([^"]+)"',
-                                      z.read("word/styles.xml").decode("utf-8", "replace")))
-        except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
+                raw = _docx_xml_part(z, "word/styles.xml")
+            if raw is None:
+                raise ValueError("styles.xml is over the size/entity budget")
+            have = set(re.findall(r'w:styleId="([^"]+)"', raw.decode("utf-8", "replace")))
+        except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError,
+                ValueError):
             style_gap.append({"file": doc.name, "error": "no readable word/styles.xml"})
             continue
         tpl_for_doc = template_for_package_file(doc, templates or {}, manuscript_names)
@@ -5312,8 +5540,11 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
             continue
         try:
             with zipfile.ZipFile(tpl_for_doc) as z:
+                raw = _docx_xml_part(z, "word/styles.xml")
+                if raw is None:
+                    continue
                 want = set(re.findall(r'w:styleId="([^"]+)"',
-                                      z.read("word/styles.xml").decode("utf-8", "replace")))
+                                      raw.decode("utf-8", "replace")))
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
             continue
         gone = sorted(want - have)
@@ -6111,17 +6342,12 @@ def _seed_write(path: Path, text: str) -> bool:
     # (and the real run) pay for a pure input.
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path_for(path)
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+
+    def do(f) -> None:
+        f.write(text)
+        f.flush()
+
+    _atomic_write_bytes(tmp, path, do, fsync=False)
     return True
 
 
@@ -6498,7 +6724,10 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
                     # errors="replace", like every other reader: a legacy byte
                     # must not throw a UnicodeDecodeError straight past the
                     # unreadable-package guard and abort the whole scan.
-                    xml = z.read("word/document.xml").decode("utf-8", "replace")
+                    raw = _docx_xml_part(z, "word/document.xml")
+                if raw is None:
+                    continue
+                xml = raw.decode("utf-8", "replace")
             except (zipfile.BadZipFile, KeyError, OSError, RuntimeError,
                     NotImplementedError):
                 continue
@@ -6642,9 +6871,8 @@ def data_table_texts(sources: list, limit: int = 40) -> list:
             ext = p.suffix.lower()
             if ext not in DATA_TABLE_EXTS + (".tex", ".ltx", ".txt", ".md"):
                 continue
-            try:
-                text = p.read_text("utf-8", "replace")
-            except OSError:
+            text = read_text_bounded(p)
+            if text is None:
                 continue
             if ext not in DATA_TABLE_EXTS:
                 first = next((l for l in text.splitlines() if l.strip()), "")
@@ -7134,13 +7362,11 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     # `_seed_write`). The atomic rename still guarantees a reader never sees a
     # truncated file, and the content is reproducible from the profile.
     tmp = tmp_path_for(p)
-    try:
-        tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, p)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
+
+    def do(f) -> None:
+        f.write(json.dumps(body, ensure_ascii=False))
+
+    _atomic_write_bytes(tmp, p, do, fsync=False)
     return p
 
 
@@ -7850,10 +8076,8 @@ def scan_placeholders_in_sources(sources: list) -> dict:
                     unparsed.append(prefix + rel)
                     continue
             elif ext in PLACEHOLDER_SOURCE_EXTS:
-                try:
-                    texts = p.read_text(encoding="utf-8", errors="replace").splitlines()
-                except OSError:
-                    texts = None
+                text_src = read_text_bounded(p)
+                texts = text_src.splitlines() if text_src is not None else None
             elif ext in CAPTION_UNPARSED_EXTS:
                 unparsed.append(prefix + rel)
                 continue
@@ -7934,6 +8158,27 @@ def _doc_key(rel: str) -> str:
     return prefix + stem.lower() + p.suffix.lower()
 
 
+def _doc_rename_key(rel: str) -> str:
+    """The identity a legitimate VERSION-TOKEN rename preserves (case-sensitive).
+
+    `_doc_key` folds case so the loose grouping can spot rename families; that
+    is too coarse for the one-to-one fallback in `document_set_check`, where
+    `Main.docx` -> `main.docx` was silently the same name (F26). This key keeps
+    the case but still strips the documented version tokens (`-<7 hex>`, `-vN`
+    and the legacy `-a`/`-b` arm letters -- those ARE the version grammar, see
+    DOC_TOKEN_RE) plus the provenance suffixes.
+    """
+    p = Path(rel)
+    stem = DOC_TOKEN_RE.sub("", p.stem)
+    prev = None
+    while prev != stem:
+        prev = stem
+        stem = DOC_PROVENANCE_SUFFIX_RE.sub("", stem)
+    parent = p.parent.as_posix()
+    prefix = "" if parent in (".", "") else parent + "/"
+    return prefix + stem + p.suffix
+
+
 def collect_documents(sources: list) -> dict:
     """{normalized name: [(relative path, sha256), ...]} for submission docs.
 
@@ -8009,8 +8254,10 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
     missing, content_only, unmatched = [], [], []
     for key, entries in sorted(base.items()):
         for rel, dig in entries:
-            if take(lambda k, r, d, key=key, dig=dig: k == key and d == dig):
-                continue                        # renamed file, bytes unchanged
+            rkey = _doc_rename_key(rel)
+            if take(lambda k, r, d, key=key, dig=dig, rkey=rkey:
+                    k == key and d == dig and _doc_rename_key(r) == rkey):
+                continue                        # version-token rename, bytes unchanged
             if take(lambda k, r, d, key=key, rel=rel: k == key and r == rel):
                 continue                        # survived under the same name, edited
             if take(lambda k, r, d, dig=dig: d == dig):
@@ -8018,13 +8265,17 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
                 continue
             unmatched.append((key, rel))
     # A version-stripped key can stand in for a document name ONLY after every
-    # exact-name pairing is done. When several base documents share a key
-    # (Dataset-a.csv / Dataset-b.csv), pairing the first one by key consumes the
-    # surviving sibling's slot and reports the WRONG file as lost -- the same
-    # collision the byte/digest steps above exist to prevent.
+    # exact-name pairing is done AND only when the two names are the same
+    # document under the documented token grammar. The folded key alone is not
+    # enough: `Main.docx` and `main.docx` share it but are a different name, and
+    # the folded match accepted that case-only change silently. The legacy
+    # `-a`/`-b` arm letters ARE version tokens (DOC_TOKEN_RE), so those still
+    # pair; the case-sensitive rename key is what tightened the comparison.
     for key, rel in unmatched:
-        if take(lambda k, r, d, key=key: k == key):
-            continue                            # rename family (...-b.docx -> ...-c.docx)
+        rkey = _doc_rename_key(rel)
+        if take(lambda k, r, d, key=key, rkey=rkey:
+                k == key and _doc_rename_key(r) == rkey):
+            continue                            # rename family (...-v2 -> ...-v3)
         missing.append(rel)
     duplicates = {}
     base_names = {key: {r for r, _d in entries} for key, entries in base.items()}

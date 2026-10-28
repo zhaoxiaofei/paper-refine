@@ -75,8 +75,8 @@ def main() -> int:
         dst = root / "PROMPT.md"
         tmp = pd.tmp_path_for(dst)
 
-        def crash_half_way(p: Path) -> None:
-            p.write_text("half a pro", encoding="utf-8")
+        def crash_half_way(f) -> None:
+            f.write("half a pro")
             raise RuntimeError("simulated crash")
 
         try:

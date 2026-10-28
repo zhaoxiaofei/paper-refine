@@ -585,7 +585,7 @@ def _probe_audit_verdict(row) -> str:
     for v in row.values():
         cell = " ".join(str(v or "").split())
         low = cell.lower()
-        if low.startswith(("stands", "promoted", "needs-evidence", "needs evidence")):
+        if low.startswith(("stands", "needs-evidence", "needs evidence")):
             return cell
     return ""
 
@@ -598,8 +598,10 @@ def probe_audit_problems(sb: Path) -> list:
     closed "no anomalies -- checked: <locations>" with nothing checked, or one
     blanket sentence shared by 25 rows, was never audited. When the frozen
     review carries probe rows the auditor disposes them one row each in
-    `audit/PROBE_AUDIT.md` (`stands` / `promoted to AU-xxx` / `needs-evidence`),
-    and a promotion must name a real `AU-*` finding.
+    `audit/PROBE_AUDIT.md` (`stands` / `needs-evidence`). AGENTS Rule 1 makes
+    the audit disposition-only: a real probe defect is recorded in
+    `audit/UNRESOLVED.md` as an observation, never promoted to an `AU-*` row
+    (any non-empty `adds` is rejected by `audit_artifact_problems`).
     """
     ids = discovery_probe_result_ids(sb)
     if not ids:
@@ -610,15 +612,11 @@ def probe_audit_problems(sb: Path) -> list:
         return [f"review/round2/probe_results.md carries {len(ids)} probe disposition(s) "
                 f"({head}) but audit/PROBE_AUDIT.md is missing or empty: the auditor must "
                 f"attack the discovery round's probe closures one row each (verdict `stands` / "
-                f"`promoted to AU-xxx` / `needs-evidence`), exactly like the reviewer's "
+                f"`needs-evidence`), exactly like the reviewer's "
                 f"finding-tier rows -- a blanket 'no anomalies' is the same boilerplate this "
-                f"stage exists to promote"]
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        text = ""
+                f"stage exists to audit"]
     errors = []
-    seen, verdictless = set(), []
+    seen, verdictless, promoted = set(), [], []
     for r in _discovery_rows(path):
         m = DISCOVERY_PROBE_ID_RE.search(_row_text(r))
         if not m:
@@ -627,30 +625,25 @@ def probe_audit_problems(sb: Path) -> list:
         seen.add(pid)
         if not _probe_audit_verdict(r):
             verdictless.append(pid)
+        if re.search(r"\bpromoted\s+to\s+AU-", _row_text(r), re.I):
+            promoted.append(pid)
     missing = [p for p in ids if p not in seen]
     if missing:
         errors.append(
             f"audit/PROBE_AUDIT.md does not dispose probe(s) "
             f"{', '.join(missing[:6])}" + (" ..." if len(missing) > 6 else "")
-            + ": one row per probe result, with the verdict `stands` / `promoted to AU-xxx` / "
+            + ": one row per probe result, with the verdict `stands` / "
               "`needs-evidence`")
     if verdictless:
         errors.append(
             f"audit/PROBE_AUDIT.md row(s) {', '.join(verdictless[:6])} carry no verdict: state "
-            f"`stands` (the reviewer's disposition is rule-specific and stands), `promoted to "
-            f"AU-xxx`, or `needs-evidence` (say what evidence the closure lacks)")
-    aj = read_json(sb / "audit" / "audit.json", revive=False, lenient=True)
-    adds = {}
-    if isinstance(aj, dict):
-        adds = {str(f.get("id") or "").strip() for f in (aj.get("adds") or [])
-                if isinstance(f, dict) and str(f.get("id") or "").strip()}
-    promoted = {a.upper() for a in re.findall(r"\bpromoted\s+to\s+(AU-[A-Za-z0-9-]+)", text, re.I)}
-    unknown = sorted(a for a in promoted if a not in adds)
-    if unknown:
+            f"`stands` (the reviewer's disposition is rule-specific and stands) or "
+            f"`needs-evidence` (say what evidence the closure lacks)")
+    if promoted:
         errors.append(
-            f"audit/PROBE_AUDIT.md promotes probe row(s) to {', '.join(unknown)} but audit.json's "
-            f"`adds` list defines no such finding: a promoted row must name the AU-* finding it "
-            f"became, so the revisers resolve it")
+            f"audit/PROBE_AUDIT.md row(s) {', '.join(sorted(promoted)[:6])} use the retired "
+            f"'promoted to AU-xxx' verdict: this audit adds no findings, so record the observed "
+            f"defect in audit/UNRESOLVED.md instead")
     return errors
 
 
@@ -1605,9 +1598,13 @@ def build_issue_census(observations, field_ids, sessions_expected=None,
     accepted = {}                   # (version, source) -> [(class, (line, words), session)]
     for sess, target, opp, comp in observations:
         if target in census:
-            census[target]["own_opps"].add(sess)
+            # OPPORTUNITIES are opponent comparisons, not judge sessions: one
+            # session comparing a version with seven opponents gave the version
+            # one opportunity and a 7x-inflated own_rate (the 2026-10-28 audit's
+            # F29). `own_sessions`/`peer_sessions` stay the session counts.
+            census[target]["own_opps"].add(str(opp))
         if opp in census:
-            census[opp]["peer_opps"].add(sess)
+            census[opp]["peer_opps"].add(str(target))
         items = ledger_items(comp)
         if not items:
             continue
@@ -3255,10 +3252,9 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
     for tdir in (sb / "feedback" / "text", sb / "feedback" / "llm" / "text"):
         if tdir.is_dir():
             for p in sorted(tdir.glob("*.txt")):
-                try:
-                    texts.append(_norm_ws(p.read_text(encoding="utf-8", errors="replace")))
-                except OSError:
-                    continue
+                text_part = read_text_bounded(p)
+                if text_part is not None:
+                    texts.append(_norm_ws(text_part))
     haystack = " \n ".join(texts)
     seen = set()
     for i, row in enumerate(rows, 1):

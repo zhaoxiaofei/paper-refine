@@ -405,6 +405,33 @@ def sentence_carries_scientific_fact(text: str) -> bool:
     return bool(re.search(r"\d", stripped))
 
 
+def _write_zip_parts_atomic(out: Path, parts: dict) -> None:
+    """Write one DOCX package through an O_EXCL descriptor, then replace `out`.
+
+    The PKG-2 writers used `zipfile.ZipFile(out, "w")` on a pathname another
+    agent can list: unlinking the reserved temp and planting a symlink there
+    redirected the package bytes (F02/F09). `mkstemp()` owns the name and the
+    archive is written through that descriptor, so no reopen-by-path can be
+    swapped for a link.
+    """
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=out.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
+                for part_name, data in parts.items():
+                    z.writestr(part_name, data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, out)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
     """Remove every SENTENCE of `src` that `finder` names as a dangling pointer.
 
@@ -562,9 +589,7 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
     parts_new = dict(parts)
     parts_new["word/document.xml"] = new_xml.encode("utf-8")
     try:
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-            for name, data in parts_new.items():
-                z.writestr(name, data)
+        _write_zip_parts_atomic(out, parts_new)
     except (OSError, RuntimeError, NotImplementedError) as e:
         res["error"] = f"could not write the repaired DOCX: {type(e).__name__}: {e}"
         return res
@@ -719,9 +744,7 @@ def strip_local_path_links(src: Path, out: Path) -> dict:
     for _a, _b, target, rid in kill:
         removed.append({"part": settings, "target": target, "id": rid})
     try:
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-            for name, data in parts_new.items():
-                z.writestr(name, data)
+        _write_zip_parts_atomic(out, parts_new)
     except (OSError, RuntimeError, NotImplementedError) as e:
         res["error"] = f"could not write the repaired DOCX: {type(e).__name__}: {e}"
         return res
@@ -947,12 +970,21 @@ FIGURES_HEADING_RE = re.compile(
 # patterns below are the same rule for "Figure 2 |", "Fig. 2.", "Figure S1",
 # "Extended Data Figure 3 |", "Supplementary Fig. 4:".
 _CAPTION_LABEL_RE = (r"(?:supplementary\s+|extended\s+data\s+|supp\.?\s+)?%s\.?\s*")
-DISPLAY_CAPTION_NUM_RE = r"(?:S?\d+[A-Za-z]?|[IVXLC]{2,})"
+# The formatter's caption grammar must accept the SAME display numbers the
+# pipeline's M19 scan counts (`Table I. Title` is a caption there). The old
+# `[IVXLC]{2,}` refused a single roman numeral and the D/M forms, so a common
+# "Table I" caption was a caption to the length scan and invisible to FMT-TB1/2/3.
+# Tables use the pipeline's full roman grammar (`[IVXLCDM]+`, so Table C/D/L/M
+# are captions too). Figures keep the narrower single-letter class (I/V/X only):
+# "Figure C. We next tested ..." is a body sentence/panel label the format
+# regression F-215 requires us to leave alone, so the two grammars differ.
+DISPLAY_TABLE_NUM_RE = r"(?:S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
+DISPLAY_CAPTION_NUM_RE = r"(?:S?\d+[A-Za-z]?|(?-i:[IVXLCDM]{2,}|[IVX]))"
 TABLE_CAPTION_RE = re.compile(
-    r"^\s*" + (_CAPTION_LABEL_RE % "tables?") + DISPLAY_CAPTION_NUM_RE
+    r"^\s*" + (_CAPTION_LABEL_RE % "tables?") + DISPLAY_TABLE_NUM_RE
     + r"\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)", re.I)
 TABLE_CAPTION_BARE_RE = re.compile(
-    r"^\s*" + (_CAPTION_LABEL_RE % "tables?") + DISPLAY_CAPTION_NUM_RE + r"\s*$", re.I)
+    r"^\s*" + (_CAPTION_LABEL_RE % "tables?") + DISPLAY_TABLE_NUM_RE + r"\s*$", re.I)
 FIGURE_CAPTION_RE = re.compile(
     r"^\s*" + (_CAPTION_LABEL_RE % "fig(?:ure)?s?") + DISPLAY_CAPTION_NUM_RE
     + r"\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)", re.I)

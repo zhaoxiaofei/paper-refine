@@ -214,6 +214,30 @@ def _mc_visible_branch(m) -> str:
     return branch.group(0) if branch else ""
 
 
+# Untrusted DOCX parts: cap the DECOMPRESSED size before reading and refuse an
+# XML DTD/entity outright. The pipeline applies the same 64 MiB budget (see
+# paper_pipeline `_docx_xml_part`); without it here, the agents' converter
+# expanded a 70 MiB part from a 70 KiB submission while the orchestrator
+# refused it, so the two readers disagreed about the corpus.
+MAX_DOCX_PART_BYTES = 64 * 1024 * 1024
+
+
+def _docx_part(z, name: str):
+    """Bytes of one DOCX part inside the size/entity budget, or None."""
+    try:
+        info = z.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > MAX_DOCX_PART_BYTES:
+        return None
+    data = z.read(name)
+    text = data.decode("utf-16", "ignore") if data[:2] in (b"\xff\xfe", b"\xfe\xff") \
+        else data.decode("utf-8", "ignore")
+    if "<!DOCTYPE" in text or "<!ENTITY" in text:
+        return None
+    return data
+
+
 def docx_part_to_lines(xml: str):
     """Paragraph lines + notes for one WordprocessingML part."""
     notes, out_lines = [], []
@@ -258,10 +282,11 @@ def docx_to_text(path: str) -> tuple:
     except Exception as e:
         return "", ["docx-unreadable: %s" % e]
     with z:
-        try:
-            body = z.read("word/document.xml").decode("utf-8", errors="replace")
-        except Exception as e:
-            return "", ["docx-unreadable: %s" % e]
+        raw = _docx_part(z, "word/document.xml")
+        if raw is None:
+            return "", ["docx-unreadable: word/document.xml is over the size/"
+                        "entity budget and was refused"]
+        body = raw.decode("utf-8", errors="replace")
         lines, part_notes = docx_part_to_lines(body)
         out_lines.extend(lines)
         notes.extend(part_notes)
@@ -273,10 +298,12 @@ def docx_to_text(path: str) -> tuple:
                               (r"word/endnotes\.xml$", "ENDNOTES")):
             extra_parts.extend((n, kind) for n in sorted(names) if re.match(pattern, n))
         for name, kind in extra_parts:
-            try:
-                xml = z.read(name).decode("utf-8", errors="replace")
-            except Exception:
+            raw = _docx_part(z, name)
+            if raw is None:
+                notes.append("%s part refused: over the size/entity budget: %s"
+                             % (kind.lower(), name))
                 continue
+            xml = raw.decode("utf-8", errors="replace")
             part_lines, part_notes = docx_part_to_lines(xml)
             if part_lines:
                 # lowercase marker: an all-caps marker would itself be inventoried as an acronym
@@ -288,11 +315,17 @@ def docx_to_text(path: str) -> tuple:
             if any(n.startswith("word/comments") for n in names):
                 notes.append("word/comments*.xml present — residual comments in docx")
             if "docProps/core.xml" in names:
-                core = z.read("docProps/core.xml").decode("utf-8", errors="replace")
-                for tag in ("lastModifiedBy", "creator"):
-                    m = re.search(r"<[^>]*%s[^>]*>(.*?)</[^>]*%s" % (tag, tag), core, re.S)
-                    if m and m.group(1).strip():
-                        notes.append("docx property %s = %r (metadata/PII check)" % (tag, m.group(1)[:60]))
+                raw_core = _docx_part(z, "docProps/core.xml")
+                if raw_core is None:
+                    notes.append("docProps/core.xml refused: over the size/entity budget")
+                else:
+                    core = raw_core.decode("utf-8", errors="replace")
+                    for tag in ("lastModifiedBy", "creator"):
+                        m = re.search(r"<[^>]*%s[^>]*>(.*?)</[^>]*%s" % (tag, tag),
+                                      core, re.S)
+                        if m and m.group(1).strip():
+                            notes.append("docx property %s = %r (metadata/PII check)"
+                                         % (tag, m.group(1)[:60]))
         except Exception:
             pass
     return "\n".join(out_lines), notes

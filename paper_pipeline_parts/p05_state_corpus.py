@@ -372,11 +372,20 @@ def load_state_file(path: Path) -> tuple:
     Never uses the agent-output cap: `state.json` is written by this program.
     The problem string is what the caller prints, so "over the limit", "not
     valid JSON" and "not the expected shape" stay distinguishable.
+
+    `state.json` sits in the operator's root and the stage sandboxes are
+    writable, so this reader refuses anything but a regular, single-link file:
+    a FIFO/device at the path used to block every command forever (size 0,
+    then a blocking open) and a symlink redirected the read outside the root.
     """
     try:
-        size = path.stat().st_size
+        st = path.lstat()
     except OSError as e:                                          # noqa: BLE001
         return None, f"could not be read ({type(e).__name__}: {e})"
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        return None, ("is not a regular file (a symlink, FIFO or device at the registry "
+                      "path is refused; state.json must be written by this pipeline)")
+    size = st.st_size
     if size > MAX_STATE_BYTES:
         def _mib(n):
             return (f"{n / (1024 * 1024):.1f} MiB" if n >= 1024 * 1024
@@ -384,9 +393,32 @@ def load_state_file(path: Path) -> tuple:
         return None, (f"is {_mib(size)}, over this pipeline's {_mib(MAX_STATE_BYTES)} registry "
                       f"limit -- prune the rounds (`prune --yes`) or start a fresh root")
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            text = f.read()
-    except OSError as e:                                          # noqa: BLE001
+        # O_NONBLOCK closes the remaining FIFO race (the file could be swapped
+        # between lstat and open); O_NOFOLLOW refuses a planted link. The read is
+        # capped at MAX_STATE_BYTES+1 so a file that grows after the stat cannot
+        # exhaust memory.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        try:
+            st2 = os.fstat(fd)
+            if not stat.S_ISREG(st2.st_mode):
+                return None, ("is not a regular file (a symlink, FIFO or device at the "
+                              "registry path is refused)")
+            chunks = []
+            remaining = MAX_STATE_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.close(fd)
+        raw = b"".join(chunks)
+        if len(raw) > MAX_STATE_BYTES:
+            return None, ("grew past this pipeline's registry size limit while being read")
+        text = raw.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as e:                    # noqa: BLE001
         return None, f"could not be read ({type(e).__name__}: {e})"
     try:
         # state.json is written by write_json_atomic, which serialises the inf/NaN
@@ -724,8 +756,9 @@ class Ctx:
         # lock and then writing its JSON leaves a window where a second process
         # reads "no pid" and declares the LIVE lock stale. A staged file linked
         # into place appears complete or not at all.
-        staged = self.root / f"{LOCK_FILE}.{os.getpid()}.tmp"
-        staged.write_text(json.dumps(info, indent=2), encoding="utf-8")
+        staged = tmp_path_for(lock_path)
+        with _open_reserved_tmp(staged, "w") as f:
+            f.write(json.dumps(info, indent=2))
         try:
             acquired = self._claim_lock(lock_path, staged, info, what)
         finally:
@@ -1868,6 +1901,14 @@ def _sanitize_ooxml_bytes(data: bytes) -> tuple:
     notes = []
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zin:
+            # The judge view reads every part of an untrusted package: a small
+            # compressed entry may declare/expand to gigabytes. Refuse rather
+            # than decompress it (the caller reports the note).
+            oversized = [i.filename for i in zin.infolist()
+                         if i.file_size > MAX_DOCX_PART_BYTES]
+            if oversized:
+                return data, [f"not stripped: part {oversized[0]!r} expands over the "
+                              f"OOXML size budget; metadata left as is"]
             items = [(i.filename, zin.read(i.filename)) for i in zin.infolist()]
     except (zipfile.BadZipFile, OSError, KeyError, RuntimeError,
             NotImplementedError) as e:                            # noqa: BLE001

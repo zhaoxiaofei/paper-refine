@@ -2179,9 +2179,12 @@ def _revision_plan_rows(sb: Path):
     collisions invisible to the repair ledger).
     """
     path = sb / REVISION_AUDIT_DIRNAME / "REPAIR_PLAN.json"
+    text = read_text_bounded(path)
+    if text is None:
+        return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(text)
+    except ValueError:
         return None
     rows = data.get("rows") if isinstance(data, dict) else data
     if not isinstance(rows, list):
@@ -2193,6 +2196,22 @@ def _revision_plan_rows(sb: Path):
         rid = str(row.get("id") or "").strip()
         rel = str(row.get("file") or "").strip()
         if not rid or rid in seen or not rel:
+            return None
+        # A row must DESCRIBE the repair it authorizes. The prompt's contract is
+        # one row per confirmed defect with its location, the wrong text/value,
+        # the correct value, the deciding basis and the exact proposed repair
+        # (plus its evidence). Accepting {"id","file"} let a bounded repair
+        # rewrite the whole file: nothing in the plan named the span, so the
+        # application audit (file hashes only) could not tell a described fix
+        # from an arbitrary replacement. An incomplete row invalidates the plan
+        # rather than being filtered out, so a defect the auditor found is never
+        # silently dropped. `wrong` is required as a KEY but may be empty for a
+        # pure addition, where there is no wrong text to quote.
+        _required = ("location", "wrong", "correct", "basis", "edit", "evidence")
+        if any(key not in row for key in _required):
+            return None
+        if any(not str(row.get(key) or "").strip()
+               for key in ("location", "correct", "basis", "edit", "evidence")):
             return None
         if _unsafe_package_rel(rel):
             return None
@@ -2236,16 +2255,19 @@ def _revision_repair_ledger(sb: Path, rows: list, with_ids: bool = False):
         return (problem, counts, ids) if with_ids else (problem, counts)
 
     path = sb / REVISED_DIR / "REPAIR_LEDGER.json"
+    text = read_text_bounded(path)
+    if text is None:
+        return _done("no readable revised/REPAIR_LEDGER.json (missing, not a regular "
+                     "file, or over the agent-output size cap)", {}, set())
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as e:
-        return _done(f"no revised/REPAIR_LEDGER.json ({e})", {}, set())
+        data = json.loads(text)
     except ValueError as e:
         return _done(f"revised/REPAIR_LEDGER.json is not valid JSON ({e})", {}, set())
     ledger = data.get("rows") if isinstance(data, dict) else data
     if not isinstance(ledger, list):
         return _done("revised/REPAIR_LEDGER.json carries no rows list", {}, set())
     plan_ids = [row["id"] for row in rows]
+    plan_by_id = {row["id"]: row for row in rows}
     seen = set()
     counts = {"confirmed": 0, "rejected": 0}
     confirmed_ids = set()
@@ -2266,11 +2288,103 @@ def _revision_repair_ledger(sb: Path, rows: list, with_ids: bool = False):
         counts[verdict] += 1
         if verdict == "confirmed":
             confirmed_ids.add(rid)
+            plan_row = plan_by_id[rid]
+            # The bounded-repair prompt requires the ledger row to quote the
+            # applied text (`before`/`after`); accepting only id/verdict/reason
+            # let a confirmed row stand for an arbitrary whole-file rewrite
+            # (F14). A pure addition has an empty `before` but still needs the
+            # quoted `after` text.
+            if all(key in plan_row for key in _REPAIR_DESCRIBED_KEYS):
+                if "before" not in row or "after" not in row:
+                    return _done(f"REPAIR_LEDGER row {rid} carries no applied text "
+                                 f"(expected `before` and `after` quotes)", {}, set())
+                if not str(row.get("after") or "").strip():
+                    return _done(f"REPAIR_LEDGER row {rid} carries an empty `after` quote "
+                                 f"for a confirmed repair", {}, set())
     missing = [rid for rid in plan_ids if rid not in seen]
     if missing:
         return _done(f"REPAIR_LEDGER does not re-validate planned row(s) "
                      f"{', '.join(missing[:6])}", {}, set())
     return _done("", counts, confirmed_ids)
+
+
+# The plan-row keys that describe a repair, and the text-bearing source
+# extensions whose pre/post content the application audit can compare against
+# the ledger's `before`/`after` quotes. A binary package (DOCX) is compared by
+# its paragraph text; an extension outside these sets keeps the documented
+# file-level bound because there is no text to diff.
+_REPAIR_DESCRIBED_KEYS = ("location", "wrong", "correct", "basis", "edit", "evidence")
+_REPAIR_TEXT_EXTS = {".md", ".txt", ".tex", ".ltx", ".json", ".csv", ".tsv",
+                     ".bib", ".yaml", ".yml", ".rst"}
+
+
+def _repair_ledger_entries(root: Path) -> dict:
+    """{id: ledger row} for the bounded repair's re-validation ledger."""
+    text = read_text_bounded(root / "REPAIR_LEDGER.json")
+    if text is None:
+        return {}
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {}
+    rows = data.get("rows") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return {}
+    out = {}
+    for row in rows:
+        if isinstance(row, dict):
+            rid = str(row.get("id") or "").strip()
+            if rid:
+                out[rid] = row
+    return out
+
+
+def _repair_file_text(path: Path):
+    """The text a ledger quote is compared with, or None for an opaque file."""
+    try:
+        if path.suffix.lower() == ".docx":
+            paras = _docx_paragraphs(path)
+            if paras is not None:
+                return "\n".join(paras)
+            # An unparseable package may still be a text fixture (the unit
+            # tests build one), so fall through to the UTF-8 decode; a real
+            # binary package raises UnicodeDecodeError and stays opaque.
+        if path.suffix.lower() not in _REPAIR_TEXT_EXTS \
+                and path.suffix.lower() != ".docx":
+            return None
+        return path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError, RuntimeError, NotImplementedError):
+        return None
+
+
+def _repair_norm(text) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _repair_span_problem(pre: Path, cur: Path, rel: str, before: str, after: str):
+    """Why `rel`'s actual text change is outside the quoted before/after, or None.
+
+    The plan now describes a span, and the ledger must quote the text it applied.
+    Comparing the quoted text with the real pre/post content is what keeps a
+    confirmed row from authorizing a whole-file replacement: every removed text
+    run must sit inside `before`, and every added run inside `after`.
+    """
+    pre_text = _repair_file_text(pre / rel)
+    cur_text = _repair_file_text(cur / rel)
+    if pre_text is None or cur_text is None or pre_text == cur_text:
+        return None                     # opaque/binary, or no textual change
+    before_n, after_n = _repair_norm(before), _repair_norm(after)
+    matcher = difflib.SequenceMatcher(None, pre_text, cur_text, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "delete"):
+            removed = _repair_norm(pre_text[i1:i2])
+            if removed and removed not in before_n:
+                return "removed text is outside the row's quoted `before`"
+        if tag in ("replace", "insert"):
+            added = _repair_norm(cur_text[j1:j2])
+            if added and added not in after_n:
+                return "added text is outside the row's quoted `after`"
+    return None
 
 
 # The bounded repair is documented to update its own ledger/report/changelog as
@@ -2317,6 +2431,23 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     # change.
     for rel in sorted(allowed):
         if (cur / rel).is_symlink():
+            bad.add(rel)
+    # The file-level bound is not enough for a DESCRIBED plan row: the ledger's
+    # quoted `before`/`after` text must cover the actual text change, or a
+    # confirmed row still authorizes a whole-file rewrite (F14). Opaque/binary
+    # files keep the documented file-level bound because there is no text diff.
+    ledger = _repair_ledger_entries(cur)
+    plan_by_id = {row["id"]: row for row in rows}
+    for rid in sorted(confirmed_ids):
+        row = plan_by_id.get(rid) or {}
+        if not all(key in row for key in _REPAIR_DESCRIBED_KEYS):
+            continue
+        rel = str(row.get("file") or "").replace("\\", "/").lstrip("./")
+        if not rel or rel in bad:
+            continue
+        entry = ledger.get(rid) or {}
+        if _repair_span_problem(pre, cur, rel, entry.get("before", ""),
+                                entry.get("after", "")):
             bad.add(rel)
     return sorted(bad)
 

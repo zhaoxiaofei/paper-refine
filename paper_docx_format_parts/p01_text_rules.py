@@ -288,7 +288,12 @@ def _word_number_is_count(text: str, start: int, end: int, written: str) -> bool
     if WORD_NUMBER_LABEL_RE.search(text[max(0, start - 24):start]):
         return False
     if first in ("hundred", "thousand", "million", "billion"):
-        return False
+        # "a hundred samples" is a count even though the match starts at the
+        # scale word. The indefinite article is the count's determiner; without
+        # this branch the very common "a hundred"/"a thousand" form escaped the
+        # numbers ledger and the M30 seed.
+        if not re.search(r"(?i)\ba\s+$", text[max(0, start - 4):start]):
+            return False
     # "one another", "one of them", "one may", "no one", "at once": pronouns and
     # idioms, not counts.
     m = re.match(r"\s+([A-Za-z][A-Za-z'-]*)", tail)
@@ -2204,6 +2209,9 @@ def _num_candidates(value: float) -> set:
     return out
 
 
+ROW_COUNT_SOURCE_PREFIX = "number of data rows in "
+
+
 def table_value_index(tables: list) -> dict:
     """{value string: 'sum of column X in file'} for tabular data files.
 
@@ -2220,8 +2228,17 @@ def table_value_index(tables: list) -> dict:
             continue
         for c in range(min(len(header), max(len(r) for r in body))):
             vals = []
+            col_has_unit = False
             for r in body:
                 if c >= len(r):
+                    continue
+                # A percentage or a currency amount is not the plain number it
+                # contains: indexing "50" from a "50%" cell let the M30
+                # reconciliation prove an unrelated count 50 (the 2026-10-28
+                # audit's F42). The unit-bearing cell is not indexed, and the
+                # column's aggregates are not either.
+                if any(u in str(r[c]) for u in ("%", "$")):
+                    col_has_unit = True
                     continue
                 fv = _cell_number(r[c])
                 if fv is None:
@@ -2232,13 +2249,15 @@ def table_value_index(tables: list) -> dict:
                     index.setdefault(
                         cand, f"value in column {header[c]!r}, row {label!r} in {name}"
                         if label else f"value in column {header[c]!r} in {name}")
-            if len(vals) < 3:
+            if col_has_unit or len(vals) < 3:
                 continue
-            # The row count is every data row, not only the rows with a
-            # numeric cell in this column (sparse columns reported 3 for a
-            # 10-row table, contradicting table_column_stats()).
+            # The table's SHAPE is a reported statistic: G-041 requires the row
+            # count to be every data row, not only the cells a column holds. It
+            # is indexed for the operator, but `reconcile_number_rows` never
+            # treats it as provenance: an unrelated table's height cannot prove
+            # an arbitrary written small integer (the 2026-10-28 audit's F42).
             for cand in _num_candidates(float(len(body))):
-                index.setdefault(cand, f"number of data rows in {name}")
+                index.setdefault(cand, f"{ROW_COUNT_SOURCE_PREFIX}{name}")
             for kind, val in (("sum", sum(vals)), ("min", min(vals)), ("max", max(vals))):
                 for cand in _num_candidates(val):
                     index.setdefault(cand, f"{kind} of column {header[c]!r} in {name}")
@@ -2780,7 +2799,7 @@ def reconcile_number_rows(rows: list, tables: list) -> dict:
             continue
         key = re.sub(r"[,\u2009\u202f\u00a0\s]", "", num).rstrip(".")
         hit = index.get(num) or index.get(key)
-        if hit:
+        if hit and not hit.startswith(ROW_COUNT_SOURCE_PREFIX):
             r["source"] = f"recomputed: {hit}"
             r["source_kind"] = "shipped-table"
             r["status"] = "proved"

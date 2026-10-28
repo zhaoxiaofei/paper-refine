@@ -184,11 +184,20 @@ if [[ ! -s "$OUTPUT" ]]; then
     exit 1
 fi
 # A non-empty file is not a Word redline: require a readable OOXML package
-# carrying the main document part before reporting success.
+# carrying the main document part before reporting success. The verifier is
+# Python, so a missing interpreter must be reported as a DEPENDENCY error (and
+# the unverified Word output removed) instead of being misdiagnosed as a
+# corrupt comparison document.
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Error: python3 is required to verify the comparison document; install Python 3 and re-run" >&2
+    rm -f -- "$OUTPUT"
+    exit 1
+fi
 if ! python3 -c 'import sys, zipfile
 z = zipfile.ZipFile(sys.argv[1]); names = set(z.namelist())
 raise SystemExit(0 if "[Content_Types].xml" in names and "word/document.xml" in names else 1)'         "$OUTPUT" 2>/dev/null; then
     echo "Error: the comparison document is not a readable DOCX package: $OUTPUT" >&2
+    rm -f -- "$OUTPUT"
     exit 1
 fi
 

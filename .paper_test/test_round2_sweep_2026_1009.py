@@ -438,11 +438,13 @@ def test_probe_audit():
         encoding="utf-8")
     (sb / "audit/audit.json").write_text(json.dumps({"adds": []}), encoding="utf-8")
     errs = nb.probe_audit_problems(sb)
-    check("PA2 a promotion naming no AU-* finding fails",
-          any("AU-001" in e for e in errs), str(errs)[:240])
-    (sb / "audit/audit.json").write_text(json.dumps({"adds": [{"id": "AU-001"}]}),
-                                         encoding="utf-8")
-    check("PA3 a full PROBE_AUDIT passes", nb.probe_audit_problems(sb) == [],
+    check("PA2 the retired 'promoted to AU-*' verdict fails and points at UNRESOLVED.md",
+          any("retired" in e and "UNRESOLVED.md" in e for e in errs), str(errs)[:240])
+    (sb / "audit/PROBE_AUDIT.md").write_text(
+        "| probe id | disposition | verdict | evidence |\n|---|---|---|---|\n"
+        "| P2-001 | no anomalies | stands | the metadata holds the rule |\n",
+        encoding="utf-8")
+    check("PA3 a disposition-only PROBE_AUDIT passes", nb.probe_audit_problems(sb) == [],
           str(nb.probe_audit_problems(sb))[:240])
 
 

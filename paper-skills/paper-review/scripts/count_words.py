@@ -116,14 +116,19 @@ SECTION_KIND_RES = (
 
 
 def _heading_text(line: str) -> str:
-    """A heading line with a Markdown ATX prefix removed.
+    """A heading line with a Markdown ATX prefix or emphasis removed.
 
     The pipeline's own length scan strips `#{1,6}` (`_length_heading_text`);
     without the same step here `## Methods` was body text to this counter and
     a heading to the gate, so a .md manuscript got one `whole file` row and
-    skipped the M19 cap check.
+    skipped the M19 cap check. The same holds for `**Abstract**`-style
+    emphasis headings, which the pipeline scanner now recognises too.
     """
-    return re.sub(r"^\s*#{1,6}\s+", "", (line or "").strip())
+    text = re.sub(r"^\s*#{1,6}\s+", "", (line or "").strip())
+    m = re.match(r"^(\*\*|__|\*|_)(\S.*?)\1(.*)$", text)
+    if m and m.group(2).strip():
+        text = (m.group(2) + m.group(3)).strip()
+    return text
 
 
 def section_kind(line: str) -> str:
@@ -138,6 +143,38 @@ def section_kind(line: str) -> str:
 KEYWORDS = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:key\s?words?)\s*"
     r"(?:[:.\u2014\u2013-]|$)", re.I)
+
+
+def keyword_continuation(line: str) -> bool:
+    """Does this line continue the keyword LIST, or start the body?
+
+    The pipeline's twin `_length_keyword_continuation` must return the same
+    answer on the same line, or the two M19 counters disagree. A comma/semicolon
+    list of short items is a continuation; a sentence with a terminator is body;
+    a short lowercase unpunctuated line is a list; anything longer is body.
+    """
+    text = (line or "").strip()
+    if not text:
+        return False
+    words = text.split()
+    terminated = bool(re.search(r"[.!?]\s*$", text))
+    if "," in text or ";" in text:
+        # Keep the pipeline twin's rule: a comma-bearing sentence is body, but a
+        # capitalized one-word item ("COVID-19, SARS-CoV-2") can still be a list.
+        if terminated:
+            return False
+        parts = [p.strip() for p in re.split(r"[,;]", text) if p.strip()]
+        if not parts:
+            return False
+        if not text[:1].islower() and len(parts[0].split()) > 1:
+            return False
+        return (2 <= len(parts) <= 20 and len(words) <= 24
+                and all(len(p.split()) <= 4 for p in parts))
+    if terminated:
+        return False
+    return len(words) <= 4 and text[:1].islower()
+
+
 # A caption line starts with the label, the number AND its separator ("Figure 2
 # | ...", "Fig. 1: ...", "Figure 3. ..."). Without the separator guard a BODY
 # sentence that merely opens with a figure reference ("Figure 2A shows that p53
@@ -397,11 +434,12 @@ def tex_lines(text: str):
                     lines.append(after)
             continue
         if re.search(r"\\begin\s*\{thebibliography\}", line) \
-                or re.search(r"\\bibliography\s*\{", line):
+                or re.search(r"\\bibliography\s*\{", line) \
+                or re.search(r"\\printbibliography\b", line):
             # The reference list is not main text when the venue excludes
             # references. `\begin{thebibliography}` is stripped as an
-            # environment token and `\bibliography{...}` as scaffold, so without
-            # this heading every entry was counted inside the main-text span.
+            # environment token, `\bibliography{...}` as scaffold, and
+            # biblatex's `\printbibliography` matched neither.
             lines.append("References")
             continue
         m = TEX_SECTION.match(line)
@@ -585,13 +623,19 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
             in_keyword_block = True
             excluded_now = True
             continue
-        if in_keyword_block and not stripped:
+        if in_keyword_block:
+            if not stripped:
+                in_keyword_block = False
+                excluded_now = False
+                continue
+            if keyword_continuation(stripped):
+                continue                # a wrapped keyword list is not prose
+            # A non-empty line that is not a keyword continuation ends the
+            # block AND is body text: a Brief Communication written as
+            # "Keywords: ..." directly followed by its body (no blank line, no
+            # headings) used to lose the whole body and report 0 main-text words.
             in_keyword_block = False
             excluded_now = False
-            continue
-        if in_keyword_block and not (SECTION_BOUND.match(stripped)
-                                     or MAIN_START.match(stripped)):
-            continue
         if SECTION_BOUND.match(stripped) or MAIN_START.match(stripped):
             in_keyword_block = False
         if SECTION_BOUND.match(stripped) or MAIN_START.match(stripped):

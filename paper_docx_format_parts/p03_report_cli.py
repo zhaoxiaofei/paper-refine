@@ -544,6 +544,28 @@ def _docx_entity_problem(data: bytes, name: str) -> str:
     return ""
 
 
+def _docx_xml_part_guarded(pkg: zipfile.ZipFile, name: str) -> bytes:
+    """One XML part inside the per-part budget, without a DTD/entity.
+
+    The shared reader for every call site that used to hand `z.read(name)` to
+    an XML parser: the fixer's own scanner/validator and the template path read
+    the same untrusted package as the pipeline, so they must apply the same cap
+    and entity refusal (the 2026-10-28 audit's F05).
+    """
+    try:
+        info = pkg.getinfo(name)
+    except KeyError as e:
+        raise OSError(f"part {name!r} is missing from the package") from e
+    if info.file_size > MAX_DOCX_PART_BYTES:
+        raise OSError(f"part {name!r} expands to {info.file_size} bytes "
+                      f"(limit {MAX_DOCX_PART_BYTES})")
+    data = pkg.read(name)
+    problem = _docx_entity_problem(data, name)
+    if problem:
+        raise OSError(problem)
+    return data
+
+
 def analyse_package(path: Path, policy: dict) -> dict:
     app_pages = None
     sizes, doc_rels, aux_parts, aux_xml, part_targets = {}, {}, [], {}, {}
@@ -2009,11 +2031,14 @@ def validate_docx_parts(path: Path) -> dict:
             names = z.namelist()
             if "word/document.xml" not in names:
                 errs.append("word/document.xml is missing from the package")
+            problem = _docx_zip_problem(z)
+            if problem:
+                errs.append(f"the package is over the read budget: {problem}")
             for name in names:
                 if not (name.endswith(".xml") or name.endswith(".rels")):
                     continue
                 try:
-                    ET.fromstring(z.read(name))
+                    ET.fromstring(_docx_xml_part_guarded(z, name))
                 except ET.ParseError as e:
                     errs.append(f"{name}: malformed XML ({e})")
                 except (OSError, RuntimeError, NotImplementedError) as e:  # noqa: PERF203
@@ -3242,6 +3267,32 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     return num_map
 
 
+def _write_zip_atomic(out: Path, parts: dict) -> None:
+    """Write one DOCX package atomically, through an O_EXCL descriptor.
+
+    `zipfile.ZipFile(out, "w")` opened the caller's destination directly: a
+    crash left a truncated master DOCX and a pre-created symlink at `out`
+    received the bytes (the 2026-10-28 audit's F09). mkstemp() creates a
+    random sibling exclusively and returns the descriptor, so neither the
+    name nor a reopen-by-path can be swapped for a link.
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=out.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
+                for part_name, data in parts.items():
+                    z.writestr(part_name, data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, out)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> dict:
     """Restyle one DOCX into the venue's official Word template.
 
@@ -3266,7 +3317,20 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                 return {"file": str(src), "ok": False,
                         "error": "the template is not a readable Word template "
                                  "(word/styles.xml / word/document.xml missing)"}
+            # Both packages are untrusted: the budget check runs BEFORE the
+            # whole-package read below, and every XML part is refused when it
+            # carries a DTD/entity declaration.
+            problem = _docx_zip_problem(spkg) or _docx_zip_problem(tpkg)
+            if problem:
+                return {"file": str(src), "ok": False,
+                        "error": f"unreadable DOCX package: {problem}"}
             parts = {i.filename: spkg.read(i.filename) for i in spkg.infolist()}
+            for name, data in parts.items():
+                if name.lower().endswith((".xml", ".rels")):
+                    problem = _docx_entity_problem(data, name)
+                    if problem:
+                        return {"file": str(src), "ok": False,
+                                "error": f"unreadable DOCX package: {problem}"}
             src_styles = parts.get("word/styles.xml", b"").decode("utf-8", "replace")
             src_numbering = parts.get("word/numbering.xml", b"").decode("utf-8", "replace")
             tpl_styles = tpkg.read("word/styles.xml").decode("utf-8", "replace")
@@ -3362,15 +3426,14 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                     parts["word/document.xml"] = doc_xml.encode("utf-8")
                 if front_parts.get("even_odd"):
                     _with_even_odd_headers(parts)
-            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-                for name, data in parts.items():
-                    z.writestr(name, data)
+            _write_zip_atomic(out, parts)
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError) as e:
         return {"file": str(src), "ok": False, "error": f"{type(e).__name__}: {e}"}
 
     def _text(p: Path) -> str:
         with zipfile.ZipFile(p) as z:
-            xml = z.read("word/document.xml").decode("utf-8", "replace")
+            raw = _docx_xml_part_guarded(z, "word/document.xml")
+        xml = raw.decode("utf-8", "replace")
         return "\n".join(t for t in (text_of(par[2]) for par in paragraphs(xml)) if t.strip())
 
     try:
@@ -3380,7 +3443,7 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             if "word/numbering.xml" in copied or carried_lists:
                 check_parts.append("word/numbering.xml")
             for name in check_parts:
-                ET.fromstring(z.read(name))
+                ET.fromstring(_docx_xml_part_guarded(z, name))
     except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError, RuntimeError,
             NotImplementedError) as e:
         return {"file": str(src), "ok": False, "error": f"verification failed: {e}"}

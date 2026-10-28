@@ -128,17 +128,35 @@ def test_chain_guards():
     def write_plan(rows):
         (plan_dir / "REPAIR_PLAN.json").write_text(json.dumps({"rows": rows}), encoding="utf-8")
 
+    def full_row(**over):
+        row = {"id": "RP-001", "file": "manuscript.md",
+               "location": "Results, paragraph 3", "wrong": "n = 12",
+               "correct": "n = 13", "basis": "raw_data/table1.csv row 2",
+               "edit": "replace n = 12 with n = 13",
+               "evidence": "review/findings.json F-001"}
+        row.update(over)
+        return row
+
     write_plan([{"id": "RP-001", "file": "manuscript.md"}])
+    check("a plan row with no described repair invalidates the plan",
+          pp._revision_plan_rows(sb) is None)
+    write_plan([full_row()])
     rows = pp._revision_plan_rows(sb)
     check("a well-formed plan is accepted", rows and rows[0]["id"] == "RP-001", str(rows))
-    write_plan([{"id": "RP-001", "file": "manuscript.md"},
-                {"id": "RP-001", "file": "other.md"}])
+    write_plan([full_row(),
+                full_row(id="RP-001", file="other.md")])
     check("a duplicate plan id invalidates the plan", pp._revision_plan_rows(sb) is None)
-    write_plan([{"id": "RP-001", "file": "../base/manuscript.md"}])
+    write_plan([full_row(file="../base/manuscript.md")])
     check("a plan row outside the package invalidates the plan",
           pp._revision_plan_rows(sb) is None)
-    write_plan([{"id": "RP-001"}])
+    write_plan([full_row(file="")])
     check("a plan row without a file invalidates the plan",
+          pp._revision_plan_rows(sb) is None)
+    write_plan([full_row(basis="")])
+    check("a plan row without a deciding basis invalidates the plan",
+          pp._revision_plan_rows(sb) is None)
+    write_plan([full_row(edit="")])
+    check("a plan row without the proposed repair invalidates the plan",
           pp._revision_plan_rows(sb) is None)
     write_plan(["not-an-object"])
     check("a non-object plan row invalidates the plan (never '0 rows')",

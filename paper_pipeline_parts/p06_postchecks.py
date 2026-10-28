@@ -666,14 +666,13 @@ def _copy_bytes_if_different(src: Path, dst: Path) -> bool:
             pass
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    def do(p: Path) -> None:
-        with open(p, "wb") as f:
-            f.write(data)
+    def do(f) -> None:
+        f.write(data)
 
     # A UNIQUE temporary sibling + os.replace, exactly like every other writer
     # here: a fixed ".tmp" could be renamed into place half-written by a second
     # materializer running at the same time.
-    _atomic_write_bytes(tmp_path_for(dst), dst, do)
+    _atomic_write_bytes(tmp_path_for(dst), dst, do, binary=True)
     return True
 
 
@@ -2662,12 +2661,15 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 seen_rows[cid] = row
             if cid and (not disp or disp.lower().startswith("not checked")):
                 bad.append(cid)
-            if cid and not in_scope and re.sub(r"\s+", " ", disp).lower().startswith("out of scope"):
+            if (cid and cid in wanted and not in_scope
+                    and re.sub(r"\s+", " ", disp).lower().startswith("out of scope")):
                 # A FULL review's object is the whole package: only a genuinely
                 # scoped round may dispose a required check as out of scope.
                 # The old gate read the disposition for out-of-scope ids only,
                 # so a full review could mark every check "out of scope" and
-                # still satisfy the contract.
+                # still satisfy the contract. `cid in wanted` keeps an EXTRA
+                # coverage proposal (M37/M38) that a full review honestly marks
+                # "out of scope" from being reported as an in-scope check.
                 bad_out_of_scope.append(cid)
         if out_of_scope:
             # A scoped round must SAY that a check was left out; silence is still

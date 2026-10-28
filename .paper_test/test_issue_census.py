@@ -152,9 +152,9 @@ def test_census_attribution():
     check("three sessions' mentions count as three reported mentions (NO cross-session dedup)",
           (cm["own"], cm["peer"], cm["total"]) == (1, 2, 3),
           str(cm))
-    check("the rates divide the reported counts by the OPPORTUNITIES (own 1, peer 2)",
-          (orig["own_opps"], orig["peer_opps"]) == (1, 2)
-          and abs(cm["own_rate"] - 1.0) < 1e-9 and abs(cm["peer_rate"] - 1.0) < 1e-9,
+    check("the rates divide the reported counts by the OPPORTUNITIES (own 2 comparisons, peer 2)",
+          (orig["own_opps"], orig["peer_opps"]) == (2, 2)
+          and abs(cm["own_rate"] - 0.5) < 1e-9 and abs(cm["peer_rate"] - 1.0) < 1e-9,
           f"opps={orig['own_opps']}/{orig['peer_opps']} rates={cm['own_rate']}/{cm['peer_rate']}")
     # The selection's adaptive defect-prefix tie-break: the cells are the
     # canonical severity_tier_category order and the prefix sums are accumulated
@@ -393,9 +393,9 @@ def test_census_file_and_table(tmp, ctx, agg):
           (r["own"], r["peer"], r["total"]) == ("1", "2", "3")
           and abs(float(r["per_session"]) - 1.0) < 1e-6
           and (r["own_sessions"], r["peer_sessions"], r["sessions_expected"]) == ("1", "2", "3")
-          and abs(float(r["own_rate"]) - 1.0) < 1e-9
+          and abs(float(r["own_rate"]) - 0.5) < 1e-9
           and abs(float(r["peer_rate"]) - 1.0) < 1e-9
-          and (r["own_opps"], r["peer_opps"]) == ("1", "2"),
+          and (r["own_opps"], r["peer_opps"]) == ("2", "2"),
           str(r))
     r2 = by[("r1_a2", "completeness", "critical")]
     check("a critical defect appears in its own tier and its own severity",

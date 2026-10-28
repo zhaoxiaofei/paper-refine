@@ -218,9 +218,8 @@ def latexdiff_one_pair(base: Path, cand: Path, out: Path,
     ok = bool(rc == 0 and stdout.strip())
     if ok:
         out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_name(out.name + ".tmp")
-        tmp.write_bytes(stdout)
-        os.replace(tmp, out)
+        _atomic_write_bytes(tmp_path_for(out), out,
+                            lambda f: f.write(stdout), binary=True)
     else:
         with contextlib.suppress(OSError):
             out.unlink()
@@ -268,12 +267,14 @@ def _write_minimal_docx(out: Path, paragraphs: list) -> None:
             'officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
             '</Relationships>')
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("[Content_Types].xml", content_types)
-        z.writestr("_rels/.rels", rels)
-        z.writestr("word/document.xml", document)
-    os.replace(tmp, out)
+
+    def _write_minimal(f) -> None:
+        with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", content_types)
+            z.writestr("_rels/.rels", rels)
+            z.writestr("word/document.xml", document)
+
+    _atomic_write_bytes(tmp_path_for(out), out, _write_minimal, binary=True)
 
 
 def _before_after_lines(base: Path, cand: Path) -> list:
@@ -381,19 +382,19 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
             body.append(child)
         payload = _serialize_document(cand_root, cand_raw)
         out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_name(out.name + ".tmp")
-        with zipfile.ZipFile(cand) as zin, \
-                zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-                if item.filename == "word/document.xml":
-                    data = payload
-                zout.writestr(item, data)
-        os.replace(tmp, out)
+
+        def _write_tracked(f) -> None:
+            with zipfile.ZipFile(cand) as zin, \
+                    zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    if item.filename == "word/document.xml":
+                        data = payload
+                    zout.writestr(item, data)
+
+        _atomic_write_bytes(tmp_path_for(out), out, _write_tracked, binary=True)
     except Exception as e:                                      # noqa: BLE001
         try:
-            with contextlib.suppress(OSError):
-                out.with_name(out.name + ".tmp").unlink()
             _write_minimal_docx(out, [
                 note,
                 f"[the revised document could not be copied: {type(e).__name__}: {e}]"]

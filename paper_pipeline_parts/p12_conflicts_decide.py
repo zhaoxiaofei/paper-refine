@@ -260,9 +260,11 @@ def detect_round_judge_conflicts(opinions: list) -> list:
                         continue
                     # One side citing MORE numbers is detail, not contradiction;
                     # only an exclusive number on BOTH sides is a real conflict.
+                    # The old extra guard then dropped the singleton-vs-singleton
+                    # case -- the most direct disagreement there is ("n=173
+                    # samples" vs "n=508 samples") -- because both sets had one
+                    # value (the 2026-10-28 audit's F44).
                     if nums_a <= nums_b or nums_b <= nums_a:
-                        continue
-                    if not (nums_a & nums_b) and len(nums_a) < 2 and len(nums_b) < 2:
                         continue
                     chosen = (sim, ta, tb, nums_a, nums_b)
                     break
@@ -4935,7 +4937,13 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
                 if mod is None or not hasattr(mod, "strip_reference_sentences"):
                     entry["skipped"].append("the OOXML engine is unavailable")
                 else:
-                    tmp_out = p.with_name(p.name + ".pkg2.tmp")
+                    # A UNIQUE reserved sibling (never the predictable
+                    # `<name>.pkg2.tmp`): an agent-writable package could plant
+                    # a symlink at the fixed name and receive the rewrite. The
+                    # strip_* writers additionally write their output through a
+                    # fresh O_EXCL descriptor + os.replace, so this name is not
+                    # reopened by path either.
+                    tmp_out = tmp_path_for(p)
                     try:
                         # 1. A local-path link the package carries (the venue
                         #    template's attachedTemplate): removed together with
@@ -6128,22 +6136,23 @@ def write_final_clean_zip(dirp: Path, zip_path: Path) -> dict:
     over an unchanged package keeps the existing archive instead of rewriting it
     (no churn). The directory is never removed or modified by this function.
     """
-    ztmp = zip_path.with_name(zip_path.name + ".tmp")
+    ztmp = tmp_path_for(zip_path)
     n_files = 0
     try:
-        with zipfile.ZipFile(ztmp, "w", zipfile.ZIP_DEFLATED) as zf:
-            for q in sorted(dirp.rglob("*")):
-                rel = f"{dirp.name}/{q.relative_to(dirp).as_posix()}"
-                info = zipfile.ZipInfo(rel + "/" if q.is_dir() else rel,
-                                       date_time=(1980, 1, 1, 0, 0, 0))
-                info.compress_type = zipfile.ZIP_DEFLATED
-                info.external_attr = (0o755 if q.is_dir() else 0o644) << 16
-                if q.is_dir():
-                    zf.writestr(info, b"")
-                    continue
-                n_files += 1
-                with open(q, "rb") as fsrc, zf.open(info, "w") as fdst:
-                    shutil.copyfileobj(fsrc, fdst, 1 << 20)
+        with _open_reserved_tmp(ztmp, "wb") as zf_raw:
+            with zipfile.ZipFile(zf_raw, "w", zipfile.ZIP_DEFLATED) as zf:
+                for q in sorted(dirp.rglob("*")):
+                    rel = f"{dirp.name}/{q.relative_to(dirp).as_posix()}"
+                    info = zipfile.ZipInfo(rel + "/" if q.is_dir() else rel,
+                                           date_time=(1980, 1, 1, 0, 0, 0))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.external_attr = (0o755 if q.is_dir() else 0o644) << 16
+                    if q.is_dir():
+                        zf.writestr(info, b"")
+                        continue
+                    n_files += 1
+                    with open(q, "rb") as fsrc, zf.open(info, "w") as fdst:
+                        shutil.copyfileobj(fsrc, fdst, 1 << 20)
         if zip_path.is_file() and sha256_file(zip_path) == sha256_file(ztmp):
             ztmp.unlink()
         else:
