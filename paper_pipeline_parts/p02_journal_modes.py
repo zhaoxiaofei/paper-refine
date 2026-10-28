@@ -3707,13 +3707,12 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
         return {}
     pkg_dir = Path(pkg_dir)
     manual = pkg_dir / "MANUAL_STEPS.md"
-    if not manual.is_file():
+    if manual.is_symlink() or not manual.is_file():
         return {}
-    try:
-        items = _handoff_items_from_manual_steps(
-            manual.read_text("utf-8", "replace"))
-    except OSError:
+    text = read_text_bounded(manual)
+    if text is None:
         return {}
+    items = _handoff_items_from_manual_steps(text)
     if not items:
         return {}
     target = pkg_dir / AUTHOR_TO_COMPLETE_README

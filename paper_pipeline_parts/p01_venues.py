@@ -1425,6 +1425,15 @@ def _document_role_tokens(name) -> set:
     return set(re.findall(r"[a-z0-9]+", stem.lower()))
 
 
+# An authored REPLY is not a cover letter. The formatter's
+# `is_cover_letter_doc` and the M19 predicate both apply this exclusion; the
+# role resolver did not, so `cover-letter-response.docx` was routed to the
+# cover template by one code path and rejected by the others (F09).
+NON_COVER_LETTER_NAME_RE = re.compile(
+    r"response|repl(?:y|ies)|rebuttal|point[\s_-]?by[\s_-]?point|"
+    r"decision[\s_-]?(?:letter|notice)|referee|reviewer", re.I)
+
+
 def docx_document_role(name, manuscript_names=()) -> str:
     """The submission role a package DOCX name advertises: main/supp/cover.
 
@@ -1456,11 +1465,13 @@ def docx_document_role(name, manuscript_names=()) -> str:
     # `coverletter` is the conventional concatenated spelling; camel-case
     # `CoverLetter` already splits into `cover` + `letter`, but the lowercase
     # form must not fall through to `main`.
-    if "cover" in tokens or "coverletter" in tokens:
+    _base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    _reply = bool(NON_COVER_LETTER_NAME_RE.search(_base))
+    if not _reply and ("cover" in tokens or "coverletter" in tokens):
         return "cover"
     if _name_is_article_type_manuscript(Path(str(name)).stem, manuscript_names):
         return "main"
-    if "letter" in tokens:
+    if "letter" in tokens and not _reply:
         return "cover"
     return "main"
 

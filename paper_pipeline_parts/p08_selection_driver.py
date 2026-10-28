@@ -9,7 +9,7 @@ from __future__ import annotations
 # AGGREGATION (Section D -- pure deterministic code, no LLM arithmetic)
 # =====================================================================
 
-def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
+def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dict:
     """Collect the round's directed scores into each version's own frame.
 
     D1  V's own judges contribute score(V vs W) to V["own"][W]; W's judges
@@ -37,6 +37,12 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
         version it started from.
     """
     field_ids = list(field_ids)
+    # `dedup` is the mode the round was DECIDED with when a decision is being
+    # re-derived. `decide` passes the recorded value: reading today's config
+    # here re-counted a past round under a mode the operator changed afterwards
+    # (the 2026-10-28 audit's F19).
+    if dedup is None:
+        dedup = dedup_mode_of(ctx)
     judges = round_judges(ctx, r)
     selection = judge_selection(ctx, r)          # empty = every session runs
     # Which judges run for each version (`--only` may select only some).
@@ -350,21 +356,21 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
     # prefix, rung by rung (the four severities, tier order, peer before own).
     census = build_issue_census(census_obs, field_ids,
                                 sessions_expected=sum(per_judges.values()),
-                                dedup=dedup_mode_of(ctx),
+                                dedup=dedup,
                                 dedup_threshold=DEDUP_FUZZY_THRESHOLD)
     # The census's LONG FORM: the very rows it counted, with their meta and the
     # sheet's own evidence sentence (reports/round<r>_defects.csv). Same
     # observations, same attribution and the same dedup rules -- the two readers
     # of one dataset.
     issue_rows = build_issue_ledger_rows(census_obs, field_ids,
-                                         dedup=dedup_mode_of(ctx),
+                                         dedup=dedup,
                                          dedup_threshold=DEDUP_FUZZY_THRESHOLD)
     return {"round": int(r), "field": field_ids, "field_size": k,
             "scores_per_version": expected,
             "scores_per_version_by_version": dict(expected_for),
             "stats": stats, "diagnostics": diags,
             "score_rows": score_rows, "issue_census": census,
-            "issue_rows": issue_rows,
+            "issue_rows": issue_rows, "dedup_mode": dedup,
             "base_id": A1_ID, "base_rep": base_rep,
             "generated": utcnow()}
 
@@ -699,7 +705,7 @@ def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None) -> t
     return agg, sel
 
 
-def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
+def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
     """D5: rank the fresh candidates AND the round's own base.
 
     The fresh arms are this round's pool (M rewritten candidates w1..wM and N
@@ -807,8 +813,16 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     # the FEWEST defects reaches the configured floor (or when every cell is
     # used). The ordered per-cell census at that prefix leads the sort key (each
     # cell a separate rung); the median (then the mean, IQR and digest) is
-    # the tie-break below it.
-    floor = tiebreak_defect_floor_of(ctx)
+    # the tie-break below it. `floor` is the value the round was DECIDED with
+    # when a decision is re-derived; reading the mutable config here changed a
+    # past round's ranking key after `set-tiebreak-defect-floor` (F18).
+    if floor is None:
+        floor = tiebreak_defect_floor_of(ctx)
+    else:
+        try:
+            floor = max(0, int(floor))
+        except (TypeError, ValueError):
+            floor = tiebreak_defect_floor_of(ctx)
     rep_ids = sorted({str(t["rep"]) for t in rows})
     cell_names, _matrix, cumulative = issue_matrix_and_cumulative(
         (agg or {}).get("issue_census") or {}, rep_ids)
@@ -1182,6 +1196,11 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
         "winner_dir": winner.get("directory"),
         "winner_digest": winner.get("digest"),
         "tiebreak_inputs": tiebreak_inputs,
+        # The ranking key's two MUTABLE inputs are frozen on the record: a later
+        # `set-tiebreak-defect-floor`/`set-dedup-mode --force` must not change
+        # what `decide` re-derives for this round (F18/F19).
+        "tiebreak_defect_floor": tiebreak_defect_floor_of(ctx),
+        "dedup_mode": agg.get("dedup_mode") or dedup_mode_of(ctx),
         "pipeline_version": VERSION,
     })
     write_json_atomic(ctx.reports_dir / f"round{r}.json",
@@ -2361,29 +2380,33 @@ def _repair_norm(text) -> str:
     return " ".join(str(text or "").split())
 
 
-def _repair_span_problem(pre: Path, cur: Path, rel: str, before: str, after: str):
-    """Why `rel`'s actual text change is outside the quoted before/after, or None.
+def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
+    """Why `rel`'s actual text change is outside the union of quoted spans, or None.
 
-    The plan now describes a span, and the ledger must quote the text it applied.
+    The plan describes a span, and the ledger must quote the text it applied.
     Comparing the quoted text with the real pre/post content is what keeps a
     confirmed row from authorizing a whole-file replacement: every removed text
-    run must sit inside `before`, and every added run inside `after`.
+    run must sit inside SOME confirmed row's `before`, and every added run inside
+    SOME confirmed row's `after`. Checking each row against the WHOLE file
+    instead made a valid repair with two confirmed rows in two paragraphs of one
+    file fail each other's diff (the 2026-10-28 audit's F17).
     """
     pre_text = _repair_file_text(pre / rel)
     cur_text = _repair_file_text(cur / rel)
     if pre_text is None or cur_text is None or pre_text == cur_text:
         return None                     # opaque/binary, or no textual change
-    before_n, after_n = _repair_norm(before), _repair_norm(after)
+    before_ns = [b for b, _a in quotes]
+    after_ns = [a for _b, a in quotes]
     matcher = difflib.SequenceMatcher(None, pre_text, cur_text, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag in ("replace", "delete"):
             removed = _repair_norm(pre_text[i1:i2])
-            if removed and removed not in before_n:
-                return "removed text is outside the row's quoted `before`"
+            if removed and not any(removed in before_n for before_n in before_ns):
+                return "removed text is outside the confirmed rows' quoted `before`"
         if tag in ("replace", "insert"):
             added = _repair_norm(cur_text[j1:j2])
-            if added and added not in after_n:
-                return "added text is outside the row's quoted `after`"
+            if added and not any(added in after_n for after_n in after_ns):
+                return "added text is outside the confirmed rows' quoted `after`"
     return None
 
 
@@ -2436,8 +2459,11 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     # quoted `before`/`after` text must cover the actual text change, or a
     # confirmed row still authorizes a whole-file rewrite (F14). Opaque/binary
     # files keep the documented file-level bound because there is no text diff.
+    # Rows are grouped by FILE: two confirmed rows may legitimately change two
+    # different paragraphs of one file (F17).
     ledger = _repair_ledger_entries(cur)
     plan_by_id = {row["id"]: row for row in rows}
+    quotes_by_file = {}
     for rid in sorted(confirmed_ids):
         row = plan_by_id.get(rid) or {}
         if not all(key in row for key in _REPAIR_DESCRIBED_KEYS):
@@ -2446,8 +2472,11 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
         if not rel or rel in bad:
             continue
         entry = ledger.get(rid) or {}
-        if _repair_span_problem(pre, cur, rel, entry.get("before", ""),
-                                entry.get("after", "")):
+        quotes_by_file.setdefault(rel, []).append(
+            (_repair_norm(entry.get("before", "")),
+             _repair_norm(entry.get("after", ""))))
+    for rel, quotes in sorted(quotes_by_file.items()):
+        if _repair_spans_cover(pre, cur, rel, quotes):
             bad.add(rel)
     return sorted(bad)
 

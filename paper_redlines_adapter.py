@@ -59,12 +59,29 @@ def write_out(out_path, data):
     a read-only directory (or on a full disk), and the module's contract is
     that every failure path prints a message and exits with a documented code
     -- never a traceback.
+
+    The bytes go to an exclusive sibling and are renamed onto OUT. Reopening
+    the cleared pathname followed a symlink planted between `clear_out` and the
+    write, so the redline landed in an arbitrary local file (F31); `os.replace`
+    swaps the link itself and never writes through it.
     """
+    tmp = None
     try:
-        with open(out_path, "wb") as fh:
+        parent = os.path.dirname(os.path.abspath(out_path)) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".paper-redlines-", suffix=".tmp",
+                                   dir=parent)
+        with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+        os.replace(tmp, out_path)
+        tmp = None
     except OSError as exc:
         fail("cannot write output %s: %s" % (out_path, exc), 6)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def drop_partial(out_path, probe):

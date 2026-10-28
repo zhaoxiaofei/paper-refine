@@ -2556,12 +2556,23 @@ def tex_input_closure(root: Path, area_names, depths: int = TEX_INPUT_MAX_DEPTH)
         return closure, sources
     for p in root.rglob("*"):
         try:
+            if p.is_symlink():
+                continue                # a linked area is not package content (F69)
             if p.is_dir() and p.name.lower() in names:
                 dirs.add(p.parent)
         except OSError:
             continue
     for d in sorted(dirs):
         for tex in sorted(d.glob("*.tex")):
+            # A symlinked source read outside prose; there is no size cap either
+            # (F69). Keep only regular files whose resolved path stays inside
+            # the package root.
+            if tex.is_symlink() or not tex.is_file():
+                continue
+            try:
+                tex.resolve().relative_to(root.resolve())
+            except (OSError, ValueError):
+                continue
             sources.append(tex.relative_to(root).as_posix())
             # The parent directory's .tex SOURCES are the things whose inputs are
             # "treated as if they are in the parent"; an arbitrary sibling (a
@@ -2579,9 +2590,10 @@ def tex_input_closure(root: Path, area_names, depths: int = TEX_INPUT_MAX_DEPTH)
             if key in seen_tex:
                 continue
             seen_tex.add(key)
-            try:
-                text = tex.read_text("utf-8", "replace")
-            except OSError:
+            if tex.is_symlink():
+                continue
+            text = read_text_bounded(tex)
+            if text is None:
                 continue
             for target in tex_input_targets(text):
                 for cand in _tex_target_candidates(target):
@@ -3241,9 +3253,10 @@ def _package_document_texts(root: Path, texts=None) -> list:
                 # an inference) would compare text from unrelated pages.
                 paras = [t for t in text.splitlines() if t.strip()]
         else:
-            try:
-                text = p.read_text("utf-8", "replace")
-            except OSError:
+            # A package's prose document is untrusted input: a 10 GiB .tex must
+            # not be loaded whole during decide (F68).
+            text = read_text_bounded(p)
+            if text is None:
                 continue
             paras = [t for t in text.splitlines() if t.strip()]
         if text.strip():
@@ -5283,7 +5296,10 @@ def package_document_texts(root: Path, limit_files: int = 25) -> list:
     if not root.is_dir():
         return out
     for p in sorted(root.rglob("*")):
-        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+        # A file symlink is not package content (copy_into refuses it); reading
+        # one pulled an outside file's prose into the decision report (F30).
+        if p.is_symlink() or not p.is_file() or is_non_document_name(p.name) \
+                or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel) or is_bookkeeping_name(p.name):
@@ -7051,22 +7067,25 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
             if verdict not in ("drop", "dropped"):
                 info["discarded"].append(item)
     steps = outdir / "MANUAL_STEPS.md"
-    if steps.is_file():
-        try:
-            text = steps.read_text("utf-8", "replace")
-        except OSError:
-            text = None
-        if text:
-            info["manual_steps"] = steps.relative_to(ctx.root).as_posix()
-            info["manual_steps_text"] = text
-            m = MANUAL_STEPS_COUNT_RE.search(text)
-            if m:
-                info["manual_steps_items"] = int(m.group(1))
-            else:
-                # The sibling count must agree with the pipeline's own
-                # count_manual_steps(): a plain bullet is one hand-off item,
-                # not zero.
-                info["manual_steps_items"] = int(count_manual_steps(steps) or 0)
+    if steps.is_symlink():
+        text = None
+    elif steps.is_file():
+        # Agent-written hand-off list: the shared bounded reader, like the
+        # sibling count_manual_steps, so a huge file cannot OOM the report (F60).
+        text = read_text_bounded(steps)
+    else:
+        text = None
+    if text:
+        info["manual_steps"] = steps.relative_to(ctx.root).as_posix()
+        info["manual_steps_text"] = text
+        m = MANUAL_STEPS_COUNT_RE.search(text)
+        if m:
+            info["manual_steps_items"] = int(m.group(1))
+        else:
+            # The sibling count must agree with the pipeline's own
+            # count_manual_steps(): a plain bullet is one hand-off item,
+            # not zero.
+            info["manual_steps_items"] = int(count_manual_steps(steps) or 0)
     csvp = outdir / MANUAL_TODO_CSV_NAME
     if csvp.is_file():
         try:
@@ -8381,10 +8400,16 @@ def cmd_sync_code(args) -> None:
                 unchanged.append(name)
                 continue
             # Replace atomically: a `run` that starts while the bundle is being
-            # synced must read a whole module, never a half-written one.
-            tmp = d.with_name(d.name + ".sync-tmp")
-            shutil.copy2(s, tmp)
-            os.replace(tmp, d)
+            # synced must read a whole module, never a half-written one. The
+            # fixed `.sync-tmp` name was followed by copy2 when a link was
+            # planted there, so the module bytes landed outside the root and the
+            # link was renamed onto the module (F25). The shared helper reserves
+            # an unpredictable name and writes through the held descriptor.
+            def _copy_sync(dst_file, _src=s):
+                with open(_src, "rb") as src_file:
+                    shutil.copyfileobj(src_file, dst_file)
+
+            _atomic_write_bytes(tmp_path_for(d), d, _copy_sync, binary=True)
             changed.append(name)
         # The loaders are thin: sync the ordered implementation parts too, again
         # atomically, and record their directory digests in the manifest.
@@ -9061,7 +9086,12 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                                 "mismatch": mismatch, "auto_promoted": True})
             continue
         field = rrec.get("field") or []
-        agg = aggregate_round(ctx, r, field)
+        # Re-derive the round with the ranking key it was DECIDED with. These
+        # two values are mutable configuration (`set-dedup-mode`,
+        # `set-tiebreak-defect-floor`); reading today's config re-ranked a past
+        # decision after an operator change (F18/F19). Old roots that predate
+        # the record fall back to the current config.
+        agg = aggregate_round(ctx, r, field, dedup=rrec.get("dedup_mode"))
         # Keep every decided round's own raw-score file present and current, even
         # for roots whose round predates it (the same file `run` writes at
         # aggregation time).
@@ -9158,7 +9188,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             if _stale_gaps.exists():
                 with contextlib.suppress(OSError):
                     _stale_gaps.unlink()
-        sel = select_champion(ctx, r, agg)
+        sel = select_champion(ctx, r, agg, floor=rrec.get("tiebreak_defect_floor"))
         mismatch = None
         if sel["champion"] != rrec.get("champion"):
             mismatch = (f"recomputed champion {sel['champion']!r} != stored champion "

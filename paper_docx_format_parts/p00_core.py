@@ -236,10 +236,32 @@ def write_json(path, obj) -> None:
     Every CLI handler wrote `Path(...).write_text(json.dumps(..., indent=2,
     ensure_ascii=False))` itself (13 copies); a machine-readable report must not
     drift in indentation/encoding between subcommands.
+
+    The report is written to an exclusive sibling and renamed into place: a
+    direct `write_text` followed a symlink at the report path (clobbering an
+    arbitrary file) and could leave truncated JSON after a crash (the
+    2026-10-28 audit's F32).
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = json.dumps(obj, indent=2, ensure_ascii=False)
+    fd, tmp = tempfile.mkstemp(prefix="." + p.name + ".", suffix=".tmp",
+                               dir=str(p.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def esc(text: str) -> str:

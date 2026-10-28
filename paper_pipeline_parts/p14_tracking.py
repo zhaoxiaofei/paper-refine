@@ -106,8 +106,7 @@ def merge_tracking_entries(ctx: Ctx, entries: list, *, tool: str = "auto",
     merge their own entries, and an entry for a (round, version) key already on
     disk is replaced by the fresh one.
     """
-    out_root = ctx.root / TRACKING_DIRNAME
-    out_root.mkdir(parents=True, exist_ok=True)
+    out_root = ensure_aux_output_root(ctx.root, TRACKING_DIRNAME)
     stored = read_json(out_root / TRACKING_MANIFEST) or {}
     manifest = tracking_manifest(ctx, tool, extra_notes=extra_notes)
     prev = {(str(v.get("round")), str(v.get("version"))): v
@@ -205,14 +204,16 @@ def latexdiff_one_pair(base: Path, cand: Path, out: Path,
              "detail": f"{LATEXDIFF_CMD} is not on PATH; the logging fallback was written"}]}
     argv = [exe, "--no-label", str(base), str(cand)]
     try:
-        proc = subprocess.run(argv, capture_output=True, timeout=timeout)
-        rc = proc.returncode
-        stdout, stderr = proc.stdout or b"", proc.stderr or b""
-        err = stderr.decode("utf-8", "replace").strip().replace("\n", " ")
+        # latexdiff prints the diff on stdout; capture it in a bounded temp
+        # file, not a PIPE whose whole content lands in memory (F61).
+        rc, stdout, stderr = run_bounded(argv, timeout)
+        err = (stderr or b"").decode("utf-8", "replace").strip().replace("\n", " ")
     except FileNotFoundError as e:                              # noqa: BLE001
         rc, stdout, err = None, b"", f"not found: {e}"
     except subprocess.TimeoutExpired:
         rc, stdout, err = None, b"", f"timeout after {timeout}s"
+    except ToolOutputOverBudget as e:                           # noqa: BLE001
+        rc, stdout, err = None, b"", str(e)[:300]
     except OSError as e:                                        # noqa: BLE001
         rc, stdout, err = None, b"", f"exec error: {e}"
     ok = bool(rc == 0 and stdout.strip())
@@ -548,8 +549,7 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     rounds = [int(r) for r in (rounds if rounds is not None
                                else range(1, ctx.rounds_count() + 1))]
     versions = list(versions) if versions else None
-    out_root = ctx.root / TRACKING_DIRNAME
-    out_root.mkdir(parents=True, exist_ok=True)
+    out_root = ensure_aux_output_root(ctx.root, TRACKING_DIRNAME)
     index = redline_index(redlines_manifest)
     manifest = tracking_manifest(ctx, tool)
     if not index:
@@ -856,8 +856,7 @@ def track_template_stage(ctx: Ctx, sb, *, quiet: bool = False) -> dict:
     srcs = [(out, "", CORPUS_EXCLUDE_TOP)]
     baselines = [(TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
                   "the pre-conformed submission (non_revised/)")]
-    out_root = ctx.root / TRACKING_DIRNAME
-    out_root.mkdir(parents=True, exist_ok=True)
+    out_root = ensure_aux_output_root(ctx.root, TRACKING_DIRNAME)
     stored = read_json(out_root / TRACKING_MANIFEST) or {}
     prev = {(str(v.get("round")), str(v.get("version"))): v
             for v in stored.get("versions") or []}

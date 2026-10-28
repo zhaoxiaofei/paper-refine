@@ -2801,8 +2801,17 @@ def _freeze_journal_feedback(root: Path, src: Path) -> str:
     dest_dir.mkdir(parents=True, exist_ok=True)
     tag = hashlib.sha1(str(src).encode("utf-8")).hexdigest()[:8]
     dest = dest_dir / f"{src.stem}-{tag}{src.suffix}"
-    if not dest.is_file() or sha256_file(dest) != sha256_file(src):
-        shutil.copy2(src, dest)
+    # A deterministic destination name can be pre-created as a symlink; both
+    # `is_file()` and `copy2` followed it, so the operator's letter was written
+    # through the link and the "frozen" input stayed a live link (F35). Replace
+    # the entry itself, atomically, through a reserved descriptor.
+    if dest.is_symlink() or not dest.is_file() \
+            or sha256_file(dest) != sha256_file(src):
+        def _copy_feedback(f, _src=src):
+            with open(_src, "rb") as src_file:
+                shutil.copyfileobj(src_file, f)
+
+        _atomic_write_bytes(tmp_path_for(dest), dest, _copy_feedback, binary=True)
     return dest.relative_to(root).as_posix()
 
 

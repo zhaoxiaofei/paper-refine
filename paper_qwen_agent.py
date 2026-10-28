@@ -204,13 +204,18 @@ def ensure_tunnel(cfg: dict, log=None) -> str:
     global _TUNNEL, _TUNNEL_STDERR
     ok, ids, err = probe_endpoint(cfg)
     mode = str(cfg.get("tunnel") or "auto").strip().lower()
-    if ok and mode != "require":
+    if ok:
+        # "Already reachable" is success in EVERY mode: `require` means do not
+        # silently fall back to a direct connection when no tunnel exists, not
+        # "refuse a working endpoint". The old branch logged and continued, then
+        # failed with "port already listening" -- the opposite of the documented
+        # behaviour (the 2026-10-28 audit's F72).
         log(f"[qwen] endpoint reachable: {cfg['base_url']} (models: "
             f"{', '.join(ids) or '(none)'})")
+        if mode == "require":
+            log("[qwen] --tunnel require: the endpoint is already reachable, so no "
+                "ssh tunnel is started (nothing to require)")
         return ""
-    if ok and mode == "require":
-        log("[qwen] --tunnel require: the endpoint is directly reachable, but this "
-            "mode still requires the ssh tunnel")
     if cfg["tunnel"] in ("off", "0", "false", "no"):
         return (f"qwen endpoint {cfg['base_url']} is not reachable and "
                 f"PAPER_QWEN_TUNNEL=off: {err}")

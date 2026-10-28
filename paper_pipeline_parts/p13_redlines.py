@@ -50,7 +50,12 @@ def list_track_files(sources: list, exts=TRACKABLE_EXTS) -> list:
         if not src.is_dir():
             continue
         for p in sorted(src.rglob("*")):
-            if not p.is_file() or p.suffix.lower() not in exts or _is_aux_doc(p.name):
+            # A symlinked candidate document is not package content: the
+            # materializer refuses to copy it, and hashing/opening it here read
+            # an outside file as a tracked manuscript (the 2026-10-28 audit's
+            # F29).
+            if p.is_symlink() or not p.is_file() or p.suffix.lower() not in exts \
+                    or _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
@@ -160,7 +165,12 @@ def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
             if data:
                 try:
                     out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_bytes(data)
+                    # Write through the reserved descriptor and rename: the
+                    # cleared OUT pathname could have been re-linked before this
+                    # write, landing the bytes outside the root (F38).
+                    _atomic_write_bytes(tmp_path_for(out), out,
+                                        lambda f, _data=data: f.write(_data),
+                                        binary=True)
                 except OSError as e:
                     attempts.append(f"{eng_name}: cannot write {out}: {e}")
                     continue
@@ -220,20 +230,38 @@ def _kill_redline_tree(proc) -> None:
 
 def _run_redline_cmd(argv: list, out: Path, timeout: int = 900) -> dict:
     try:
-        proc = subprocess.Popen(
-            [str(a) for a in argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", **_redline_popen_kwargs())
-        try:
-            so, err = proc.communicate(timeout=timeout)
-            rc = proc.returncode
-            err, so = (err or "").strip(), (so or "").strip()
-        except subprocess.TimeoutExpired:
-            _kill_redline_tree(proc)
+        # A backend that prints a flood must not accumulate it in memory: its
+        # stdout/stderr go to temporary files and are read back under a budget
+        # (F61).
+        with tempfile.TemporaryFile() as out_tmp, tempfile.TemporaryFile() as err_tmp:
+            proc = subprocess.Popen(
+                [str(a) for a in argv], stdout=out_tmp, stderr=err_tmp,
+                **_redline_popen_kwargs())
             try:
-                proc.communicate(timeout=30)      # reap; never leave a zombie
+                proc.wait(timeout=timeout)
+                rc = proc.returncode
             except subprocess.TimeoutExpired:
-                pass
-            rc, err, so = None, f"timeout after {timeout}s", ""
+                _kill_redline_tree(proc)
+                try:
+                    proc.wait(timeout=30)      # reap; never leave a zombie
+                except subprocess.TimeoutExpired:
+                    pass
+                rc = None
+            out_tmp.seek(0, os.SEEK_END)
+            err_tmp.seek(0, os.SEEK_END)
+            over = (out_tmp.tell() > MAX_TOOL_OUTPUT_BYTES
+                    or err_tmp.tell() > MAX_TOOL_OUTPUT_BYTES)
+            out_tmp.seek(0)
+            err_tmp.seek(0)
+            so = out_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
+            err = err_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
+        if over:
+            rc, err, so = None, (f"backend output over the {MAX_TOOL_OUTPUT_BYTES}-byte "
+                                 f"budget; refusing it"), ""
+        elif rc is None:
+            err, so = f"timeout after {timeout}s", ""
+        else:
+            err, so = (err or "").strip(), (so or "").strip()
     except FileNotFoundError as e:                              # noqa: BLE001
         rc, err, so = None, f"not found: {e}", ""
     except OSError as e:                                        # noqa: BLE001
@@ -1153,8 +1181,7 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
     rounds = [int(r) for r in (rounds if rounds is not None
                                else range(1, ctx.rounds_count() + 1))]
     versions = list(versions) if versions else None
-    out_root = ctx.root / REDLINE_DIRNAME
-    out_root.mkdir(parents=True, exist_ok=True)
+    out_root = ensure_aux_output_root(ctx.root, REDLINE_DIRNAME)
     src_setup = Path(ctx.state.get("source") or ".")
     # The setup source is only a trustworthy baseline while it still matches the
     # manifest recorded at `setup`: the operator may have edited their working

@@ -485,7 +485,8 @@ def test_f23_f24_f26_f27_f28() -> None:
 # ---------------------------------------------------------------------------
 # F29/F33/F37/F38 -- bounded repair, disabled evidence, review gates
 # ---------------------------------------------------------------------------
-def _review_errors(tmp: Path, *, prior_ids=(), findings=(), all_out=(), scope="full"):
+def _review_errors(tmp: Path, *, prior_ids=(), findings=(), all_out=(),
+                   scope="full", extra_out=()):
     sb = tmp / "sb"
     (sb / "prior_round").mkdir(parents=True)
     (sb / "review" / "artifacts").mkdir(parents=True)
@@ -495,7 +496,8 @@ def _review_errors(tmp: Path, *, prior_ids=(), findings=(), all_out=(), scope="f
         "M19", "M18", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28",
         "M29", "J5", "M30", "M31", "M32", "M33", "M34", "M35", "M36"]
     cov = [{"check": c,
-            "disposition": ("out of scope -- formatting-only pass" if c in all_out
+            "disposition": ("out of scope -- formatting-only pass"
+                            if c in all_out or c in extra_out
                             else "clean -- basis: a.md")}
            for c in wanted]
     cur = {"submission_dir": "./base", "findings": list(findings), "coverage": cov}
@@ -580,9 +582,20 @@ def test_f29_f33_f37_f38() -> None:
     errs = _review_errors(scratch("paper_f37_"), all_out={"M1", "M2", "M3"})
     check("F37 a FULL review cannot dispose an in-scope check as out of scope",
           any("out of scope" in e for e in errs), errs[:2])
-    errs = _review_errors(scratch("paper_f37b_"), all_out={"M1", "M2", "M3"},
+    errs = _review_errors(scratch("paper_f37b_"), all_out={"M1", "M3"},
                           scope="formatting-writing")
-    check("F37 a scoped round may dispose the scoped ids as out of scope",
+    check("F37 a scoped round cannot dispose an IN-SCOPE check as out of scope "
+          "(the 2026-10-28 F14 correction)",
+          any("in-scope check(s)" in e for e in errs), errs[:2])
+    # A genuinely out-of-scope check may be disposed as out of scope; every such
+    # id must say so, and none of them is reported as an in-scope violation.
+    _scoped = set(pp.scoped_review_checks("formatting-writing"))
+    _wanted = set(pp.REQUIRED_REVIEW_CHECKS) | {
+        "M19", "M18", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27",
+        "M28", "M29", "J5", "M30", "M31", "M32", "M33", "M34", "M35", "M36"}
+    errs = _review_errors(scratch("paper_f37c_"), extra_out=tuple(_wanted - _scoped),
+                          scope="formatting-writing")
+    check("F37 a scoped round may dispose the out-of-scope ids as out of scope",
           not any("in-scope check(s)" in e for e in errs), errs[:2])
 
     errs = _review_errors(scratch("paper_f38_"), prior_ids=["F-999"],

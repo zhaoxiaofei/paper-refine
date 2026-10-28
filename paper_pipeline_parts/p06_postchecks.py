@@ -748,12 +748,9 @@ def discovery_ledger_reconciliation_problems(ledger: Path, ids) -> list:
     ids = [str(i) for i in (ids or ()) if str(i).strip()]
     if not ids:
         return []
-    text = ""
-    try:
-        if ledger.is_file():
-            text = ledger.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        text = ""
+    # The ledger is agent-written: refuse a symlink/non-regular or over-budget
+    # file exactly like the donor-ledger read in postcheck_integrate (F59).
+    text = read_text_bounded(ledger) or ""
     missing = discovery_ledger_missing(text, ids)
     if not missing:
         return []
@@ -1372,20 +1369,55 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
                                 encoding="utf-8", errors="replace")
     except OSError as e:
         return {"ok": False, "error": f"the MCP server would not start: {e}"}
-    lines = queue.Queue()
+    # A misbehaving MCP server must not grow memory without bound: queue only a
+    # bounded number of lines/bytes and record a flood instead of blocking the
+    # producer or allocating until OOM (the 2026-10-28 audit's F80).
+    MAX_MCP_LINES = 4096
+    MAX_MCP_LINE_BYTES = 1 << 20
+    MAX_MCP_QUEUED_BYTES = 8 << 20      # TOTAL bytes waiting in the queue
+    MAX_MCP_STDERR_KEEP = 4096          # per-line tail kept for the error report
+    lines = queue.Queue(maxsize=MAX_MCP_LINES)
+    queued_bytes = [0]
+    queue_lock = threading.Lock()
+    flooded = threading.Event()
+    stderr_flooded = threading.Event()
     err_tail = deque(maxlen=6)
 
     def pump(stream) -> None:
         try:
-            for line in stream:
-                lines.put(line)
+            while True:
+                line = stream.readline(MAX_MCP_LINE_BYTES + 1)
+                if not line:
+                    break
+                if len(line) > MAX_MCP_LINE_BYTES:
+                    flooded.set()
+                    continue
+                with queue_lock:
+                    if queued_bytes[0] + len(line) > MAX_MCP_QUEUED_BYTES:
+                        flooded.set()
+                        continue
+                    try:
+                        lines.put_nowait(line)
+                    except queue.Full:
+                        flooded.set()
+                    else:
+                        queued_bytes[0] += len(line)
         finally:
-            lines.put(None)
+            try:
+                lines.put_nowait(None)
+            except queue.Full:
+                pass
 
     def pump_err(stream) -> None:
         try:
-            for line in stream:
-                err_tail.append(line)
+            while True:
+                line = stream.readline(MAX_MCP_LINE_BYTES + 1)
+                if not line:
+                    break
+                if len(line) > MAX_MCP_LINE_BYTES:
+                    stderr_flooded.set()
+                    continue
+                err_tail.append(line[-MAX_MCP_STDERR_KEEP:])
         except (OSError, ValueError):
             pass
 
@@ -1410,6 +1442,10 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
             bits.append(f"the server exited with code {proc.returncode}")
         if text:
             bits.append(f"stderr: {text[-300:]}")
+        if flooded.is_set():
+            bits.append("the server flooded its stdout; excess output was dropped")
+        if stderr_flooded.is_set():
+            bits.append("the server flooded its stderr; excess output was dropped")
         return {"ok": False, "error": "; ".join(bits)}
 
     def send(obj: dict) -> None:
@@ -1427,6 +1463,9 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
                 continue
             if line is None:
                 return None
+            with queue_lock:
+                if queued_bytes[0]:
+                    queued_bytes[0] = max(0, queued_bytes[0] - len(line))
             line = line.strip()
             if not line.startswith("{"):
                 continue
@@ -1454,7 +1493,15 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
             return failure(f"the MCP tool {tool} did not answer within {int(timeout)}s")
         if rep.get("error"):
             return {"ok": False, "error": f"the MCP tool {tool} failed: {rep['error']}"}
-        return {"ok": True, "result": rep.get("result") or {}}
+        out = {"ok": True, "result": rep.get("result") or {}}
+        flood_warnings = []
+        if flooded.is_set():
+            flood_warnings.append("the server flooded its stdout; excess output was dropped")
+        if stderr_flooded.is_set():
+            flood_warnings.append("the server flooded its stderr; excess output was dropped")
+        if flood_warnings:
+            out["warnings"] = flood_warnings
+        return out
     except (OSError, ValueError) as e:                                  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
     finally:
@@ -2661,15 +2708,18 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 seen_rows[cid] = row
             if cid and (not disp or disp.lower().startswith("not checked")):
                 bad.append(cid)
-            if (cid and cid in wanted and not in_scope
+            if (cid and cid in wanted and (not in_scope or cid in in_scope)
                     and re.sub(r"\s+", " ", disp).lower().startswith("out of scope")):
-                # A FULL review's object is the whole package: only a genuinely
-                # scoped round may dispose a required check as out of scope.
-                # The old gate read the disposition for out-of-scope ids only,
-                # so a full review could mark every check "out of scope" and
-                # still satisfy the contract. `cid in wanted` keeps an EXTRA
-                # coverage proposal (M37/M38) that a full review honestly marks
-                # "out of scope" from being reported as an in-scope check.
+                # A FULL review's object is the whole package, and a SCOPED
+                # round still owns every check it declares in scope: neither may
+                # dispose one of those as out of scope. The old gate tested
+                # `not in_scope`, so a formatting-writing round (non-empty
+                # in_scope) silently accepted an in-scope M1 row marked out of
+                # scope (the 2026-10-28 audit's F14). A genuinely out-of-scope
+                # check of a scoped round is still separately checked below.
+                # `cid in wanted` keeps an EXTRA coverage proposal (M37/M38)
+                # that a review honestly marks "out of scope" from being
+                # reported as an in-scope check.
                 bad_out_of_scope.append(cid)
         if out_of_scope:
             # A scoped round must SAY that a check was left out; silence is still
@@ -2692,9 +2742,8 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                         f" ('not checked' is not an allowed value)")
         if bad_out_of_scope:
             errs.append(f"{FINDINGS_REL} disposes in-scope check(s) {sorted(set(bad_out_of_scope))} "
-                        f"as 'out of scope', but this is a FULL review: every required check "
-                        f"must be applied and disposed on its result (only a genuinely scoped "
-                        f"round may leave a check out)")
+                        f"as 'out of scope', but this round's review must apply and dispose "
+                        f"every required check it holds in scope on its result")
     # 3. per-sweep artifacts must exist (the coverage evidence).
     art_dir = sb / ARTIFACTS_REL
     if not art_dir.is_dir():
@@ -5070,9 +5119,10 @@ def parse_markdown_blocks(path: Path) -> list:
     against the FIRST header turned those rows' own cells into empty
     `disposition` cells of the seeded table.
     """
-    try:
-        text = path.read_text("utf-8", "replace")
-    except OSError:
+    # Agent-written table artifact: shared regular-file/no-follow/byte-budget
+    # reader (the integration ledger is read here a second time, F59).
+    text = read_text_bounded(path)
+    if text is None:
         return []
     raw_blocks, cur = [], []
     for line in text.splitlines():

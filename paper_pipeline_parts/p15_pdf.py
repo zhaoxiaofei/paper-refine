@@ -36,7 +36,10 @@ def latex_root_documents(dirp: Path) -> list:
     if not dirp.is_dir():
         return out
     for p in sorted(dirp.rglob("*")):
-        if not p.is_file() or p.suffix.lower() not in (".tex", ".ltx"):
+        # A symlinked .tex is not package content: `is_file()` followed it and
+        # the outside file's text reached the persistent PDF (the 2026-10-28
+        # audit's F26).
+        if p.is_symlink() or not p.is_file() or p.suffix.lower() not in (".tex", ".ltx"):
             continue
         rel = p.relative_to(dirp)
         if p.name.startswith("~$") or _is_aux_doc(p.name) \
@@ -49,6 +52,28 @@ def latex_root_documents(dirp: Path) -> list:
             continue
         if re.search(r"\\documentclass\b", head):
             out.append(rel.as_posix())
+    return out
+
+
+def _package_symlink_problems(pkg: Path) -> list:
+    """Relative paths of package entries that are symlinks (evidence excepted).
+
+    `shutil.copytree(..., symlinks=False)` follows a nested link, so a package
+    could pull an outside TeX source (and its text) into the compiled PDF. The
+    read-only evidence areas are legitimately linked and are excluded from the
+    build copy, so they are not reported.
+    """
+    out = []
+    pkg = Path(pkg)
+    for p in sorted(pkg.rglob("*")):
+        if not p.is_symlink():
+            continue
+        rel = p.relative_to(pkg)
+        if rel.parts and rel.parts[0] in EVIDENCE_DIRNAMES:
+            continue
+        if p.name.startswith("~$") or any(part == "work" for part in rel.parts[:-1]):
+            continue
+        out.append(rel.as_posix())
     return out
 
 
@@ -75,6 +100,13 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         return {"ok": False, "tool": None,
                 "error": "latexmk is not on PATH; the LaTeX sources were not compiled"}
     src = pkg / rel
+    links = _package_symlink_problems(pkg)
+    if links:
+        return {"ok": False, "tool": None,
+                "error": "refusing to compile a package carrying symlink(s) "
+                         + ", ".join(links[:6])
+                         + (f" and {len(links) - 6} more" if len(links) > 6 else "")
+                         + ": a linked source can pull outside content into the PDF"}
     work = Path(tempfile.mkdtemp(prefix="paper_pdf_"))
     try:
         shutil.copytree(pkg, work, dirs_exist_ok=True,
@@ -103,23 +135,38 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         # latexmk spawns pdflatex/bibtex children. Starting it in its own
         # process group and killing the GROUP on timeout stops those children
         # from writing into the build tree while `finally` removes it (a bare
-        # `subprocess.run(timeout=...)` kills only latexmk itself).
-        proc = subprocess.Popen(argv, cwd=str((work / rel).parent),
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                start_new_session=True)
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            import signal as _signal
+        # `subprocess.run(timeout=...)` kills only latexmk itself). Output goes
+        # to temporary FILES: a verbose document must not accumulate unbounded
+        # bytes in the orchestrator (F61).
+        with tempfile.TemporaryFile() as out_tmp, tempfile.TemporaryFile() as err_tmp:
+            proc = subprocess.Popen(argv, cwd=str((work / rel).parent),
+                                    stdout=out_tmp, stderr=err_tmp,
+                                    start_new_session=True)
             try:
-                os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
-            except (AttributeError, OSError):
-                proc.kill()
-            try:
-                proc.communicate(timeout=30)
+                proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                pass
-            raise
+                import signal as _signal
+                try:
+                    os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                except (AttributeError, OSError):
+                    proc.kill()
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise
+            out_tmp.seek(0, os.SEEK_END)
+            out_size = out_tmp.tell()
+            err_tmp.seek(0, os.SEEK_END)
+            err_size = err_tmp.tell()
+            if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
+                return {"ok": False, "tool": "latexmk", "pages": 0,
+                        "error": f"latexmk output over the {MAX_TOOL_OUTPUT_BYTES}-byte budget "
+                                 f"(stdout={out_size}, stderr={err_size}); refusing it"}
+            out_tmp.seek(0)
+            err_tmp.seek(0)
+            stdout = out_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1)
+            stderr = err_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1)
         out = (stdout or b"").decode("utf-8", "replace") \
             + (stderr or b"").decode("utf-8", "replace")
         pdf = (work / rel).with_suffix(".pdf")
@@ -286,8 +333,7 @@ def run_pdf_conversion(ctx: Ctx, rounds=None, versions=None, include_original: b
     rounds = [int(r) for r in (rounds if rounds is not None
                                else range(1, ctx.rounds_count() + 1))]
     versions = list(versions) if versions else None
-    out_root = ctx.root / PDF_DIRNAME
-    out_root.mkdir(parents=True, exist_ok=True)
+    out_root = ensure_aux_output_root(ctx.root, PDF_DIRNAME)
     stored = read_json(out_root / PDF_MANIFEST) or {}
     previous = _pdf_previous_records(stored)
     # Like the tracking manifest, this one ACCUMULATES: a `track --round 2`

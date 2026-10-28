@@ -3708,6 +3708,25 @@ def _xfa_dataset_packets(data: bytes) -> list:
 # (FMT-PDF2) and `xfa_export_text` (which promises "every answer") dropped it.
 XFA_LEAF_RE = re.compile(r"<([A-Za-z_][\w.\-]*)\s*>\s*([^<>]*?)\s*</\1\s*>")
 
+# A package PDF is scanned (not trusted) input. Reading it whole with no cap
+# let a 10 GiB/sparse/FIFO PDF exhaust memory in the formatter (the 2026-10-28
+# audit's F39). The DOCX readers already have a per-part budget; this is the
+# PDF-side equivalent.
+MAX_PDF_BYTES = 64 * 1024 * 1024
+
+
+def _read_pdf_bounded(path: Path):
+    """The PDF's bytes, or None for an unreadable/symlinked/over-budget file."""
+    p = Path(path)
+    try:
+        if p.is_symlink() or not p.is_file():
+            return None
+        if p.stat().st_size > MAX_PDF_BYTES:
+            return None
+        return p.read_bytes()
+    except OSError:
+        return None
+
 
 def _xfa_dataset_report(path: Path):
     """(is_xfa, non_empty_values, is_livecycle_shell) for a PDF's XFA dataset.
@@ -3718,9 +3737,8 @@ def _xfa_dataset_report(path: Path):
     XFA form with no dataset packet at all returns -1 (unverifiable), which
     never produces the "unfilled" finding.
     """
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
+    data = _read_pdf_bounded(path)
+    if data is None:
         return (False, -1, False)
     form_line = _pdfinfo_form(Path(path))
     # The byte test requires the AcroForm/XFA object structure, not the bare
@@ -3843,9 +3861,8 @@ def xfa_live_packets(path: Path) -> dict:
     duplicate?" -- is answered by the /XFA array itself, never by packet order.
     """
     out = {"resolved": False, "packets": {}, "live_datasets": [], "all_datasets": 0}
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
+    data = _read_pdf_bounded(path)
+    if data is None:
         return out
     objs = _pdf_object_bodies(data)
     out["all_datasets"] = len(_xfa_dataset_packets(data))
@@ -3903,9 +3920,8 @@ def _xfa_packet_summary(path: Path) -> dict:
     so the count of each side is reported and the caller words its row from
     them.
     """
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
+    data = _read_pdf_bounded(path)
+    if data is None:
         return {}
     is_xfa, _all_answers, is_shell = _xfa_dataset_report(Path(path))
     live = xfa_live_packets(Path(path))
@@ -3945,9 +3961,8 @@ def xfa_dataset_answers(path: Path, limit: int = 400) -> list:
     duplicate instead is how "the form is filled" and "the form is blank" were
     both argued about the same file in 2026-10-15.
     """
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
+    data = _read_pdf_bounded(path)
+    if data is None:
         return []
     live = xfa_live_packets(Path(path))
     if live.get("resolved"):
@@ -3999,9 +4014,8 @@ def _pdf_carries_an_image(path: Path) -> bool:
     Reads the object structure first, then looks for a JPEG/PNG stream when the
     object dictionary is compressed.
     """
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
+    data = _read_pdf_bounded(path)
+    if data is None:
         return False
     if re.search(rb"/Subtype\s*/Image", data):
         return True

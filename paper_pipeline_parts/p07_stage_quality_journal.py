@@ -660,7 +660,8 @@ def postcheck_audit(ctx: Ctx, rec: dict):
     aj = sb / "audit" / "audit.json"
     if not aj.is_file():
         errs.append("audit/audit.json is missing: the auditor's dispositions are the deliverable "
-                    "the revisers consume (one row per frozen finding id, plus its `AU-` adds)")
+                    "the revisers consume (one row per frozen finding id; unresolved "
+                    "observations belong in audit/UNRESOLVED.md, never in an `AU-` adds row)")
     else:
         audit = read_json(aj, revive=False, lenient=True)         # agent-written
         problems = audit_artifact_problems(audit, frozen_ids)
@@ -1109,12 +1110,16 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     # so a donor may legitimately be named differently in it), never a hard fail.
     donors = list(rec.get("other_ids") or [])
     ledger = sb / INTEGRATION_LEDGER_REL
-    if donors and ledger.is_file():
-        try:
-            text = ledger.read_text(encoding="utf-8", errors="replace")
-        except OSError as e:                                          # noqa: BLE001
+    if donors and ledger.is_symlink():
+        warns.append(f"{INTEGRATION_LEDGER_REL} is a symlink; it is not read as the ledger")
+    elif donors and ledger.is_file():
+        # The integration ledger is an agent-written prose deliverable; a
+        # multi-GiB file must fail cheaply, not OOM the postcheck (F59).
+        text = read_text_bounded(ledger)
+        if text is None:
             text = ""
-            warns.append(f"{INTEGRATION_LEDGER_REL} could not be read ({e})")
+            warns.append(f"{INTEGRATION_LEDGER_REL} could not be read (it is a symlink/"
+                         f"non-regular file or over the byte budget)")
         missing = [d for d in donors if not _finding_id_mentioned(str(d), text)]
         if missing:
             warns.append(f"{INTEGRATION_LEDGER_REL} does not mention donor(s) {missing}; every "
@@ -3533,8 +3538,13 @@ def postcheck_response(ctx: Ctx, rec: dict):
         errs.append(f"{JOURNAL_RESPONSE_MD_REL} is missing: the response to reviewers is the "
                     f"deliverable of this mode")
     else:
-        letter = md.read_text(encoding="utf-8", errors="replace")
-        if not letter.strip():
+        letter = read_text_bounded(md)
+        if letter is None:
+            errs.append(f"{JOURNAL_RESPONSE_MD_REL} could not be read (it is a symlink/"
+                        f"non-regular file or over the byte budget): the response to "
+                        f"reviewers must be a readable text deliverable")
+            letter = ""
+        elif not letter.strip():
             # A 0-byte file is present but not a letter: without this check the
             # per-concern mention test was skipped (`if cid and letter`), so a
             # mode whose deliverable IS the letter could be certified empty.

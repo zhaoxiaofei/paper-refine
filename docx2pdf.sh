@@ -139,7 +139,10 @@ if ! head -c 1024 -- "$PDF" | grep -aq '%PDF-'; then
     echo "Error: the converter wrote no PDF header: $PDF" >&2
     exit 1
 fi
-if ! grep -aq '%%EOF' -- "$PDF"; then
+# The EOF marker must be in the PDF's trailer, not merely somewhere in the
+# bytes: `grep` over the whole file accepted a truncated/garbage file whose
+# text stream happened to contain the marker (the 2026-10-28 audit's F64).
+if ! tail -c 2048 -- "$PDF" | grep -aq '%%EOF'; then
     echo "Error: the converter wrote no PDF trailer (%%EOF): $PDF" >&2
     exit 1
 fi

@@ -183,7 +183,14 @@ def start_run_log(cmd: str, root, argv=None) -> Path:
     """
     try:
         reports = Path(root) / "reports"
+        # A symlinked `reports/` made every console log land outside the frozen
+        # root (the 2026-10-28 audit's F34). Refuse the link (and any resolved
+        # escape) before mkdir; a stale link must not capture the history.
+        if reports.is_symlink() or not is_within(reports, Path(root)):
+            return None
         reports.mkdir(parents=True, exist_ok=True)
+        if not is_within(reports, Path(root)):
+            return None
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         base = reports / f"{cmd}-{stamp}.log"
         path = base
@@ -967,7 +974,8 @@ def sha256_files(paths, on_error=None) -> list:
     return list(_hash_pool().map(one, paths))
 
 
-def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
+def _iter_tree_files(root: Path, follow_dir_links: bool = False,
+                     owner_root: Path = None) -> list:
     """Every file under `root`; optionally descend into EVIDENCE-area links.
 
     `pathlib.rglob` does NOT follow directory symlinks -- and the read-only
@@ -982,6 +990,12 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
     `sub -> /outside`, is skipped, because following it put outside files in
     blinded judge views and content manifests. An ancestor-inode set keeps a
     link cycle finite.
+
+    `owner_root` is the run root that owns the copy. When it is given, a
+    followed link must be the canonical `<owner_root>/non_revised/<area>` link
+    (`is_canonical_evidence_link`); without it the walker only has the weaker
+    target-shape test, and an outside tree shaped like `.../non_revised/raw_data`
+    was followed into the judge view (the 2026-10-28 audit's F27).
     """
     if not root.is_dir():
         return []
@@ -1003,15 +1017,15 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
         `<root>/non_revised/<raw_data|...>` link is legitimate
         (ensure_pristine_input); the name alone never authorizes the follow.
 
-        This walker is not handed the owning run root, so the test below is a
-        TARGET-SHAPE test, not a root-identity proof: an outside tree that
-        merely has the same `.../non_revised/<area>` shape is followed too. The
-        strict containment proof is `is_canonical_evidence_link`, which the
-        writers that DO receive the owning root (`copy_into`,
-        `ensure_pristine_input`) use before following or copying a link.
+        With `owner_root` the strict containment proof
+        (`is_canonical_evidence_link`) is applied. Without it the test below is
+        a TARGET-SHAPE test, not a root-identity proof: callers that hold the
+        owning root should always pass it.
         """
         if not p.is_symlink() or not top_level or not is_evidence_rel(p.name):
             return False
+        if owner_root is not None:
+            return is_canonical_evidence_link(p, owner_root)
         try:
             target = p.resolve(strict=True)
         except (OSError, RuntimeError):
@@ -1386,19 +1400,17 @@ def _json_from_text(text: str, lenient: bool):
             return None
     decoder = json.JSONDecoder()
     total = len(text)
-    # Only BALANCED TOP-LEVEL values are document candidates. Trying every
-    # `{`/`[` made a truncated payload quadratic: each start re-scanned to its
-    # failure point, so a 64 MiB file with many braces stalled for a very long
-    # time before the malformed-output retry could fire. A nested value is never
-    # the document (the outer value, when it parses, is), and a start with no
-    # matching close cannot parse, so recording the balanced span first keeps the
-    # total decode work proportional to the text. The cap bounds the pathological
-    # prose case where a file carries hundreds of `{...}` snippets.
-    starts = []                      # (start, end) of balanced top-level values
-    stack = []                       # expected closers, innermost last
+    # Only BALANCED values are document candidates. Trying every `{`/`[` made
+    # a truncated payload quadratic. Top-level values are preferred; a value
+    # that closes while an EARLIER, still-unmatched prose opener is on the
+    # stack is kept as a fallback, so one literal "{" in the prose cannot hide
+    # a complete JSON document that follows it (F13). The lists are separate
+    # and bounded: counting nested values against one cap made a large ordinary
+    # JSON document exceed the cap before its own closing brace.
+    top_starts, nested_starts = [], []      # (start, end)
+    stack = []                              # (expected closer, start), innermost last
     in_string = False
     escaped = False
-    cand_start = None
     for i, ch in enumerate(text):
         if in_string:
             if escaped:
@@ -1411,21 +1423,19 @@ def _json_from_text(text: str, lenient: bool):
         if ch == '"':
             in_string = True
         elif ch in "{[":
-            if not stack:
-                if len(starts) >= 64:
-                    break
-                cand_start = i
-            stack.append("}" if ch == "{" else "]")
+            stack.append(("}" if ch == "{" else "]", i))
         elif ch in "}]":
-            if stack and stack[-1] == ch:
-                stack.pop()
+            if stack and stack[-1][0] == ch:
+                _closer, start = stack.pop()
                 if not stack:
-                    starts.append((cand_start, i + 1))
-                    cand_start = None
+                    if len(top_starts) < 64:
+                        top_starts.append((start, i + 1))
+                elif len(nested_starts) < 64:
+                    nested_starts.append((start, i + 1))
             elif stack:
                 # Mismatched prose brackets: no value can start here.
                 stack.clear()
-                cand_start = None
+    starts = top_starts or nested_starts
     found = []                       # (start, end, value)
     for i, _end in starts:
         try:
@@ -1651,12 +1661,20 @@ def count_manual_steps(path: Path):
         if bullet.match(line):
             in_table = False
             continue
-        if line.count("|") >= 2 and not separator.match(line):
+        if separator.match(line):
+            # A valid two-column GFM table without outer pipes has ONE pipe per
+            # row (`a | b` / `--- | ---`), so the old `count("|") >= 2` test
+            # never opened the table and its data rows were lost (F10). A
+            # pipe-bearing separator is table evidence: the row above it is the
+            # header (not counted) and the rows below are data.
+            in_table = "|" in line
+            continue
+        if line.count("|") >= 2:
             if in_table:
                 n += 1                  # a data row
             in_table = True             # the first row of a block is its header
-        elif in_table and separator.match(line):
-            continue                    # the |---| rule keeps the table open
+        elif in_table and line.count("|") == 1:
+            n += 1                      # a data row of a no-outer-pipe table
         else:
             in_table = False
     return n
@@ -2421,49 +2439,6 @@ def text_source_paragraphs(path: Path) -> list:
 TEX_INCLUDE_RE = re.compile(r"\\(?:input|include|subfile)\s*\{([^{}]+)\}")
 
 
-def _tex_include_path(base: Path, arg: str):
-    """The .tex file an \\input/\\include/\\subfile argument names, or None."""
-    arg = str(arg or "").strip().strip('"')
-    if not arg:
-        return None
-    cand = Path(arg)
-    if cand.suffix.lower() not in (".tex", ".ltx"):
-        cand = Path(str(cand) + ".tex")
-    path = cand if cand.is_absolute() else (base / cand)
-    try:
-        resolved = path.resolve()
-        resolved.relative_to(base.resolve())
-    except (OSError, ValueError):
-        return None                     # a path outside the manuscript directory
-    return resolved if resolved.is_file() else None
-
-
-def _tex_expand_includes(text: str, base: Path, seen=None):
-    """Inline \\input/\\include/\\subfile children so a multi-file paper counts.
-
-    The scan iterated each .tex file independently: the master's
-    `\\input{intro}` was stripped as scaffolding, so the master had no body,
-    while `intro.tex` had no Abstract/Introduction heading and was skipped. A
-    multi-file manuscript was reported as 0 body words (F36). Includes expand
-    once (cycle-safe); comments are stripped first; an unresolved include is
-    named as a gap by the caller.
-    """
-    seen = set() if seen is None else seen
-
-    def repl(match):
-        child = _tex_include_path(base, match.group(1))
-        if child is None or child in seen:
-            return match.group(0)
-        seen.add(child)
-        try:
-            child_text = child.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return match.group(0)
-        return _tex_expand_includes(child_text, base, seen)
-
-    return TEX_INCLUDE_RE.sub(repl, strip_tex_comment(text or ""))
-
-
 def _tex_length_scan(text: str):
     """(lines, caption_spans, abstract_end) for a LaTeX source.
 
@@ -2480,12 +2455,15 @@ def _tex_length_scan(text: str):
         (a one-line abstract used to be replaced by the bare heading and lost).
     """
     out, captions, abstract_end = [], [], None
-    raw_lines = blank_math_environments(text or "").splitlines()
+    raw_lines = _blank_tex_verbatim(blank_math_environments(text or "")).splitlines()
+    env_kind = None
     i, n = 0, len(raw_lines)
     while i < n:
         raw = raw_lines[i]
         i += 1
         line = strip_tex_comment(raw).strip()
+        env_at_start = env_kind
+        env_kind = _tex_float_env_after(line, env_kind)
         begins = re.search(r"\\begin\{abstract\}", line)
         ends = re.search(r"\\end\{abstract\}", line)
         if begins or ends:
@@ -2542,7 +2520,13 @@ def _tex_length_scan(text: str):
                 group = f"{group}\n{nxt}"
                 depth += _tex_brace_delta(nxt)
             cap_text, after = _tex_split_group(group)
-            captions.append((len(out), len(out) + 1))
+            # Carry the caption KIND: a profile that excludes only figure
+            # legends must not subtract this table's caption as well (F03).
+            cap_kind = _tex_float_env_after(line[:cap.start()], env_at_start)
+            of = re.match(r"\\captionof\*?\s*\{([^{}]*)\}", line[cap.start():])
+            if of:
+                cap_kind = of.group(1).strip().lower()
+            captions.append((len(out), len(out) + 1, cap_kind))
             out.append(_strip_latex(cap_text))
             after = _tex_line_text(after)
             if after:
@@ -2587,6 +2571,11 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     include_abstract = "abstract" not in excludes
     subtract_captions = ("figure-legends" in excludes
                          or "table-captions" in excludes)
+    # Which caption KINDS the venue leaves out. A tagged span of another kind is
+    # not subtracted even though SOME caption kind is excluded (F03).
+    caption_kinds = {kind for kind, section in (("figure", "figure-legends"),
+                                                 ("table", "table-captions"))
+                     if section in excludes}
     n = len(lines)
 
     def clean(s):
@@ -2657,9 +2646,12 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
             # contract), so this branch stays unfiltered.
             caption_words = 0
             if subtract_captions:
+                # A TeX span carries its kind; DOCX/text spans are pre-filtered.
                 caption_words = sum(
                     count_caption_words(" ".join(lines[max(a, 0):min(b, n)]))
-                    for a, b in (caption_spans or []) if a < n and b > 0)
+                    for a, b, kind in ((s[0], s[1], s[2] if len(s) > 2 else None)
+                                       for s in (caption_spans or []))
+                    if a < n and b > 0 and (kind is None or kind in caption_kinds))
             words = max(0, count_words(" ".join(lines)) - caption_words)
             main_cap = limits["main text"].get("cap")
             return [{"document": doc, "section": "main text", "words": words,
@@ -2747,8 +2739,10 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     if subtract_captions:
         caption_words = sum(
             count_caption_words(" ".join(lines[max(a, span_start):min(b, n)]))
-            for a, b in (caption_spans or [])
+            for a, b, kind in ((span[0], span[1], span[2] if len(span) > 2 else None)
+                               for span in (caption_spans or []))
             if a < n and b > span_start
+            and (kind is None or kind in caption_kinds)
             and any(included[i] for i in range(max(a, span_start), min(b, n)))
         )
     words = max(0, count_words(" ".join(body)) - caption_words)
@@ -2945,15 +2939,21 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                     unparsed.append(doc)
                     continue
                 lines = paras
+                # A wrapped DOCX legend is usually split over several
+                # paragraphs. `_caption_units` sees one paragraph at a time, so
+                # only its first line was excluded and the continuation was
+                # charged to the article cap (F04). The line-oriented reader
+                # merges continuations with the SAME rules the text extractor
+                # uses.
                 caption_spans = [(a, b) for _, _, a, b
-                                 in _caption_units(paras, with_spans=True,
-                                                   kinds=caption_kinds)]
+                                 in _caption_units_from_lines(paras, with_spans=True,
+                                                              kinds=caption_kinds)]
             elif ext in LENGTH_TEX_EXTS:
                 if p.resolve() in tex_included:
                     skipped.append(doc)     # counted in the master that includes it
                     continue
                 text = tex_cache.get(p.resolve(), "")
-                expanded = _tex_expand_includes(text, p.parent)
+                expanded = _tex_expand_includes(text, p.parent, source=p)
                 for inc in TEX_INCLUDE_RE.finditer(expanded):
                     unparsed.append(f"{doc}: unresolved include {inc.group(1)}")
                 lines, caption_spans, abstract_end = _tex_length_scan(expanded)
@@ -6582,7 +6582,7 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
     except Exception as e:                                            # noqa: BLE001
         evidence["front_matter_gaps"] = {"error": f"{type(e).__name__}: {e}"}
     try:
-        man = manifest_for_sources(sources)
+        man = manifest_for_sources(sources, owner_root=getattr(ctx, "root", None))
         evidence["corpus_identity"] = {
             "digest": manifest_digest(man),
             "files": sorted(man["files"]),

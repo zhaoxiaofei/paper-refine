@@ -248,6 +248,67 @@ def strip_tex_comment(text: str) -> str:
     """`text` without its LaTeX comments (the escape pair kept in place)."""
     return TEX_COMMENT.sub(r"\1", text or "")
 
+
+TEX_INCLUDE = re.compile(r"\\(?:input|include|subfile)\s*\{([^{}]+)\}")
+
+
+def _tex_include_path(base: Path, arg: str):
+    """The .tex file an \\input/\\include/\\subfile argument names, or None."""
+    arg = str(arg or "").strip().strip('"')
+    if not arg:
+        return None
+    cand = Path(arg)
+    if cand.suffix.lower() not in TEX_EXTS:
+        cand = Path(str(cand) + ".tex")
+    path = cand if cand.is_absolute() else (base / cand)
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(base.resolve())
+    except (OSError, ValueError):
+        return None                     # a path outside the manuscript directory
+    return resolved if resolved.is_file() else None
+
+
+def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
+                         _stack=None):
+    """Inline \\input/\\include/\\subfile children so a multi-file paper counts.
+
+    The pipeline's M19 scan expands includes; this counter only stripped the
+    command, so a master `main.tex` that inputs its sections was reported as
+    one body word (or as a whole-file count) while the orchestrator counted the
+    expanded text (the 2026-10-28 audit's F06). Includes expand once
+    (cycle-safe), comments are stripped first, and `source`/`_stack` stop an
+    a -> b -> a cycle from re-entering the master.
+    """
+    seen = set() if seen is None else seen
+    if source is not None:
+        try:
+            seen.add(Path(source).resolve())
+        except (OSError, RuntimeError):
+            pass
+    stack = [] if _stack is None else _stack
+    body = strip_tex_comment(text or "")
+    stack.append(body)
+
+    def repl(match):
+        child = _tex_include_path(base, match.group(1))
+        if child is None or child in seen:
+            return match.group(0)
+        seen.add(child)
+        try:
+            child_text = child.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            return match.group(0)
+        if child_text in stack:
+            return match.group(0)
+        return _tex_expand_includes(child_text, base, seen, source=child,
+                                    _stack=stack)
+
+    try:
+        return TEX_INCLUDE.sub(repl, body)
+    finally:
+        stack.pop()
+
 ABSTRACT_RELAXATION = 1.10
 MAIN_TEXT_RELAXATION = 1.25
 COVER_LETTER_MIN = 300
@@ -569,7 +630,8 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
     n = len(lines)
     abs_start = abs_end = None
     for i, raw in enumerate(lines):
-        inline = INLINE_ABSTRACT_HEAD.match(_heading_text(raw))
+        heading = _heading_text(raw)
+        inline = INLINE_ABSTRACT_HEAD.match(heading)
         if inline:
             # Keep the remainder as the abstract's first paragraph; the heading
             # itself is not counted.
@@ -578,10 +640,16 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
             abs_end = (max(abs_start, min(int(abstract_end), n)) if abstract_end is not None
                        else _abstract_end(lines, abs_start))
             break
-        if ABSTRACT_HEAD.match(_heading_text(raw)):
+        if ABSTRACT_HEAD.match(heading):
             abs_start = i + 1
             abs_end = (max(abs_start, min(int(abstract_end), n)) if abstract_end is not None
                        else _abstract_end(lines, abs_start))
+            break
+        # "Summary" is also a common CLOSING heading. The pipeline scan stops
+        # at a body heading before accepting a later Summary; this loop did not,
+        # so a paper that starts with Introduction and ends with Summary was
+        # treated as abstract-only and its main text reported as 0 (F05).
+        if MAIN_START.match(heading) or section_kind(heading):
             break
     main_start = None
     for i, raw in enumerate(lines):
@@ -716,6 +784,9 @@ def is_cover_letter(text: str, name: str = "", type_names=()) -> bool:
     """
     if _name_is_type_manuscript(name, type_names):
         return False
+    base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if _COVER_REPLY_RE.search(base):
+        return False
     if _COVER_WORD_RE.search(name or ""):
         return True
     for line in (text or "").splitlines()[:12]:
@@ -781,6 +852,13 @@ _SCIENCE_ROLE_COMPOUND_RE = re.compile(
 _COVER_WORD_RE = re.compile(
     r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
     r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
+# An authored REPLY is not a cover letter, whatever else its name contains.
+# The pipeline's `_is_cover_letter_lines` has excluded these all along; this
+# predicate did not, so a response-to-reviewers package was measured against
+# the 300-500-word cover-letter preference (the 2026-10-28 audit's F08).
+_COVER_REPLY_RE = re.compile(
+    r"response|repl(?:y|ies)|rebuttal|point[\s_-]?by[\s_-]?point|"
+    r"decision[\s_-]?(?:letter|notice)|referee|reviewer", re.I)
 
 
 def is_evidence_path(path: str) -> bool:
@@ -1095,6 +1173,9 @@ def main(argv=None) -> int:
             failed = True
             continue
         if p.suffix.lower() in TEX_EXTS:
+            # A multi-file manuscript's body lives in the children; counting
+            # the master alone reported 1-2 words (F06).
+            text = _tex_expand_includes(text, p.parent, source=p)
             lines, abstract_end, caption_lines = tex_lines(text)
             prepared = "\n".join(lines)
             rows = ([("whole file", count_words(prepared),

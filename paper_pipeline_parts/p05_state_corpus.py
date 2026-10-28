@@ -161,8 +161,12 @@ PROBE_ID_RE = re.compile(r"^X-9\d{2}$")
 PROBE_FINDING_ID_BASE = 900
 # Every DECLARED verifier is re-run at postcheck time. The timeout is per
 # script; the scripts are the session's own, offline and deterministic by
-# contract.
+# contract. The count and the aggregate wall-clock are ALSO bounded: one probe
+# could declare 99 verifiers (the reserved X-901..X-999 block) and make postcheck
+# run for hours (the 2026-10-28 audit's F56).
 PROBE_REPRO_TIMEOUT = 120
+PROBE_REPRO_MAX_VERIFIERS = 50
+PROBE_REPRO_TOTAL_BUDGET = 600
 
 
 def probe_review_of(ctx) -> str:
@@ -314,8 +318,27 @@ def find_pin(ctx, pid: str):
     return None
 
 
+def _safe_state_segment(value) -> bool:
+    """True when `value` is one safe path component from the state registry.
+
+    State records are data, not trusted paths. A pin id or run id of `../../x`
+    or `/tmp/x` made `pinned_docs_dir`, `failed_sandbox_dir`, `stash_logs` and
+    `prune` read, move or delete outside the pipeline root (the 2026-10-28
+    audit's F22/F24).
+    """
+    text = str(value if value is not None else "")
+    if not text or text in (".", ".."):
+        return False
+    return "/" not in text and "\\" not in text and "\x00" not in text \
+        and Path(text).name == text
+
+
 def pinned_docs_dir(ctx, pin: dict) -> Path:
-    return ctx.pins_dir / pin["id"] / "documents"
+    pin_id = str((pin or {}).get("id") or "")
+    if not _safe_state_segment(pin_id):
+        die(f"state.json records an unsafe pin id {pin_id!r}: a pin id must be one path "
+            f"component under {ctx.pins_dir}. Refusing to read outside the pipeline root.")
+    return ctx.pins_dir / pin_id / "documents"
 
 
 def winner_dir_of(ctx: Ctx, r: int) -> Path:
@@ -620,6 +643,11 @@ class Ctx:
                         f"       {self.state_path}\n"
                         f"       Restore state.json from a backup; the pipeline never adopts "
                         f"a partial pin chain automatically.")
+                if not _safe_state_segment(pin["id"]):
+                    die(f"state.json is damaged: pinned entry {i} has an unsafe id "
+                        f"{pin['id']!r} (it must be ONE path component under "
+                        f"{self.pins_dir}).\n       {self.state_path}\n"
+                        f"       Restore state.json from a backup.")
             for rid, rec in st["runs"].items():
                 if not isinstance(rec, dict) or "kind" not in rec or "round" not in rec:
                     die(f"state.json is not a round-pipeline registry: run record {rid!r} "
@@ -640,6 +668,16 @@ class Ctx:
                 except (TypeError, ValueError):
                     die(f"state.json is damaged: run record {rid!r} has a non-numeric 'round' "
                         f"({rec['round']!r}).\n       {self.state_path}")
+                # The run id is a PATH COMPONENT in failed_sandbox_dir,
+                # stash_logs and prune: `../x` moved or deleted outside the root
+                # (F24). Checked after the shape checks so the message still
+                # names the first damage a legacy root has.
+                _rid = rec.get("id") or rid
+                if not _safe_state_segment(rid) or not _safe_state_segment(_rid):
+                    die(f"state.json is damaged: run id {rid!r} is not one safe path "
+                        f"component (the retry/prune paths are built from it).\n"
+                        f"       {self.state_path}\n"
+                        f"       Restore state.json from a backup.")
             st.setdefault("rounds", {})
             st.setdefault("pinned", [])
             st.setdefault("log", [])
@@ -1043,6 +1081,15 @@ def pinned_integrity(ctx: Ctx) -> list:
             errs.append(f"round {r} is complete but records no published winner directory")
             continue
         d = ctx.root / name
+        # `winner_dir` is state data: an absolute or `../outside` value used to
+        # make this READ-ONLY integrity command hash a tree outside --root (and
+        # report a misleading CHANGED result instead of the escape). The sibling
+        # `invalidate_from_round`/publish paths already apply containment.
+        if not is_within(d, ctx.root):
+            errs.append(f"round {r} records a winner directory {name!r} outside --root; "
+                        f"refusing to verify outside content")
+            continue
+        d = d.resolve()
         if not d.is_dir():
             errs.append(f"{name}/ is missing (every completed round publishes its winner under "
                         f"--root)")
@@ -1150,7 +1197,7 @@ def output_dir_of(rec: dict) -> str:
     return output_dir_for_kind(rec.get("kind"))
 
 
-def manifest_for_sources(sources: list) -> dict:
+def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
     """{rel path: sha256} for ordered [(dir, prefix, excluded)] corpus sources.
 
     ONE definition of a version corpus, shared by the digest the pipeline
@@ -1160,6 +1207,11 @@ def manifest_for_sources(sources: list) -> dict:
     from every materialized copy) are dropped, the sources' own top-level
     exclusions (`work/` scratch) apply, and later sources override earlier ones
     with the same relative path.
+
+    `owner_root` is the run root that owns the copy; passing it makes an
+    evidence-area link follow only when it is THIS root's canonical
+    `<root>/non_revised/<area>` link (F27). Callers that hold the run root
+    (`corpus_manifest`, `code_side_evidence`) pass it.
     """
     entries = []
     for src, prefix, excluded in sources:
@@ -1170,7 +1222,7 @@ def manifest_for_sources(sources: list) -> dict:
         # root's canonical copy (see ensure_pristine_input). The digest a run
         # records must see the SAME files the pin materializes, or pin_champion
         # dies on its own "internal inconsistency" check.
-        for p in _iter_tree_files(src, follow_dir_links=True):
+        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root):
             if not p.is_file() or _is_aux_doc(p.name):
                 continue
             if is_bookkeeping_name(p.name):
@@ -1188,7 +1240,7 @@ def manifest_for_sources(sources: list) -> dict:
 
 def corpus_manifest(ctx: Ctx, r: int, vid: str) -> dict:
     """{rel path: sha256} for a version corpus -- the corpus IDENTITY."""
-    return manifest_for_sources(corpus_sources(ctx, r, vid))
+    return manifest_for_sources(corpus_sources(ctx, r, vid), owner_root=ctx.root)
 
 
 def recompute_corpus_digest(ctx: Ctx, r: int, vid: str) -> str:
@@ -1209,14 +1261,18 @@ def recompute_corpus_digest(ctx: Ctx, r: int, vid: str) -> str:
 # duplicated documents still count twice and a lost file is still visible.
 # ---------------------------------------------------------------------
 
-def corpus_content_set_fingerprint(sources: list) -> str:
-    """Name- and bookkeeping-insensitive fingerprint of a version corpus."""
+def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> str:
+    """Name- and bookkeeping-insensitive fingerprint of a version corpus.
+
+    `owner_root` is threaded to the walker so an evidence-area link is followed
+    only when it is THIS root's canonical `<root>/non_revised/<area>` link (F27).
+    """
     overrides = corpus_source_overrides(sources)
     paths = []
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for p in _iter_tree_files(src, follow_dir_links=True):
+        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root):
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
@@ -1241,7 +1297,7 @@ def corpus_content_set_fingerprint(sources: list) -> str:
 
 
 def corpus_content_fingerprint(ctx: Ctx, r: int, vid: str) -> str:
-    return corpus_content_set_fingerprint(corpus_sources(ctx, r, vid))
+    return corpus_content_set_fingerprint(corpus_sources(ctx, r, vid), owner_root=ctx.root)
 
 
 # ---------------------------------------------------------------------
@@ -1494,7 +1550,7 @@ def corpus_files_for_view(ctx: Ctx, r: int, vid: str) -> list:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for rel, p in corpus_dir_view_files(src):
+        for rel, p in corpus_dir_view_files(src, owner_root=ctx.root):
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
             key = prefix + rel
@@ -1505,7 +1561,7 @@ def corpus_files_for_view(ctx: Ctx, r: int, vid: str) -> list:
     return out
 
 
-def corpus_dir_view_files(dirp: Path) -> list:
+def corpus_dir_view_files(dirp: Path, owner_root: Path = None) -> list:
     """[(relative path, path)] for one directory under the judge-view rules.
 
     Slightly narrower than the corpus `build_corpus_dir()` materializes, because
@@ -1520,9 +1576,14 @@ def corpus_dir_view_files(dirp: Path) -> list:
     compiled from a shipped `.bib`/`.docx`/`.tex` is redundant next to its
     source) never reach a judge view -- so a judge cannot score or infer anything
     from an auxiliary file, a changelog, a ledger, a build log or a rendering.
+
+    `owner_root` is the run root that owns the copy. Passing it makes an
+    evidence-area link follow only when it is THIS root's canonical
+    `<root>/non_revised/<area>` link; without it an outside tree shaped like
+    `.../non_revised/raw_data` was followed into the judge view (F27).
     """
     out = []
-    entries = _iter_tree_files(dirp, follow_dir_links=True)
+    entries = _iter_tree_files(dirp, follow_dir_links=True, owner_root=owner_root)
     siblings = {}
     for p in entries:
         siblings.setdefault(p.parent, []).append(p.name)
@@ -2372,6 +2433,9 @@ def stash_logs(sb: Path, logs_dir: Path, rid: str, attempt: int = None) -> list:
     15 MB transcript as `r1_review._agent.log` with nothing referring to it).
     """
     moved = []
+    if not _safe_state_segment(rid):
+        die(f"refusing to archive logs for unsafe run id {rid!r} (it must be one path "
+            f"component); repair state.json")
     if sb.is_dir():
         logs_dir.mkdir(parents=True, exist_ok=True)
         for f in sorted(sb.glob("_agent.log*")):
@@ -2444,6 +2508,9 @@ def failed_sandbox_dir(ctx: Ctx, rec: dict, attempt: int = None) -> Path:
     are recorded in its `record.json` and in `attempts_log`.
     """
     rid = str(rec.get("id"))
+    if not _safe_state_segment(rid):
+        die(f"refusing a failed-sandbox path for unsafe run id {rid!r} (it must be one "
+            f"path component); repair state.json")
     n = int(attempt or 0) or (len(list(ctx.runs_dir.glob(f"{rid}_try*_failed"))) + 1)
     return ctx.runs_dir / (rid + FAILED_SUFFIX_FMT.format(n=n))
 
@@ -3382,6 +3449,11 @@ def _probe_contract_problems(sb: Path) -> tuple:
                                 f"value (EXACTLY the last non-empty stdout line the script "
                                 f"prints)")
         findings.append(f)
+    verifier_count = sum(1 for f in findings if isinstance(f.get("verifier"), dict))
+    if verifier_count > PROBE_REPRO_MAX_VERIFIERS:
+        errs.append(f"{PROBE_FINDINGS_REL}: {verifier_count} verifier(s) declared but at most "
+                    f"{PROBE_REPRO_MAX_VERIFIERS} are re-run per attempt; a verifier is a "
+                    f"computation the orchestrator must be able to re-run within its budget")
     return errs, warns, findings
 
 
@@ -3399,6 +3471,8 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
     record.
     """
     results = []
+    ran = 0
+    started = time.monotonic()
     for f in findings or ():
         fid = str(f.get("id") or "")
         verifier = f.get("verifier")
@@ -3406,6 +3480,16 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
             results.append({"row": fid, "script": "", "declared": "", "produced": "",
                             "status": "no-verifier", "detail": ""})
             continue
+        if (ran >= PROBE_REPRO_MAX_VERIFIERS
+                or time.monotonic() - started > PROBE_REPRO_TOTAL_BUDGET):
+            results.append({"row": fid, "script": str(verifier.get("script") or ""),
+                            "declared": "", "produced": "",
+                            "status": "skipped-over-budget",
+                            "detail": (f"only {PROBE_REPRO_MAX_VERIFIERS} verifier(s) and "
+                                       f"{PROBE_REPRO_TOTAL_BUDGET}s of aggregate postcheck "
+                                       f"time are run per attempt")})
+            continue
+        ran += 1
         script = str(verifier.get("script") or "").strip()
         entry = {"row": fid, "script": script,
                  "declared": " ".join(str(verifier.get("computed") or "").split()),
@@ -3431,17 +3515,17 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
         try:
             # The WHOLE stdout, not its final 8192 bytes: a correct last line
             # longer than that failed, and a long line whose suffix happened to
-            # float-equal the claim passed.
-            proc = subprocess.run(
-                [sys.executable, str(target)], cwd=str(sb), stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=PROBE_REPRO_TIMEOUT)
-            text = (proc.stdout or b"").decode("utf-8", "replace")
+            # float-equal the claim passed. Output goes to files and is capped:
+            # a verifier that floods stdout is an over-budget failure, never
+            # unbounded memory in the orchestrator (F61).
+            rc, out, _err = run_bounded(
+                [sys.executable, str(target)], PROBE_REPRO_TIMEOUT, cwd=str(sb))
+            text = (out or b"").decode("utf-8", "replace")
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             produced = lines[-1] if lines else ""
             entry["produced"] = " ".join(produced.split())[:200]
-            if proc.returncode != 0:
-                entry.update(status="failed", detail=f"exit {proc.returncode}")
+            if rc != 0:
+                entry.update(status="failed", detail=f"exit {rc}")
             elif not produced:
                 entry.update(status="empty")
             elif _probe_value_equal(entry["declared"], produced):
@@ -3450,6 +3534,8 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
                 entry.update(status="mismatch")
         except subprocess.TimeoutExpired:
             entry.update(status="timeout", detail=f"over {PROBE_REPRO_TIMEOUT}s")
+        except ToolOutputOverBudget as e:
+            entry.update(status="failed", detail=str(e)[:120])
         except OSError as e:                                     # noqa: BLE001
             entry.update(status="failed", detail=f"{type(e).__name__}: {e}"[:120])
         results.append(entry)
@@ -3502,16 +3588,19 @@ def postcheck_probe(ctx: Ctx, rec: dict):
     errs.extend(perrs)
     warns.extend(pwarns)
     coverage = sb / PROBE_COVERAGE_REL
-    if not coverage.is_file():
+    if coverage.is_symlink() or not coverage.is_file():
         errs.append(f"{PROBE_COVERAGE_REL} is missing: the areas examined, the counts and the "
                     f"round's honest limits are part of the deliverable")
     else:
-        try:
-            if not coverage.read_text(encoding="utf-8", errors="replace").strip():
-                errs.append(f"{PROBE_COVERAGE_REL} is EMPTY: account for the areas examined, the "
-                            f"findings they produced and what could not be checked")
-        except OSError as e:                                     # noqa: BLE001
-            errs.append(f"{PROBE_COVERAGE_REL} could not be read ({e})")
+        # Agent-written prose: use the shared regular-file/no-follow/byte-budget
+        # reader. A huge or blocking COVERAGE.md could hang/OOM postcheck (F57).
+        coverage_text = read_text_bounded(coverage)
+        if coverage_text is None:
+            errs.append(f"{PROBE_COVERAGE_REL} could not be read (it is a symlink/"
+                        f"non-regular file or over the byte budget)")
+        elif not coverage_text.strip():
+            errs.append(f"{PROBE_COVERAGE_REL} is EMPTY: account for the areas examined, the "
+                        f"findings they produced and what could not be checked")
     repro = probe_reproduction(sb, findings)
     if findings:
         _write_probe_reproduction(sb, repro)
