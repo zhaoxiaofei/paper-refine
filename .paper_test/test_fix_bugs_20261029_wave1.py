@@ -1095,6 +1095,19 @@ def test_deletion_audit_and_m30_seed() -> None:
           any("seed listed" in p
               for p in pp.deletion_audit_problems(d / "sb", expected_rows=3)),
           str(pp.deletion_audit_problems(d / "sb", expected_rows=3)))
+    expected = [r["paragraph"] for r in rows]
+    check("the seeded paragraph identities pass",
+          pp.deletion_audit_problems(d / "sb", expected_paragraphs=expected) == [],
+          str(pp.deletion_audit_problems(d / "sb", expected_paragraphs=expected)))
+    replaced = text.replace(rows[0]["paragraph"],
+                            "A replacement row that was never in the seed.", 1)
+    _write(d / "sb" / "revision_audit" / "DELETED_PARAGRAPHS.md", replaced)
+    check("a replaced seed row is rejected",
+          any("no longer carries" in p
+              for p in pp.deletion_audit_problems(d / "sb",
+                                                  expected_paragraphs=expected)),
+          str(pp.deletion_audit_problems(d / "sb",
+                                         expected_paragraphs=expected)))
     check("the M30 seed pre-disposes a no-producer row",
           pp.m30_seed_disposition(
               {"candidate producer": "(no shipped table column matches this sentence)"}

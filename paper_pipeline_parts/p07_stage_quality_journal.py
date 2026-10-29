@@ -3658,7 +3658,7 @@ def deletion_audit_markdown(rows: list) -> str:
 
 
 def deletion_audit_problems(sb: Path, expected_rows: int = None,
-                            plan_ids=None) -> list:
+                            expected_paragraphs=None, plan_ids=None) -> list:
     """Problems with the revision audit's deleted-paragraph dispositions.
 
     `expected_rows` is the seed's row count: an audit that deletes rows instead
@@ -3667,18 +3667,28 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
     absent, which would turn a rewritten table into a clean audit). When
     `plan_ids` is given, a `fact removed — RP-xxx` disposition must name a row
     in the bounded-repair plan; otherwise the audit records a removal and asks
-    for no repair.
+    for no repair. `expected_paragraphs` makes the row check identity-based:
+    replacing a seed row with a different row while keeping the count must not
+    pass either.
     """
     p = Path(sb) / "revision_audit" / "DELETED_PARAGRAPHS.md"
     if not p.is_file():
         return [f"{p.name} is missing: the deletion audit was not written"]
+
+    def _norm_para(value) -> str:
+        return re.sub(r"\s+", " ", str(value or "").replace("\\|", "|")).strip()[:1200]
+
     problems, seen_rows = [], 0
+    seen_paragraphs = set()
     check_plan = plan_ids is not None
     plan_ids = {str(x).strip().upper() for x in (plan_ids or ()) if str(x).strip()}
     for block in parse_markdown_blocks(p):
         if not block["rows"]:
             continue
         seen_rows += len(block["rows"])
+        seen_paragraphs.update(_norm_para(row.get("paragraph"))
+                               for row in block["rows"]
+                               if str(row.get("paragraph") or "").strip())
         if not any("disposition" in str(h) for h in block["header"]):
             problems.append(f"{p.name} has a table with no disposition column; "
                             f"re-emit the seeded table with its last column intact")
@@ -3698,6 +3708,13 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
         problems.append(f"{p.name} lists {seen_rows} row(s) but the seed listed "
                         f"{int(expected_rows)}: a deleted paragraph was removed from the "
                         f"audit instead of disposed")
+    if expected_paragraphs is not None:
+        missing = [_norm_para(p) for p in expected_paragraphs
+                   if _norm_para(p) and _norm_para(p) not in seen_paragraphs]
+        if missing:
+            problems.append(f"{p.name} no longer carries {len(missing)} seeded paragraph "
+                            f"row(s) (e.g. {missing[0][:90]!r}): a row was replaced or "
+                            f"dropped instead of disposed")
     return problems
 
 

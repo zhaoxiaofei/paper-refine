@@ -2668,7 +2668,9 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     rows = _revision_plan_rows(sb)
     _plan_ids = [str(r.get("id") or "") for r in (rows or []) if isinstance(r, dict)]
     deletion_problems = deletion_audit_problems(
-        sb, expected_rows=len(_deleted_rows), plan_ids=_plan_ids)
+        sb, expected_rows=len(_deleted_rows),
+        expected_paragraphs=[r.get("paragraph") for r in _deleted_rows],
+        plan_ids=_plan_ids)
     audit_rec = {"status": "failed", "rows": 0,
                  "duration": round(res.get("dur") or 0.0, 1),
                  "deleted_paragraphs": len(_deleted_rows),
