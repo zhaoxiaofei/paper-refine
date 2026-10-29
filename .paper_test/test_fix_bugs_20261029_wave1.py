@@ -1091,6 +1091,10 @@ def test_deletion_audit_and_m30_seed() -> None:
     check("a 'fact removed' disposition with its plan row passes",
           pp.deletion_audit_problems(d / "sb", plan_ids=["RP-001"]) == [],
           str(pp.deletion_audit_problems(d / "sb", plan_ids=["RP-001"])))
+    check("a seed row removed from the audit is rejected",
+          any("seed listed" in p
+              for p in pp.deletion_audit_problems(d / "sb", expected_rows=3)),
+          str(pp.deletion_audit_problems(d / "sb", expected_rows=3)))
     check("the M30 seed pre-disposes a no-producer row",
           pp.m30_seed_disposition(
               {"candidate producer": "(no shipped table column matches this sentence)"}
