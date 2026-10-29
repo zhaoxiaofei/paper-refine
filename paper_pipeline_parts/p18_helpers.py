@@ -319,8 +319,8 @@ def _docx_paragraphs(path: Path, include_tables: bool = True):
         if data is None:
             return None
         root = ET.fromstring(data)
-    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
-            NotImplementedError):
+    except (OSError, KeyError, zipfile.BadZipFile, zipfile.LargeZipFile,
+            ET.ParseError, RuntimeError, NotImplementedError):
         return None
     table_paras = set()
     if not include_tables:
