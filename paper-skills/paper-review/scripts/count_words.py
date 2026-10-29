@@ -342,7 +342,8 @@ def docx_paragraph_text(path: Path, include_tables: bool = True):
             if info.file_size > MAX_DOCX_PART_BYTES:
                 return None
             data = z.read("word/document.xml")
-    except (OSError, KeyError, zipfile.BadZipFile):
+    except (OSError, KeyError, zipfile.BadZipFile, zipfile.LargeZipFile,
+            RuntimeError, NotImplementedError):
         return None
     # ElementTree expands internal entities; refuse the DTD before parsing,
     # exactly as the pipeline's shared DOCX part reader does.
