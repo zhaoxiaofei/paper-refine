@@ -1068,6 +1068,9 @@ def test_deletion_audit_and_m30_seed() -> None:
           bool(pp._deleted_para_candidate(
               "**Figure 1.** Seedling density in thinned and control plots, with the "
               "95% confidence interval shown for every block.")))
+    check("a short fact sentence is auditable",
+          bool(pp._deleted_para_candidate(
+              "We drank the species of every seedling in the field book.")))
     (d / "sb" / "revision_audit").mkdir(parents=True)
     _write(d / "sb" / "revision_audit" / "DELETED_PARAGRAPHS.md",
            pp.deletion_audit_markdown(rows))

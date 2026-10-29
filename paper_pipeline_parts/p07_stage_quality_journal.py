@@ -3530,7 +3530,7 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
-_DELETED_PARA_MIN = 60
+_DELETED_PARA_MIN = 30
 _DELETED_PARA_SKIP_RE = re.compile(
     r"(?i)^(?:#{1,6}\s|\\(?:sub)*section\*?\s*\{|\\(?:sub)*paragraph\s*\{|"
     r"\[(?:insert|ref|cite)\b|todo\b|tbd\b|lorem ipsum|"
