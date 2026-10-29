@@ -507,8 +507,13 @@ def run_dsh_streaming(cmd: list, env: dict) -> tuple:
     turn_failed = None
     carry = b""
     try:
+        # `read1`, not `read`: a buffered `read(n)` waits for n bytes (or EOF),
+        # so a slow harness's first event would not be echoed until the stream
+        # filled or the process exited -- the opposite of streaming. `read1`
+        # returns as soon as one raw chunk is available.
+        read_chunk = getattr(proc.stdout, "read1", proc.stdout.read)
         while True:
-            chunk = proc.stdout.read(1 << 20)
+            chunk = read_chunk(1 << 20)
             if not chunk:
                 break
             _echo_stdout(chunk)

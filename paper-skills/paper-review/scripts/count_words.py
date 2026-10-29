@@ -275,11 +275,52 @@ def _tex_include_path(base: Path, arg: str):
 
 
 _DOCX_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_DOCX_MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+# The same budget the pipeline's DOCX reader uses: an untrusted package can
+# carry a part that decompresses to gigabytes, and the counter must refuse it
+# instead of allocating the whole thing.
+MAX_DOCX_PART_BYTES = 64 * 1024 * 1024
 # A binary format this counter cannot read as text. Counting its ZIP bytes with
 # errors="replace" produced a meaningless number (a small DOCX reported 1359
 # words, F06), so an unsupported binary is refused with a real error instead.
 BINARY_DOCUMENT_EXTS = {".pdf", ".doc", ".xls", ".xlsx", ".ppt", ".pptx",
                         ".zip", ".gz", ".tar", ".rar", ".7z"}
+
+
+def _docx_visible_nodes(el):
+    """Descendants of one paragraph as Word renders them: ONE Choice branch.
+
+    `mc:AlternateContent` carries the same text in a Choice and a Fallback;
+    walking every descendant counted both. A nested `w:p` (a text box's own
+    paragraph) is a separate entry of the paragraph walk, not part of this one.
+    """
+    for child in list(el):
+        if child.tag == _DOCX_MC + "AlternateContent":
+            branch = child.find(_DOCX_MC + "Choice")
+            if branch is None:
+                branch = child.find(_DOCX_MC + "Fallback")
+            if branch is not None:
+                yield from _docx_visible_nodes(branch)
+            continue
+        if child.tag == _DOCX_W + "p":
+            continue
+        yield child
+        yield from _docx_visible_nodes(child)
+
+
+def _docx_visible_paragraphs(el):
+    """The `w:p` elements Word renders, each exactly once (one Choice branch)."""
+    for child in list(el):
+        if child.tag == _DOCX_MC + "AlternateContent":
+            branch = child.find(_DOCX_MC + "Choice")
+            if branch is None:
+                branch = child.find(_DOCX_MC + "Fallback")
+            if branch is not None:
+                yield from _docx_visible_paragraphs(branch)
+            continue
+        if child.tag == _DOCX_W + "p":
+            yield child
+        yield from _docx_visible_paragraphs(child)
 
 
 def docx_paragraph_text(path: Path, include_tables: bool = True):
@@ -290,12 +331,28 @@ def docx_paragraph_text(path: Path, include_tables: bool = True):
     like the rest of this script; table-cell paragraphs are included because
     they are visible text, unless the venue's counting rule excludes table
     contents (`table-contents`, F08).
+
+    One `mc:AlternateContent` branch only, and a text box's nested paragraph is
+    its own entry: walking every descendant counted Choice+Fallback twice and
+    counted the text box's text once inside its container and once by itself.
     """
     try:
         with zipfile.ZipFile(path) as z:
+            info = z.getinfo("word/document.xml")
+            if info.file_size > MAX_DOCX_PART_BYTES:
+                return None
             data = z.read("word/document.xml")
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
+    # ElementTree expands internal entities; refuse the DTD before parsing,
+    # exactly as the pipeline's shared DOCX part reader does.
+    probe = data.decode("utf-16", "ignore") if data[:2] in (b"\xff\xfe", b"\xfe\xff") \
+        else data.decode("utf-8", "ignore")
+    if "<!DOCTYPE" in probe or "<!ENTITY" in probe:
+        return None
+    try:
         root = ET.fromstring(data)
-    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError):
+    except ET.ParseError:
         return None
     table_paras = set()
     if not include_tables:
@@ -303,15 +360,17 @@ def docx_paragraph_text(path: Path, include_tables: bool = True):
             for para in tbl.iter(_DOCX_W + "p"):
                 table_paras.add(id(para))
     out = []
-    for para in root.iter(_DOCX_W + "p"):
+    for para in _docx_visible_paragraphs(root):
         if id(para) in table_paras:
             continue
         parts = []
-        for node in para.iter():
-            if node.tag == _DOCX_W + "t":
-                parts.append(node.text or "")
-            elif node.tag in (_DOCX_W + "br", _DOCX_W + "cr", _DOCX_W + "tab"):
+        for node in _docx_visible_nodes(para):
+            if node.tag in (_DOCX_W + "br", _DOCX_W + "cr", _DOCX_W + "tab"):
                 parts.append("\n")
+            elif node.tag == _DOCX_W + "noBreakHyphen":
+                parts.append("-")
+            elif node.tag == _DOCX_W + "t":
+                parts.append(node.text or "")
         out.append("".join(parts))
     return "\n".join(out)
 

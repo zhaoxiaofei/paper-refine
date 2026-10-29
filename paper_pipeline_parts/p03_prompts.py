@@ -596,7 +596,10 @@ the artifacts landing in ./revised. Read the skill's SKILL.md and its references
   R1  re-verify every finding against the sources; record a verdict with a location-checked
       rationale (empty rationale = invalid). False positives are discarded only with a concrete
       recorded rationale; ambiguous wording becomes "clarification"; unverifiable becomes
-      "manual-required".
+      "manual-required". EXCEPTION — a finding the auditor DROPPED is recorded as
+      `dropped-by-audit` with the auditor's evidence and is NOT re-validated or re-litigated
+      (the audit block above is authoritative); the ledger still NAMES its id so nothing is
+      silently dropped.
   R2  copy the editable documents into revised/ (doc/docx/tex/bib/md/txt/xlsx; never pdf/png).
   R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E12; P propagation A6
       (supplementary tables > supplementary figures/notes > main figures & legends > Methods >
@@ -3232,6 +3235,8 @@ Inputs (paths relative to the sandbox root):
   revised/MANUAL_STEPS.md
   revised/README-AUTHOR-TO-COMPLETE.md   when the readme hand-off policy is in force, the manual
                            items live there instead of revised/MANUAL_STEPS.md
+  revision_audit/DELETED_PARAGRAPHS.md   the seeded deletion audit (base -> revised); its last
+                           column is YOUR disposition, editable in place
   raw_data/, code/         the read-only sources the hierarchy names
 
 WHAT TO AUDIT — one row per CONFIRMED defect in the revision:
@@ -3268,6 +3273,23 @@ WHAT TO AUDIT — one row per CONFIRMED defect in the revision:
      matching verification row (`work/EMAIL_VERIFICATION.json` for an address,
      `work/FACT_VERIFICATION.json` for an identifier; a newly ADDED identifier for new content is
      not a correction, but its own lookup still governs it).
+
+DELETED-PARAGRAPH AUDIT — mandatory, and it is not satisfied by the plan alone:
+`revision_audit/DELETED_PARAGRAPHS.md` lists every base prose paragraph whose normalised text is
+absent from `revised/`. A moved, merged or lightly reworded paragraph appears there too: decide
+whether every fact survived, not merely whether the bytes moved. Edit that file IN PLACE and put one
+disposition in the last cell of EVERY row:
+  * `OK — <why no fact is lost>` for a duplicate, artifact or obsolete paragraph, or for a paragraph
+    whose every fact, number, definition and claim survives at a NAMED location in `revised/`
+    (`OK — merged into Results paragraph 3; all values survive`). Do not write a bare `OK` or repeat
+    one generic sentence: the orchestrator treats repeated boilerplate as an undisposed row.
+  * `fact removed — RP-xxx` when a fact, number, definition, method step or claim has no surviving
+    carrier, AND add that row to `REPAIR_PLAN.json` with the exact restoration/rewrite. A paragraph
+    carrying a fact may not be removed to resolve a finding.
+  * `manual-required — <reason>` for a corrupted paragraph with no recoverable fact: the author must
+    decide; it is not `OK`.
+The audit FAILS (and the stage is retried) while any row's disposition cell is empty. An empty plan
+is still a valid result only after every deleted-paragraph row is disposed.
 
 For every row you must give a LOCATION, the WRONG text or value, the CORRECT value, and the BASIS
 (the exact file/line/table/identifier that decides it, re-runnable by another session). If you

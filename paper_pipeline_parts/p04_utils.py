@@ -6757,12 +6757,29 @@ def evidence_pack_summary(ev: dict) -> str:
             + f"; digest {str(ident.get('digest'))[:12]}")
 
 
+def m30_seed_disposition(row) -> str:
+    """The disposition the M30 seed already carries for one written value.
+
+    A written number the shipped tables do not prove and the scan could pair
+    with NO candidate producer is a recorded `unable` (the hierarchy has no
+    producer in this corpus), not an agent task. Pre-filling those rows is what
+    keeps a 165-row seed from being skipped wholesale: the agent disposes the
+    handful of rows that actually have a producer.
+    """
+    producer = str((row or {}).get("candidate producer") or "").strip()
+    if not producer or producer.startswith("(no shipped table column"):
+        return ("unable — no shipped producer in the corpus (M30 structural "
+                "row; not a source-hierarchy conflict)")
+    return ""
+
+
 def _evidence_artifact_table(rows: list, columns: list, empty_note: str) -> str:
     out = ["| # | " + " | ".join(columns) + " | disposition |",
            "|---|" + "---|" * (len(columns) + 1)]
     for i, r in enumerate(rows, 1):
         cells = " | ".join(str(r.get(c, "")).replace("|", "\\|")[:140] for c in columns)
-        out.append(f"| {i} | {cells} |  |")
+        disposition = str(r.get("disposition") or "").replace("|", "\\|")
+        out.append(f"| {i} | {cells} | {disposition} |")
     if not rows:
         out.append("| - | " + " | ".join("—" for _ in columns) + f" | {empty_note} |")
     # The reminder sits AFTER the table (and outside it: the block ends at the
@@ -7579,12 +7596,14 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     hrows = (ev.get("hierarchy") or {}).get("rows") or []
     crows = (ev.get("code_literals") or {}).get("rows") or []
     nrows = (ev.get("negative_claims") or {}).get("rows") or []
+
     h_rows = [{"document": r.get("document"), "kind": r.get("kind"),
                "number": r.get("number"), "unit": r.get("unit") or "",
                "sentence": (r.get("sentence") or "")[:110],
                "candidate producer": r.get("candidate producer"),
                "producer summary": r.get("producer summary"),
-               "seed check": r.get("seed check")} for r in hrows]
+               "seed check": r.get("seed check"),
+               "disposition": m30_seed_disposition(r)} for r in hrows]
     c_rows = [{"file": r.get("file"), "line": r.get("line"), "symbol": r.get("symbol"),
                "value": r.get("value"), "context": (r.get("context") or "")[:90]}
               for r in crows]
@@ -7600,9 +7619,11 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         "with the candidate producer column(s) and the check the code could make (a table's own "
         "row count against a cohort-size sentence; a written value against a column's values and "
         "statistics). Table B lists the module-level literals the corpus's code/config files "
-        "declare — the producer side of a Methods parameter. Dispose EVERY seeded row "
-        "(`OK — <the reconciling reason>` / `contradiction — <finding id>` / "
-        "`unable — the producer is not in the corpus`), then ADD the rows the code cannot see: "
+        "declare — the producer side of a Methods parameter. Dispose every seeded row whose "
+        "`disposition` cell is EMPTY (rows already marked `unable — no shipped producer` are "
+        "recorded by the orchestrator): `OK — <the reconciling reason>` / "
+        "`contradiction — <finding id>` / `unable — the producer is not in the corpus`. Then ADD "
+        "the rows the code cannot see: "
         "figure/panel ↔ the code or raw data that generates it, protocol step ↔ the code that "
         "implements it, sample/cohort set ↔ the data's rows, a Methods parameter ↔ the code's "
         "constant. One finding per incompatible instance, naming BOTH sides and the authoritative "

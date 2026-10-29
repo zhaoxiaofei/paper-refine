@@ -879,15 +879,35 @@ def postcheck_revise(ctx: Ctx, rec: dict):
         else:
             try:
                 block_problems = []
+                actionable = actionable_empty = 0
                 for block in parse_markdown_blocks(ledger):
-                    if block["rows"]:
-                        block_problems += disposition_artifact_problems(
-                            block["rows"], block.get("widths"), len(block["header"]))
+                    if not block["rows"]:
+                        continue
+                    block_problems += disposition_artifact_problems(
+                        block["rows"], block.get("widths"), len(block["header"]))
+                    for row in block["rows"]:
+                        producer = str(row.get("candidate producer") or "").strip()
+                        # A row the scan already recorded as "no shipped
+                        # producer" is not an agent task; the rows that still
+                        # need a disposition are the ones with a real candidate.
+                        if producer and not producer.startswith("(no shipped table column"):
+                            actionable += 1
+                            if not str(row.get("disposition") or "").strip():
+                                actionable_empty += 1
                 if block_problems:
-                    warns.append(f"work/M30_hierarchy_reconciliation.md still carries "
-                                 f"{len(block_problems)} undisposed row(s) ({block_problems[0][:80]}): "
-                                 f"an M30 finding's fix must record the producer it reconciled "
-                                 f"against (rule E12)")
+                    message = (f"work/M30_hierarchy_reconciliation.md still carries "
+                               f"{len(block_problems)} undisposed row(s) "
+                               f"({block_problems[0][:80]}): an M30 finding's fix must record "
+                               f"the producer it reconciled against (rule E12)")
+                    if actionable and actionable_empty == actionable:
+                        # None of the rows that actually need a comparison was
+                        # disposed: the check was not run at all, not merely
+                        # left one row short. Fail the attempt (the retry prompt
+                        # carries this message) instead of accepting the warning
+                        # the evaluation run ignored.
+                        errs.append(message + "; every row with a candidate producer is EMPTY")
+                    else:
+                        warns.append(message)
             except Exception as e:                                  # noqa: BLE001
                 warns.append(f"work/M30_hierarchy_reconciliation.md could not be read ({e}); "
                              f"the M30 rows stay unverified")
@@ -3510,6 +3530,179 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
+_DELETED_PARA_MIN = 60
+_DELETED_PARA_SKIP_RE = re.compile(
+    r"(?i)^(?:#{1,6}\s|\\(?:sub)*section\*?\s*\{|\\(?:sub)*paragraph\s*\{|"
+    r"\\caption(?:of)?\*?\s*\{|"
+    r"\*\*?(?:figure|table|scheme)\b|(?:figure|table)\s+[a-z]?\d+[.:]|"
+    r"\[(?:insert|ref|cite)\b|todo\b|tbd\b|lorem ipsum|"
+    r"\\bibitem\b|\[\d+\]\s|"
+    r"[A-Z][A-Za-z'’.-]+,\s+[A-Z]\.)\s*")
+
+
+def _deleted_para_norm(text) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _deleted_para_candidate(text) -> str:
+    """A prose paragraph worth auditing when it disappears, or "".
+
+    Headings, captions, reference entries and hand-off artifacts are not fact-
+    bearing prose; a short fragment is noise. The full paragraph text travels
+    (up to 1200 characters in the table) so the auditor can decide without
+    re-reading a huge document for every row.
+    """
+    s = _deleted_para_norm(text)
+    if len(s) < _DELETED_PARA_MIN or _DELETED_PARA_SKIP_RE.match(s):
+        return ""
+    return s
+
+
+def _text_paragraphs_with_lines(text: str):
+    """(offset, paragraph) of one text document, split at blank lines."""
+    offset = 0
+    for para in re.split(r"\n\s*\n", text or ""):
+        start = text.find(para, offset)
+        if start < 0:
+            start = offset
+        offset = start + len(para) + 1
+        yield start, para
+
+
+def deletion_audit_paragraphs(root: Path) -> list:
+    """[(document, line, text)] for the prose paragraphs a package carries.
+
+    Only submitted prose is read: process scratch (`work/`), evidence areas,
+    README/bookkeeping files and OS by-products are not part of the manuscript.
+    DOCX text comes from the shared visible-paragraph reader, so the audit sees
+    the same words a reader does.
+    """
+    rows = []
+    root = Path(root)
+    if not root.is_dir():
+        return rows
+    for p in _iter_tree_files(root):
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        top = rel.split("/", 1)[0].lower()
+        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
+            continue
+        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
+                or is_non_submitted_readme_name(p.name)
+                or is_non_shippable_name(p.name)):
+            continue
+        ext = p.suffix.lower()
+        if ext == ".docx":
+            paras = _docx_paragraphs(p) or []
+            for index, text in enumerate(paras, 1):
+                if _deleted_para_candidate(text):
+                    rows.append((rel, index, text))
+        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx"):
+            text = read_text_bounded(p)
+            if text is None:
+                continue
+            for start, para in _text_paragraphs_with_lines(text):
+                if _deleted_para_candidate(para):
+                    rows.append((rel, text[:start].count("\n") + 1, para))
+    return rows
+
+
+def deletion_audit_rows(base: Path, revised: Path) -> list:
+    """Base prose paragraphs whose normalised text is absent from `revised`.
+
+    A paragraph that was moved, merged or lightly reworded appears here too:
+    the audit row asks the auditor to decide whether every fact survived, not
+    merely whether the bytes moved. That is the point -- a silent deletion is
+    exactly the failure the revision audit exists to catch.
+    """
+    revised_norm = {_deleted_para_norm(text)
+                    for _rel, _line, text in deletion_audit_paragraphs(revised)}
+    rows, seen = [], set()
+    for rel, line, text in deletion_audit_paragraphs(base):
+        norm = _deleted_para_norm(text)
+        if norm in revised_norm or norm in seen:
+            continue
+        seen.add(norm)
+        rows.append({"document": rel, "line": line, "paragraph": norm})
+    return rows
+
+
+def deletion_audit_markdown(rows: list) -> str:
+    """The seeded table the revision auditor must dispose."""
+    lines = [
+        "# DELETED PARAGRAPHS — revision audit (base -> revised)",
+        "",
+        "Every base prose paragraph whose text is absent from `revised/` is listed",
+        "below. A moved, merged or reworded paragraph appears here too: decide",
+        "whether every fact survived, not merely whether the bytes moved.",
+        "",
+        "| # | document | line | paragraph | disposition |",
+        "|---|---|---|---|---|",
+    ]
+    if not rows:
+        lines.append("| - | — | — | no base prose paragraph was removed | OK — nothing removed |")
+    for i, row in enumerate(rows, 1):
+        para = str(row.get("paragraph") or "").replace("|", "\\|")[:1200]
+        doc = str(row.get("document") or "").replace("|", "\\|")
+        lines.append(f"| {i} | {doc} | {int(row.get('line') or 0)} | {para} |  |")
+    lines += [
+        "",
+        "_Dispose EVERY row in the last column: `OK — <why no fact is lost>` for a",
+        "duplicate/artifact/obsolete paragraph or one whose every fact survives at a",
+        "named location; `fact removed — RP-xxx` plus that row in `REPAIR_PLAN.json`",
+        "when a fact, number, definition, method step or claim has no surviving",
+        "carrier. A corrupted paragraph with no recoverable fact is `manual-required`,",
+        "not `OK`. A paragraph carrying a fact may not be removed to resolve a finding._",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def deletion_audit_problems(sb: Path, expected_rows: int = None,
+                            plan_ids=None) -> list:
+    """Problems with the revision audit's deleted-paragraph dispositions.
+
+    `expected_rows` is the seed's row count: an audit that deletes rows instead
+    of disposing them must not pass. A block without a disposition column is a
+    problem too (the shared checker silently returns [] when the column is
+    absent, which would turn a rewritten table into a clean audit). When
+    `plan_ids` is given, a `fact removed — RP-xxx` disposition must name a row
+    in the bounded-repair plan; otherwise the audit records a removal and asks
+    for no repair.
+    """
+    p = Path(sb) / "revision_audit" / "DELETED_PARAGRAPHS.md"
+    if not p.is_file():
+        return [f"{p.name} is missing: the deletion audit was not written"]
+    problems, seen_rows = [], 0
+    check_plan = plan_ids is not None
+    plan_ids = {str(x).strip().upper() for x in (plan_ids or ()) if str(x).strip()}
+    for block in parse_markdown_blocks(p):
+        if not block["rows"]:
+            continue
+        seen_rows += len(block["rows"])
+        if not any("disposition" in str(h) for h in block["header"]):
+            problems.append(f"{p.name} has a table with no disposition column; "
+                            f"re-emit the seeded table with its last column intact")
+            continue
+        problems += disposition_artifact_problems(
+            block["rows"], block.get("widths"), len(block["header"]))
+        if check_plan:
+            for row in block["rows"]:
+                disposition = str(row.get("disposition") or "")
+                for match in re.finditer(r"(?i)fact\s+removed\s*[—:-]\s*(RP-\d+)",
+                                         disposition):
+                    if match.group(1).upper() not in plan_ids:
+                        problems.append(
+                            f"{p.name} records {match.group(1)} as a removed fact but the "
+                            f"bounded-repair plan has no row with that id")
+    if expected_rows is not None and seen_rows < int(expected_rows):
+        problems.append(f"{p.name} lists {seen_rows} row(s) but the seed listed "
+                        f"{int(expected_rows)}: a deleted paragraph was removed from the "
+                        f"audit instead of disposed")
+    return problems
+
+
 def response_comment_quotes(letter: str) -> dict:
     """{concern id: the verbatim `**Comment:**` quotation in that block}.
 
@@ -3753,40 +3946,62 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
     # `evidence` ("the reviewer said main.docx is unclear") authorise an edit
     # to main.docx (F88).
     authorized = set()
-    ledger_text = ""
     lp = rev / "revision_report.json"
-    if lp.is_file():
-        ledger_text = read_text_bounded(lp) or ""
-        try:
-            ledger_data = json.loads(ledger_text) if ledger_text.strip() else None
-        except ValueError:
-            ledger_data = None
-        if isinstance(ledger_data, list):
-            ledger_rows = ledger_data
-        elif isinstance(ledger_data, dict):
-            ledger_rows = (ledger_data.get("ledger") or ledger_data.get("findings")
-                           or ledger_data.get("coverage") or [])
-        else:
-            ledger_rows = []
-        for row in ledger_rows:
-            if not isinstance(row, dict):
-                continue
-            for key in ("file", "files", "path", "paths", "changed_files"):
-                value = row.get(key)
-                values = value if isinstance(value, (list, tuple)) else [value]
-                for item in values:
+    # Use the SAME reader the ledger contract/postcheck use: `read_json(...,
+    # lenient=True)` accepts a fenced or prose-introduced agent document, and
+    # `read_json` applies the regular-file/no-follow/byte budget. A bare
+    # `json.loads` used to reject a lenient ledger here although
+    # `revision_ledger_problems` had accepted it (a valid edit then failed the
+    # scoped guard). The ledger may also be a mapping keyed by finding id; the
+    # old text search found the file there, this structured reader must too.
+    ledger_data = (read_json(lp, revive=False, lenient=True)
+                   if lp.is_file() else None)
+    if isinstance(ledger_data, list):
+        ledger_rows = ledger_data
+    elif isinstance(ledger_data, dict):
+        ledger_rows = None
+        for key in ("ledger", "findings", "coverage", "rows"):
+            value = ledger_data.get(key)
+            if isinstance(value, list):
+                ledger_rows = value
+                break
+            if isinstance(value, dict):
+                ledger_rows = list(value.values())
+                break
+        if ledger_rows is None:
+            # A single row object, or a mapping keyed by finding id.
+            if any(k in ledger_data for k in
+                   ("id", "verdict", "final_status", "file", "files", "path",
+                    "paths", "changed_files", "changes", "edits")):
+                ledger_rows = [ledger_data]
+            else:
+                ledger_rows = [v for v in ledger_data.values()
+                               if isinstance(v, dict)]
+    else:
+        ledger_rows = []
+    for row in ledger_rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ("file", "files", "path", "paths", "changed_files"):
+            value = row.get(key)
+            values = value if isinstance(value, (list, tuple)) else [value]
+            for item in values:
+                if isinstance(item, dict):
+                    item = item.get("file") or item.get("path")
+                if isinstance(item, str) and item.strip():
+                    authorized.add(item.strip())
+        for key in ("changes", "edits"):
+            for change in row.get(key) or []:
+                if isinstance(change, str) and change.strip():
+                    authorized.add(change.strip())
+                    continue
+                if not isinstance(change, dict):
+                    continue
+                for name in ("file", "path"):
+                    item = change.get(name)
                     if isinstance(item, str) and item.strip():
                         authorized.add(item.strip())
-            for key in ("changes", "edits"):
-                for change in row.get(key) or []:
-                    if not isinstance(change, dict):
-                        continue
-                    for name in ("file", "path"):
-                        item = change.get(name)
-                        if isinstance(item, str) and item.strip():
-                            authorized.add(item.strip())
     authorized_names = {Path(p.replace("\\", "/")).name for p in authorized}
-    # `ledger_text` is kept only for the diagnostics below.
     added = sorted(set(got) - set(want))
     dropped = sorted(set(want) - set(got))
     # A version-token rename (`main-4f3a9c1.docx` -> `main-9b2c7e4.docx`) is

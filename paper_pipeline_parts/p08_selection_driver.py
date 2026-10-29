@@ -2635,9 +2635,17 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     # and a stale file made an interrupted chain look complete.
     (sb / "revision_audit").mkdir(parents=True, exist_ok=True)
     for _rel in ("revision_audit/REPAIR_PLAN.json", "revision_audit/REPAIR_PLAN.md",
+                 "revision_audit/DELETED_PARAGRAPHS.md",
                  "revised/REPAIR_LEDGER.json", "revised/REPAIR_LEDGER.md"):
         (sb / _rel).unlink(missing_ok=True)
     shutil.rmtree(sb / "revised_prerepair", ignore_errors=True)
+    # Seed the deletion audit from base -> revised. The auditor must dispose
+    # every row: a deleted paragraph that carried a fact is exactly the
+    # "FACT REMOVED" class this stage exists to catch, and leaving the seed
+    # blank fails the attempt instead of silently certifying the deletion.
+    _deleted_rows = deletion_audit_rows(sb / "base", sb / REVISED_DIR)
+    write_text_atomic(sb / "revision_audit" / "DELETED_PARAGRAPHS.md",
+                      deletion_audit_markdown(_deleted_rows))
     write_text_atomic(sb / REVISION_AUDIT_PROMPT_FILE,
                       revision_audit_prompt(sb, rec["id"], r))
     # The revision audit is documented READ-ONLY on every input its prompt
@@ -2658,14 +2666,21 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                            "_revision_audit.log")
     (sb / REVISION_AUDIT_PROMPT_FILE).unlink(missing_ok=True)
     rows = _revision_plan_rows(sb)
+    _plan_ids = [str(r.get("id") or "") for r in (rows or []) if isinstance(r, dict)]
+    deletion_problems = deletion_audit_problems(
+        sb, expected_rows=len(_deleted_rows), plan_ids=_plan_ids)
     audit_rec = {"status": "failed", "rows": 0,
                  "duration": round(res.get("dur") or 0.0, 1),
+                 "deleted_paragraphs": len(_deleted_rows),
                  "error": str(res.get("error") or "")}
     if res.get("error") or res.get("rc") not in (0,):
         audit_rec["error"] = audit_rec["error"] or f"audit session exited rc={res.get('rc')}"
     elif rows is None:
         audit_rec["error"] = ("no valid revision_audit/REPAIR_PLAN.json (every row needs a "
                               "unique id and a package-relative file)")
+    elif deletion_problems:
+        audit_rec["error"] = ("the deletion audit is incomplete: "
+                              + deletion_problems[0][:400])
     else:
         audit_rec["status"] = "done"
         audit_rec["rows"] = len(rows)

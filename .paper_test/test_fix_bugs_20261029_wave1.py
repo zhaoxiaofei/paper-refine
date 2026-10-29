@@ -152,6 +152,34 @@ def test_f06() -> None:
     check("F06 an unsupported binary is refused, not counted",
           proc2.returncode != 0 and "binary document" in (proc2.stdout + proc2.stderr),
           f"rc={proc2.returncode} {(proc2.stdout + proc2.stderr)[:200]}")
+    # A text box's paragraph is nested inside its container paragraph, and an
+    # mc:AlternateContent carries the same text twice. Reading every
+    # descendant counted both; the visible-text walk must count each once.
+    ns = ('xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+          'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+          'xmlns:v="urn:schemas-microsoft-com:vml"')
+    body = (
+        "<w:document " + ns + "><w:body>"
+        "<w:p><w:r><w:t>Outer</w:t></w:r><w:r><w:pict><v:shape><v:textbox>"
+        "<w:txbxContent><w:p><w:r><w:t>Inner</w:t></w:r></w:p></w:txbxContent>"
+        "</v:textbox></v:shape></w:pict></w:r></w:p>"
+        "<w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"wps\">"
+        "<w:t>Choice</w:t></mc:Choice><mc:Fallback><w:t>Fallback</w:t>"
+        "</mc:Fallback></mc:AlternateContent></w:r></w:p>"
+        "</w:body></w:document>")
+    nested = d / "nested.docx"
+    with zipfile.ZipFile(nested, "w") as z:
+        z.writestr("word/document.xml", body)
+    text = cw.docx_paragraph_text(nested)
+    check("F06 a text box is counted once", text.count("Inner") == 1, repr(text))
+    check("F06 only one AlternateContent branch is counted",
+          "Fallback" not in text and text.count("Choice") == 1, repr(text))
+    dtd = d / "dtd.docx"
+    with zipfile.ZipFile(dtd, "w") as z:
+        z.writestr("word/document.xml",
+                   "<!DOCTYPE x [<!ENTITY y \"z\">]><w:document " + ns +
+                   "><w:body><w:p><w:r><w:t>&y;</w:t></w:r></w:p></w:body></w:document>")
+    check("F06 a DOCX with a DTD is refused", cw.docx_paragraph_text(dtd) is None)
 
 
 # ---------------------------------------------------------------------------
@@ -968,6 +996,15 @@ def test_f88() -> None:
         "id": "F1", "verdict": "fixed", "files": ["main.docx"]}]))
     check("F88 a structured files row authorises it",
           pp.scoped_scope_problems(None, sb, sb / "revised") == [])
+    _write(sb / "revised" / "revision_report.json", json.dumps({
+        "F1": {"verdict": "fixed", "file": "main.docx"}}))
+    check("F88 a mapping keyed by finding id authorises it",
+          pp.scoped_scope_problems(None, sb, sb / "revised") == [])
+    _write(sb / "revised" / "revision_report.json",
+           "Here is the ledger:\n```json\n" + json.dumps([{
+               "id": "F1", "verdict": "fixed", "files": ["main.docx"]}]) + "\n```\n")
+    check("F88 a lenient agent ledger authorises it",
+          pp.scoped_scope_problems(None, sb, sb / "revised") == [])
 
 
 # ---------------------------------------------------------------------------
@@ -1006,6 +1043,60 @@ def test_f90() -> None:
           and "NOT evaluated" in rows[0].get("detail", ""), str(rows))
 
 
+# ---------------------------------------------------------------------------
+# deletion audit + M30 seed: the evaluation run's two real process gaps
+# ---------------------------------------------------------------------------
+def test_deletion_audit_and_m30_seed() -> None:
+    print("\n== deletion audit / M30 seed ==")
+    d = scratch("fixbugs1029_delaudit_")
+    base, revised = d / "base", d / "revised"
+    base.mkdir()
+    revised.mkdir()
+    _write(base / "main.md",
+           "# Results\n\n"
+           "This base paragraph carries a fact that must survive the revision audit "
+           "and cannot be silently removed.\n\n"
+           "This duplicate paragraph should be reported as a removed duplicate, not "
+           "as an unexplained deletion.\n")
+    _write(revised / "main.md", "# Results\n\nA different paragraph survives here.\n")
+    rows = pp.deletion_audit_rows(base, revised)
+    check("the deletion audit finds the removed fact-bearing paragraphs",
+          len(rows) == 2 and all(r.get("paragraph") for r in rows), str(rows))
+    (d / "sb" / "revision_audit").mkdir(parents=True)
+    _write(d / "sb" / "revision_audit" / "DELETED_PARAGRAPHS.md",
+           pp.deletion_audit_markdown(rows))
+    check("an undisposed deletion table is a problem",
+          bool(pp.deletion_audit_problems(d / "sb")),
+          str(pp.deletion_audit_problems(d / "sb")))
+    text = pp.deletion_audit_markdown(rows).replace(
+        "|  |", "| OK — duplicate/artifact checked; no fact lost |", 1)
+    text = text.replace("|  |", "| fact removed — RP-001; restore the fact |", 1)
+    _write(d / "sb" / "revision_audit" / "DELETED_PARAGRAPHS.md", text)
+    check("a disposed deletion table passes",
+          pp.deletion_audit_problems(d / "sb") == [],
+          str(pp.deletion_audit_problems(d / "sb")))
+    check("a 'fact removed' disposition without a plan row is rejected",
+          any("no row with that id" in p
+              for p in pp.deletion_audit_problems(d / "sb", plan_ids=[])),
+          str(pp.deletion_audit_problems(d / "sb", plan_ids=[])))
+    check("a 'fact removed' disposition with its plan row passes",
+          pp.deletion_audit_problems(d / "sb", plan_ids=["RP-001"]) == [],
+          str(pp.deletion_audit_problems(d / "sb", plan_ids=["RP-001"])))
+    check("the M30 seed pre-disposes a no-producer row",
+          pp.m30_seed_disposition(
+              {"candidate producer": "(no shipped table column matches this sentence)"}
+          ).startswith("unable — no shipped producer"))
+    check("the M30 seed leaves a real producer for the agent",
+          pp.m30_seed_disposition({"candidate producer": "raw_data/x.csv:count"}) == "")
+    table = pp._evidence_artifact_table(
+        [{"a": "v", "disposition": "unable — no shipped producer in the corpus"}],
+        ["a"], "none")
+    check("the M30 table carries the seeded disposition",
+          "unable — no shipped producer in the corpus" in table, table)
+    check("the audit prompt names the deletion table",
+          "DELETED_PARAGRAPHS.md" in pp.revision_audit_prompt(d / "sb", "r1", 1))
+
+
 def main() -> int:
     tests = [
         test_f03, test_f04, test_f05, test_f06, test_f07, test_f08, test_f09,
@@ -1014,6 +1105,7 @@ def main() -> int:
         test_f35, test_f36, test_f37_f61, test_f38, test_f39, test_f40, test_f44,
         test_f45, test_f46, test_f47, test_f49, test_f58, test_f60, test_f62,
         test_f65, test_f68, test_f75, test_f88, test_f89, test_f90,
+        test_deletion_audit_and_m30_seed,
     ]
     for fn in tests:
         try:
