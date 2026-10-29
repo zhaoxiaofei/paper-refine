@@ -1062,6 +1062,12 @@ def test_deletion_audit_and_m30_seed() -> None:
     rows = pp.deletion_audit_rows(base, revised)
     check("the deletion audit finds the removed fact-bearing paragraphs",
           len(rows) == 2 and all(r.get("paragraph") for r in rows), str(rows))
+    check("a section heading is not a deletion row",
+          pp._deleted_para_candidate("# Results\n" + "word " * 30) == "")
+    check("a deleted figure caption is auditable",
+          bool(pp._deleted_para_candidate(
+              "**Figure 1.** Seedling density in thinned and control plots, with the "
+              "95% confidence interval shown for every block.")))
     (d / "sb" / "revision_audit").mkdir(parents=True)
     _write(d / "sb" / "revision_audit" / "DELETED_PARAGRAPHS.md",
            pp.deletion_audit_markdown(rows))

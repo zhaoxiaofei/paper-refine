@@ -3533,8 +3533,6 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
 _DELETED_PARA_MIN = 60
 _DELETED_PARA_SKIP_RE = re.compile(
     r"(?i)^(?:#{1,6}\s|\\(?:sub)*section\*?\s*\{|\\(?:sub)*paragraph\s*\{|"
-    r"\\caption(?:of)?\*?\s*\{|"
-    r"\*\*?(?:figure|table|scheme)\b|(?:figure|table)\s+[a-z]?\d+[.:]|"
     r"\[(?:insert|ref|cite)\b|todo\b|tbd\b|lorem ipsum|"
     r"\\bibitem\b|\[\d+\]\s|"
     r"[A-Z][A-Za-z'’.-]+,\s+[A-Z]\.)\s*")
