@@ -106,7 +106,7 @@ def state_of(root: Path) -> dict:
 def all_prompts(venue=None) -> dict:
     sb = Path("/tmp/paper_venue_prompt")
     return {
-        "review": nb.review_prompt(sb, "r1_review", 1, venue=venue),
+        "review": nb.review_prompt(sb, "r1_targeted_review", 1, venue=venue),
         "rewrite": nb.rewrite_prompt(sb, "r1_w1", 1, venue=venue),
         "revise": nb.revise_prompt(sb, "r1_a2_revise", 1, venue=venue),
         "audit": nb.audit_prompt(sb, "r1_audit", 1, venue=venue),
@@ -388,7 +388,7 @@ def test_frontiers_immunology_profile():
           and ctx.cfg.get("journal") == "Frontiers in Immunology"
           and ctx.cfg.get("article_type") == "original-research",
           f"{ctx.cfg.get('venue')} {ctx.cfg.get('journal')} {ctx.cfg.get('article_type')}")
-    prompt = nb.review_prompt(ctx.runs_dir / "x", "r1_review", 1,
+    prompt = nb.review_prompt(ctx.runs_dir / "x", "r1_targeted_review", 1,
                               venue=nb.venue_profile_of(ctx))
     check("VC1f the prompts name the journal and its caps",
           "Frontiers in Immunology" in prompt and "12000" in prompt

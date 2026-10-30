@@ -95,8 +95,8 @@ def build_revise_sandbox(ctx, drop=(), empty=(), rename=False, edited_pdf_twin=T
     sb.mkdir(parents=True)
     shutil.copytree(ctx.pristine, sb / "base")
     shutil.copytree(ctx.pristine, sb / "non_revised")
-    (sb / "review").mkdir()
-    (sb / "review" / "findings.json").write_text(json.dumps(
+    (sb / "targeted_review").mkdir()
+    (sb / "targeted_review" / "findings.json").write_text(json.dumps(
         {"submission_dir": "./base", "guidelines_source": "test",
          "findings": [{"id": "F-001", "location": "x", "category": 0, "check": "M1",
                        "severity": "Minor", "evidence": "e", "explanation": "x",
@@ -139,7 +139,7 @@ def build_revise_sandbox(ctx, drop=(), empty=(), rename=False, edited_pdf_twin=T
                        source_id="a1")
     rec["inputs_manifest"] = {"base": nb.hash_manifest(sb / "base"),
                               "non_revised": nb.hash_manifest(sb / "non_revised"),
-                              "review": nb.hash_manifest(sb / "review")}
+                              "targeted_review": nb.hash_manifest(sb / "targeted_review")}
     return rec, sb
 
 

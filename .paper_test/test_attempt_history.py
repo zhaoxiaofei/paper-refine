@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Attempt history + evidence retention — red on the pre-fix tree.
 
-The reported gap: the 2026-09-22 root's `r1_review` failed TWICE, for different
+The reported gap: the 2026-09-22 root's `r1_targeted_review` failed TWICE, for different
 reasons, and the run record (and therefore `status`, the run table in
 DECISION_REPORT.md and the console) described only the second failure. Attempt
 1's three problems existed only because they had been copied into attempt 2's
@@ -108,20 +108,20 @@ BOILERPLATE = "OK — summary written from the paragraph's own claim"
 
 def write_failed_review(sb: Path, rec: dict, *, rows: int = 30, with_coverage: bool = False):
     """A review deliverable that cannot pass: no coverage table, boilerplate rows."""
-    art = sb / nb.REVIEW_DIR / "artifacts"
+    art = sb / nb.TARGETED_REVIEW_DIR / "artifacts"
     art.mkdir(parents=True, exist_ok=True)
     body = "\n".join(f"| {i} | cnb-12-2-mainText.docx | Methods | {i} | 5 | summary {i} | "
                      f"{BOILERPLATE} |" for i in range(rows))
     write(art / "OUTLINE.md",
           "# OUTLINE\n\n| # | document | heading | paragraph | words | summary | disposition |\n"
           "|---|---|---|---|---|---|---|\n" + body + "\n")
-    write(sb / nb.MARKER_FILE, json.dumps({"stage": "review", "run_id": rec["id"], "round": 1,
+    write(sb / nb.MARKER_FILE, json.dumps({"stage": "targeted_review", "run_id": rec["id"], "round": 1,
                                            "status": "complete",
                                            "summary": {"findings_total": 0}}))
     fj = {"submission_dir": "./base", "findings": []}
     if with_coverage:
         fj["coverage"] = []
-    write(sb / nb.REVIEW_DIR / "findings.json", json.dumps(fj))
+    write(sb / nb.TARGETED_REVIEW_DIR / "findings.json", json.dumps(fj))
 
 
 print("== A. attempt numbering is monotone across retry ==")
@@ -196,7 +196,7 @@ write(sb / "_agent.log", "attempt 1 transcript\n")
 failed_attempt = nb.attempt_number(rec)
 nb.rebuild_sandbox(ctx, rec)
 arch = nb.failed_sandbox_dir(ctx, rec, 1)
-kept_outline = arch / nb.REVIEW_DIR / "artifacts" / "OUTLINE.md"
+kept_outline = arch / nb.TARGETED_REVIEW_DIR / "artifacts" / "OUTLINE.md"
 check("C1 the WHOLE sandbox is kept under runs/<run>_try1_failed (deliverables included)",
       arch.is_dir() and arch.name == f"{rec['id']}_try1_failed"
       and kept_outline.is_file() and BOILERPLATE in kept_outline.read_text(encoding="utf-8"),
@@ -214,7 +214,7 @@ check("C4 the kept sandbox is self-describing (record.json carries the attempt's
       record["attempt"] == 1 and record["ok"] is False and record["run_id"] == rec["id"]
       and record["errors"] and record["attempts_in_sandbox"] == [1],
       str(sorted(record))[:140])
-rebuilt = ctx.sandbox_of(rec) / nb.REVIEW_DIR / "artifacts" / "OUTLINE.md"
+rebuilt = ctx.sandbox_of(rec) / nb.TARGETED_REVIEW_DIR / "artifacts" / "OUTLINE.md"
 check("C6 the sandbox itself was rebuilt fresh (no marker, no stale deliverable)",
       not (ctx.sandbox_of(rec) / nb.MARKER_FILE).exists()
       and (not rebuilt.is_file() or BOILERPLATE not in rebuilt.read_text(encoding="utf-8")))
@@ -225,7 +225,7 @@ print()
 print("== D. the history is surfaced (status, report, console) ==")
 lines = "\n".join(nb.attempt_history_lines(ctx))
 check("D1 the history names the run, the attempt and its first problem",
-      f"{rec['id']} (review, round 1): 1 attempt(s), 1 failed" in lines
+      f"{rec['id']} (targeted_review, round 1): 1 attempt(s), 1 failed" in lines
       and "attempt 1" in lines and "problem(s)" in lines, lines[:160])
 check("D2 the history points at the kept sandbox and the transcript it carries",
       f"kept: runs/{rec['id']}_try1_failed/" in lines
@@ -248,7 +248,7 @@ with contextlib.redirect_stdout(status_buf), contextlib.redirect_stderr(status_b
         print(f"[debug] cmd_status exited {e}")
 check("D4 `status` shows the attempt history",
       "ATTEMPT HISTORY" in status_buf.getvalue()
-      and f"{rec['id']} (review, round 1)" in status_buf.getvalue(),
+      and f"{rec['id']} (targeted_review, round 1)" in status_buf.getvalue(),
       status_buf.getvalue()[-500:])
 
 print()
@@ -366,18 +366,18 @@ print("== I. the retry prompt is told EVERY failure of the previous attempt ==")
 many_errors = [f"decision artifact artifacts/T{i}.md: {i} of {i} row(s) have an EMPTY "
                f"disposition cell (every seeded row must be disposed or reconciled)"
                for i in range(1, 7)]
-rec_i = {"id": "r1_review", "kind": "review", "round": 1, "attempts": 1, "attempts_done": 1,
+rec_i = {"id": "r1_targeted_review", "kind": "targeted_review", "round": 1, "attempts": 1, "attempts_done": 1,
          "postcheck": {"ok": False, "errors": many_errors[:1], "warnings": ["w1", "w2"]},
          "attempts_log": [{"attempt": 1, "ok": False, "n_errors": len(many_errors),
                            "n_warnings": 2, "errors": many_errors, "warnings": ["w1", "w2"],
-                           "sandbox_moved_to": "runs/r1_review_try1_failed"}]}
+                           "sandbox_moved_to": "runs/r1_targeted_review_try1_failed"}]}
 nb.CURRENT_RUN_LOG = None
 text = nb.prior_failure_text(rec_i)
 check("I1 EVERY error of the previous attempt reaches the next session (no 4/1200-char cut)",
       all(e in text for e in many_errors) and "fix ALL of them" in text,
       text[:160])
 check("I2 the attempt's warnings and its kept sandbox are named too",
-      "w1" in text and "w2" in text and "runs/r1_review_try1_failed" in text)
+      "w1" in text and "w2" in text and "runs/r1_targeted_review_try1_failed" in text)
 check("I3 the block is built from the complete attempts_log entry, not `last_error`",
       nb.prior_failure_text({"attempts": 1, "last_error": "x" * 4000,
                              "attempts_log": rec_i["attempts_log"]}) == text)

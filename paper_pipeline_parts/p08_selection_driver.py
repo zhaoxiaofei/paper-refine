@@ -407,7 +407,7 @@ def candidate_tiebreak_inputs(ctx: Ctx, r: int, vid: str) -> tuple:
     open in the package -- self-reported by the producing session exactly like
     `critical_remaining`, and never a score, a gate or a reason to make a version
     ineligible. The frozen-review cross-check exists only for the arms that
-    consume a `review/` directory (the revise arm) and only in the reported-zero
+    consume a `targeted_review/` directory (the revise arm) and only in the reported-zero
     direction; a rewrite or integration self-report is unverified, exactly as the
     decision record's `tiebreak_notes` say. `manual_steps` is
     REPORTED, never ranked on: it measures how much work the pipeline hands to the
@@ -1227,7 +1227,7 @@ def sweep_artifacts(ctx: Ctx, cmd: list = None, timeout: int = 0) -> list:
     """Adopt runs left pending whose completion signal already exists (manual-mode
     completions, or a previous crashed orchestrator).
 
-    The signal is the agent-written marker (rewrite/review/revise/integrate) or a parseable
+    The signal is the agent-written marker (rewrite/targeted-review/revise/integrate) or a parseable
     scores.json (judge) -- never a bare non-empty output directory.
 
     An adopted run whose postcheck fails on REPAIRABLE bookkeeping gets the same one
@@ -2117,25 +2117,34 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "materialize": (lambda c: materialize_concerns(c, r))})
             review_deps = [rid_concerns(r)]
         else:
-            entries.append({"id": rid_review(r), "kind": "review", "vid": None,
-                            "deps": [rid_a1(r)] + ([feedback_rid] if feedback_rid else []),
-                            "stage": "review",
-                            "materialize": (lambda c: materialize_review(c, r, "a"))})
-            review_deps = [rid_review(r)]
-        if review_split_of(ctx) != "off" and not scoped:
-            entries.append({"id": rid_review_b(r), "kind": "review", "vid": None,
-                            # Session B consumes session A's OUTPUT (`review_a/`,
+            # THE TARGETED REVIEW (the round's general checklist pass). With
+            # `--no-targeted-review` this stage is not planned at all: the probe
+            # review below is then the round's ONLY finding source, and the
+            # classes the targeted review owns are recorded as a named gap by
+            # `synthesize_frozen_review` (see p19_profiles.py) -- in the frozen
+            # `targeted_review/findings.json` coverage table every downstream session
+            # reads, in the audit/revise prompts and in `pipeline_config.json`.
+            review_deps = []
+            if targeted_review_enabled(ctx):
+                entries.append({"id": rid_targeted_review(r), "kind": "targeted_review", "vid": None,
+                                "deps": [rid_a1(r)] + ([feedback_rid] if feedback_rid else []),
+                                "stage": "targeted_review",
+                                "materialize": (lambda c: materialize_review(c, r, "a"))})
+                review_deps = [rid_targeted_review(r)]
+        if review_split_of(ctx) != "off" and not scoped and targeted_review_enabled(ctx):
+            entries.append({"id": rid_targeted_review_b(r), "kind": "targeted_review", "vid": None,
+                            # Session B consumes session A's OUTPUT (`targeted_review_a/`,
                             # copied by materialize_review): with the same deps as
                             # A, B was materialized first and kept whatever A had
                             # written at that instant -- the seeded evidence pack
                             # at best, nothing at worst, never the findings.
-                            "deps": [rid_a1(r), rid_review(r)], "stage": "review",
+                            "deps": [rid_a1(r), rid_targeted_review(r)], "stage": "targeted_review",
                             "materialize": (lambda c: materialize_review(c, r, "b"))})
-            review_deps.append(rid_review_b(r))
+            review_deps.append(rid_targeted_review_b(r))
         if (probe_review_of(ctx) == "on" and not scoped
                 and round_review_scope(ctx, r) == "full"):
             # The PROBE REVIEW: an independent, cold-context DISCOVERY session
-            # that runs IN PARALLEL with the checklist review (same base, no
+            # that runs IN PARALLEL with the TARGETED review (same base, no
             # dependency on it). It hunts any defect class and, where a
             # computation can show one, declares a re-runnable verifier the
             # orchestrator re-runs. Its findings feed the frozen list (X-9xx),
@@ -2583,7 +2592,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     Two guards keep the chain off a judged artifact: a round that is already
     decided is never audited/repaired (its champion and pin are that digest's
     bytes, rule 5), and a concern-scoped (major/minor) revision has no general
-    review/audit to consume -- its edits are limited to the admitted concerns.
+    targeted-review/audit to consume -- its edits are limited to the admitted concerns.
     """
     if rec.get("kind") != "revise":
         return
@@ -2676,7 +2685,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     write_text_atomic(sb / REVISION_AUDIT_PROMPT_FILE,
                       revision_audit_prompt(sb, rec["id"], r))
     # The revision audit is documented READ-ONLY on every input its prompt
-    # names -- base/, revised/, review/, audit/, raw_data/ and code/ -- and may
+    # names -- base/, revised/, targeted_review/, audit/, raw_data/ and code/ -- and may
     # write only revision_audit/REPAIR_PLAN.json. Snapshot each area so a
     # session that edits the manuscript (or the frozen findings/base it audits
     # against) is caught instead of being silently accepted.

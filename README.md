@@ -582,7 +582,7 @@ must not silence the HG008 original).
 ### Package self-consistency: PKG-11 to PKG-24
 
 Every scan below runs on each produced package and on every published copy, and
-its rows are seeded in the review/audit/revision evidence pack. The table-
+its rows are seeded in the targeted-review/audit/revision evidence pack. The table-
 contradiction rows block the readiness verdict (one of the two statements is
 wrong, and only the author can say which); the claim-quality seeds are advisory
 because they need a judgment the code cannot make.
@@ -668,7 +668,7 @@ they must anonymize and re-name every file, so they receive per-view copies
 [![One revision round: the read-only manuscript, the round base, the directed-evolution and large-scale-mutation arms, the cross-over integration and the blind judge panel](media/paper-refine-one-revision-round.png)](media/paper-refine-one-revision-round.png)
 
 *One revision round — the read-only manuscript, the round's base `a1`, the
-directed-evolution (review/audit/revise) and large-scale-mutation (rewrite) arms,
+directed-evolution (targeted-review/audit/revise) and large-scale-mutation (rewrite) arms,
 the cross-over integration, and the blind judge panel that pins the champion by
 digest ([PNG](media/paper-refine-one-revision-round.png)).*
 
@@ -1061,7 +1061,12 @@ Setup-time policy flags:
 `--audit {off,on}` (the auditor stage), `--revision-audit {on,off}`
 (after every revise run: an independent revision audit writes a bounded-repair
 plan, and ONE bounded repair pass applies it; ON by default, `PAPER_REVISION_AUDIT=off`
-turns an existing root off), `--probe-review {on,off}`
+turns an existing root off), `--targeted-review {on,off}` / `--no-targeted-review` (the round's
+checklist pass; ON by default; OFF runs the probe alone and records the targeted classes as a named
+gap, see "The TARGETED review" below), `--execution-profile {high,medium}` (the instruction
+profile: `high` is the pipeline unchanged, `medium` pages the elaborative rule sections out of each
+stage prompt into `INSTRUCTIONS/PROFILE_RULES.md` — see "Execution profiles" below),
+`--probe-review {on,off}`
 (the independent discovery session; ON by default, `--no-probe-review` turns it off,
 `set-probe-review off` flips an existing root), `--submit-code {off,on}`
 (whether the analysis-code area `code/` is part of the submission; OFF by
@@ -1147,13 +1152,13 @@ did not support it — and the reviewer's own discovery probes had read that ver
 "no anomalies".
 
 The **probe review** is one extra independent session per full-scope round (`r<r>_probe`, planned
-in parallel with `r<r>_review`; the auditor and the revision arms WAIT for it). It is deliberately
+in parallel with `r<r>_targeted_review`; the auditor and the revision arms WAIT for it). It is deliberately
 cold-context and GENERIC — any defect class may be reported. It belongs to the review STEP: the
 auditor and the revisers consume its findings, so `run --only review` (or `2:review`) drives the
 probe with the review, while `retry --runs 1:review` stays exact (a retry resets only the runs the
 operator names):
 
-* it is given the corpus and NOTHING else — no `review/`, no finding list, no sweeps; its sandbox
+* it is given the corpus and NOTHING else — no `targeted_review/`, no finding list, no sweeps; its sandbox
   carries only `base/`, `non_revised/` and three seeded CANDIDATE inventories
   (`probe_review/CLAIM_SURFACES.md`, `probe_review/PRODUCERS.md` and — since 2026-10-16 —
   `probe_review/OBLIGATIONS.md`, what THIS submission promises: the submitted set its own README
@@ -1173,7 +1178,7 @@ operator names):
   probe cannot reproduce is a correctness blocker, not a finding;
 * every finding is an **`X-9xx` row** (the reserved probe block) of the same standing as the
   discovery round's `X-*` findings: it is merged into the frozen
-  `review/round2/findings_extra.json` of the auditor and every reviser (the source review sandbox
+  `targeted_review/round2/findings_extra.json` of the auditor and every reviser (the source review sandbox
   is never mutated), into the integration seed `frozen_discovery/`, and into
   `reports/round<r>_review/` (so a pruned root re-seeds the same ids). Colliding ids are remapped
   deterministically and the remap is recorded;
@@ -1195,6 +1200,83 @@ handed the list — it re-derives its own generic discovery pass and scores side
 normal `resolved`/`introduced` rows. A `formatting-writing` polish round plans no probe (it is a
 content-level pass).
 
+## Execution profiles (`--execution-profile high|medium`)
+
+The pipeline was written for a frontier model with a very large context window. A medium model (a
+single-GPU 27B deployment, ~100k tokens or less) does not fail on the manuscript — it fails on the
+INSTRUCTION PAYLOAD. Every session is handed ~110 KB of stage prompt before it reads one word of
+the paper, and an agent loop re-sends that prompt on every step. Measured on one 18.9 KB manuscript:
+1,589 model calls and 110.8 M prompt tokens, median call ~72k prompt tokens.
+
+`--execution-profile {high,medium}` (default `high`) selects the instruction profile. It is NOT a
+reasoning-effort setting (`PAPER_QWEN_REASONING_EFFORT` is a different axis) and it changes no
+postcheck.
+
+* **`high`** is the pipeline exactly as it has always been, and it is the default. A default root
+  writes no new config key, plans the same sessions and renders the same prompts, byte for byte;
+  `--execution-profile high` is therefore identical to running without the flag.
+* **`medium`** keeps every rule but stops INLINING the elaborative ones. Each stage prompt keeps
+  the stage contract, the finding schema, the deliverable list and the completion marker, and the
+  long rule sections it used to paste are written once to `INSTRUCTIONS/PROFILE_RULES.md` in the
+  session sandbox and referenced by a pointer. The prompt opens with the medium capacity contract
+  (bounded reads, incremental writes, no re-reading, close the deliverables first). Nothing is
+  dropped, summarised or weakened: the same bytes ship in the root, the prompt states that the
+  paged sections are mandatory and authoritative, and the postchecks are unchanged — the difference
+  is WHERE the instructions live, not what they demand.
+
+Measured effect (the eleven stage prompts, rendered from the same checkout):
+
+| stage | `high` | `medium` | cut |
+|---|---|---|---|
+| review | 111 KB | 43 KB | 61% |
+| probe | 58 KB | 19 KB | 68% |
+| audit | 80 KB | 36 KB | 55% |
+| revise | 109 KB | 55 KB | 49% |
+| integrate | 108 KB | 55 KB | 49% |
+| rewrite | 102 KB | 52 KB | 49% |
+| judge | 97 KB | 66 KB | 32% |
+
+The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
+`pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
+those prompts is the one frozen beside it. `sync-code` and `retry` preserve the recorded policy. A
+root created before this feature carries no key and runs `high`.
+
+## The TARGETED review and `--no-targeted-review`: running the probe alone
+
+The round's two discovery roles are the **targeted review** and the **probe review**. The targeted
+review is the checklist pass — the M1–M36 mechanical sweeps, the J1–J5 judgment passes and the
+D0–D5 discovery round. Its recorded names are `targeted_review` (the run kind),
+`r<r>_targeted_review` (the run id) and `targeted_review/` (its output area); they were
+`review` / `r<r>_review` / `review/` before the 2026-10 targeted-review rename. The probe
+review is the independent, cold, unanchored pass documented above.
+
+The three recorded names were renamed together (2026-10) from `review` / `r<r>_review` / `review/`,
+so the vocabulary matches the role: a run's record now reads `kind: "targeted_review"`, its sandbox
+is `runs/r<r>_targeted_review/`, and its output area is `targeted_review/` (with the split session's
+`targeted_review_a/` and the frozen `targeted_review/round2/` unchanged in shape). The CLI keeps
+`review`, `reviewer` and `r` as ACCEPTED ALIASES of the `--only`/`retry --runs` stage name, so old
+command lines still select the stage. Roots created before the rename keep their old on-disk names;
+they are not migrated, so re-create such a root (`setup`) to run it under the new vocabulary.
+
+`--targeted-review {on,off}` / `--no-targeted-review` (default `on`) turns the targeted review OFF
+and runs the probe alone: the probe's `X-9xx` rows become the round's frozen finding list, and the
+whole class the targeted review owns is recorded as a NAMED GAP — never as a clean result. The gap
+is written where every downstream session reads it:
+
+* `targeted_review/findings.json` in each auditor/reviser sandbox carries `targeted_review: off`, the
+  `named_gap` sentence, and one `unable -- <gap>` coverage row per check id the targeted review
+  would have carried (the file is synthesized by `synthesize_frozen_review`);
+* the audit and revise prompts open with the "THIS ROUND HAS NO TARGETED REVIEW" block, so no
+  session mistakes the probe's silence for coverage;
+* the probe prompt states that its `coverage.md` is the round's ONLY coverage record;
+* `pipeline_config.json` records `targeted_review: off` together with the same gap text (rule 10).
+
+`setup` REFUSES the combinations that would leave the round with no finding source at all: a
+concern-scoped revision mode (which already replaces the general review with the concerns ledger),
+`--review-split` (two targeted-review sessions), the probe turned off, and a non-`full` review
+scope. The flag is a diagnostic mode — it answers "how well does the probe do on its own?" — and
+the round it produces is comparable only with another run of the same flag.
+
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
 
 A from-scratch rewrite fixes a family of defects as a side-effect of rewriting:
@@ -1208,7 +1290,7 @@ credited the rewrites (w1/w2) with exactly these rows while the
 review→audit→revise arm had nothing to act on — the review's instance-level
 format had either closed them with the wrong bar or never enumerated them.
 
-The review/audit/revise path now carries them explicitly:
+The targeted-review/audit/revise path now carries them explicitly:
 
 * **M25** figure-artwork/text parity · **M26** house-style/orthographic
   conventions (bundled `enumerate_conventions.py`; one authoritative form per
@@ -1217,9 +1299,9 @@ The review/audit/revise path now carries them explicitly:
   **M29** caption-promise vs printed-schema parity — a two-sided pairing: a
   promise the print does not deliver and a printed column/panel/encoding the
   caption never describes are the same finding class in opposite directions.
-  Each gets its own artifact under `review/artifacts/` and its own coverage row;
+  Each gets its own artifact under `targeted_review/artifacts/` and its own coverage row;
 * **J5** is the architecture pass: one row per scope in
-  `review/ARCHITECTURE.md`, and its findings carry a `scope` key (they are the
+  `targeted_review/ARCHITECTURE.md`, and its findings carry a `scope` key (they are the
   one legal non-instance finding);
 * the auditor attacks the dispositions that used to close these classes
   ("it is a proper name", "the artwork is read-only", a convention closed per
@@ -1276,7 +1358,7 @@ review → audit → revise path (`sweeps.md` §M30):
   sentence against the table's own row count, the "12 samples" vs a 3-row table
   case) and `code_literal_rows` (module-level literals such as
   `N_SAMPLES = 15`, the producer side of a Methods parameter). They land in
-  `review/artifacts/M30_hierarchy_reconciliation.md` (two disposed tables,
+  `targeted_review/artifacts/M30_hierarchy_reconciliation.md` (two disposed tables,
   under the strict-artifact policy) and `work/M30_hierarchy_reconciliation.md`
   in the other layouts;
 * the auditor attacks the closures that used to hide the class ("the code is
@@ -1296,7 +1378,7 @@ review → audit → revise path (`sweeps.md` §M30):
 Phase 3 of `$paper-review` is the open-ended hunt for issue CLASSES the frozen
 checklist does not own (`paper-skills/paper-review/references/discovery.md`).
 Its deliverables used to be existence-checked at best — a session could leave a
-three-line `new_sweeps.md` (or no `review/round2/` at all, which was a warning)
+three-line `new_sweeps.md` (or no `targeted_review/round2/` at all, which was a warning)
 and the review still passed. The pipeline now reads the whole D0–D5 deliverable
 set and, under the review's `--strict-artifacts` policy (fail by default, warn
 under `--strict-artifacts off`, and recorded for `decide --residual-gate`),
@@ -1324,7 +1406,7 @@ Continuity is enforced: every sweep id the PREVIOUS round proposed
 artifacts, so a discovered class cannot vanish between rounds.
 
 Adoption is a command, not a manual paste: `paper_pipeline.py adopt-sweep
---proposals review/round2/new_sweeps.md` validates the proposal blocks, refuses
+--proposals targeted_review/round2/new_sweeps.md` validates the proposal blocks, refuses
 non-continuing numbering or collisions with `references/sweeps.md`, appends
 them with `--yes` and re-syncs the standalone review prompt's appendix
 (`validate_skill.py`'s D10 sync check). And the auditor now attacks the
@@ -1344,7 +1426,7 @@ package was not ranked ahead of the version it had improved on. The two stages
 need different treatment:
 
 * the INTEGRATOR is not blind: the frozen
-  `review/round2/findings_extra.{json,md}` is copied VERBATIM into a read-only
+  `targeted_review/round2/findings_extra.{json,md}` is copied VERBATIM into a read-only
   `frozen_discovery/` directory in its sandbox (recorded in the run's input
   manifest, byte-verified like every other input), with the auditor's `drop`
   dispositions honored (a dropped X id is not in force and is never scored).
@@ -1439,7 +1521,7 @@ need different treatment:
 ## Provenance, identifiers and the residual gate
 
 Every non-judge sandbox now also receives a code-side **provenance pack**
-(`work/` and, for the review, `review/artifacts/`):
+(`work/` and, for the review, `targeted_review/artifacts/`):
 
 | artifact | what it carries |
 |---|---|
@@ -1661,14 +1743,14 @@ boxes.
 |---|---|---|
 | `a1` | `r<r>_a1` | the round's base: round 1 is the pristine copy, later rounds the previous champion (no agent) |
 | `rewrite` | `r<r>_w1…wM` | full alternative versions with a **declared level**: odd arms are `structural` (organization-level, reported in `## ORGANIZATION MAP`), even arms are `sentence` (same organization, prose-level). With M≥2 the round therefore carries BOTH kinds of difference for the integration stage to weigh |
-| `review` | `r<r>_review` | ONE frozen identification pass (`$paper-review`) that feeds every revise session |
+| `targeted_review` | `r<r>_targeted_review` | ONE frozen identification pass (`$paper-review`) — the TARGETED review (M1–M36 / J1–J5 + D0–D5) that feeds every revise session. **on by default**; `setup --no-targeted-review` runs the probe alone and records the targeted classes as a named gap (see "The TARGETED review" above). The on-disk names are unchanged |
 | `probe` | `r<r>_probe` | **on by default** (`setup --probe-review off` / `--no-probe-review` / `set-probe-review off` disables): an INDEPENDENT, cold-context discovery session launched IN PARALLEL with the review and given the corpus only (no review, no finding list). It is GENERIC — any defect class may be filed — and wherever a defect can be shown by a computation the finding declares a re-runnable verifier; the orchestrator re-runs every declared verifier (a non-reproducing computation FAILS the attempt) and the findings ride in the frozen discovery list as `X-9xx` rows (reviser resolves, auditor disposes, integrator reconciles) |
 | `audit` | `r<r>_audit` | **on by default** (`setup --audit off` / `--no-audit` disables): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), attacks the reviewer's boilerplate `OK` closures without filing new findings (an observation goes to `audit/UNRESOLVED.md`), and hands the AUDITED list to the revision arms |
 | `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran). **After its postcheck**, an independent REVISION AUDITOR writes `revision_audit/REPAIR_PLAN.json` (no edits), and a non-empty plan runs ONE bounded-repair session that re-validates and applies only confirmed rows, records `revised/REPAIR_LEDGER.json`, and re-passes the revise postcheck (`--revision-audit off` / `PAPER_REVISION_AUDIT=off` records the skip; it does not run in a concern-scoped major/minor revision) |
 | `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members). It reconciles every frozen X-* id in its difference ledger — a dropped id is accounted for, never applied |
 | `judge` | `judge_t…_j…` | blind pairwise panels over the round's field (the id is an opaque token: it carries no round and no arm) |
 
-Each run keeps its sandbox under `runs/<id>/` (`base/`, `review/`, the stage's
+Each run keeps its sandbox under `runs/<id>/` (`base/`, `targeted_review/`, the stage's
 own output directory, `PROMPT.md`, `_pipeline_done.json`). Completion is a
 marker file, never "the directory is non-empty"; every published winner and pin
 is verified against the digest of the corpus the judges actually scored.
@@ -1732,7 +1814,7 @@ A root can be driven against a REAL journal decision letter instead of the
 pipeline's own review rounds. `setup --revision-mode <mode>` (or
 `set-revision-mode <mode>` on an existing root) selects one of the workflows
 below. Two of them read no feedback at all: **`continue`** (the default; the
-pipeline's own review/revise rounds — the mode was spelled `none` before, and
+pipeline's own targeted-review/revise rounds — the mode was spelled `none` before, and
 that spelling is REMOVED) and **`init`** (start a NEW
 submission: the `conform` stage runs BEFORE round 1 — inside the venue's own
 Word template when one ships, else to the journal's own author guidelines and
@@ -1756,7 +1838,7 @@ human letter should drive the revision.
 
 | option | mode | what it is | response to reviewers | rewrites | edits |
 |---|---|---|---|---|---|
-| — | `continue` | the pipeline's own review/revise rounds (the default) | **not written** | allowed | the round's full review |
+| — | `continue` | the pipeline's own targeted-review/revise rounds (the default) | **not written** | allowed | the round's full review |
 | — | `init` | start a **new submission**: conform to the venue's template (or its guidelines → academic convention when no template ships) first, then the default rounds | **not written** | allowed | the round's full review |
 | option 1 | `transfer` | revise for a **new journal** (e.g. read iScience, submit to Frontiers in Immunology) | **not written** | allowed | the round's full review + the decision letter's concerns |
 | option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
@@ -1786,7 +1868,7 @@ How each mode runs:
   `feedback/llm/`, origin kept in the ledger's `source`/`author` columns, and
   never silently dropped).
 * **Options 1–2** feed the ledger into the normal round: the review reconciles
-  every concern (`review/concerns_reconciled.json`) and files a `check: "JF"`
+  every concern (`targeted_review/concerns_reconciled.json`) and files a `check: "JF"`
   finding for each unanswered one; the rewrites carry the concern block; the
   revise arms answer the findings; the judge panel and `decide` work as usual.
 * **Options 3–4** run a different, restricted path: `r1_concerns` produces the
@@ -2152,8 +2234,8 @@ formatting used to be invisible to every stage. The pipeline now handles it:
   judge views and the next round's base are built. The repair is reported as a
   `FORMAT-FIX: …` warning and recorded in
   `runs/<id>/FORMAT_FIX_<run>.json` (with before/after scans).
-* the review stage receives a seeded `review/work/FORMAT_SCAN.json` plus
-  `review/artifacts/M20_formatting.md` (one row per finding to dispose) and the
+* the review stage receives a seeded `targeted_review/work/FORMAT_SCAN.json` plus
+  `targeted_review/artifacts/M20_formatting.md` (one row per finding to dispose) and the
   review contract requires an `M20` coverage row, like M18/M19.
 * `decide` re-scans the winner, reports it in `decision.json` /
   `DECISION_REPORT.md`, and `publish_final_clean` publishes the pin-identical
@@ -2524,11 +2606,11 @@ cannot disagree about a number:
 | `CODE_SCANS.json` | M18 legend counts, M19 abstract/main-text lengths, M20 OOXML formatting rows, the hand-off placeholder count, the PKG-2 submission-surface rows (a to-be-submitted document that names a file the submission does not carry) and the corpus identity (digest, file list, revision token) |
 | `EVIDENCE_PACK.md` | the same, human-readable, with the re-scan command and the "Submission-surface references (PKG-2)" table |
 | `M18_caption_words.md`, `M19_length.md`, `M20_formatting.md` | seeded tables (one row per code-side finding, empty disposition column) for the review and the judge |
-| `CLAIM_STRENGTH.md` | J3's claim-strength ledger, BOTH directions: one row per claim-bearing paragraph per direction (`under` = a hedge the evidence may not require; `over` = a maximal claim the evidence may not support), each with a disposition column. Seeded under `review/artifacts/` for the review and under `work/` for the package-producing and audit sessions |
-| `M30_hierarchy_reconciliation.md` | M30's source-hierarchy seed: table A pairs every written number the shipped data tables do NOT prove with its candidate producer column and the check the code can make (a cohort-size sentence against the table's own row count; a value against the column's min/max/mean/sum); table B lists the code/config literals (`N_SAMPLES = 15`). Seeded under `review/artifacts/` for the review and under `work/` for the other layouts; a disposed decision table |
+| `CLAIM_STRENGTH.md` | J3's claim-strength ledger, BOTH directions: one row per claim-bearing paragraph per direction (`under` = a hedge the evidence may not require; `over` = a maximal claim the evidence may not support), each with a disposition column. Seeded under `targeted_review/artifacts/` for the review and under `work/` for the package-producing and audit sessions |
+| `M30_hierarchy_reconciliation.md` | M30's source-hierarchy seed: table A pairs every written number the shipped data tables do NOT prove with its candidate producer column and the check the code can make (a cohort-size sentence against the table's own row count; a value against the column's min/max/mean/sum); table B lists the code/config literals (`N_SAMPLES = 15`). Seeded under `targeted_review/artifacts/` for the review and under `work/` for the other layouts; a disposed decision table |
 | `CODE_SCANS_before.json` / `CODE_SCANS_after.json` | per stage: the input's and the delivered package's measurements, with an `evidence_delta` (over-cap sections, placeholders, formatting rows) recorded on the run and warned about when it regresses |
 
-Where it lands: `review/work/` + `review/artifacts/` (review) and `work/` at the
+Where it lands: `targeted_review/work/` + `targeted_review/artifacts/` (review) and `work/` at the
 sandbox root (rewrite/revise/integrate, scanned from the package the stage is
 about to edit). An `EVIDENCE_PACK.md` also sits next to `PROMPT.md` and inside
 the session's OUT directory. Those four prompts carry the same block: use these
@@ -2575,7 +2657,7 @@ re-derived from the blinded target outside the sandbox (`postcheck_judge`).
 
 One consequence worth knowing: because a judge sees the sources, a *stale*
 submitted PDF (a rendering that no longer matches the editable file beside it)
-is no longer a judge finding -- the review/revise/integrate stages still see
+is no longer a judge finding -- the targeted-review/revise/integrate stages still see
 every rendering and still flag it, and the shared derived-output rule below
 still applies to them.
 
@@ -2644,7 +2726,7 @@ made mechanical where it can be:
   enumerates the `under` rows (hedge markers) and the `over` rows (maximal-claim
   markers) of every claim-bearing paragraph -- title/front matter, abstract,
   body, legends, cover letter; never Methods, never references -- and is seeded
-  as `review/artifacts/CLAIM_STRENGTH.md` (a decision table under the
+  as `targeted_review/artifacts/CLAIM_STRENGTH.md` (a decision table under the
   strict-artifacts policy) and as `work/CLAIM_STRENGTH.md` in the other
   layouts. The code cannot decide the calibration; it guarantees that the QUIET
   direction is enumerated as well as the loud one, and a hedge the evidence
@@ -3025,7 +3107,7 @@ which files may change, and which evidence is pinned:
 
 | stage | repairable (examples) | may write | pinned evidence |
 |---|---|---|---|
-| `review` | the decision-artifact quality problems (empty cells, boilerplate closures, echoed OUTLINE summaries), the M1b long-form gate (undisposed residue rows — the class that failed the 2026-09-22 roots), a missing visual record | `review/artifacts/` (the seeded tables **including `M1_acronyms.md`**), `review/work/` | every table's row identity, all headers and column orders; `findings.json`/`md`, `round2/`, the other artifact files |
+| `review` | the decision-artifact quality problems (empty cells, boilerplate closures, echoed OUTLINE summaries), the M1b long-form gate (undisposed residue rows — the class that failed the 2026-09-22 roots), a missing visual record | `targeted_review/artifacts/` (the seeded tables **including `M1_acronyms.md`**), `targeted_review/work/` | every table's row identity, all headers and column orders; `findings.json`/`md`, `round2/`, the other artifact files |
 | `audit` | `audit.json` missing/unparseable/duplicated/missing dispositions | `audit/` | every existing disposition and every `adds` row; **new dispositions must be `confirm`** (a drop hides a finding from the revisers and needs the auditor's own evidence) |
 | `rewrite` / `revise` / `integrate` | an EMPTY/thin report or ledger the stage wrote (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`: blank cells, wrong level, missing `artifact` rows), the language-pass coverage rows, the visual record, the marker | the package's bookkeeping files the stage wrote (by name) and its existing `work/` files | every manuscript file of the package; the frozen review; the corpus inputs |
 | `judge` | a missing `checks` coverage map, `score`/`basis` that contradict the sheet's own ledger, bookkeeping ids, a missing grounding record | `scores.json`, `judge_review/` | `resolved`/`introduced` (the ledger IS the judgement), the comparison set, existing coverage entries; new coverage entries must be `unable` |
@@ -3116,7 +3198,7 @@ marker or to the review:
 | stage | what is adopted / caught before the marker |
 |---|---|
 | `rewrite` | `rewritten/REWRITE_REPORT.md` written into the sandbox root (adopted); the report's declared `Level:` checked against the arm the prompt states; the L1-L11 language pass and the visual record |
-| `review` | `review/findings.json` in the wrong place (adopted); the whole review contract (the corpus pointer, every check id's coverage row, the M1b long-form gate) and the decision tables |
+| `review` | `targeted_review/findings.json` in the wrong place (adopted); the whole review contract (the corpus pointer, every check id's coverage row, the M1b long-form gate) and the decision tables |
 | `audit` | `audit/audit.json` / `audit/AUDIT.md` in the wrong place (adopted); the disposition sheet's own contract; `audit/audit.json` joins the structured-output PARSE gate; a crashed process with a complete sheet is re-verified instead of re-run |
 | `revise` | `revised/revision_report.json` written into the root or into `revised/work/` (adopted); the ledger's finding coverage measured against the AUDITED list the sandbox itself carries; the language pass and the visual record |
 | `integrate` | `integrated/DIFF_LEDGER.md` in the wrong place (adopted); every ledger row's `artifact` cell (the strict rule) and the language pass |
@@ -3124,7 +3206,7 @@ marker or to the review:
 
 Nothing in either list is a manuscript document: the rescue moves BOOKKEEPING
 only, never a `.docx`/`.tex`/`.bib`/figure, and never a file out of a read-only
-input area (`base/`, `non_revised/`, `review/`, `audit/`, `self/`, `others/`,
+input area (`base/`, `non_revised/`, `targeted_review/`, `audit/`, `self/`, `others/`,
 `target/`, `field/`, `original/`) -- a document belongs to the package's document
 set and stays the recovery layer's business. The pre-flight is read-only: it
 never moves the file, it tells the session to.
@@ -3199,34 +3281,72 @@ its four integration runs never started.
 
 The suite is offline and needs Python 3.12 plus two third-party packages:
 `python-docx` (the DOCX scanner/parity fixtures) and `openpyxl` (the pairwise
-workbook check). The reproducible environment script creates them:
+workbook check). **Create that environment first, with the bundled script, if
+you intend to run any test:**
 
 ```bash
-bash scripts/create-test-env.sh
+bash scripts/create-test-env.sh             # create it (or verify an existing one)
+bash scripts/create-test-env.sh --recreate  # delete it first, then re-create it
 conda run -n paper-refine-test python .paper_test/run_all.py --engine python -j 32
 ```
 
-If conda cannot write its normal cache directories (for example inside a file
-sandbox), use a prefix environment; the script keeps the conda/pip caches under
-`tmp/`:
+`scripts/create-test-env.sh` builds the environment **from the exported data in
+[`env/`](env/README.md)** rather than from whatever the channels serve today, and
+then proves it works by importing both packages and running
+`paper_pipeline.py --version` with that environment's own interpreter. It reads:
+
+* `env/paper-refine-test.freeze.env_export.from_history.yml` — what conda installs
+  (`python=3.12`, the only explicitly requested package);
+* `env/paper-refine-test.requirements.test.txt` — the declared test dependencies
+  and their full transitive closure at exact versions
+  (`python-docx==1.2.0`, `openpyxl==3.1.5`, `lxml`, `et_xmlfile`,
+  `typing_extensions`).
+
+Without those files it falls back to `conda create python=3.12` plus the two
+pinned dependencies, so a clone without a refresh export still works.
+
+**Refresh the export** (and commit the result) whenever a test dependency
+changes:
 
 ```bash
-PAPER_REFINE_TEST_PREFIX="$PWD/tmp/paper-refine-test" bash scripts/create-test-env.sh
+bash scripts/export-test-env.sh             # rewrites env/ from the live environment
+```
+
+`scripts/export-test-env.sh` records the environment in seven files, the same
+shape the neoguider `env/` freeze uses: the full `conda env export`, its
+`--no-builds` and channel-free variants, the `--from-history` minimal spec, the
+`pip freeze --all` record, that record with conda-managed distributions removed,
+and the declared-test-dependency closure the create script installs.
+[`env/README.md`](env/README.md) says which file to use when, and
+`scripts/env_test_closure.py` computes the closure.
+
+If conda cannot write its normal environment directory (a file sandbox, a
+read-only HOME, or a managed CI image), `create-test-env.sh` notices BEFORE
+deleting anything and builds a self-contained prefix under the checkout instead,
+leaving any named environment untouched:
+
+```bash
+PAPER_REFINE_TEST_PREFIX="$PWD/tmp/paper-refine-test" bash scripts/create-test-env.sh --recreate
 conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine python -j 32
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 168 suites (a few
+any failure. They are independent, so run them in parallel — 169 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
-python3 .paper_test/run_all.py          # GNU parallel (32 jobs by default, capped only by
-                                      # the suite count); falls back to a
-                                      # thread pool when `parallel` is missing
-python3 .paper_test/run_all.py -j 4     # cap the parallelism on a smaller box
-python3 .paper_test/run_all.py -j 1     # the old sequential loop, for a bisect
-python3 .paper_test/run_all.py --only test_pipeline test_docx_format_1_scan_fix  # a subset
+# every command runs INSIDE the environment created above:
+conda run -n paper-refine-test python .paper_test/run_all.py            # 32 jobs by default
+conda run -n paper-refine-test python .paper_test/run_all.py -j 4      # cap on a smaller box
+conda run -n paper-refine-test python .paper_test/run_all.py -j 1      # sequential, for a bisect
+conda run -n paper-refine-test python .paper_test/run_all.py \
+    --only test_pipeline test_docx_format_1_scan_fix                  # a subset
+conda run -n paper-refine-test python .paper_test/test_execution_profile.py   # one suite
 ```
+
+(With the environment activated, the plain `python .paper_test/run_all.py` form
+is the same thing. Do not run the suites with a system Python: the DOCX suites
+need `python-docx` and will report it missing.)
 
 Each suite runs in its own `TMPDIR` and writes `<logs>/<suite>.log`; a suite that
 fails is re-run alone once, so a timing-sensitive suite that merely lost a race
@@ -3254,7 +3374,7 @@ one-shot contract stopped up front), `test_length_limits.py`
 (M18/M19 length rules), the `test_docx_format_*_*.py` parts (OOXML formatting scan/fix, the
 setup/stage normalization, the seeded M20 artifact and its contract, plus a real
 LibreOffice render proving the blank page is gone), `test_stage_subset.py`
-(`--only` review/revise/merge/judge end-to-end with the stub agent),
+(`--only` targeted-review/revise/merge/judge end-to-end with the stub agent),
 `test_only_rounds_{1_run_plan,2_session_selection,3_agent_ids}.py` (`--only 1,2`
 / `--only 2:review` round filtering, the per-round `--integrators` mask
 including 0x0 and the arms it skips, and the per-round `--judges` panel

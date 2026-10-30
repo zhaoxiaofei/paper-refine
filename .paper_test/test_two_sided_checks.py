@@ -17,7 +17,7 @@ meaning-bearing hedging). This suite pins the fix:
     per claim-bearing paragraph per direction, skipping Methods and the
     reference list (and never treating a required hedge as a defect);
   * `code_side_evidence` carries the family and `seed_evidence_pack` seeds
-    `CLAIM_STRENGTH.md` under `review/artifacts/` (review) and `work/` (the
+    `CLAIM_STRENGTH.md` under `targeted_review/artifacts/` (review) and `work/` (the
     other layouts), with a disposition column;
   * the seeded review table is a DECISION table: an undisposed row is a
     problem the disposition layer reports;
@@ -150,8 +150,8 @@ def test_evidence_and_seeding():
     check("the family carries BOTH directions",
           {r.get("direction") for r in rows} >= {"under", "over"},
           str(sorted({r.get("direction") for r in rows})))
-    # review: review/work/ + review/artifacts/; audit/stage: work/ at the root
-    for where, sub in (("review", "review"), ("audit", ""), ("stage", "")):
+    # review: targeted_review/work/ + targeted_review/artifacts/; audit/stage: work/ at the root
+    for where, sub in (("review", nb.TARGETED_REVIEW_DIR), ("audit", ""), ("stage", "")):
         sb = tmp / f"run_{where}"
         sb.mkdir()
         nb.seed_evidence_pack(ctx, sb, corpus, where)
@@ -162,7 +162,7 @@ def test_evidence_and_seeding():
         check(f"{where}: the ledger carries a disposition column and both rows",
               "| disposition |" in text and "| under |" in text and "| over |" in text,
               text[:120])
-    review_art = tmp / "run_review" / "review" / "artifacts" / "CLAIM_STRENGTH.md"
+    review_art = tmp / "run_review" / "targeted_review" / "artifacts" / "CLAIM_STRENGTH.md"
     check("the review's artifacts/ copy is seeded too (the decision table)",
           review_art.is_file() and "| disposition |" in review_art.read_text(encoding="utf-8"))
     check("the review decision-artifact list includes the ledger",
@@ -175,14 +175,14 @@ def test_undisposed_row_is_a_problem():
     print()
     print("== an undisposed claim-strength row is a decision-artifact problem ==")
     tmp = scratch("paper_two_sided_quality_")
-    art = tmp / "review" / "artifacts"
+    art = tmp / "targeted_review" / "artifacts"
     art.mkdir(parents=True)
     (art / "CLAIM_STRENGTH.md").write_text(
         "# CLAIM_STRENGTH\n\n| # | document | paragraph | kind | direction | markers | n | "
         "sentence | disposition |\n|---|---|---|---|---|---|---|---|---|\n"
         "| 1 | ms.md | 2 | abstract | under | may | 1 | We may have found X. |  |\n",
         encoding="utf-8")
-    report = nb.artifact_quality_report(tmp / "review")
+    report = nb.artifact_quality_report(tmp / "targeted_review")
     check("the undisposed ledger row is reported",
           "artifacts/CLAIM_STRENGTH.md" in report,
           str(report)[:200])
@@ -227,7 +227,7 @@ def test_document_set_both_directions():
 def prompts() -> dict:
     P = Path("/tmp/x")
     return {
-        "review": nb.review_prompt(P, "r1_review", 1),
+        "review": nb.review_prompt(P, "r1_targeted_review", 1),
         "audit": nb.audit_prompt(P, "r1_audit", 1),
         "rewrite": nb.rewrite_prompt(P, "r1_w1", 1, index=1, total=2),
         "revise": nb.revise_prompt(P, "r1_a2_revise", 1),

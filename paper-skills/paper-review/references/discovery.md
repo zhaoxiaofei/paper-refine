@@ -11,9 +11,9 @@ Phase 2 sweeps.
 
 **Inputs:**
 - `SUBMISSION_DIR` = the reviewed directory (default `./non_revised`)
-- `PRIOR` = `./review/findings.json` (canonical prior findings; also `./review/findings.md`)
-- `WORK` = `./review/work` — converted corpus from the prior run; REUSE it (reconvert only missing files)
-- `OUT2` = `./review/round2` (create it; ALL outputs here)
+- `PRIOR` = `./targeted_review/findings.json` (canonical prior findings; also `./targeted_review/findings.md`)
+- `WORK` = `./targeted_review/work` — converted corpus from the prior run; REUSE it (reconvert only missing files)
+- `OUT2` = `./targeted_review/round2` (create it; ALL outputs here)
 
 If PRIOR is missing, STOP and tell the user to run the standard review first.
 
@@ -190,7 +190,7 @@ disposition stays the auditor's and the revisers' job:
   Purpose, Enumeration, Artifact and Finding rules) numbered from M37, with no
   duplicate ids; or an explicit statement that there were no proposals (and
   why) — a bare `# none` is refused. The operator adopts validated proposals
-  with `paper_pipeline.py adopt-sweep --proposals review/round2/new_sweeps.md`
+  with `paper_pipeline.py adopt-sweep --proposals targeted_review/round2/new_sweeps.md`
   (`--yes` writes them into `references/sweeps.md`).
 - `OUT2/round2_summary.md` — the round's counts (gap rows, probes, X-findings,
   proposed sweeps); a missing honest-limits statement is reported as a WARNING

@@ -82,7 +82,7 @@ def test_static():
     check("all three stage-prompt templates carry the rule", p02.count(MARKER) == 3,
           f"found {p02.count(MARKER)}")
     check("the prompt states 'In a revision stage'", "In a revision stage" in p02)
-    check("review/audit stages are stage-safe",
+    check("targeted-review/audit stages are stage-safe",
           "A review or audit stage reports the typo" in p02)
     check("grammar/punctuation/style are excluded",
           "Grammar, punctuation and style errors" in p02 and "NEVER listed" in p02)
@@ -141,7 +141,7 @@ def test_generated_prompts():
           EMAIL_RULE in revise and "work/EMAIL_VERIFICATION.json" in revise)
     check("generated revise prompt forbids the inferred domain",
           "DOMAIN is not inferable from an affiliation" in revise)
-    review = (root / "runs" / "r1_review" / "PROMPT.md").read_text(encoding="utf-8")
+    review = (root / "runs" / "r1_targeted_review" / "PROMPT.md").read_text(encoding="utf-8")
     check("generated review prompt reports rather than edits",
           "A review or audit stage reports the typo" in review)
     check("generated review prompt carries the e-mail-contact rule",

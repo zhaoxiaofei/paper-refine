@@ -472,14 +472,14 @@ def main() -> int:
         sb.mkdir(parents=True)
         shutil.copytree(ctx.pristine, sb / "base")
         shutil.copytree(ctx.pristine, sb / "non_revised")
-        (sb / "review").mkdir()
-        (sb / "review" / "findings.json").write_text(json.dumps(
+        (sb / "targeted_review").mkdir()
+        (sb / "targeted_review" / "findings.json").write_text(json.dumps(
             {"submission_dir": "./base", "guidelines_source": "t",
              "findings": [{"id": "F-001", "location": "x", "category": 0, "check": "M1",
                            "severity": "Minor", "evidence": "e", "explanation": "x",
                            "status": "resolvable"}], "artifacts": {}, "coverage": []}))
         (sb / "_pipeline_done.json").write_text(json.dumps(
-            {"stage": "review", "run_id": rid, "round": 1, "status": "complete"}))
+            {"stage": "targeted_review", "run_id": rid, "round": 1, "status": "complete"}))
         mutate(sb)
         rec = ctx.register(rid, "review", 1, "runs/" + rid, source_id="a1")
         rec["inputs_manifest"] = {"base": nb.hash_manifest(sb / "base"),
@@ -488,19 +488,19 @@ def main() -> int:
         return tmp, rec, result
 
     tmp, rec, (ok, errs, warns, crash) = review_case(
-        lambda sb: (sb / "review" / "findings.json").write_text('["F-001"]'))
+        lambda sb: (sb / "targeted_review" / "findings.json").write_text('["F-001"]'))
     check("E1 findings.json as a list fails cleanly", crash is None and ok is False, str(errs[:1]))
     cleanup(tmp)
 
     tmp, rec, (ok, errs, warns, crash) = review_case(
-        lambda sb: (sb / "review" / "findings.json").write_text("null"))
+        lambda sb: (sb / "targeted_review" / "findings.json").write_text("null"))
     check("E2 findings.json as JSON null fails cleanly",
           crash is None and ok is False and any("JSON object" in e for e in errs), str(errs[:1]))
     cleanup(tmp)
 
     tmp, rec, (ok, errs, warns, crash) = review_case(
-        lambda sb: (sb / "review" / "findings.json").write_text(
-            (sb / "review" / "findings.json").read_text()[:120]))
+        lambda sb: (sb / "targeted_review" / "findings.json").write_text(
+            (sb / "targeted_review" / "findings.json").read_text()[:120]))
     check("E3 truncated findings.json fails cleanly",
           crash is None and ok is False and any("malformed" in e for e in errs), str(errs[:1]))
     cleanup(tmp)

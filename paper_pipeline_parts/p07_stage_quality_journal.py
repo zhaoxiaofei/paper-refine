@@ -647,7 +647,7 @@ def apply_audit_to_findings(findings, audit) -> dict:
 
 def _frozen_review_findings(sb: Path) -> list:
     out = []
-    for rel in (FINDINGS_REL, "review/round2/findings_extra.json"):
+    for rel in (FINDINGS_REL, "targeted_review/round2/findings_extra.json"):
         fj = read_json(sb / rel, revive=False, lenient=True)      # agent-written
         if isinstance(fj, dict):
             for f in fj.get("findings") or []:
@@ -685,7 +685,7 @@ def probe_audit_problems(sb: Path) -> list:
     head = ", ".join(ids[:5]) + (" ..." if len(ids) > 5 else "")
     path = sb / "audit" / "PROBE_AUDIT.md"
     if not _discovery_nonempty(path):
-        return [f"review/round2/probe_results.md carries {len(ids)} probe disposition(s) "
+        return [f"targeted_review/round2/probe_results.md carries {len(ids)} probe disposition(s) "
                 f"({head}) but audit/PROBE_AUDIT.md is missing or empty: the auditor must "
                 f"attack the discovery round's probe closures one row each (verdict `stands` / "
                 f"`needs-evidence`), exactly like the reviewer's "
@@ -778,7 +778,7 @@ def postcheck_review(ctx: Ctx, rec: dict):
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
     marker = marker_json(sb, rec["kind"])
-    _marker_checks(rec, marker, "review", errs, warns, sb=sb)
+    _marker_checks(rec, marker, "targeted_review", errs, warns, sb=sb)
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     fp = sb / FINDINGS_REL
@@ -810,7 +810,7 @@ def postcheck_review(ctx: Ctx, rec: dict):
     if word_docs_present([sb / "base"]):
         check_visual_artifact(sb / VISUAL_ARTIFACT_REVIEW,
                               f"the visual-inspection record {VISUAL_ARTIFACT_REVIEW}",
-                              errs, warns, sandbox=sb, render_roots=[sb / REVIEW_DIR])
+                              errs, warns, sandbox=sb, render_roots=[sb / TARGETED_REVIEW_DIR])
     # THE DISCOVERY ROUND'S CONTRACT (D0-D5): the phase's deliverables are
     # quality-checked, not just existence-checked (see
     # `discovery_contract_problems`). The problems follow the review's
@@ -821,7 +821,7 @@ def postcheck_review(ctx: Ctx, rec: dict):
     if review_owes_discovery(ctx, rec):
         rec["discovery_contract"] = check_discovery_contract(ctx, sb, errs, warns)
     elif not any((sb / rel).exists() for rel in DISCOVERY_RELS):
-        warns.append("no discovery-round artifact under review/round2/ -- the D0-D5 phase cannot "
+        warns.append("no discovery-round artifact under targeted_review/round2/ -- the D0-D5 phase cannot "
                      "be verified")
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
@@ -830,12 +830,12 @@ def postcheck_review(ctx: Ctx, rec: dict):
     # check id both sessions were given). This lives in the REVIEW postcheck: the
     # dispatcher routes a revise record to postcheck_revise, so the guard can
     # never fire there and the merge would never run at all.
-    if not errs and review_split_of(ctx) != "off" and rec.get("id") == rid_review_b(
+    if not errs and review_split_of(ctx) != "off" and rec.get("id") == rid_targeted_review_b(
             int(rec.get("round") or 1)):
         try:
             m = merge_review_parts(ctx, rec)
             rec["review_merge"] = m
-            a_ids = set(frozen_finding_ids(ctx, ctx.run(rid_review(int(rec["round"]))) or {}))
+            a_ids = set(frozen_finding_ids(ctx, ctx.run(rid_targeted_review(int(rec["round"]))) or {}))
             merged_ids = set(frozen_finding_ids(ctx, rec))
             missing = sorted(a_ids - merged_ids)
             if missing:
@@ -1050,7 +1050,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     add_stage_quality_checks(ctx, rec, [(sb / "base", "", ())],
                              [(rev, "", CORPUS_EXCLUDE_TOP)],
                              rev, "revise", errs, warns)
-    # HARD check: Phase 2 must not touch the frozen review/ copy.
+    # HARD check: Phase 2 must not touch the frozen targeted_review/ copy.
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
     if journal_is_scoped(ctx):
@@ -1082,13 +1082,13 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
     rows follow, id collisions get a `B-` prefix (recorded in the merge block),
     coverage tables are unioned by check id (A wins on a conflict, the conflict
     is recorded) and the discovery findings are concatenated. The merged file is
-    written into B's `review/`, which is the directory the revise sessions copy.
+    written into B's `targeted_review/`, which is the directory the revise sessions copy.
     """
     r = int(rec_b["round"])
-    a_sb = ctx.sandbox_of(ctx.run(rid_review(r)) or {"sandbox": f"runs/{rid_review(r)}"})
+    a_sb = ctx.sandbox_of(ctx.run(rid_targeted_review(r)) or {"sandbox": f"runs/{rid_targeted_review(r)}"})
     b_sb = ctx.sandbox_of(rec_b)
-    a_json = read_json(a_sb / REVIEW_DIR / "findings.json", revive=False, lenient=True) or {}
-    b_json = read_json(b_sb / REVIEW_DIR / "findings.json", revive=False, lenient=True) or {}
+    a_json = read_json(a_sb / TARGETED_REVIEW_DIR / "findings.json", revive=False, lenient=True) or {}
+    b_json = read_json(b_sb / TARGETED_REVIEW_DIR / "findings.json", revive=False, lenient=True) or {}
     a_items = [dict(f) for f in (a_json.get("findings") or []) if isinstance(f, dict)]
     b_items = [dict(f) for f in (b_json.get("findings") or []) if isinstance(f, dict)]
     seen = {str(f.get("id")) for f in a_items}
@@ -1141,15 +1141,15 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
               "findings": a_items + b_kept, "artifacts": artifacts,
               "coverage": coverage,
               "split_review": {"mode": review_split_of(ctx),
-                               "sessions": [rid_review(r), rid_review_b(r)],
+                               "sessions": [rid_targeted_review(r), rid_targeted_review_b(r)],
                                "from_a": len(a_items), "from_b": len(b_kept),
                                "deduped_b": deduped,
                                "id_remap": remap, "coverage_conflicts": sorted(set(conflicts))}}
-    write_json_atomic(b_sb / REVIEW_DIR / "findings.json", merged)
+    write_json_atomic(b_sb / TARGETED_REVIEW_DIR / "findings.json", merged)
     # The discovery round's findings travel with the frozen list too.
     extra = []
     for sb in (a_sb, b_sb):
-        doc = read_json(sb / REVIEW_DIR / "round2" / "findings_extra.json",
+        doc = read_json(sb / TARGETED_REVIEW_DIR / "round2" / "findings_extra.json",
                         revive=False, lenient=True) or {}
         extra += [f for f in (doc.get("findings") or []) if isinstance(f, dict)]
     if extra:
@@ -1158,12 +1158,12 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
         # reviser and the archived ledger read.
         coverage = []
         for sb in (a_sb, b_sb):
-            doc = read_json(sb / REVIEW_DIR / "round2" / "findings_extra.json",
+            doc = read_json(sb / TARGETED_REVIEW_DIR / "round2" / "findings_extra.json",
                             revive=False, lenient=True) or {}
             for row in (doc.get("coverage") or []):
                 if row not in coverage:
                     coverage.append(row)
-        write_json_atomic(b_sb / REVIEW_DIR / "round2" / "findings_extra.json",
+        write_json_atomic(b_sb / TARGETED_REVIEW_DIR / "round2" / "findings_extra.json",
                           {"findings": extra, "coverage": coverage})
     return merged["split_review"]
 
@@ -2505,7 +2505,7 @@ def postcheck_judge(ctx: Ctx, rec: dict):
 POSTCHECK_HANDLERS = {
     "a1": postcheck_a1,
     "rewrite": postcheck_rewrite,
-    "review": postcheck_review,
+    "targeted_review": postcheck_review,
     "probe": postcheck_probe,
     "audit": postcheck_audit,
     "revise": postcheck_revise,
@@ -2552,7 +2552,7 @@ def run_kind_support_problems(ctx: Ctx) -> list:
 #
 # The stages never touch the submission corpus they read: `base/` is a copy of
 # the round's base, the feedback files are copied into `feedback/`, and the
-# deliverables land in `concerns/` / `review/` / `response/` at the sandbox
+# deliverables land in `concerns/` / `targeted_review/` / `response/` at the sandbox
 # root -- outside every corpus directory, so no judge view or package carries
 # them.
 # =====================================================================
@@ -2607,7 +2607,7 @@ def _stage_original_submission(ctx: Ctx, sb: Path) -> dict:
         "# original_submission/ -- the reviewer-visible manuscript (EVIDENCE)\n\n"
         "This directory is the manuscript version the editors/reviewers of the\n"
         "PREVIOUS journal actually saw. It is NOT the current submission: `base/`\n"
-        "is the submission under review/revision, and this copy is supplied only\n"
+        "is the submission under targeted_review/revision, and this copy is supplied only\n"
         "so the raised concerns can be understood. Use it to resolve what a\n"
         "reviewer's quote refers to and to decide whether `base/` already answers\n"
         "a concern. Never edit or copy its text into a candidate package, never\n"
@@ -2804,8 +2804,8 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
     sb.mkdir(parents=True, exist_ok=True)
     _journal_stage_base(ctx, sb, r)
     (sb / "concerns").mkdir(exist_ok=True)
-    (sb / REVIEW_DIR).mkdir(exist_ok=True)
-    (sb / REVIEW_DIR / "artifacts").mkdir(parents=True, exist_ok=True)
+    (sb / TARGETED_REVIEW_DIR).mkdir(exist_ok=True)
+    (sb / TARGETED_REVIEW_DIR / "artifacts").mkdir(parents=True, exist_ok=True)
     seed = _write_journal_feedback_inputs(ctx, sb)
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
@@ -2850,8 +2850,8 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
     ensure_copy(src_sb / "concerns", sb / "concerns")
     if (src_sb / "feedback").is_dir():
         ensure_copy(src_sb / "feedback", sb / "feedback")
-    if (src_sb / REVIEW_DIR).is_dir():
-        ensure_copy(src_sb / REVIEW_DIR, sb / REVIEW_DIR)
+    if (src_sb / TARGETED_REVIEW_DIR).is_dir():
+        ensure_copy(src_sb / TARGETED_REVIEW_DIR, sb / TARGETED_REVIEW_DIR)
     if target is None:
         rec0 = ctx.run(rid) or {}
         tgt_rel = str(rec0.get("target_dir") or "").strip()
@@ -3015,7 +3015,7 @@ WRITE:
 {JOURNAL_LEDGER_SCHEMA}
   * concerns/JF_concerns.md — the same rows as a markdown table
     (id | source | author | action | disposition | quote | summary | location)
-  * Do NOT write review/, do NOT edit base/, non_revised/ or feedback/, and do
+  * Do NOT write targeted_review/, do NOT edit base/, non_revised/ or feedback/, and do
     not write any other directory.
 
 {marker_root_rule()}
@@ -3089,7 +3089,7 @@ THE LEDGER (one row per distinct concern; same shape as modes 1-2):
   * not-applicable     say why; no finding
 
 THE FINDING LIST (the revision session consumes it):
-  * review/findings.json — {{"submission_dir": "base", "findings": [ ... ],
+  * targeted_review/findings.json — {{"submission_dir": "base", "findings": [ ... ],
     "coverage": [ ... ]}} with ONE finding per concern whose disposition is
     to-fix or manual, and NO other findings (a scoped revision does not fix
     what the reviewers did not raise):
@@ -3107,8 +3107,8 @@ THE FINDING LIST (the revision session consumes it):
   * The scoped review covers ONLY the admitted concerns: add one `coverage` row
     with `check`: "scope" naming that scope and stating that every class outside
     the ledger is a named gap, not a clean result.
-  * review/artifacts/JF_concerns.md — the ledger as a markdown table.
-  * review/findings.md — the findings in the review's markdown shape.
+  * targeted_review/artifacts/JF_concerns.md — the ledger as a markdown table.
+  * targeted_review/findings.md — the findings in the review's markdown shape.
   * Do NOT edit base/ or the feedback; do not write revised/ here.
 
 {marker_root_rule()}
@@ -3218,7 +3218,7 @@ The round carries {carried} in `concerns/`
 quote a reviewer or the LLM review as if the authors wrote it). Every concern
 has the same standing, whatever its source. Beyond the normal sweep:
   * reconcile EVERY concern id in the ledger and write
-    `review/concerns_reconciled.json` with one row per id:
+    `targeted_review/concerns_reconciled.json` with one row per id:
     {{"id": "...", "status": "finding|already-addressed|manual|not-applicable",
       "finding": "<finding id or null>", "location": "<base/ file:where>",
       "rationale": "<one sentence>"}};
@@ -3251,7 +3251,7 @@ def journal_revise_block(ctx: Ctx) -> str:
 
 === {mode.upper()} REVISION — CONCERN-SCOPED EDITS ONLY ===
 This is a real {mode} revision: the review raised the concerns now in
-`review/findings.json` (every finding has `check: "JF"` and a `concern` id;
+`targeted_review/findings.json` (every finding has `check: "JF"` and a `concern` id;
 `concerns/JF_concerns.md` carries the sources' own words — human reviewers
 and/or the false-positive-filtered LLM review, with the same standing).
   * Change the manuscript ONLY where a concern requires it. Every edit names the
@@ -3433,7 +3433,7 @@ def postcheck_feedback(ctx: Ctx, rec: dict):
 def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) -> list:
     """Modes 1-2: the review reconciled EVERY concern of the decision letter.
 
-    Reads `review/concerns_reconciled.json` (one row per concern id) against the
+    Reads `targeted_review/concerns_reconciled.json` (one row per concern id) against the
     feedback run's ledger and the review's own findings: a row that claims
     `finding` must name a JF finding that exists; `already-addressed` must name
     the location; `manual`/`not-applicable` must give a rationale.
@@ -3448,14 +3448,14 @@ def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) ->
     if not rows:
         return errs
     want = {str(x.get("id")) for x in rows}
-    path = sb / REVIEW_DIR / "concerns_reconciled.json"
+    path = sb / TARGETED_REVIEW_DIR / "concerns_reconciled.json"
     if not path.is_file():
-        errs.append(f"{REVIEW_DIR}/concerns_reconciled.json is missing: revision modes 1-2 must "
+        errs.append(f"{TARGETED_REVIEW_DIR}/concerns_reconciled.json is missing: revision modes 1-2 must "
                     f"reconcile every concern of the decision letter (one row per id)")
         return errs
     data = read_json(path, revive=False, lenient=True)
     if not isinstance(data, dict):
-        errs.append(f"{REVIEW_DIR}/concerns_reconciled.json does not parse as a JSON object")
+        errs.append(f"{TARGETED_REVIEW_DIR}/concerns_reconciled.json does not parse as a JSON object")
         return errs
     got_rows = [x for x in (data.get("rows") or []) if isinstance(x, dict)]
     got = [str(x.get("id") or "") for x in got_rows]
@@ -3530,12 +3530,12 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
     errs = []
     if not states_gap(lambda n: n == "scope"):
         errs.append(
-            "review/findings.json has no coverage row with check \"scope\" naming the admitted "
+            "targeted_review/findings.json has no coverage row with check \"scope\" naming the admitted "
             "scope and stating that every class outside the ledger is a named gap, not a clean "
             "result")
     if llm_feedback_present and not states_gap(lambda n: "llm" in n):
         errs.append(
-            "review/findings.json has no coverage row with check \"LLM-pre-filter\" naming the "
+            "targeted_review/findings.json has no coverage row with check \"LLM-pre-filter\" naming the "
             "upstream LLM pre-filter and stating that its dropped classes are a named gap")
     return errs
 
@@ -3594,12 +3594,12 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
         if extra:
             errs.append(f"{len(extra)} finding(s) do not match a to-fix/manual concern: "
                         f"{', '.join(extra[:6])}")
-        if not (sb / REVIEW_DIR / "artifacts" / "JF_concerns.md").is_file():
+        if not (sb / TARGETED_REVIEW_DIR / "artifacts" / "JF_concerns.md").is_file():
             errs.append(f"{ARTIFACTS_REL}/JF_concerns.md is missing")
         errs.extend(concern_coverage_problems(
             fj, (sb / "feedback" / "llm").is_dir()))
-        if not (sb / REVIEW_DIR / "findings.md").is_file():
-            warns.append(f"{REVIEW_DIR}/findings.md is missing (the human-readable list)")
+        if not (sb / TARGETED_REVIEW_DIR / "findings.md").is_file():
+            warns.append(f"{TARGETED_REVIEW_DIR}/findings.md is missing (the human-readable list)")
     if data:
         rec["concerns"] = {"count": len(rows), "to_fix": len(must_fix),
                            "manual": len(manual), "files": rec.get("feedback_files") or []}
@@ -4521,7 +4521,7 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
     into the attempt history, because "attempt 2" means something different when
     no second agent ran.
     """
-    kind = rec["kind"]
+    kind = normalize_run_kind(rec["kind"])
     # ADOPT a completion signal that names this run but was written one
     # directory down (an `audit/_pipeline_done.json`, a judge sheet inside
     # `judge_review/`), BEFORE the handler reads it: the alternative is failing
@@ -4533,6 +4533,7 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
     # reviser's `revision_report.json` written into the sandbox root instead of
     # `revised/`): adopt the file the session actually wrote, never author one.
     stray_notes = rescue_misplaced_deliverable(ctx, rec) + relocate_stray_signal(ctx, rec)
+    kind = normalize_run_kind(kind)          # a pre-rename record says `review`
     handler = POSTCHECK_HANDLERS.get(kind)
     if handler is None:
         ok, errs, warns = False, [f"unknown run kind {kind!r}"], []
@@ -4629,7 +4630,8 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
 # postcheck calls, so the two can never disagree.
 # =====================================================================
 
-SELFCHECK_STAGES = ("rewrite", "review", "probe", "audit", "revise", "integrate", "judge")
+SELFCHECK_STAGES = ("rewrite", "targeted_review", "probe", "audit", "revise", "integrate",
+                    "judge")
 
 # --- the stage's own bookkeeping deliverables --------------------------------
 # `required` FAILS an attempt when it is missing (the postcheck errors on it);
@@ -4639,8 +4641,8 @@ SELFCHECK_STAGES = ("rewrite", "review", "probe", "audit", "revise", "integrate"
 # deliverable while its context is still live. Manuscript documents are never in
 # either list -- a rescue moves BOOKKEEPING only.
 STAGE_DELIVERABLES = {
-    "review": {"required": (FINDINGS_REL,),
-               "expected": (FINDINGS_MD_REL, "review/round2/findings_extra.json",
+    "targeted_review": {"required": (FINDINGS_REL,),
+               "expected": (FINDINGS_MD_REL, "targeted_review/round2/findings_extra.json",
                             VISUAL_ARTIFACT_REVIEW)},
     "probe": {"required": (PROBE_FINDINGS_REL, PROBE_COVERAGE_REL),
               "expected": (PROBE_FINDINGS_MD_REL,)},
@@ -4717,12 +4719,12 @@ def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
 
     Deliberately narrow: only the names in `STAGE_DELIVERABLES[...]["required"]`,
     only from the sandbox root or the session's OWN `work/` scratch (never from a
-    read-only input area: `base/`, `non_revised/`, `review/` for non-review
+    read-only input area: `base/`, `non_revised/`, `targeted_review/` for non-review
     stages, `audit/`, `self/`, `others/`, `target/`, `field/`), and
     never for a manuscript document -- a document belongs to the package's
     document set and is handled by the recovery layer, which knows the corpus.
     """
-    kind = rec.get("kind")
+    kind = normalize_run_kind(rec.get("kind"))
     table = STAGE_DELIVERABLES.get(str(kind)) or {}
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir():
@@ -4767,6 +4769,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
     """
     kind = str(kind or "")
     errs, warns = [], []
+    kind = normalize_selfcheck_stage(kind)
     if kind not in SELFCHECK_STAGES:
         return False, [f"unknown stage {kind!r} (known: {', '.join(SELFCHECK_STAGES)})"], []
     # `round` stays None when the caller did not supply one: the marker's own
@@ -4795,7 +4798,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
         if problem:
             errs.append(problem)
     # 4. the stage-specific contracts, each through the postcheck's own helper
-    if kind == "review":
+    if kind == "targeted_review":
         # The session prompt is read TWICE in this block: by the review-contract
         # branch for its scope, and by the discovery-contract check at the end,
         # which runs whether or not findings.json parsed. Initialise it here --
@@ -4846,17 +4849,17 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             _derrs, _dwarns = discovery_contract_problems(sb)
             errs.extend(f"discovery round: {d}" for d in _derrs)
             warns.extend(f"discovery round: {d}" for d in _dwarns)
-        report = artifact_quality_report(sb / REVIEW_DIR)
+        report = artifact_quality_report(sb / TARGETED_REVIEW_DIR)
         for rel, problems in sorted(report.items()):
             for p in problems:
                 errs.append(f"decision artifact {rel}: {p}")
-        for rel, notes in sorted(artifact_quality_notes(sb / REVIEW_DIR).items()):
+        for rel, notes in sorted(artifact_quality_notes(sb / TARGETED_REVIEW_DIR).items()):
             for n in notes:
                 warns.append(f"decision artifact {rel}: {n}")
         if word_docs_present([sb / "base"]):
             check_visual_artifact(sb / VISUAL_ARTIFACT_REVIEW,
                                   f"the visual-inspection record {VISUAL_ARTIFACT_REVIEW}",
-                                  errs, warns, sandbox=sb, render_roots=[sb / REVIEW_DIR])
+                                  errs, warns, sandbox=sb, render_roots=[sb / TARGETED_REVIEW_DIR])
     elif kind == "probe":
         # The probe session's own detectors, verbatim: the checked inventory and
         # the finding shapes AND the reproduction pass, so a computation that
@@ -5029,12 +5032,25 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
     return (not errs), errs, warns
 
 
+# The stage's pre-rename spellings, accepted by `selfcheck --stage` (the stage
+# itself was renamed `review` -> `targeted_review`; a command line, a script or a
+# manual run written before that rename must keep working).
+SELFCHECK_STAGE_ALIASES = {"review": "targeted_review", "review_b": "targeted_review_b",
+                           "reviewer": "targeted_review"}
+
+
+def normalize_selfcheck_stage(stage: str) -> str:
+    raw = str(stage or "").strip().lower()
+    return SELFCHECK_STAGE_ALIASES.get(raw, raw)
+
+
 def cmd_selfcheck(args) -> None:
     """`selfcheck`: print the postcheck's paperwork verdict for one sandbox."""
     sb = Path(args.sandbox).expanduser().resolve()
-    ok, errs, warns = sandbox_selfcheck(sb, args.stage, args.run_id or sb.name,
+    stage = normalize_selfcheck_stage(args.stage)
+    ok, errs, warns = sandbox_selfcheck(sb, stage, args.run_id or sb.name,
                                         args.round or 0)
-    print(f"SELF-CHECK  stage={args.stage}  sandbox={sb}")
+    print(f"SELF-CHECK  stage={stage}  sandbox={sb}")
     for w in warns:
         print(f"  [warn] {w}")
     for e in errs:

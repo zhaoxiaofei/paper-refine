@@ -348,7 +348,7 @@ and `.bib` entries (a commented-out or verbatim `\cite` is not a call-out),
 numbered and unnumbered reference lists. Extend it in WORK/ for other styles
 (e.g. superscript numbers) instead of eyeballing.
 
-The orchestrator ALSO seeds `review/artifacts/M2_references.md` (copied to
+The orchestrator ALSO seeds `targeted_review/artifacts/M2_references.md` (copied to
 `work/M2_references.md`): one row per reference ENTRY that carries a DOI, with
 its own public-API verdict for that DOI (`found` / `absent` / `error` /
 `skipped` / `not selected`), what the endpoint returned (year and title), and
@@ -679,7 +679,7 @@ placeholder-domain?
 **E-mail-address rule (M12/M14):** an address is a contact FACT, never an inferable
 typo. Report a mismatch or a reserved/placeholder domain, but never propose a
 replacement address and never infer a domain from the affiliation, the author's name
-or the journal. A review/probe/audit session files the mismatch and the query only
+or the journal. A targeted-review/probe/audit session files the mismatch and the query only
 (identification); a revision may change the address only to one the input corpus
 already carries verbatim, or to one a recorded web-search result verifies in
 `work/EMAIL_VERIFICATION.json` (query, source URL, checked date, verbatim quote).
@@ -904,8 +904,8 @@ formatting visible, enumerable and repairable. The orchestrator enumerates it
 (the code-side scan of the reviewed corpus) and normalizes the mechanical
 classes before a candidate is fingerprinted, pinned or judged.
 
-**Enumeration:** `review/work/FORMAT_SCAN.json` (the code-side scan of `base/`,
-repeated as rows in `review/artifacts/M20_formatting.md`): every `.docx` of the
+**Enumeration:** `targeted_review/work/FORMAT_SCAN.json` (the code-side scan of `base/`,
+repeated as rows in `targeted_review/artifacts/M20_formatting.md`): every `.docx` of the
 corpus, skipping the difference-tracking auxiliaries (`*.tracking-<baseline>.<ext>`
 / `*.logging-<baseline>.<ext>`) and stage scratch (`work/`). AUDIT that table
 row by row and ADD every
@@ -969,8 +969,8 @@ rule | severity | location | evidence | fix kind | disposition.
   in the journal's styles" is the PIPELINE's convention, not the journal's, and
   the pipeline's disposition gate fails that closure.
 
-**Artifact:** `review/artifacts/M20_formatting.md` (the seeded table, every row
-disposed) plus `review/work/FORMAT_SCAN.json`.
+**Artifact:** `targeted_review/artifacts/M20_formatting.md` (the seeded table, every row
+disposed) plus `targeted_review/work/FORMAT_SCAN.json`.
 
 Formatting never makes a version ineligible and never decides a comparison on
 its own; a uniform candidate may be preferred to an inconsistent one by at most
@@ -1107,7 +1107,7 @@ per-paragraph claim map this pass reads.
    where one would do (Results vs Discussion, main text vs legend vs cover
    letter) — one row per repeated scope pair, with both locations.
 
-**Artifact.** `review/ARCHITECTURE.md`: one row per scope —
+**Artifact.** `targeted_review/ARCHITECTURE.md`: one row per scope —
 `document | section | paragraphs | current structure | reader cost | proposed
 reorganization | class | severity | disposition`.
 A scope that is fine gets its own row with a row-specific
@@ -1145,7 +1145,7 @@ summary note with their reasons.
 
 The coverage table carries every check ID this skill defines: M1–M36 and
 J1–J5 (M18, M19 and M20 are always active). J5's row names
-`review/ARCHITECTURE.md` as its basis.
+`targeted_review/ARCHITECTURE.md` as its basis.
 
 ---
 
@@ -1467,7 +1467,7 @@ snapshot, the figure/table sources), so M30 makes every such comparison a row.
 surface (abstract, main text, legend, cover letter; Methods for a parameter or
 step) find the artifact that PRODUCED it: a `raw_data/` file, a code/config
 file's constant or the function that prints the value, the figure/table source.
-The pipeline seeds `review/artifacts/M30_hierarchy_reconciliation.md` with what
+The pipeline seeds `targeted_review/artifacts/M30_hierarchy_reconciliation.md` with what
 the code can pair for itself — table A: every written number the shipped data
 tables do not already PROVE, against its candidate producer column(s), with the
 mechanical check the code can make (a cohort-size sentence against the table's
@@ -1483,7 +1483,7 @@ producer and not a written surface: it documents what the review requires
 (J1 / category 0 may cite it as external context) and is never quoted as
 something the submission says.
 
-**Artifact.** `review/artifacts/M30_hierarchy_reconciliation.md`:
+**Artifact.** `targeted_review/artifacts/M30_hierarchy_reconciliation.md`:
 `document | kind | number | unit | sentence | candidate producer | producer
 summary | seed check | disposition` for table A and
 `file | line | symbol | value | context | disposition` for table B, plus the
@@ -1706,7 +1706,7 @@ single file and exits non-zero on a high finding — run it after EVERY external
 refresh (in Word: `Zotero` → `Refresh`), and before flattening fields for a
 submission copy.
 
-**Artifact.** `review/artifacts/M36_zotero_parity.md`:
+**Artifact.** `targeted_review/artifacts/M36_zotero_parity.md`:
 `field | item key | number shown | rank | entry text | disposition` for the rows
 the scan seeds, plus the rows the session adds (e.g. a field the refresh skipped
 because its item could not be resolved).

@@ -360,7 +360,7 @@ def test_prompt_contract():
     print("== ZC5: prompts carry the continuity contract ==")
     sb = Path("/tmp/paper_zc_prompt")
     prompts = {
-        "review": NB.review_prompt(sb, "r1_review", 1),
+        "review": NB.review_prompt(sb, "r1_targeted_review", 1),
         "rewrite": NB.rewrite_prompt(sb, "r1_w1", 1),
         "revise": NB.revise_prompt(sb, "r1_a2_revise", 1),
         "integrate": NB.integrate_prompt(sb, "r1_i1", 1, "a1", ["w1"]),

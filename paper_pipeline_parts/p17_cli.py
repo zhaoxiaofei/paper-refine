@@ -688,7 +688,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "(`--last-modified auto` makes a concurrent edit fail the write instead "
                          "of being overwritten); this writes to your remote Zotero account, so "
                          "choose it deliberately. No mode ever creates or deletes library items, "
-                         "and review/rewrite/judge sessions can never write")
+                         "and targeted-review/rewrite/judge sessions can never write")
     ps.set_defaults(func=cmd_setup)
     ps.add_argument("--review-split", choices=list(REVIEW_SPLIT_MODES), default="off",
                     help="run TWO review sessions per round on complementary scopes and merge "
@@ -711,8 +711,40 @@ def build_parser() -> argparse.ArgumentParser:
                          "non-empty, ONE bounded repair pass applies it and produces the final "
                          "revised version. OFF: both are skipped and the revised version is "
                          "final. `PAPER_REVISION_AUDIT=off` does the same on an existing root, "
-                         "and `--no-audit` skips the REVIEW audit (the reviser then works from "
+                         "and `--no-audit` skips the TARGETED-REVIEW audit (the reviser then works from "
                          "the frozen findings unaudited)")
+    ps.add_argument("--targeted-review", choices=list(TARGETED_REVIEW_MODES),
+                    default=TARGETED_REVIEW_DEFAULT,
+                    help="run the round's TARGETED review -- the general checklist pass "
+                         "(M1-M36 / J1-J5 and its D0-D5 discovery round) -- beside the probe "
+                         "review. ON by default, which is the pipeline's documented plan. OFF "
+                         "(`--no-targeted-review`) runs the PROBE review ALONE: its X-9xx rows "
+                         "become the round's frozen finding list, and every class the targeted "
+                         "review owns is recorded as a NAMED GAP (in the frozen review view, in "
+                         "the audit/revise prompts and in state.json) -- never as a clean "
+                         "result. When the stage runs, the round records it as the run kind "
+                         "`targeted_review`, the run id `r<r>_targeted_review` and the area "
+                         "`targeted_review/`. Refused with a concern-scoped revision mode, "
+                         "with --review-split, "
+                         "with the probe off (no finding source would remain) and outside a "
+                         "full-scope round")
+    ps.add_argument("--no-targeted-review", dest="targeted_review", action="store_const",
+                    const="off",
+                    help="run the probe review alone (same as --targeted-review off); the "
+                         "targeted review's classes are recorded as a named gap")
+    ps.add_argument("--execution-profile", choices=list(EXECUTION_PROFILES),
+                    default=EXECUTION_PROFILE_DEFAULT,
+                    help="the instruction profile the stages run under. `high` (default) is "
+                         "the pipeline exactly as it has always been: every rule inlined in "
+                         "every session prompt, byte for byte. `medium` keeps every rule but "
+                         "stops INLINING the elaborative ones: each stage prompt carries the "
+                         "contract, the finding schema and the completion marker, and the long "
+                         "rule sections are written to INSTRUCTIONS/PROFILE_RULES.md in the "
+                         "session sandbox and referenced for a bounded read. It is for a "
+                         "limited-context model (one GPU, ~100k tokens or less); the "
+                         "postchecks, the coverage table and every deliverable are UNCHANGED. "
+                         "Not to be confused with the model's reasoning effort (see "
+                         "PAPER_QWEN_REASONING_EFFORT), which this flag does not touch")
     ps.add_argument("--probe-review", choices=list(PROBE_REVIEW_MODES),
                     default=PROBE_REVIEW_DEFAULT,
                     help="run an INDEPENDENT PROBE session in parallel with every full-scope "
@@ -1010,7 +1042,8 @@ def build_parser() -> argparse.ArgumentParser:
                               "tables, the audit sheet); read-only, needs no --root")
     psc.add_argument("--sandbox", required=True,
                      help="the run's sandbox (the directory holding PROMPT.md)")
-    psc.add_argument("--stage", required=True, choices=list(SELFCHECK_STAGES),
+    psc.add_argument("--stage", required=True,
+                    choices=list(SELFCHECK_STAGES) + list(SELFCHECK_STAGE_ALIASES),
                      help="the run's stage/kind")
     psc.add_argument("--run-id", default=None,
                      help="the run id the marker must name (default: the sandbox's own name)")
@@ -1019,12 +1052,12 @@ def build_parser() -> argparse.ArgumentParser:
     psc.set_defaults(func=cmd_selfcheck)
 
     psw2 = sub.add_parser("adopt-sweep",
-                          help="validate a review/round2/new_sweeps.md proposal file and, with "
+                          help="validate a targeted_review/round2/new_sweeps.md proposal file and, with "
                                "--yes, append its proposals to the skill's references/sweeps.md "
                                "(re-syncing the standalone prompt's appendix)")
     psw2.add_argument("--proposals", required=True, metavar="PATH",
                       help="the proposal file, or a review sandbox carrying "
-                           "review/round2/new_sweeps.md")
+                           "targeted_review/round2/new_sweeps.md")
     psw2.add_argument("--sweeps", default=None, metavar="PATH",
                       help="target sweeps.md (default: paper-skills/paper-review/references/"
                            "sweeps.md beside this script)")
@@ -1120,7 +1153,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="select the revision mode (continue / init / option 1 transfer / "
                               "2 resubmit / 3 major / 4 minor / 5 llm), or show the current one")
     psm.add_argument("mode", nargs="?", default=None, metavar="MODE",
-                     help="continue (the pipeline's own review/revise rounds) | init "
+                     help="continue (the pipeline's own targeted-review/revise rounds) | init "
                           "(conform into the venue's own "
                           "Word template before round 1, then the pipeline's own rounds; no "
                           "journal feedback) | transfer (option 1: new journal, no response "

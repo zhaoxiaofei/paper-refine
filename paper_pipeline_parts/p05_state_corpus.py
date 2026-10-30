@@ -17,14 +17,14 @@ def rid_rewrite(r: int, k: int) -> str:
     return f"r{r}_{rewrite_vid(k)}"
 
 
-def rid_review(r: int) -> str:
+def rid_targeted_review(r: int) -> str:
     """The round's SINGLE review run (its findings feed every revise session)."""
-    return f"r{r}_review"
+    return f"r{r}_targeted_review"
 
 
-def rid_review_b(r: int) -> str:
+def rid_targeted_review_b(r: int) -> str:
     """The SECOND review run when `--review-split` is on (part B)."""
-    return f"r{r}_review_b"
+    return f"r{r}_targeted_review_b"
 
 
 def rid_feedback(r: int) -> str:
@@ -241,13 +241,13 @@ def upstream_deps(rec: dict, ctx=None) -> list:
                                                         JOURNAL_MODE_RESUBMIT):
             deps.append(rid_feedback(r))
         return deps
-    if kind == "review":
+    if kind == "targeted_review":
         deps = [rid_a1(r)]
-        if rec.get("id") == rid_review_b(r):
-            # A split part B consumes part A's review/ (merge_review_parts
-            # freezes A's findings into B's review/findings.json), so an A
+        if rec.get("id") == rid_targeted_review_b(r):
+            # A split part B consumes part A's targeted_review/ (merge_review_parts
+            # freezes A's findings into B's targeted_review/findings.json), so an A
             # retry must defer B instead of rebuilding it from stale output.
-            deps.append(rid_review(r))
+            deps.append(rid_targeted_review(r))
         # `materialize_review` now stages the concern ledger for EVERY feedback
         # mode that is not scoped -- transfer/resubmit AND `llm` -- because the
         # llm review reconciles that ledger too. List it here as well, or a
@@ -264,14 +264,14 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         # died inside materialize_probe's RuntimeError instead.
         return [rid_a1(r)]
     if kind == "audit":
-        return [rec.get("upstream_run_id") or rid_review(r)]
+        return [rec.get("upstream_run_id") or rid_targeted_review(r)]
     if kind == "revise":
         # With the auditor enabled the reviser consumes the AUDITED list, so the
         # audit run (not the bare review) is the dependency that must be done.
         # A scoped (major/minor) revision consumes the CONCERNS run instead of a
         # general review; the materializer records which run that is, so the
         # retry/rebuild path never blocks on a run this root does not have.
-        deps = [rid_a1(r), rec.get("upstream_run_id") or rid_review(r)]
+        deps = [rid_a1(r), rec.get("upstream_run_id") or rid_targeted_review(r)]
         # `register()` initializes inputs_manifest to None; `.get(k, {})` does
         # not cover an existing None, and the AttributeError used to break
         # retry/rebuild for a registered-but-unmaterialized revise run.
@@ -678,6 +678,11 @@ class Ctx:
                         f"component (the retry/prune paths are built from it).\n"
                         f"       {self.state_path}\n"
                         f"       Restore state.json from a backup.")
+            # A registry written before the TARGETED-REVIEW rename records the
+            # stage as `review`; read it under the new kind so every handler
+            # table, repair profile and self-check keeps resolving (the id and
+            # the sandbox path stay exactly as recorded).
+            normalize_legacy_run_kinds(st["runs"])
             st.setdefault("rounds", {})
             st.setdefault("pinned", [])
             st.setdefault("log", [])
@@ -1016,6 +1021,10 @@ class Ctx:
         return (self.state.get("rounds") or {}).get(str(int(r))) or {}
 
     def register(self, rid: str, kind: str, round_no: int, sandbox_rel: str, **extra) -> dict:
+        # The run kind is recorded in its canonical spelling: the stage was
+        # renamed `review` -> `targeted_review`, and a caller that still passes
+        # the old token must not create a record no handler table can resolve.
+        kind = normalize_run_kind(kind)
         rec = self.state["runs"].get(rid)
         if rec is None:
             rec = {"id": rid, "kind": kind, "round": int(round_no), "sandbox": sandbox_rel,
@@ -2428,7 +2437,7 @@ def sample_labels(r: int, vid: str, j: int, k: int, salt: str = "") -> list:
 
 
 def freshness_vid(rec: dict):
-    """The round-local version id a run produces (None for review/judge runs).
+    """The round-local version id a run produces (None for targeted-review/judge runs).
 
     The run record carries `produces` for every content-producing arm, which is
     what keeps the mapping correct for any M/N plan instead of re-deriving it
@@ -2878,9 +2887,9 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
 
     All M rewrites are staged FIRST in the round -- before the review -- because
     the order the round asks for is "create the rewritten candidates, add them
-    to the pool, then review/revise and integrate". A rewrite sandbox consumes
+    to the pool, then targeted-review/revise and integrate". A rewrite sandbox consumes
     nothing but the round's own base, so retrying one never invalidates the
-    review/revise arm, and retrying the review never invalidates a rewrite (see
+    targeted-review/revise arm, and retrying the review never invalidates a rewrite (see
     revalidate_round_inputs).
     """
     vid = rewrite_vid(k)
@@ -2928,7 +2937,8 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                                                if journal_has_feedback(ctx)
                                                                and not journal_is_scoped(ctx)
                                                                else ""),
-                                                venue_norm=venue_norm_for(ctx)))
+                                                venue_norm=venue_norm_for(ctx),
+                                                execution_profile=execution_profile_of(ctx)))
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
     rec["rewrite_level"] = rewrite_level_of(k, m)
@@ -2939,8 +2949,8 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
 
 
 def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
-    """(ii) Phase-1 sandbox: base/ + non_revised/ + prior_round/ (r>1) + review/ (OUT)."""
-    rid = rid_review(r) if part == "a" else rid_review_b(r)
+    """(ii) Phase-1 sandbox: base/ + non_revised/ + prior_round/ (r>1) + targeted_review/ (OUT)."""
+    rid = rid_targeted_review(r) if part == "a" else rid_targeted_review_b(r)
     sb = ctx.runs_dir / rid
     a1 = ctx.run(rid_a1(r))
     if a1 is None:
@@ -2998,11 +3008,11 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
         # The second session's scope is complementary; it does NOT merge (the
         # orchestrator concatenates the two findings files after both finish),
         # but it can read the other session's OUTPUT once it is complete.
-        a_sb = ctx.sandbox_of(ctx.run(rid_review(r)) or {"sandbox": f"runs/{rid_review(r)}"})
-        if (a_sb / REVIEW_DIR).is_dir():
-            ensure_copy(a_sb / REVIEW_DIR, sb / "review_a")
-            inputs["review_a"] = hash_manifest(sb / "review_a")
-    (sb / REVIEW_DIR).mkdir(exist_ok=True)
+        a_sb = ctx.sandbox_of(ctx.run(rid_targeted_review(r)) or {"sandbox": f"runs/{rid_targeted_review(r)}"})
+        if (a_sb / TARGETED_REVIEW_DIR).is_dir():
+            ensure_copy(a_sb / TARGETED_REVIEW_DIR, sb / TARGETED_REVIEW_A_DIR)
+            inputs[TARGETED_REVIEW_A_DIR] = hash_manifest(sb / TARGETED_REVIEW_A_DIR)
+    (sb / TARGETED_REVIEW_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     # Seed the M20 formatting sweep: the code-side OOXML scan IS the enumeration
@@ -3034,15 +3044,16 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                                split_mode=split_mode,
                                                scope=scope,
                                                venue=venue_profile_of(ctx),
-                                               venue_norm=venue_norm_for(ctx)))
-    rec = ctx.register(rid, "review", r, f"runs/{rid}",
+                                               venue_norm=venue_norm_for(ctx),
+                                               execution_profile=execution_profile_of(ctx)))
+    rec = ctx.register(rid, "targeted_review", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
     rec["inputs_manifest"] = inputs
     return rec
 
 
 def materialize_audit(ctx: Ctx, r: int) -> dict:
-    """The AUDITOR sandbox: base/ + non_revised/ + the FROZEN review/, read-only.
+    """The AUDITOR sandbox: base/ + non_revised/ + the FROZEN targeted_review/, read-only.
 
     The audit stage only exists when `setup --audit on` was given. It is a
     decision session, not an editing session: it writes `audit/` and nothing
@@ -3054,21 +3065,33 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     a1 = ctx.run(rid_a1(r))
     if a1 is None:
         raise RuntimeError(f"cannot materialize {rid}: {rid_a1(r)} does not exist")
-    merge_rid = rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r)
-    rev_rec = _require_done(ctx, merge_rid,
-                            "the auditor consumes the round's frozen review/ output")
+    # With `--no-targeted-review` there is no review sandbox: the frozen review
+    # view is synthesized from the probe's X-9xx rows, with the targeted
+    # review's classes recorded as a named gap (see p19_profiles.py).
+    merge_rid = review_producer_rid(ctx, r)
+    if merge_rid is not None:
+        rev_rec = _require_done(ctx, merge_rid,
+                                "the auditor consumes the round's frozen targeted_review/ output")
+        _stage_frozen_review = ctx.sandbox_of(rev_rec) / TARGETED_REVIEW_DIR
+    else:
+        _stage_frozen_review = None
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    ensure_copy(ctx.sandbox_of(rev_rec) / REVIEW_DIR, sb / REVIEW_DIR)
+    if _stage_frozen_review is not None:
+        ensure_copy(_stage_frozen_review, sb / TARGETED_REVIEW_DIR)
+    else:
+        _require_done(ctx, rid_probe(r),
+                      "the auditor consumes the round's frozen targeted_review/ output")
+        synthesize_frozen_review(ctx, r, sb)
     # The PROBE session is an independent producer of X-9xx rows: merge them
     # into THIS sandbox's frozen review copy (never into the source review), so
     # the auditor disposes them beside every other frozen id.
     # A concern-scoped revision has no probe session and must never absorb
     # general X-9xx discovery rows: they are not reviewer concerns.
-    probe_merge = ({} if journal_is_scoped(ctx)
+    probe_merge = ({} if journal_is_scoped(ctx) or merge_rid is None
                    else merge_probe_into_review_copy(ctx, r, sb))
-    if journal_has_feedback(ctx):
+    if journal_has_feedback(ctx) and merge_rid is not None:
         # The auditor disposes JF findings against the real letter, and a
         # concern the reviewers raised against the earlier version can only be
         # classified with that version in view: carry the ledger and the
@@ -3090,13 +3113,15 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
                                               zotero=zotero_mode_of(ctx),
                                               venue=venue_profile_of(ctx),
                                               author_to_complete=author_to_complete_mode_of(ctx),
-                                              venue_norm=venue_norm_for(ctx)))
+                                              venue_norm=venue_norm_for(ctx),
+                                              execution_profile=execution_profile_of(ctx),
+                                              targeted_review_off=not targeted_review_enabled(ctx)))
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
     rec["probe_merge"] = probe_merge
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
-                              "review": hash_manifest(sb / REVIEW_DIR)}
+                              "targeted_review": hash_manifest(sb / TARGETED_REVIEW_DIR)}
     if (sb / "feedback").is_dir():
         rec["inputs_manifest"]["feedback"] = hash_manifest(sb / "feedback",
                                                           follow_dir_links=True)
@@ -3121,7 +3146,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
 # computation is trustworthy; different -> the attempt FAILS (a computation the
 # probe cannot reproduce is a correctness blocker, not a finding). The findings
 # (X-9xx) ride in the round's discovery list
-# (`review/round2/findings_extra.json` in every downstream copy), so the
+# (`targeted_review/round2/findings_extra.json` in every downstream copy), so the
 # reviser must resolve them, the auditor may only drop them with evidence, and
 # the integrator must reconcile them.
 # =====================================================================
@@ -3322,7 +3347,7 @@ def seed_probe_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
 def materialize_probe(ctx: Ctx, r: int) -> dict:
     """The PROBE REVIEW sandbox (see `rid_probe`): a cold-context discovery pass.
 
-    Materialized from the round base ONLY. Deliberately absent: `review/`,
+    Materialized from the round base ONLY. Deliberately absent: `targeted_review/`,
     `prior_round/`, any finding list, any sweep artifact. The session's value
     is that it re-derives its own read of the corpus -- and its own
     computations -- in a context that has not just disposed the checklist's
@@ -3344,7 +3369,9 @@ def materialize_probe(ctx: Ctx, r: int) -> dict:
     if not prompt.is_file():
         write_text_atomic(prompt, probe_prompt(sb, rid, r, prior_failure=note,
                                                venue=venue_profile_of(ctx),
-                                               author_to_complete=author_to_complete_mode_of(ctx)))
+                                               author_to_complete=author_to_complete_mode_of(ctx),
+                                               execution_profile=execution_profile_of(ctx),
+                                               targeted_review_off=not targeted_review_enabled(ctx)))
     rec = ctx.register(rid, "probe", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
@@ -3706,12 +3733,12 @@ def probe_review_upstream_doc(ctx: Ctx, r: int) -> dict:
     if journal_is_scoped(ctx):
         rid, archive = rid_concerns(r), f"round{int(r)}_concerns"
     elif review_split_of(ctx) != "off":
-        rid, archive = rid_review_b(r), f"round{int(r)}_review"
+        rid, archive = rid_targeted_review_b(r), f"round{int(r)}_review"
     else:
-        rid, archive = rid_review(r), f"round{int(r)}_review"
+        rid, archive = rid_targeted_review(r), f"round{int(r)}_review"
     rec = ctx.run(rid)
     if rec is not None and str(rec.get("status") or "") == "done":
-        doc = read_json(ctx.sandbox_of(rec) / REVIEW_DIR / "round2" / "findings_extra.json",
+        doc = read_json(ctx.sandbox_of(rec) / TARGETED_REVIEW_DIR / "round2" / "findings_extra.json",
                         revive=False, lenient=True)
         if isinstance(doc, dict):
             return doc
@@ -3785,7 +3812,7 @@ def merge_probe_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
 
     The probe findings have the same standing as the discovery round's X-* rows,
     so they travel in the ONE file every downstream contract reads
-    (`review/round2/findings_extra.json`). The SOURCE review sandbox is never
+    (`targeted_review/round2/findings_extra.json`). The SOURCE review sandbox is never
     mutated -- it is frozen and byte-verified -- and every consumer (auditor,
     each reviser) gets the same merged copy. Colliding ids are remapped
     deterministically (see `probe_findings_for_merge`) and the merge block records
@@ -3794,7 +3821,7 @@ def merge_probe_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
     rows = probe_findings_rows(ctx, r)
     if not rows:
         return {"rows": 0, "remap": {}}
-    target = sb / REVIEW_DIR / "round2" / "findings_extra.json"
+    target = sb / TARGETED_REVIEW_DIR / "round2" / "findings_extra.json"
     # Compute the expected merge from the UNMERGED upstream review (never from
     # the copy, which may already carry a merge block): writing the expected doc
     # is idempotent, replaces a stale merge after a probe retry, and cannot
@@ -3826,7 +3853,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     """Phase-2 sandbox for ONE reviewed-and-then-revised candidate.
 
     Created ONLY once the round's review marker exists. Each of the round's N
-    revise sessions receives its OWN read-only copy of the SAME frozen review/,
+    revise sessions receives its OWN read-only copy of the SAME frozen targeted_review/,
     so the N candidates are independent revisions of one finding list.
 
     A4 rationale for the split: Phase 1's context (sweep artifacts, coverage
@@ -3837,7 +3864,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     handoff is between SESSIONS, not within one prompt -- a single prompt that
     asks the agent to "review, then revise" defeats the purpose.
 
-    The review/ directory is handed over as a READ-ONLY copy. Read-only-ness is
+    The targeted_review/ directory is handed over as a READ-ONLY copy. Read-only-ness is
     enforced by the prompt plus the byte-identity postcheck, which is a HARD
     failure. The alternative we did not pick is chmod 0444/0555 hardening: this
     pipeline may run on Windows/drvfs roots where read-only files break
@@ -3847,31 +3874,40 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     _m, n = round_counts(ctx, r)
     rid = rid_for_fresh(r, vid)
     sb = ctx.runs_dir / rid
+    review_only = False
     if journal_is_scoped(ctx):
         # A major/minor revision consumes the concerns run's finding list, not a
         # general review: that is what keeps the edits concern-scoped.
         merge_rid = rid_concerns(r)
+    elif not targeted_review_enabled(ctx):
+        # `--no-targeted-review`: the probe's X-9xx rows ARE the frozen list and
+        # the targeted classes are a recorded gap (p19_profiles.py).
+        merge_rid = rid_probe(r)
+        review_only = True
     else:
-        merge_rid = rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r)
+        merge_rid = rid_targeted_review_b(r) if review_split_of(ctx) != "off" else rid_targeted_review(r)
     rev_rec = _require_done(ctx, merge_rid,
-                            "every revise session consumes the round's frozen review/ output")
+                            "every revise session consumes the round's frozen targeted_review/ output")
     _require_done(ctx, rid_a1(r), "every revise session edits a copy of the round's base")
     src_sb = ctx.sandbox_of(rev_rec)
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(ctx.run(rid_a1(r))) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    # The frozen review/ is the authoritative finding list: a partial copy must
+    # The frozen targeted_review/ is the authoritative finding list: a partial copy must
     # never be trusted (the revision ledger keys on every finding id).
-    ensure_copy(src_sb / REVIEW_DIR, sb / REVIEW_DIR)
+    if review_only:
+        synthesize_frozen_review(ctx, r, sb)
+    else:
+        ensure_copy(src_sb / TARGETED_REVIEW_DIR, sb / TARGETED_REVIEW_DIR)
     # The PROBE session's X-9xx findings are part of the frozen list this
     # reviser must resolve: merge them into THIS sandbox's review copy (the
     # source review sandbox is never touched; every consumer gets the same
     # merged list -- see merge_probe_into_review_copy).
     # A concern-scoped revision has no probe session and must never absorb
     # general X-9xx discovery rows: they are not reviewer concerns.
-    probe_merge = ({} if journal_is_scoped(ctx)
+    probe_merge = ({} if journal_is_scoped(ctx) or review_only
                    else merge_probe_into_review_copy(ctx, r, sb))
-    if journal_has_feedback(ctx):
+    if journal_has_feedback(ctx) and not review_only:
         if (src_sb / "concerns").is_dir():
             ensure_copy(src_sb / "concerns", sb / "concerns")
         if (src_sb / "feedback").is_dir():
@@ -3879,7 +3915,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     aud_manifest = None
     if audit_enabled(ctx) and not journal_is_scoped(ctx):
         # The reviser acts on the AUDITED list: the auditor's drops (with their
-        # evidence) and its `AU-` additions travel beside the frozen review/.
+        # evidence) and its `AU-` additions travel beside the frozen targeted_review/.
         aud_rec = _require_done(ctx, rid_audit(r),
                                 "the reviser consumes the AUDITED finding list (--audit on)")
         ensure_copy(ctx.sandbox_of(aud_rec) / "audit", sb / "audit")
@@ -3921,13 +3957,15 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                journal_block=(journal_revise_block(ctx)
                                                               if journal_has_feedback(ctx)
                                                               else ""),
-                                               venue_norm=venue_norm_for(ctx)))
+                                               venue_norm=venue_norm_for(ctx),
+                                               execution_profile=execution_profile_of(ctx),
+                                               targeted_review_off=not targeted_review_enabled(ctx)))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
     rec["probe_merge"] = probe_merge
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
-                              "review": hash_manifest(sb / REVIEW_DIR)}
+                              "targeted_review": hash_manifest(sb / TARGETED_REVIEW_DIR)}
     if (sb / "feedback").is_dir():
         rec["inputs_manifest"]["feedback"] = hash_manifest(sb / "feedback",
                                                           follow_dir_links=True)
@@ -4000,7 +4038,8 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                                                   author_to_complete=author_to_complete_mode_of(ctx),
                                                   venue_norm=venue_norm_for(ctx),
                                                   discovery_ids=disc["ids"],
-                                                  discovery_dropped=disc["dropped"]))
+                                                  discovery_dropped=disc["dropped"],
+                                                  execution_profile=execution_profile_of(ctx)))
     rec = ctx.register(rid, "integrate", r, f"runs/{rid}", self_id=self_id,
                        other_ids=other_ids, pool_ids=pool, produces=vid,
                        field_ids=other_ids, discovery_ids=list(disc["ids"]))
@@ -4185,7 +4224,8 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
                     venue=venue_profile_of(ctx),
                     dedup_mode=dedup_mode_of(ctx),
                     author_to_complete=author_to_complete_mode_of(ctx),
-                    venue_norm=venue_norm_for(ctx)))
+                    venue_norm=venue_norm_for(ctx),
+                    execution_profile=execution_profile_of(ctx)))
             # One timestamp for the WHOLE judge sandbox (views, prompt and the
             # public tool alike): a listing must not be able to order the
             # session's own files, and the "whole wave is equalized" guarantee
@@ -4264,7 +4304,7 @@ def build_field(ctx: Ctx, r: int) -> tuple:
 def _rebuild_review(ctx: Ctx, rec: dict) -> None:
     """Rebuild session A or B of a split review (the run id names the part)."""
     r = int(rec["round"])
-    part = "b" if str(rec.get("id")) == rid_review_b(r) else "a"
+    part = "b" if str(rec.get("id")) == rid_targeted_review_b(r) else "a"
     materialize_review(ctx, r, part)
 
 
@@ -4277,7 +4317,7 @@ def _rebuild_judge(ctx: Ctx, rec: dict) -> None:
 REBUILD_HANDLERS = {
     "a1": lambda ctx, rec: materialize_a1(ctx, int(rec["round"])),
     "rewrite": lambda ctx, rec: materialize_rewrite(ctx, int(rec["round"]), _vid_index(rec)),
-    "review": _rebuild_review,
+    "targeted_review": _rebuild_review,
     "probe": lambda ctx, rec: materialize_probe(ctx, int(rec["round"])),
     "audit": lambda ctx, rec: materialize_audit(ctx, int(rec["round"])),
     "revise": lambda ctx, rec: materialize_revise(ctx, int(rec["round"]), _rec_vid(rec)),
@@ -4311,7 +4351,7 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
             print(f"  [warn] {rec['id']}: could not keep attempt {attempt_number(rec)}'s sandbox "
                   f"({e}); its diagnostics stay in state.json's attempts_log")
             rmtree_force(sb, ignore_errors=True)
-    kind = rec["kind"]
+    kind = normalize_run_kind(rec["kind"])   # a pre-rename record says `review`
     handler = REBUILD_HANDLERS.get(kind)
     if handler is None:
         # A PIPELINE BUG, not a property of this run: the operator's only way
@@ -4392,7 +4432,7 @@ def reset_run_record(rec: dict) -> None:
 # Input-freshness revalidation (in-round retries).
 #
 # materialize_a1() digest-checks the round base before reusing it, but the
-# rewrite/review/revise/integrate/judge materializers only ever CREATE an input
+# rewrite/targeted-review/revise/integrate/judge materializers only ever CREATE an input
 # when it is missing. `retry` invalidates COMPLETED rounds only, so after an
 # upstream run of the current round is retried, a downstream sandbox keeps the
 # superseded input bytes -- and the next materialization re-hashes those bytes
@@ -4424,7 +4464,7 @@ def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
             and str(prec.get("status") or "") != "done":
         return (f"the probe run {rid_probe(r)} is not done: the findings this round's auditor "
                 f"and revisers consume will change")
-    cur = hash_manifest(sb / REVIEW_DIR).get("files") or {}
+    cur = hash_manifest(sb / TARGETED_REVIEW_DIR).get("files") or {}
     want = hash_manifest(upstream_dir).get("files") or {}
     rel = "round2/findings_extra.json"
     differing = sorted({k for k in set(cur) | set(want) if cur.get(k) != want.get(k)})
@@ -4433,12 +4473,12 @@ def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
         return None
     others = [k for k in differing if k != rel]
     if others:
-        return (f"{REVIEW_DIR}/ no longer matches its current upstream source "
+        return (f"{TARGETED_REVIEW_DIR}/ no longer matches its current upstream source "
                 f"({', '.join(others[:3])})")
     expected, _rows, _remap = probe_merged_review_doc(ctx, r, probe_review_upstream_doc(ctx, r))
-    actual = read_json(sb / REVIEW_DIR / rel, revive=False, lenient=True)
+    actual = read_json(sb / TARGETED_REVIEW_DIR / rel, revive=False, lenient=True)
     if expected is None or actual != expected:
-        return (f"{REVIEW_DIR}/{rel} no longer matches the frozen list this round's auditor "
+        return (f"{TARGETED_REVIEW_DIR}/{rel} no longer matches the frozen list this round's auditor "
                 f"and revisers must consume (the probe findings changed)")
     return None
 
@@ -4450,7 +4490,7 @@ def _journal_staged_freshness_problems(ctx: Ctx, r: int, sb: Path) -> list:
     A feedback retry re-stages them from the canonical source, but a downstream
     sandbox keeps the copy it was born with and its own recorded manifest still
     matches that stale copy -- so nothing marked it stale. Compare the areas
-    against the CURRENT ledger run, exactly like the review/base checks above.
+    against the CURRENT ledger run, exactly like the targeted_review/base checks above.
     """
     try:
         src_sb = _journal_concern_source(ctx, r)
@@ -4472,7 +4512,7 @@ def _journal_staged_freshness_problems(ctx: Ctx, r: int, sb: Path) -> list:
 
 def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
     """Input-area drift for ONE run, measured against its CURRENT upstream."""
-    kind, r = rec["kind"], int(rec["round"])
+    kind, r = normalize_run_kind(rec["kind"]), int(rec["round"])
     sb = ctx.sandbox_of(rec)
     src_ok = bool(ctx.source_manifest)
 
@@ -4498,7 +4538,7 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
             probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
-    elif kind == "review":
+    elif kind == "targeted_review":
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
@@ -4523,19 +4563,19 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
                 probs.append("prior_audit/UNRESOLVED.md no longer matches the prior audit")
         elif (sb / "prior_audit").is_dir():
             probs.append("prior_audit/ is present but the prior audit no longer has observations")
-        # Session B's frozen input is session A's review/ OUTPUT. Retrying A
-        # changes it, but B's own review_a/ still matches the manifest B recorded
+        # Session B's frozen input is session A's targeted_review/ OUTPUT. Retrying A
+        # changes it, but B's own targeted_review_a/ still matches the manifest B recorded
         # when it was built, so the old checks above never saw the drift. Compare
-        # the copy against A's CURRENT review/ (the audit and every reviser
+        # the copy against A's CURRENT targeted_review/ (the audit and every reviser
         # consume B's merged list, so a stale copy would silently freeze an old
         # finding set).
-        if review_split_of(ctx) != "off" and rec.get("id") == rid_review_b(r):
-            a_rec = ctx.run(rid_review(r))
+        if review_split_of(ctx) != "off" and rec.get("id") == rid_targeted_review_b(r):
+            a_rec = ctx.run(rid_targeted_review(r))
             if a_rec is None or a_rec.get("status") != "done":
                 probs.append("upstream review session A is not done")
-            elif not manifests_equal(hash_manifest(sb / "review_a"),
-                                     hash_manifest(ctx.sandbox_of(a_rec) / REVIEW_DIR)):
-                probs.append("review_a/ no longer matches session A's current review")
+            elif not manifests_equal(hash_manifest(sb / TARGETED_REVIEW_A_DIR),
+                                     hash_manifest(ctx.sandbox_of(a_rec) / TARGETED_REVIEW_DIR)):
+                probs.append(f"{TARGETED_REVIEW_A_DIR}/ no longer matches session A's current review")
     elif kind == "revise":
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
@@ -4545,13 +4585,13 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         # list, not a general review: pointing this check at the review run
         # would mark every scoped revision stale on every re-run.
         # With --review-split the revise sandbox holds SESSION B's frozen review
-        # (materialize_revise copies rid_review_b), so hashing session A's dir
+        # (materialize_revise copies rid_targeted_review_b), so hashing session A's dir
         # made every revise arm look stale on every re-entry.
         rev_rid = (rid_concerns(r) if journal_is_scoped(ctx)
-                   else rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r))
+                   else rid_targeted_review_b(r) if review_split_of(ctx) != "off" else rid_targeted_review(r))
         rev_rec = ctx.run(rev_rid)
         if rev_rec is None or rev_rec.get("status") != "done":
-            probs.append("upstream review/concerns run is not done")
+            probs.append("upstream targeted_review/concerns run is not done")
         else:
             # BOTH revise paths receive the probe merge (materialize_revise
             # calls merge_probe_into_review_copy): a scoped revise on the
@@ -4559,7 +4599,7 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             # the merged copy in either case -- the old scoped-only branch left
             # the general path with no review check at all after F004.
             probs.append(_review_copy_mismatch(ctx, r, sb,
-                                               ctx.sandbox_of(rev_rec) / REVIEW_DIR))
+                                               ctx.sandbox_of(rev_rec) / TARGETED_REVIEW_DIR))
     elif kind == "probe":
         # The probe reads the round base and the pristine original, like every
         # other round-family session; its own provenance record is written by
@@ -4601,13 +4641,13 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
             probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
-        merge_rid = rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r)
+        merge_rid = rid_targeted_review_b(r) if review_split_of(ctx) != "off" else rid_targeted_review(r)
         rv = ctx.run(merge_rid)
         if rv is None or rv.get("status") != "done":
             probs.append("upstream review run is not done")
         else:
             probs.append(_review_copy_mismatch(ctx, r, sb,
-                                               ctx.sandbox_of(rv) / REVIEW_DIR))
+                                               ctx.sandbox_of(rv) / TARGETED_REVIEW_DIR))
     elif kind == "integrate":
         self_id = rec.get("self_id")
         others = list(rec.get("other_ids") or [])
@@ -4678,7 +4718,7 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # in this function would ever look at it).
     audit_ids = [rid_audit(r)] if ctx.run(rid_audit(r)) is not None else []
     probe_ids = [rid_probe(r)] if ctx.run(rid_probe(r)) is not None else []
-    order = ((rewrite_ids + ([rid_review(r)] if n else []) + probe_ids + audit_ids
+    order = ((rewrite_ids + ([rid_targeted_review(r)] if n else []) + probe_ids + audit_ids
               + revise_ids + integrate_ids)
              + ([j_feedback] if j_feedback else []) + ([j_concerns] if j_concerns else [])
              + ([j_response] if j_response else []))
@@ -4687,7 +4727,7 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         # assignment REPLACED the whole list, so a `--review-split` run in a
         # journal mode never revalidated a stale feedback/concerns/response
         # sandbox: the drift survived and the response letter stayed "done".
-        order = (rewrite_ids + [rid_review(r), rid_review_b(r)] + probe_ids + audit_ids
+        order = (rewrite_ids + [rid_targeted_review(r), rid_targeted_review_b(r)] + probe_ids + audit_ids
                  + revise_ids + integrate_ids
                  + ([j_feedback] if j_feedback else [])
                  + ([j_concerns] if j_concerns else [])
@@ -4696,8 +4736,8 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # Any arm's content change invalidates every judge session of the round (the
     # panel scores the whole field), and every pool member feeds every
     # integration run that takes it as a donor.
-    dependents = {rid_a1(r): rewrite_ids + ([rid_review(r)] if n else []) + probe_ids,
-                  rid_review(r): list(audit_ids) + list(revise_ids)}
+    dependents = {rid_a1(r): rewrite_ids + ([rid_targeted_review(r)] if n else []) + probe_ids,
+                  rid_targeted_review(r): list(audit_ids) + list(revise_ids)}
     for _pid in probe_ids:
         # The auditor and every reviser consume the merged review copy, so a
         # reset probe must reach them (their frozen list is derived from it).
@@ -4707,7 +4747,7 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         dependents[_aid] = list(revise_ids)
     if j_feedback:
         dependents.setdefault(rid_a1(r), []).append(j_feedback)
-        dependents[j_feedback] = (list(rewrite_ids) + ([rid_review(r)] if n else []))
+        dependents[j_feedback] = (list(rewrite_ids) + ([rid_targeted_review(r)] if n else []))
     if j_concerns:
         dependents.setdefault(rid_a1(r), []).append(j_concerns)
         dependents[j_concerns] = list(revise_ids)
@@ -4726,9 +4766,9 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         if j_feedback:
             dependents.setdefault(j_feedback, []).append(j_response)
     if n and review_split_of(ctx) != "off":
-        # B's frozen input is A's review/ output, so resetting A resets B too.
-        dependents[rid_review(r)] = [rid_review_b(r)] + dependents[rid_review(r)]
-        dependents[rid_review_b(r)] = list(audit_ids) + list(revise_ids)
+        # B's frozen input is A's targeted_review/ output, so resetting A resets B too.
+        dependents[rid_targeted_review(r)] = [rid_targeted_review_b(r)] + dependents[rid_targeted_review(r)]
+        dependents[rid_targeted_review_b(r)] = list(audit_ids) + list(revise_ids)
     for k_idx, vid in enumerate(pool):
         if vid == A1_ID:
             continue

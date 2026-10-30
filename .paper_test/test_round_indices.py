@@ -5,7 +5,7 @@ Run:  python3 .paper_test/test_round_indices.py
 
 The built-in schedule (DEFAULTS) has three entries: round 1 stages the two
 from-scratch rewrites and every integration arm; round 2 has no rewrites and
-every integration arm; round 3 is the final review/revise round with no
+every integration arm; round 3 is the final targeted-review/revise round with no
 rewrites and NO integration arm. `--round-indices` selects which entries the
 pipeline's own rounds follow:
 
@@ -194,8 +194,8 @@ def test_last_round_e2e():
     runs = root / "runs"
     check("RI5 no rewrite run was staged", not (runs / "r1_w1").exists())
     check("RI5 no integration run was staged", not (runs / "r1_i1").exists())
-    check("RI5 the review/revision/judge chain ran",
-          (runs / "r1_review").is_dir() and (runs / "r1_a2_revise").is_dir()
+    check("RI5 the targeted_review/revision/judge chain ran",
+          (runs / "r1_targeted_review").is_dir() and (runs / "r1_a2_revise").is_dir()
           and any(p.name.startswith("judge_") for p in runs.iterdir()),
           str(sorted(p.name for p in runs.iterdir())))
     st = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "status",

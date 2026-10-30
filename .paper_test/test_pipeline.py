@@ -49,7 +49,7 @@ def write(p: Path, data):
 def test_prompts():
     sb = Path("/tmp/paper_validate/sandbox")
     builders = {
-        "review": np.review_prompt(sb, "r1_review", 1),
+        "review": np.review_prompt(sb, "r1_targeted_review", 1),
         "rewrite": np.rewrite_prompt(sb, "r1_w1", 1),
         "revise": np.revise_prompt(sb, "r1_a2_revise", 1),
         "integrate": np.integrate_prompt(sb, "r1_i1", 1, "a1", ["w1", "a2"]),
@@ -156,8 +156,8 @@ def test_prompts():
           np.default_venue_profile().caption_default == np.DEFAULT_CAPTION_LIMIT == 0,
           str(np.default_venue_profile().caption_default))
     # SPLIT REVIEW: two scoped sessions, distinct id namespaces, one merged list
-    a = np.review_prompt(sb, "r1_review", 1, split="a", split_mode="phases")
-    b = np.review_prompt(sb, "r1_review_b", 1, split="b", split_mode="phases")
+    a = np.review_prompt(sb, "r1_targeted_review", 1, split="a", split_mode="phases")
+    b = np.review_prompt(sb, "r1_targeted_review_b", 1, split="b", split_mode="phases")
     check("setup --review-split defaults to off",
           parser.parse_args(["setup", "--source", "/tmp"]).review_split == "off")
     check("a split review prompt (A) carries its scope and FA- ids",
@@ -165,28 +165,28 @@ def test_prompts():
     check("a split review prompt (B) carries the complementary scope and FB- ids",
           "SPLIT REVIEW" in b and "JUDGMENT passes J1-J5" in b and "FB-001" in b)
     check("an unsplit review prompt carries no split block", "SPLIT REVIEW" not in
-          np.review_prompt(sb, "r1_review", 1))
+          np.review_prompt(sb, "r1_targeted_review", 1))
     split_ctx = make_ctx(Path("/tmp/paper_validate_split"))
     split_ctx.cfg["review_split"] = "phases"
     split_plan = [e["id"] for e in np.round_run_plan(split_ctx, 1)]
     rev = [e for e in np.round_run_plan(split_ctx, 1) if e["kind"] == "revise"][0]
     check("a split round plans two review runs and the revise waits for both",
-          "r1_review_b" in split_plan and "r1_review" in split_plan
-          and "r1_review_b" in rev["deps"], str(split_plan))
+          "r1_targeted_review_b" in split_plan and "r1_targeted_review" in split_plan
+          and "r1_targeted_review_b" in rev["deps"], str(split_plan))
     # Session B consumes session A's OUTPUT (materialize_review copies A's
-    # review/ into B's review_a/); with the same deps as A, B was materialized
+    # targeted_review/ into B's review_a/); with the same deps as A, B was materialized
     # before A had written anything, so its review_a/ held the seeded skeleton
     # at best. B must wait for A.
     b_entry = [e for e in np.round_run_plan(split_ctx, 1)
-               if e["id"] == "r1_review_b"][0]
+               if e["id"] == "r1_targeted_review_b"][0]
     check("the split review's second session waits for the first (it reads review_a/)",
-          "r1_review" in b_entry["deps"], str(b_entry["deps"]))
+          "r1_targeted_review" in b_entry["deps"], str(b_entry["deps"]))
     # The frozen-review cross-check of the self-reported writing count exists
-    # only for the arm that consumes review/ (revise). The integration prompt
-    # used to promise it while the integrate sandbox holds no review/ at all.
+    # only for the arm that consumes targeted_review/ (revise). The integration prompt
+    # used to promise it while the integrate sandbox holds no targeted_review/ at all.
     check("the integrate prompt does not claim a frozen-review cross-check it cannot run",
           "cross-checks the frozen review's category-2 count" not in builders["integrate"])
-    check("the revise prompt keeps the frozen-review cross-check (it consumes review/)",
+    check("the revise prompt keeps the frozen-review cross-check (it consumes targeted_review/)",
           "orchestrator cross-checks it against the frozen review" in builders["revise"])
     # ONE defect vocabulary in every session: the five scored classes, the
     # category -> class bridge and the shared severity scale must be identical

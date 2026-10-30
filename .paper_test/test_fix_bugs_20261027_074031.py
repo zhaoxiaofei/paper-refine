@@ -1004,14 +1004,14 @@ def test_f08_winner_dir_containment():
 # ---------------------------------------------------------------- F06
 def test_f06_audit_readonly_areas():
     print()
-    print("== F06: the revision audit may not edit review/ or base/ ==")
+    print("== F06: the revision audit may not edit targeted_review/ or base/ ==")
     tmp = scratch("f06_")
     sb = tmp / "runs" / "r1"
     for name in ("base", "review", "audit", "raw_data", "code", "revised",
                  "revision_audit"):
         (sb / name).mkdir(parents=True)
     (sb / "revised" / "manuscript.md").write_text("judged text\n", encoding="utf-8")
-    (sb / "review" / "findings.json").write_text('{"findings": []}', encoding="utf-8")
+    (sb / "targeted_review" / "findings.json").write_text('{"findings": []}', encoding="utf-8")
     rec = {"id": "r1", "kind": "revise", "round": 1, "status": "done"}
 
     class C:
@@ -1040,9 +1040,9 @@ def test_f06_audit_readonly_areas():
     }
 
     def fake_session(_sb, _rec, _cmd, _timeout, _prompt, _log):
-        # The audit edits a read-only area (review/) but writes a valid,
+        # The audit edits a read-only area (targeted_review/) but writes a valid,
         # empty plan where it is allowed to write.
-        (_sb / "review" / "findings.json").write_text('{"findings": ["tampered"]}',
+        (_sb / "targeted_review" / "findings.json").write_text('{"findings": ["tampered"]}',
                                                      encoding="utf-8")
         (_sb / "revision_audit" / "REPAIR_PLAN.json").write_text('{"rows": []}',
                                                                 encoding="utf-8")
@@ -1060,7 +1060,7 @@ def test_f06_audit_readonly_areas():
         pp.journal_is_scoped = old["journal_is_scoped"]
         pp.round_is_done = old["round_is_done"]
     audit = rec.get("revision_audit") or {}
-    check("an audit that edits review/ fails", audit.get("status") == "failed", audit)
+    check("an audit that edits targeted_review/ fails", audit.get("status") == "failed", audit)
     check("the failure names the modified area", "review" in str(audit.get("error") or ""),
           audit.get("error"))
 

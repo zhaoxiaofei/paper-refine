@@ -71,18 +71,18 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
                        f'<w:t>text</w:t></w:r></w:p></w:body></w:document>')
     (sb / "non_revised").mkdir(parents=True, exist_ok=True)
     (sb / "non_revised/manuscript-o.md").write_text("text\n", encoding="utf-8")
-    (sb / "review").mkdir(parents=True, exist_ok=True)
+    (sb / "targeted_review").mkdir(parents=True, exist_ok=True)
     findings = [{"id": i, "location": "base/manuscript-o.md", "category": 0, "check": "M1",
                  "severity": "Minor", "evidence": "e", "explanation": "x",
                  "status": "resolvable"} for i in ids]
-    (sb / "review/findings.json").write_text(json.dumps(
+    (sb / "targeted_review/findings.json").write_text(json.dumps(
         {"submission_dir": submission_dir, "guidelines_source": "x", "findings": findings,
          "artifacts": {}, "coverage": full_coverage() if coverage is None else coverage}),
         encoding="utf-8")
-    (sb / "review/findings.md").write_text("# stub\n", encoding="utf-8")
+    (sb / "targeted_review/findings.md").write_text("# stub\n", encoding="utf-8")
     # The discovery round's D0-D5 deliverables (the review postcheck verifies
     # them as a contract; see test_round2_sweep_2026_1009.py).
-    r2 = sb / "review/round2"
+    r2 = sb / "targeted_review/round2"
     r2.mkdir(parents=True, exist_ok=True)
     (r2 / "known_index.md").write_text(
         "# D0 (fixture)\n\nM1 .. M36, J1 .. J5 (KNOWN-CLASSES); no KNOWN-INSTANCES\n",
@@ -110,33 +110,33 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
         "executed (clean). X-findings: none. Proposed sweeps: none.\n"
         "Honest limits: fixture only.\n", encoding="utf-8")
     if artifacts:
-        (sb / "review/artifacts").mkdir(parents=True, exist_ok=True)
-        (sb / "review/artifacts/M1.md").write_text("|row|\n", encoding="utf-8")
+        (sb / "targeted_review/artifacts").mkdir(parents=True, exist_ok=True)
+        (sb / "targeted_review/artifacts/M1.md").write_text("|row|\n", encoding="utf-8")
         for fname in ("M25_artwork_parity.md", "M26_conventions.md",
                       "M27_evidence_coverage.md", "M28_symmetry.md",
                       "M29_caption_schema.md", "M30_hierarchy_reconciliation.md",
                   "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md", "M2_references.md"):
-            (sb / "review/artifacts" / fname).write_text(
+            (sb / "targeted_review/artifacts" / fname).write_text(
                 "| row | disposition |\n|---|---|\n| x | OK |\n", encoding="utf-8")
-        (sb / "review/ARCHITECTURE.md").write_text(
+        (sb / "targeted_review/ARCHITECTURE.md").write_text(
             "| document | section | paragraphs | current structure | reader cost | "
             "proposed reorganization | class | severity | disposition |\n"
             "|---|---|---|---|---|---|---|---|---|\n"
             "| ms | all | 1 | x | none | none | writing | Minor | OK |\n",
             encoding="utf-8")
         if vis:
-            (sb / "review/artifacts/VIS_visual.md").write_text("# vis\n", encoding="utf-8")
+            (sb / "targeted_review/artifacts/VIS_visual.md").write_text("# vis\n", encoding="utf-8")
         # Every seeded decision artifact is part of the review contract: a
         # deleted/emptied one must fail the postcheck (the session may leave its
         # table header-only when it has no rows).
         for rel in np.DECISION_ARTIFACTS:
-            p = sb / "review" / rel
+            p = sb / "targeted_review" / rel
             if not p.is_file():
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text("| row | disposition |\n|---|---|\n", encoding="utf-8")
-    np.write_json_atomic(sb / np.MARKER_FILE, {"stage": "review", "run_id": "r1_a2_review",
+    np.write_json_atomic(sb / np.MARKER_FILE, {"stage": "targeted_review", "run_id": "r1_a2_review",
                                                "round": 1, "status": "complete"})
     return sb
 
@@ -317,7 +317,7 @@ print()
 print("=" * 70)
 print("F29 - visual rule is in every prompt")
 sb = Path("/tmp/x")
-for name, text in (("review", np.review_prompt(sb, "r1_review", 1)),
+for name, text in (("review", np.review_prompt(sb, "r1_targeted_review", 1)),
                    ("revise", np.revise_prompt(sb, "r1_a2_revise", 1)),
                    ("integrate", np.integrate_prompt(sb, "r1_i1", 1, "a1", ["w1", "a2"])),
                    ("judge", np.judge_prompt(sb, "r1_judge_t1_j1", 1, "t1", 1, 3, ["v1"]))):

@@ -162,7 +162,7 @@ from pathlib import Path
 # (M25 artwork/text parity, M26 house-style conventions via the new
 # enumerate_conventions.py, M27 claim->evidence coverage, M28 sibling-definition
 # symmetry, M29 caption-promise parity) and the J5 architecture pass writes one
-# scope row per document (review/ARCHITECTURE.md; J5 findings carry a `scope`).
+# scope row per document (targeted_review/ARCHITECTURE.md; J5 findings carry a `scope`).
 # The auditor attacks the dispositions that used to close them; the reviser
 # resolves M25-M29 by aligning the editable surface corpus-wide and J5 by E11
 # scoped restructuring (content frozen, one RESTRUCTURE_<id>.md per finding).
@@ -275,7 +275,7 @@ from pathlib import Path
 #   unit-bearing ranges (not only decimal CIs).
 # 3.8.0 -- THE PROBE REVIEW (`setup --probe-review`, default on; `--no-probe-review`
 #   or `set-probe-review off` is the off switch). One extra INDEPENDENT session
-#   per full-scope round, launched IN PARALLEL with the checklist review and
+#   per full-scope round, launched IN PARALLEL with the TARGETED review and
 #   given NOTHING but the corpus (the submission documents AND the evidence
 #   areas, raw_data/ and code/ included) -- no review, no finding list, no
 #   sweeps. It is GENERIC by design: any defect class may be filed, in the
@@ -288,7 +288,7 @@ from pathlib import Path
 #       findings without a verifier are evidence rows like any other finding;
 #     * its findings become X-9xx rows of the same standing as the discovery
 #       round's X-* findings: merged into every downstream copy of
-#       `review/round2/findings_extra.json` (the source review sandbox is never
+#       `targeted_review/round2/findings_extra.json` (the source review sandbox is never
 #       mutated), so the reviser must resolve them, the auditor may only drop
 #       them with evidence, and the integration ledger must reconcile them
 #       (`frozen_discovery/` carries the merged list, probe findings included);
@@ -329,7 +329,7 @@ PIPELINE_ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts")
 # root cannot silently diverge from the profiles its record claims.
 PIPELINE_VENUE_ASSET_DIRS = ("venue_profiles",)
 # Skills are read from beside the running driver too (adopt-sweep's default
-# sweeps.md and the review/revise prompt assets), so a root freezes them; a
+# sweeps.md and the targeted-review/revise prompt assets), so a root freezes them; a
 # trimmed checkout without the skills pack still creates a root (the copy is
 # recorded as None rather than aborting setup).
 PIPELINE_SKILL_ASSET_DIRS = ("paper-skills",)
@@ -398,6 +398,20 @@ DEFAULTS = {
 # review scope / integration mask. The pipeline's internal rounds stay 1..K;
 # `--round-indices 2 3` makes pipeline round 1 adopt schedule entry 2 and
 # pipeline round 2 adopt entry 3 (so a run can start at a later revision round).
+# THE EXECUTION PROFILE (see p19_profiles.py). `high` is the pipeline as it has
+# always been: every rule inlined in every session. `medium` keeps every rule but
+# pages the elaborative ones out of the prompts into
+# `INSTRUCTIONS/PROFILE_RULES.md`, for a model with a limited context window.
+# The constants live here because the CLI (p17) resolves its defaults at load
+# time, before the profile module's own part is executed.
+EXECUTION_PROFILES = ("high", "medium")
+EXECUTION_PROFILE_DEFAULT = "high"
+#: The TARGETED review is the round's general checklist pass (M1-M36/J1-J5). It is
+#: the counterpart of the PROBE review (`--probe-review`), and `--no-targeted-review`
+#: runs the probe alone, recording the targeted classes as a named gap.
+TARGETED_REVIEW_MODES = ("on", "off")
+TARGETED_REVIEW_DEFAULT = "on"
+
 ROUND_SCHEDULE_LEN = max(len(DEFAULTS[k]) for k in
                          ("rewrites", "revises", "review_scope", "integrators"))
 

@@ -200,8 +200,8 @@ def test_f03_f04_f05_f06() -> None:
 def test_f13_f14() -> None:
     print("\n== F13/F14: audit is disposition-only; repair plan is described ==")
     sb = scratch("f13_")
-    (sb / "review" / "round2").mkdir(parents=True)
-    (sb / "review" / "round2" / "probe_results.md").write_text(
+    (sb / "targeted_review" / "round2").mkdir(parents=True)
+    (sb / "targeted_review" / "round2" / "probe_results.md").write_text(
         "# probe\n\n| probe id | disposition |\n|---|---|\n"
         "| P2-001 | executed - no anomalies - checked: base/x |\n", encoding="utf-8")
     (sb / "audit").mkdir()
@@ -289,16 +289,16 @@ def test_f26_f29_f31() -> None:
 
     sb = scratch("f31_")
     (sb / "base").mkdir(parents=True)
-    (sb / "review" / "artifacts").mkdir(parents=True)
+    (sb / "targeted_review" / "artifacts").mkdir(parents=True)
     (sb / "prior_round").mkdir()
-    (sb / "review" / "findings.md").write_text("#\n", encoding="utf-8")
+    (sb / "targeted_review" / "findings.md").write_text("#\n", encoding="utf-8")
     wanted = list(pp.REQUIRED_REVIEW_CHECKS) + [
         "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27",
         "M28", "M29", "J5", "M30", "M31", "M32", "M33", "M34", "M35", "M36"]
     coverage = [{"check": c, "disposition": "clean -- basis: a.md"} for c in wanted]
     coverage.append({"check": "M37", "disposition": "out of scope -- proposed check"})
     for name in ("M1.md", "M27_evidence_coverage.md", "M34_source_data_coverage.md"):
-        (sb / "review" / "artifacts" / name).write_text(
+        (sb / "targeted_review" / "artifacts" / name).write_text(
             "|check|d|\n|---|---|\n|x|clean|", encoding="utf-8")
     errs, warns = [], []
     pp.check_review_contract(types.SimpleNamespace(cfg={}), sb,

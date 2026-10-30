@@ -1336,7 +1336,7 @@ def score_model_doc(ctx=None) -> dict:
                                     "writing_remaining (self-reported)"],
         "visual_tools_detected": visual_tools_summary(),
         "review_contract": "submission_dir must resolve to base/, the coverage table must carry "
-                           "every required check id, review/artifacts/ must exist, finding ids "
+                           "every required check id, targeted_review/artifacts/ must exist, finding ids "
                            "must be unique, and prior-round findings must be reconciled",
         "base_is_winnable": True,
         "note_on_gates": "caption length and hand-off placeholders are advisory and never gate; "
@@ -3218,7 +3218,7 @@ def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
 #     comparative inference from the measure (the NeoHeteroclitic G(y) sum of
 #     ratios).
 #
-# These rows are seeded for the review/audit/revision arms and reach readiness
+# These rows are seeded for the targeted-review/audit/revision arms and reach readiness
 # (the first two block; the judgment seeds are advisory). Each row quotes BOTH
 # surfaces so a session can dispose it without re-deriving the package.
 def _package_document_texts(root: Path, texts=None) -> list:
@@ -4496,7 +4496,7 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
                     # know whether the sentence should carry the file, a locator
                     # instead, or neither, and deleting a Methods sentence about
                     # where the analysis lives would destroy real information. The
-                    # sentence therefore reaches the review/revise evidence pack
+                    # sentence therefore reaches the targeted-review/revise evidence pack
                     # (`submission_references`) for a rewriting agent to resolve,
                     # and the package readiness lists it so it cannot ship unseen.
                     # The pointer must be WRITTEN as a pointer ("in X.py",
@@ -5233,7 +5233,7 @@ def package_front_matter_glue_rows(root: Path, limit: int = 20) -> list:
 # statements is false (or the identifier is unusable) and only the AUTHOR can
 # say which, but a package that carries the pair is not one to upload. The
 # pipeline never rewrites either side -- it seeds the rows into every session's
-# evidence pack so the review/revise arms can repair the prose, and reports
+# evidence pack so the targeted-review/revise arms can repair the prose, and reports
 # them in the delivered status, `readiness.findings` and the console.
 
 # The unit names the two halves of a statistical statement can disagree about.
@@ -7673,7 +7673,7 @@ def collect_residuals(ctx: Ctx) -> dict:
             if led.get("rows") and led.get("missing_artifact"):
                 add(f"{rid}: {len(led['missing_artifact'])} integration ledger row(s) carry no "
                     f"per-difference artifact", gate=True)
-        if kind == "review":
+        if kind == "targeted_review":
             for rel, probs in sorted((rec.get("artifact_quality") or {}).items()):
                 add(f"{rid}: decision artifact {rel}: {str(probs[0])[:140]}", gate=True)
             for prob in (rec.get("discovery_contract") or []):
@@ -8321,7 +8321,7 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     L.append("")
     L.append("**Review provenance (carry-over).** Each round's review must satisfy the contract "
              "check (submission_dir resolves to base/, every check id M1-M17 and J1-J4 carries a "
-             "real coverage disposition, review/artifacts/ exists, finding ids are unique), and "
+             "real coverage disposition, targeted_review/artifacts/ exists, finding ids are unique), and "
              "its deliverables are archived under `reports/round<r>_review/`. From round 2 on, "
              "the reviewer receives the previous round's finding list as read-only `prior_round/` "
              "and must reconcile every prior id (carried forward with a new id and a "
@@ -8333,7 +8333,7 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     L.append(f"**Visual verification.** The prompts require a render-then-look pass for Word "
              f"documents (convert .docx/.doc to PDF with a layout-faithful converter, render the "
              f"pages with pdftoppm/Ghostscript, inspect the images) and a record of what was "
-             f"looked at: `review/artifacts/VIS_visual.md`, `judge_review/artifacts/VIS_visual.md`, "
+             f"looked at: `targeted_review/artifacts/VIS_visual.md`, `judge_review/artifacts/VIS_visual.md`, "
              f"or `revised/VISUAL_CHECK.md`. The orchestrator requires that record whenever Word "
              f"documents are present and reports when the record says pages were NOT visually "
              f"verified. Renderers detected on this machine at decision time: "

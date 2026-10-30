@@ -339,7 +339,7 @@ Dispose every row:
     keep it byte-identical and add a HIGH-PRIORITY manual query; never replace it
     with a plausible domain, never delete a real address (a reserved/example
     placeholder may be removed), and never propose a replacement address in a
-    review/audit/probe finding. The orchestrator fails a package that adds an
+    targeted-review/audit/probe finding. The orchestrator fails a package that adds an
     address with neither an in-corpus match nor a matching verification row.
   - OPAQUE IDENTIFIERS AND EXTERNALLY-ASSIGNED FACTS FOLLOW THE SAME RULE: a DOI,
     accession (GEO/SRA/BioProject/BioSample/...), ORCID, UUID/UID, git commit

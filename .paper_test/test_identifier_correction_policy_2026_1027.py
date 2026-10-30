@@ -153,7 +153,7 @@ def test_policy_text():
     pp = load("identifier_policy_prompts", WS / "paper_pipeline.py")
     P = Path("/tmp/x")
     prompts = {
-        "review": pp.review_prompt(P, "r1_review", 1),
+        "review": pp.review_prompt(P, "r1_targeted_review", 1),
         "audit": pp.audit_prompt(P, "r1_audit", 1),
         "rewrite": pp.rewrite_prompt(P, "r1_w1", 1, index=1, total=2),
         "revise": pp.revise_prompt(P, "r1_a2_revise", 1),

@@ -6308,8 +6308,8 @@ def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
     """Seed the M20 sweep for a review run: the code-side scan IS the enumeration.
 
     Text-only converters cannot see layout or character formatting, so the
-    orchestrator enumerates it (`review/work/FORMAT_SCAN.json`) and seeds the
-    artifact table (`review/artifacts/M20_formatting.md`) with one row per
+    orchestrator enumerates it (`targeted_review/work/FORMAT_SCAN.json`) and seeds the
+    artifact table (`targeted_review/artifacts/M20_formatting.md`) with one row per
     finding; the review prompt requires the agent to dispose every row (and to
     add the classes the scan cannot see). The review postcheck requires the M20
     coverage row like M18/M19.
@@ -6319,7 +6319,7 @@ def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
     info = (scan_format_in_sources([(base, "", ())], policy=policy) if base.is_dir()
             else {"rows": [], "by_rule": {}, "high": 0, "medium": 0, "low": 0,
                   "unavailable": "base/ is missing"})
-    work = sb / REVIEW_DIR / "work"
+    work = sb / TARGETED_REVIEW_DIR / "work"
     work.mkdir(parents=True, exist_ok=True)
     write_json_atomic(work / "FORMAT_SCAN.json", info)
     lines = [
@@ -6372,7 +6372,7 @@ def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
                      f"{r['location']} | {evidence} | {r['fix']} |  |")
     if not rows:
         lines.append("| - | — | — | — | — | no code-side formatting finding | — |  |")
-    art = sb / REVIEW_DIR / "artifacts"
+    art = sb / TARGETED_REVIEW_DIR / "artifacts"
     art.mkdir(parents=True, exist_ok=True)
     _seed_write(art / "M20_formatting.md", "\n".join(lines) + "\n")
     return info
@@ -6426,7 +6426,7 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
     # PKG-2 (AGENTS.md): a to-be-submitted document may not point at what the
     # submission does not carry. The mechanical half runs in every
     # package-producing stage's postcheck (the sentence is REMOVED there); this
-    # seed puts the rows in front of the review/audit/revise sessions FIRST, so
+    # seed puts the rows in front of the targeted-review/audit/revise sessions FIRST, so
     # the sentence is rewritten in prose instead of lost, and so a document the
     # mechanical edit cannot touch (a structural file, a pointer inside a live
     # citation field) is still fixed by someone.
@@ -6450,7 +6450,7 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
     except Exception as e:                                            # noqa: BLE001
         evidence["placeholder_files"] = {"error": f"{type(e).__name__}: {e}"}
     # The two families that only the PUBLISHED package used to see, seeded here
-    # so a review/audit/revise session can ADDRESS them in prose (the mechanical
+    # so a targeted-review/audit/revise session can ADDRESS them in prose (the mechanical
     # layer reports them; only the editing arms can ship a figure, embed it, or
     # re-point a citation):
     #   * PKG-4 -- a display item the documents cite (and legend) while the
@@ -6479,7 +6479,7 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
     # two units of analysis (the operator's result-driven audit of the two
     # delivered packages found all three, and every existing rule compares a
     # surface against itself or against the raw data, never two statements).
-    # Seeded so the review/revise arms can repair the PROSE -- the mechanical
+    # Seeded so the targeted-review/revise arms can repair the PROSE -- the mechanical
     # layer reports them and never rewrites a sentence it cannot adjudicate.
     try:
         evidence["contradictions"] = {"rows": package_contradiction_rows(corpus_dir)}
@@ -7274,7 +7274,7 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     The scanner the sessions run themselves (`python paper_docx_format.py scan
     <dir> --policy format_policy.json`) cannot know a venue's table/figure rule:
     it is profile DATA, so it travels with the sandbox. The file sits at the
-    sandbox ROOT (never inside `review/`, which `leftovers_present` reads as
+    sandbox ROOT (never inside `targeted_review/`, which `leftovers_present` reads as
     agent work), carries only venue-level data (the `tables`/`figures`/`page_budget` blocks,
     the template's `empty_paragraph_slots`, the image-aspect tolerance), and is
     identical for every session of a root -- it is venue-level, not derived
@@ -7331,7 +7331,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     """Write the code-side evidence pack into one session sandbox.
 
     `where` selects the layout:
-      * "review"  -> review/work/ + review/artifacts/ (M18/M19/M20 skeletons)
+      * "review"  -> targeted_review/work/ + targeted_review/artifacts/ (M18/M19/M20 skeletons)
       * "judge"   -> judge_review/work/ + judge_review/artifacts/ (same skeletons,
                      scanned from the judge's own target/ view)
       * "stage"   -> work/ at the sandbox root (rewrite/revise/integrate see the
@@ -7341,7 +7341,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     corpus_identity.
     """
     if where == "review":
-        work, art = sb / REVIEW_DIR / "work", sb / REVIEW_DIR / "artifacts"
+        work, art = sb / TARGETED_REVIEW_DIR / "work", sb / TARGETED_REVIEW_DIR / "artifacts"
     elif where == "judge":
         work, art = sb / "judge_review" / "work", sb / "judge_review" / "artifacts"
     else:
@@ -7359,7 +7359,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         try:
             prov = seed_provenance_pack(
                 ctx, sb, [(corpus_dir, "", CORPUS_EXCLUDE_TOP)], ev, work,
-                art=(sb / REVIEW_DIR / "artifacts") if where == "review" else None,
+                art=(sb / TARGETED_REVIEW_DIR / "artifacts") if where == "review" else None,
                 where=where)
             ev["provenance"] = {"numbers_proved":
                                 (prov.get("reconcile") or {}).get("filled"),
@@ -7859,7 +7859,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     if where in ("review", "judge"):
         # also inside the session's OUT directory, where the agent's own report
         # lives, so the pack is one path away from the artifact tables
-        (sb / (REVIEW_DIR if where == "review" else "judge_review")
+        (sb / (TARGETED_REVIEW_DIR if where == "review" else "judge_review")
          / "EVIDENCE_PACK.md").write_text("\n".join(lines), encoding="utf-8")
     return ev
 
@@ -7868,14 +7868,14 @@ def seeded_evidence_paths(sb: Path) -> set:
     """Every file `seed_evidence_pack` may write into a session sandbox.
 
     `leftovers_present` must treat these as INPUTS, not as agent work: a freshly
-    materialized review/judge sandbox already contains them.
+    materialized targeted-review/judge sandbox already contains them.
     """
     rels = ["EVIDENCE_PACK.md", "work/CODE_SCANS.json", "work/FORMAT_SCAN.json",
             "work/EVIDENCE_PACK.md", "work/PROVENANCE.json",
             "work/OFFICIAL_TEMPLATE.json", "work/OFFICIAL_TEMPLATE.md",
             "format_policy.json"]
     # The provenance pack is seeded into EVERY non-judge layout, so the review
-    # sandbox's copies live under review/work/ and the stage sandboxes' under
+    # sandbox's copies live under targeted_review/work/ and the stage sandboxes' under
     # work/; `leftovers_present` must treat both as inputs, or a freshly
     # materialized review sandbox looks "already worked in" and never starts.
     prov_stems = ("PROVENANCE.json", "NUMBERS_LEDGER.md", "IDENTIFIERS.md",
@@ -7883,36 +7883,36 @@ def seeded_evidence_paths(sb: Path) -> set:
                   "GLOSSARY.md", "CLAIM_STRENGTH.md", "M2_references.md",
                   "M30_hierarchy_reconciliation.md")
     rels += [f"work/{s}" for s in prov_stems]
-    rels += [f"{REVIEW_DIR}/work/{s}" for s in prov_stems]
-    rels += [f"{REVIEW_DIR}/work/OFFICIAL_TEMPLATE.json",
-             f"{REVIEW_DIR}/work/OFFICIAL_TEMPLATE.md"]
+    rels += [f"{TARGETED_REVIEW_DIR}/work/{s}" for s in prov_stems]
+    rels += [f"{TARGETED_REVIEW_DIR}/work/OFFICIAL_TEMPLATE.json",
+             f"{TARGETED_REVIEW_DIR}/work/OFFICIAL_TEMPLATE.md"]
     # Judge sandboxes are deliberately absent: nothing is seeded there (blinding).
-    rels += [f"{REVIEW_DIR}/EVIDENCE_PACK.md", f"{REVIEW_DIR}/work/CODE_SCANS.json",
-             f"{REVIEW_DIR}/work/FORMAT_SCAN.json", f"{REVIEW_DIR}/work/EVIDENCE_PACK.md",
-             f"{REVIEW_DIR}/artifacts/M18_caption_words.md",
-             f"{REVIEW_DIR}/artifacts/M19_length.md",
-             f"{REVIEW_DIR}/artifacts/M20_formatting.md",
-             f"{REVIEW_DIR}/artifacts/M4_numbers.md",
-             f"{REVIEW_DIR}/artifacts/M8_terms.md",
-             f"{REVIEW_DIR}/artifacts/OUTLINE.md",
-             f"{REVIEW_DIR}/artifacts/PLACEHOLDERS.md",
-             f"{REVIEW_DIR}/artifacts/CLAIM_STRENGTH.md",
-             f"{REVIEW_DIR}/artifacts/M30_hierarchy_reconciliation.md",
-             f"{REVIEW_DIR}/artifacts/M2_references.md",
-             f"{REVIEW_DIR}/artifacts/NUMBERS_LEDGER.md",
-             f"{REVIEW_DIR}/artifacts/IDENTIFIERS.md",
-             f"{REVIEW_DIR}/artifacts/GENE_LEDGER.md",
-             f"{REVIEW_DIR}/artifacts/PLACEHOLDER_LOOKUP.md",
-             f"{REVIEW_DIR}/artifacts/M24_concepts.md",
-             f"{REVIEW_DIR}/artifacts/GLOSSARY.md"]
+    rels += [f"{TARGETED_REVIEW_DIR}/EVIDENCE_PACK.md", f"{TARGETED_REVIEW_DIR}/work/CODE_SCANS.json",
+             f"{TARGETED_REVIEW_DIR}/work/FORMAT_SCAN.json", f"{TARGETED_REVIEW_DIR}/work/EVIDENCE_PACK.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/M18_caption_words.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/M19_length.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/M20_formatting.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/M4_numbers.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/M8_terms.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/OUTLINE.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/PLACEHOLDERS.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/CLAIM_STRENGTH.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/M30_hierarchy_reconciliation.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/M2_references.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/NUMBERS_LEDGER.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/IDENTIFIERS.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/GENE_LEDGER.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/PLACEHOLDER_LOOKUP.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/M24_concepts.md",
+             f"{TARGETED_REVIEW_DIR}/artifacts/GLOSSARY.md"]
     return {sb / r for r in rels}
 
 
 def evidence_pack_block(where: str) -> str:
     """The prompt block that tells a session where its evidence pack is."""
     if where == "review":
-        paths = ("`review/work/CODE_SCANS.json` / `review/work/EVIDENCE_PACK.md` (and the "
-                 "seeded `review/artifacts/M18_caption_words.md`, `M19_length.md`, "
+        paths = ("`targeted_review/work/CODE_SCANS.json` / `targeted_review/work/EVIDENCE_PACK.md` (and the "
+                 "seeded `targeted_review/artifacts/M18_caption_words.md`, `M19_length.md`, "
                  "`M20_formatting.md`, `M4_numbers.md`, `NUMBERS_LEDGER.md`, `M8_terms.md`, "
                  "`M24_concepts.md`, `GLOSSARY.md`, `IDENTIFIERS.md`, `M2_references.md`, "
                  "`OUTLINE.md`, "
@@ -7937,9 +7937,9 @@ def evidence_pack_block(where: str) -> str:
                  "`work/NUMBERS_LEDGER.md`, `work/IDENTIFIERS.md`, `work/PLACEHOLDER_LOOKUP.md`, "
                  "`work/M24_concepts.md`, `work/GLOSSARY.md` and `work/CLAIM_STRENGTH.md` (the "
                  "J3 claim-strength ledger, BOTH directions), and the reviewer's disposed tables "
-                 "under `review/artifacts/` -- including the reviewer's disposed "
-                 "`review/artifacts/M30_hierarchy_reconciliation.md` and the "
-                 "`review/artifacts/M2_references.md` seed it disposed row by row (each "
+                 "under `targeted_review/artifacts/` -- including the reviewer's disposed "
+                 "`targeted_review/artifacts/M30_hierarchy_reconciliation.md` and the "
+                 "`targeted_review/artifacts/M2_references.md` seed it disposed row by row (each "
                  "reference entry's DOI with the orchestrator's resolver verdict) -- a closure "
                  "there is only as good as the verdict it names, so attack it: an `absent` DOI "
                  "or a `found` record that names another work is a finding, not a formality")
@@ -9501,8 +9501,8 @@ class OnlySpec:
     def _token_stage(tok: str) -> str:
         """The stage a session token belongs to (`w2` -> rewrite, `a2` -> revise...)."""
         vid = str(tok)
-        if vid in ("review", "review_b"):
-            return "review"
+        if vid in ("targeted_review", "targeted_review_b", "review", "review_b"):
+            return "targeted_review"
         # Exact stage names win over the single-letter prefixes below: "audit"
         # must not be read as "a" (revise), and the journal chain's stages are
         # their own classes.
@@ -9516,7 +9516,7 @@ class OnlySpec:
             return "revise"
         if vid.startswith("i"):
             return "integrate"
-        return "review"
+        return "targeted_review"
 
     def stage_selected(self, r: int, stage: str) -> bool:
         """Is `stage` selected in round `r` (as a class, or through a session)?
@@ -9545,7 +9545,7 @@ class OnlySpec:
         if self.all_stages:
             return True
         stage = plan_stage_of(entry)
-        if stage == "probe" and self.probe_with_review and "review" in self.classes_for(r):
+        if stage == "probe" and self.probe_with_review and "targeted_review" in self.classes_for(r):
             # The PROBE is part of the review STEP: selecting the review stage
             # (`--only review`, `2:review`) runs the probe beside it, because the
             # auditor and the revisers consume its findings -- without this, the
@@ -9676,11 +9676,12 @@ def parse_only_spec(raw, flag: str = "--only", probe_with_review: bool = True) -
             _add_judge_selector(spec, int(sel.group(1)), sel.group(2) + sel.group(3),
                                 part, flag)
             continue
-        # `r1_w2` / `r1_a2` / `r1_i1` / `r1_review` / `r1_review_b` / `r1_audit`:
-        # ONE session of one round. A `_j<k>` tail makes it a judge session
-        # (`r1_w2_j1`), the same selection as `r1_judge_w2_j1`.
-        sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(w\d+|a\d+|i\d+|review|reviewer|probe|audit|"
-                           r"feedback|concerns|response|"
+        # `r1_w2` / `r1_a2` / `r1_i1` / `r1_targeted_review` / `r1_audit`: ONE
+        # session of one round. A `_j<k>` tail makes it a judge session
+        # (`r1_w2_j1`), the same selection as `r1_judge_w2_j1`. The pre-rename
+        # spellings (`r1_review`, `r1_review_b`, `r1_reviewer`) stay accepted.
+        sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(w\d+|a\d+|i\d+|targeted_review|review|"
+                           r"reviewer|probe|audit|feedback|concerns|response|"
                            r"rewriter\d+|reviser\d+|integrator\d+)"
                            r"((?:[_:/.-](?:b|j\d+))?)", token)
         if sel:
@@ -9692,7 +9693,8 @@ def parse_only_spec(raw, flag: str = "--only", probe_with_review: bool = True) -
                 # `agents` use), while `r1_reviser2` keeps the friendly count.
                 _add_session_id(spec, int(sel.group(1)), session, part, flag)
             else:
-                _add_session_token(spec, int(sel.group(1)), session, part, flag)
+                _add_session_token(spec, int(sel.group(1)), normalize_session_stage(session),
+                                   part, flag)
             continue
         # `r1_a2_revise`: the exact RUN ID `agents` prints for a revise arm (the
         # others -- `r1_w1`, `r1_i1`, `r1_review`, `r1_audit` -- are already
@@ -9766,9 +9768,14 @@ def parse_only_spec(raw, flag: str = "--only", probe_with_review: bool = True) -
         # `w2` / `rewriter2` / `integrator1` / `reviser1` / `reviewer`: ONE
         # producing session, in every round that has it. `a2` alone stays the
         # documented revise ALIAS (the stage branch below), so the un-suffixed
-        # revise spelling must be `reviser1`.
+        # revise spelling must be `reviser1`. The targeted review's own session
+        # tokens are accepted in BOTH spellings -- the canonical
+        # `targeted_review`/`targeted_review_b` and the pre-rename
+        # `review`/`review_b` -- because a bare `targeted_review` is also a
+        # legitimate STAGE name, and the stage branch below handles that one.
         if re.fullmatch(r"(?:w\d+|i\d+|rewriter\d+|writer\d+|reviser\d+|revise\d+|"
-                        r"integrator\d+|integrate\d+|reviewer|review_b)", token):
+                        r"integrator\d+|integrate\d+|reviewer|review_b|targeted_review_b)",
+                        token):
             _add_session_token(spec, None, token, part, flag)
             continue
         spec.stages.add(parse_only_stage(token, part, flag))
@@ -9940,9 +9947,9 @@ def _session_token(raw: str, part: str, flag: str = "--only") -> str:
     m = re.fullmatch(r"(integrator|integrate|i)(\d+)", tok)
     if m:
         return f"i{int(m.group(2))}"
-    m = re.fullmatch(r"(reviewer|review)(_?b)?", tok)
+    m = re.fullmatch(r"(reviewer|review|targeted_review)(_?b)?", tok)
     if m:
-        return "review_b" if m.group(2) else "review"
+        return "targeted_review_b" if m.group(2) else "targeted_review"
     if re.fullmatch(r"(?:a1|w\d+|a\d+|i\d+|orig|probe|audit|feedback|concerns|response)", tok):
         if tok == "a1":
             die(f"{flag}: {part!r} names a1, the round base COPY -- it has no agent session "
@@ -9985,7 +9992,7 @@ def plan_stage_of(entry: dict) -> str:
     """The bare stage name of a round-plan entry.
 
     `round_run_plan` labels entries with their plan position ("revise 1/1",
-    "integrate 2/2", "rewrite 1/2", "review"); `--only` filters on the bare
+    "integrate 2/2", "rewrite 1/2", "targeted_review"); `--only` filters on the bare
     name, so map the label back to it.
     """
     return str((entry or {}).get("stage") or "").strip().lower().split(" ")[0]

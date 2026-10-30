@@ -19,7 +19,7 @@ suite pins the round trip:
     first occurrence, so the mechanical finding is clearable and no longer
     rejects every other repair of the file;
   * `format_policy_of` carries the venue template's slots, the session policy
-    file writes them, and the review/revise/integrate/rewrite/judge prompts and
+    file writes them, and the targeted-review/revise/integrate/rewrite/judge prompts and
     the auditor directives name the new classes and the template exemption.
 
 Run:  python3 .paper_test/test_format_hygiene.py
@@ -333,7 +333,7 @@ def test_spelling_tie_is_clearable(tmp):
 
 def test_policy_and_prompts():
     print()
-    print("== policy slots + the review/audit/revise/integrate/rewrite/judge text ==")
+    print("== policy slots + the targeted-review/audit/revise/integrate/rewrite/judge text ==")
     tmp = Path(tempfile.mkdtemp(prefix="paper_hyg_prompt_"))
     root = tmp / "root"
     (root / "venue_profiles").mkdir(parents=True)
@@ -370,7 +370,7 @@ def test_policy_and_prompts():
           and written.get("image_aspect_tolerance") == 0.02, json.dumps(written)[:160])
     fr = np.load_venue_profile("frontiers-in-immunology")
     sb = Path(tempfile.mkdtemp(prefix="paper_hyg_prompts_"))
-    review = np.review_prompt(sb, "r1_review", 1, venue=fr)
+    review = np.review_prompt(sb, "r1_targeted_review", 1, venue=fr)
     revise = np.revise_prompt(sb, "r1_a2", 1, venue=fr)
     integrate = np.integrate_prompt(sb, "r1_i1", 1, "a1", ["a2"], venue=fr)
     rewrite = np.rewrite_prompt(sb, "r1_w1", 1, venue=fr)

@@ -336,7 +336,7 @@ def test_upstream_deps_journal():
           pp.upstream_deps(rec, ctx) == ["r1_a1", "r1_feedback"],
           str(pp.upstream_deps(rec, ctx)))
     check("transfer-mode review lists the feedback run",
-          pp.upstream_deps({"kind": "review", "round": 1}, ctx) ==
+          pp.upstream_deps({"kind": "targeted_review", "round": 1}, ctx) ==
           ["r1_a1", "r1_feedback"])
     ctx.cfg = {"revision_mode": "llm"}
     check("the no-journal path keeps its old dependency list",

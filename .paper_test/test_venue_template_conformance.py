@@ -247,7 +247,7 @@ def test_prompt_wiring():
     sandbox = scratch("paper_tpl_prompt_")
     marker = "=== FAKE VENUE TEMPLATE RULES ==="
     for name, text in (
-            ("review", nb.review_prompt(sandbox, "r1_review", 1, venue_norm=marker)),
+            ("review", nb.review_prompt(sandbox, "r1_targeted_review", 1, venue_norm=marker)),
             ("revise", nb.revise_prompt(sandbox, "r1_a2_revise", 1, venue_norm=marker)),
             ("integrate", nb.integrate_prompt(sandbox, "r1_i1", 1, "a1", ["w1"],
                                               venue_norm=marker)),
@@ -1167,7 +1167,7 @@ def test_cover_letter_defect_gates():
     sb2 = tmp / "review_sb"
     (sb2 / "base").mkdir(parents=True)
     shutil.copy2(corpus / "coverLetter.docx", sb2 / "base" / "coverLetter.docx")
-    art2 = sb2 / "review" / "artifacts"
+    art2 = sb2 / "targeted_review" / "artifacts"
     art2.mkdir(parents=True)
     (art2 / "M20_formatting.md").write_text("| rule | disposition |\n|---|---|\n",
                                             encoding="utf-8")

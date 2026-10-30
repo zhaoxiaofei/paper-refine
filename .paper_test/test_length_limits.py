@@ -76,7 +76,7 @@ def cleanup():
 def all_prompts() -> dict:
     sb = Path("/tmp/paper_len_prompt")
     return {
-        "review": nb.review_prompt(sb, "r1_review", 1),
+        "review": nb.review_prompt(sb, "r1_targeted_review", 1),
         "rewrite": nb.rewrite_prompt(sb, "r1_w1", 1),
         "revise": nb.revise_prompt(sb, "r1_a2_revise", 1),
         "integrate": nb.integrate_prompt(sb, "r1_i1", 1, "a1", ["w1"]),
@@ -160,7 +160,7 @@ def test_prompts():
               "LENGTH IS EXEMPT" not in text and "abstract or main-text word\n    limits, never"
               not in text)
     check("LT3 the review prompt mandates the M19 sweep and its artifact",
-          "review/artifacts/M19_length.md" in texts["review"]
+          "targeted_review/artifacts/M19_length.md" in texts["review"]
           and "Give M19 its own coverage row" in texts["review"])
     check("LT3 the review prompt reports over-cap sections as category-4 findings",
           "CATEGORY-4 (technical formatting) finding" in texts["review"])
@@ -183,8 +183,8 @@ def test_prompts():
           str({k: ("650" in texts[k]) for k in texts}))
     check("LT3 the shared class rule invents no cover-letter total cap",
           "with 650 words" not in " ".join(nb.defect_class_rule().split()))
-    on = nb.review_prompt(Path("/tmp/x"), "r1_review", 1, caption_limit=300)
-    off = nb.review_prompt(Path("/tmp/x"), "r1_review", 1, caption_limit=0)
+    on = nb.review_prompt(Path("/tmp/x"), "r1_targeted_review", 1, caption_limit=300)
+    off = nb.review_prompt(Path("/tmp/x"), "r1_targeted_review", 1, caption_limit=0)
     check("LT3 the caption rule now names both narrowed places",
           "check id M19" in on and "cover letter keeps" in on
           and "for its persuading part" in on
@@ -328,16 +328,16 @@ def test_orchestrator_wiring():
     tmp = scratch("paper_len_pc_")
     sb = tmp / "runs" / "r1_a2_review"
     write(sb / "base" / "ms.md", "text\n")
-    write(sb / "review" / "artifacts" / "M1_acronyms.md", "| row |\n|---|\n")
+    write(sb / "targeted_review" / "artifacts" / "M1_acronyms.md", "| row |\n|---|\n")
     for fname in ("M25_artwork_parity.md", "M26_conventions.md",
                   "M27_evidence_coverage.md", "M28_symmetry.md",
                   "M29_caption_schema.md", "M30_hierarchy_reconciliation.md",
                   "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md", "M2_references.md"):
-        write(sb / "review" / "artifacts" / fname,
+        write(sb / "targeted_review" / "artifacts" / fname,
               "| row | disposition |\n|---|---|\n| x | OK |\n")
-    write(sb / "review" / "ARCHITECTURE.md",
+    write(sb / "targeted_review" / "ARCHITECTURE.md",
           "| document | section | paragraphs | current structure | reader cost | "
           "proposed reorganization | class | severity | disposition |\n"
           "|---|---|---|---|---|---|---|---|---|\n"

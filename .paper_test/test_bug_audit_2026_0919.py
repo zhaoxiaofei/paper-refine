@@ -205,7 +205,7 @@ def test_c07_empty_ledger():
     sb.mkdir(parents=True)
     shutil.copytree(pristine, sb / "base")
     shutil.copytree(pristine, sb / "non_revised")
-    write(sb / "review" / "findings.json",
+    write(sb / "targeted_review" / "findings.json",
           json.dumps({"submission_dir": "./base", "findings": [], "artifacts": {},
                       "coverage": []}))
     rev = sb / "revised"
@@ -223,7 +223,7 @@ def test_c07_empty_ledger():
                        source_id="a1")
     rec["inputs_manifest"] = {"base": nb.hash_manifest(sb / "base"),
                               "non_revised": nb.hash_manifest(sb / "non_revised"),
-                              "review": nb.hash_manifest(sb / "review")}
+                              "targeted_review": nb.hash_manifest(sb / "targeted_review")}
     ok, errs, warns, _extra = (list(nb.postcheck_revise(ctx, rec)) + [None])[:4]
     check("C07 a zero-finding review with an empty ledger is accepted",
           ok is True and not any("EMPTY/unfinished" in e for e in errs),

@@ -79,7 +79,7 @@ def prompts(mode: str = None) -> dict:
     sb = Path("/tmp/paper_zot_prompt")
     kw = {} if mode is None else {"zotero": mode}
     return {
-        "review": nb.review_prompt(sb, "r1_review", 1, **kw),
+        "review": nb.review_prompt(sb, "r1_targeted_review", 1, **kw),
         "rewrite": nb.rewrite_prompt(sb, "r1_w1", 1, **kw),
         "revise": nb.revise_prompt(sb, "r1_a2_revise", 1, **kw),
         "integrate": nb.integrate_prompt(sb, "r1_i1", 1, "a1", ["w1"], **kw),
@@ -308,7 +308,7 @@ def test_end_to_end_prompt():
     check("ZT5 the stub round completes", proc.returncode == 0, out[-400:])
     check("ZT5 the run log announces the apply mode",
           "zotero reference tooling:  apply" in out, out[-300:])
-    review_prompt = root / "runs" / "r1_review" / "PROMPT.md"
+    review_prompt = root / "runs" / "r1_targeted_review" / "PROMPT.md"
     revise_prompt = root / "runs" / "r1_a2_revise" / "PROMPT.md"
     check("ZT5 the on-disk review prompt is read-only for the library",
           review_prompt.is_file() and "YOUR STAGE IDENTIFIES, IT NEVER EDITS" in

@@ -33,8 +33,8 @@ def stub_discovery_x_findings() -> list:
 def frozen_finding_rows(review: Path) -> list:
     """Every finding row a compliant session must consume: F-* AND X-*.
 
-    The revision and audit stages read `review/findings.json` PLUS the
-    discovery round's `review/round2/findings_extra.json` (paper-revise merges
+    The revision and audit stages read `targeted_review/findings.json` PLUS the
+    discovery round's `targeted_review/round2/findings_extra.json` (paper-revise merges
     both namespaces). A stub that reads only findings.json silently drops the
     X-* list -- exactly the inconsistency the pipeline's contracts check for.
     """
@@ -269,7 +269,7 @@ SCOPED_OUT_IDS = ("M2", "M4", "M5", "M13", "M14", "M15", "M16", "M21", "M22", "M
 
 
 def do_review(sb: Path, name: str, round_no: int) -> int:
-    out = sb / "review"
+    out = sb / "targeted_review"
     (out / "artifacts").mkdir(parents=True, exist_ok=True)
     (out / "round2").mkdir(parents=True, exist_ok=True)
     scoped = "FORMATTING AND WRITING ONLY" in (
@@ -332,7 +332,7 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                          "detail": "stub"}]
                      + [{"check": "M20",
                          "disposition": "0 findings -- code-side formatting rows disposed",
-                         "detail": "stub: review/work/FORMAT_SCAN.json audited"}]
+                         "detail": "stub: targeted_review/work/FORMAT_SCAN.json audited"}]
                      + [{"check": c,
                          "disposition": ("out of scope -- this round's review is the "
                                          "formatting-and-writing-only pass" if scoped and c in
@@ -424,7 +424,7 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "corpus (stub).\n", encoding="utf-8")
     fill_seeded_tables(out / "artifacts")
     write_json(sb / "_pipeline_done.json", {
-        "stage": "review", "run_id": name, "round": round_no, "status": "complete",
+        "stage": "targeted_review", "run_id": name, "round": round_no, "status": "complete",
         "error": None, "summary": {"findings_total": 1, "critical_found": 0,
                                    "major_found": 0, "minor_found": 1}})
     return 0
@@ -487,7 +487,7 @@ def do_concerns(sb: Path, name: str, round_no: int) -> int:
         + "\n".join(f"| {r['id']} | {r['source']} | {r['author']} | {r['action']} | "
                     f"{r['disposition']} | {r['quote']} | {r['summary']} | — |" for r in rows)
         + "\n", encoding="utf-8")
-    rev = sb / "review"
+    rev = sb / "targeted_review"
     (rev / "artifacts").mkdir(parents=True, exist_ok=True)
     findings = [{"id": r["id"], "location": "base", "category": 0, "check": "JF",
                  "severity": "Major", "evidence": r["quote"],
@@ -636,7 +636,7 @@ def do_audit(sb: Path, name: str, round_no: int) -> int:
     with evidence, promoted `AU-` findings) is exercised by the unit fixtures of
     `test_residual_audit_2026_0921.py`, not by the stub round.
     """
-    rev = sb / "review"
+    rev = sb / "targeted_review"
     frozen = frozen_finding_rows(rev)
     out = sb / "audit"
     out.mkdir(parents=True, exist_ok=True)
@@ -698,7 +698,7 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
     (out / "REVISION_REPORT.md").write_text("# report (stub)\n", encoding="utf-8")
     language_pass_artifact(out, "revised documents")
     # The ledger contract: one row per finding id from the frozen review -- the
-    # revise stage consumes review/findings.json AND review/round2/
+    # revise stage consumes targeted_review/findings.json AND targeted_review/round2/
     # findings_extra.json (the discovery round's X-* ids); the cross stage works
     # from the self/ package, which carries the same ledger back in. A run that
     # lists no row at all cannot prove "no finding was silently dropped".
@@ -709,7 +709,7 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
                                           "visual_check.md")
                and "work" not in p.relative_to(out).parts[:-1]]
     rows = []
-    for rel in ("review/findings.json", "review/round2/findings_extra.json",
+    for rel in ("targeted_review/findings.json", "targeted_review/round2/findings_extra.json",
                 "revised/revision_report.json"):
         p = sb / rel
         if not p.is_file():

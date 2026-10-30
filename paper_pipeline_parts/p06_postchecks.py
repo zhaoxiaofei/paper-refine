@@ -31,7 +31,7 @@ from __future__ import annotations
 SIGNAL_ALT_DIRS = {
     "audit": ("audit",),
     "judge": ("judge_review",),
-    "review": (REVIEW_DIR,),
+    "targeted_review": (TARGETED_REVIEW_DIR,),
     "probe": (PROBE_DIR,),
     "rewrite": (REWRITTEN_DIR,),
     "revise": (REVISED_DIR,),
@@ -177,7 +177,7 @@ def likely_complete_artifacts(ctx: Ctx, rec: dict) -> bool:
     if completion_signal_exists(ctx, rec):
         return True
     sb = ctx.sandbox_of(rec)
-    if rec["kind"] == "review":
+    if rec["kind"] == "targeted_review":
         return (sb / FINDINGS_REL).is_file()
     if rec["kind"] in ("rewrite", "revise", "integrate"):
         out = sb / output_dir_of(rec)
@@ -261,7 +261,7 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
     """True when a pending sandbox already holds AGENT output (never re-enter).
 
     Kind-aware on purpose: a revise sandbox is materialized WITH a read-only
-    review/ copy, and an integration/judge sandbox is materialized with its
+    targeted_review/ copy, and an integration/judge sandbox is materialized with its
     inputs, so those directories must not be mistaken for partial work by the
     agent.
     """
@@ -273,8 +273,8 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
         # content is the agent's own work (scores.json alone is also accepted as
         # the completion signal elsewhere).
         return (sb / SCORES_FILE).exists() or (sb / "judge_review").is_dir()
-    if rec["kind"] == "review":
-        d = sb / REVIEW_DIR
+    if rec["kind"] == "targeted_review":
+        d = sb / TARGETED_REVIEW_DIR
         if not (d.is_dir() and any(d.iterdir())):
             return False
         # The orchestrator SEEDS the M20 formatting sweep (the code-side scan is
@@ -465,7 +465,7 @@ def audit_record_of(ctx: Ctx, r) -> dict:
 def findings_from_sandbox(sb: Path, audit=None) -> list:
     """The frozen review's finding rows as THIS sandbox carries them.
 
-    `sb/review/findings.json` (+ `review/round2/findings_extra.json`), with the
+    `sb/targeted_review/findings.json` (+ `targeted_review/round2/findings_extra.json`), with the
     AUDITED list applied when `audit` (an `audit/audit.json` payload) is given:
     the auditor's drops removed, its `AU-` additions appended.
 
@@ -476,7 +476,7 @@ def findings_from_sandbox(sb: Path, audit=None) -> list:
     cannot disagree about which ids a ledger has to name.
     """
     out = []
-    for rel in (FINDINGS_REL, "review/round2/findings_extra.json"):
+    for rel in (FINDINGS_REL, "targeted_review/round2/findings_extra.json"):
         fj = read_json(sb / rel, revive=False, lenient=True)   # agent-written
         if not isinstance(fj, dict):
             continue
@@ -496,7 +496,7 @@ def findings_from_sandbox(sb: Path, audit=None) -> list:
 def consumed_findings(ctx: Ctx, rec: dict) -> list:
     """The finding list a stage must resolve: the frozen review, AUDITED.
 
-    review/findings.json (+ review/round2/findings_extra.json) minus the
+    targeted_review/findings.json (+ targeted_review/round2/findings_extra.json) minus the
     auditor's drops, plus the auditor's `AU-` additions.  With `--audit off`
     this is byte-for-byte the frozen list, so every existing contract keeps its
     meaning; with the auditor on, the revisers act on the dispositions an
@@ -523,7 +523,7 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
     """The round's frozen (audited) review list, for arms whose sandbox carries none.
 
     The rewrite and integration arms do not consume findings, so they never get
-    a `review/` copy -- but the round's frozen list is the SAME list the auditor
+    a `targeted_review/` copy -- but the round's frozen list is the SAME list the auditor
     disposed and the revision arm acted on, so the self-reported tie-break
     counts of every arm can be cross-checked against it. An unreadable or
     pruned round yields [] (no cross-check), never a guess.
@@ -533,16 +533,16 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
     except (TypeError, ValueError):
         return []
     # Under `--review-split` the round has ONE frozen list: the merged A+B file,
-    # and `merge_review_parts` writes it into session B's `review/` (the directory
+    # and `merge_review_parts` writes it into session B's `targeted_review/` (the directory
     # the revise sessions copy). Reading session A unconditionally therefore
     # handed every consumer a PARTIAL list: the rewrite/integration arms'
     # self-reported remaining counts were cross-checked against A alone, and the
     # decision report's remaining-work figure undercounted by every finding only
     # session B filed. Session A stays the source only when no split is
     # configured (or B never produced a list).
-    rev = ctx.run(rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r))
+    rev = ctx.run(rid_targeted_review_b(r) if review_split_of(ctx) != "off" else rid_targeted_review(r))
     if (rev is None or rev.get("status") != "done") and review_split_of(ctx) != "off":
-        rev = ctx.run(rid_review(r))
+        rev = ctx.run(rid_targeted_review(r))
     if not rev or rev.get("status") != "done":
         return []
     sb = ctx.sandbox_of(rev)
@@ -550,7 +550,7 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
         return []
     findings = findings_from_sandbox(sb, audit_record_of(ctx, r))
     # The PROBE is the round's second producer in the same frozen list: arms
-    # whose sandbox carries no review/ copy (rewrite, integration) must count
+    # whose sandbox carries no targeted_review/ copy (rewrite, integration) must count
     # its findings here too, or their self-reported critical/writing counts are
     # cross-checked against an incomplete list.
     probe_rows, _remap = probe_findings_for_merge(
@@ -568,7 +568,7 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
 # ---------------------------------------------------------------------
 
 def discovery_findings_of(dirp: Path) -> list:
-    """The X-* finding rows of a `review/round2/`-shaped directory or its seed copy."""
+    """The X-* finding rows of a `targeted_review/round2/`-shaped directory or its seed copy."""
     data = read_json(dirp / "findings_extra.json", revive=False, lenient=True)
     rows = data.get("findings") if isinstance(data, dict) else None
     out, seen = [], set()
@@ -605,7 +605,7 @@ def discovery_dropped_ids(audit, ids) -> list:
 
 
 def round_discovery_dir(ctx: Ctx, r: int):
-    """The `review/round2/` directory that owns round r's discovery list.
+    """The `targeted_review/round2/` directory that owns round r's discovery list.
 
     Prefers the review session the discovery round actually lives in -- part B
     under a split review (the merge copies the discovery there), the single
@@ -624,15 +624,15 @@ def round_discovery_dir(ctx: Ctx, r: int):
         split = review_split_of(ctx) != "off"
     except Exception:                                             # noqa: BLE001
         split = False
-    first, second = ((rid_review_b(r), rid_review(r)) if split
-                     else (rid_review(r), rid_review_b(r)))
+    first, second = ((rid_targeted_review_b(r), rid_targeted_review(r)) if split
+                     else (rid_targeted_review(r), rid_targeted_review_b(r)))
     for rid_ in (first, second):
         rec = ctx.run(rid_)
         # Only a FINISHED review owns a discovery round: a pending/failed
         # sandbox can hold a partial round2/ from an interrupted attempt, and
         # seeding half a list would be worse than seeding none.
         if rec is not None and str(rec.get("status") or "") == "done":
-            cands.append(ctx.sandbox_of(rec) / REVIEW_DIR / "round2")
+            cands.append(ctx.sandbox_of(rec) / TARGETED_REVIEW_DIR / "round2")
     cands.append(ctx.reports_dir / f"round{r}_review")
     for c in cands:
         if (c / "findings_extra.json").is_file():
@@ -795,7 +795,7 @@ def critical_findings_input(ctx: Ctx, rec: dict):
     Used only as a sanity signal for the self-reported `critical_remaining`
     count (which no longer ranks -- the panel's issue census does): it is the
     count the run started from, not the count that remains, so it never gates a
-    run. An arm whose own sandbox has no `review/` copy
+    run. An arm whose own sandbox has no `targeted_review/` copy
     (rewrite, integration) falls back to the round's frozen list, so the
     cross-check below is not revise-only.
     """
@@ -894,7 +894,7 @@ def tiebreak_selfreport_warnings(ctx: Ctx, rec: dict, summ: dict, warns: list) -
     distinguished from a genuine partial fix, so it is taken at face value.
     `critical_findings_input`/`writing_findings_input` fall back to the round's
     own frozen review, so the check covers the rewrite and integration arms too
-    -- they carry no `review/` copy, which is exactly why their self-reports
+    -- they carry no `targeted_review/` copy, which is exactly why their self-reports
     used to be unverified.
     """
     if not isinstance(summ, dict):
@@ -2159,7 +2159,7 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
     author. Silence is not an acceptable outcome.
 
     `render_roots` is where the converted pages may live (the version corpus for
-    revise/integration, review/ for the review, judge_review/ for a judge). When the
+    revise/integration, targeted_review/ for the review, judge_review/ for a judge). When the
     artifact claims the pass was done and a renderer exists on this machine, at
     least one rendered file (PDF/PNG/...) must be present -- otherwise the claim
     is only a sentence, which is exactly what the prompt forbids ("Never write
@@ -2240,7 +2240,7 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
     except Exception as e:                                     # noqa: BLE001 -- never gate on scan
         # A skipped scan is UNKNOWN, not clean: returning [] let a review that
         # deleted every seeded FMT-CL1 row ship whenever the scan crashed.
-        return [f"{REVIEW_DIR}/artifacts/M20_formatting.md cannot be verified: the code-side "
+        return [f"{TARGETED_REVIEW_DIR}/artifacts/M20_formatting.md cannot be verified: the code-side "
                 f"FMT-CL1 scan FAILED ({type(e).__name__}: {e}); the row state is UNKNOWN, "
                 f"not clean"]
     want = {str(r.get("document") or "").strip()
@@ -2249,11 +2249,11 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
     want = {w for w in want if w}
     if not want:
         return []
-    path = sb / REVIEW_DIR / "artifacts" / "M20_formatting.md"
+    path = sb / TARGETED_REVIEW_DIR / "artifacts" / "M20_formatting.md"
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return [f"{REVIEW_DIR}/artifacts/M20_formatting.md is missing: the code-side scan "
+        return [f"{TARGETED_REVIEW_DIR}/artifacts/M20_formatting.md is missing: the code-side scan "
                 f"proves {len(want)} FMT-CL1 cover-letter row(s) "
                 f"({', '.join(sorted(want)[:3])}) the review must dispose"]
     # Rows are per DOCUMENT, not per mention: three rows about one letter do not
@@ -2266,7 +2266,7 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
         # when the table's own document column carries the name implicitly.
         return []
     missing = sorted(want - named)
-    return [f"{REVIEW_DIR}/artifacts/M20_formatting.md carries FMT-CL1 row(s) for "
+    return [f"{TARGETED_REVIEW_DIR}/artifacts/M20_formatting.md carries FMT-CL1 row(s) for "
             f"{len(named)} of the {len(want)} cover letter(s) the code-side scan proves "
             f"({', '.join(missing[:3])} missing): a seeded row cannot be deleted -- dispose "
             f"every cover letter the scan flags (an M20 finding, or OK with the journal's own "
@@ -2333,9 +2333,9 @@ def _unable_reason_present(rest: str) -> bool:
 
 
 def discovery_gap_summary(sb: Path) -> dict:
-    """{rows, covered, uncovered, unmarked} of review/round2/gap_table.md."""
+    """{rows, covered, uncovered, unmarked} of targeted_review/round2/gap_table.md."""
     covered = uncovered = unmarked = 0
-    rows = _discovery_rows(sb / "review" / "round2" / "gap_table.md")
+    rows = _discovery_rows(sb / TARGETED_REVIEW_DIR / "round2" / "gap_table.md")
     for r in rows:
         low = _row_text(r).lower()
         # The UNCOVERED spellings D1's own prose uses: "UNCOVERED", "not covered",
@@ -2355,9 +2355,9 @@ def discovery_gap_summary(sb: Path) -> dict:
 
 
 def discovery_probe_ids(sb: Path) -> list:
-    """The P2-* probe ids declared in review/round2/probes.md, in file order."""
+    """The P2-* probe ids declared in targeted_review/round2/probes.md, in file order."""
     ids = []
-    for r in _discovery_rows(sb / "review" / "round2" / "probes.md"):
+    for r in _discovery_rows(sb / TARGETED_REVIEW_DIR / "round2" / "probes.md"):
         m = DISCOVERY_PROBE_ID_RE.search(_row_text(r))
         if m and m.group(0) not in ids:
             ids.append(m.group(0))
@@ -2365,9 +2365,9 @@ def discovery_probe_ids(sb: Path) -> list:
 
 
 def discovery_probe_result_ids(sb: Path) -> list:
-    """The P2-* probe ids recorded in review/round2/probe_results.md."""
+    """The P2-* probe ids recorded in targeted_review/round2/probe_results.md."""
     ids = []
-    for r in _discovery_rows(sb / "review" / "round2" / "probe_results.md"):
+    for r in _discovery_rows(sb / TARGETED_REVIEW_DIR / "round2" / "probe_results.md"):
         m = DISCOVERY_PROBE_ID_RE.search(_row_text(r))
         if m and m.group(0) not in ids:
             ids.append(m.group(0))
@@ -2428,12 +2428,12 @@ def discovery_contract_problems(sb: Path) -> tuple:
     (the convergence loop D5 promises, made code-enforced). Callers apply the
     `--strict-artifacts` policy -- see `check_discovery_contract`.
     """
-    r2 = sb / "review" / "round2"
+    r2 = sb / TARGETED_REVIEW_DIR / "round2"
     errors, warns = [], []
     missing = [name for name in DISCOVERY_ROUND_FILES if not _discovery_nonempty(r2 / name)]
     if missing:
         errors.append(
-            "review/round2/ is missing the discovery round's deliverable(s) "
+            "targeted_review/round2/ is missing the discovery round's deliverable(s) "
             f"{', '.join(missing)}: the D0-D5 phase must leave all of "
             f"{', '.join(DISCOVERY_ROUND_FILES)} (references/discovery.md). A phase whose "
             "artifacts are absent cannot be told apart from one that never ran -- the review's "
@@ -2456,7 +2456,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
 
         if not (_class_id_mentioned("M1") and _class_id_mentioned("J5")):
             errors.append(
-                "review/round2/known_index.md never names both ends of the frozen class range "
+                "targeted_review/round2/known_index.md never names both ends of the frozen class range "
                 "(M1 and J5 must appear as whole tokens): D0's KNOWN-CLASSES index is what keeps "
                 "the round from re-reporting an already-owned class, and an index built without "
                 "it cannot exclude anything")
@@ -2466,17 +2466,17 @@ def discovery_contract_problems(sb: Path) -> tuple:
     if _discovery_nonempty(r2 / "gap_table.md"):
         if gap["rows"] < DISCOVERY_MIN_GAP_ROWS:
             errors.append(
-                f"review/round2/gap_table.md carries {gap['rows']} row(s); D1's gap table must "
+                f"targeted_review/round2/gap_table.md carries {gap['rows']} row(s); D1's gap table must "
                 f"enumerate at least {DISCOVERY_MIN_GAP_ROWS} issue-class rows "
                 f"(references/discovery.md: seed the table, then ask 'what else?' twice more)")
         if gap["unmarked"]:
             errors.append(
-                f"review/round2/gap_table.md leaves {gap['unmarked']} of its {gap['rows']} "
+                f"targeted_review/round2/gap_table.md leaves {gap['unmarked']} of its {gap['rows']} "
                 f"row(s) without a COVERED/UNCOVERED marking: every class row must state "
                 f"whether a frozen check owns it (and which)")
         if gap["rows"] and not gap["uncovered"] and not gap["unmarked"]:
             errors.append(
-                "review/round2/gap_table.md marks every row COVERED: a discovery round that "
+                "targeted_review/round2/gap_table.md marks every row COVERED: a discovery round that "
                 "found no uncovered class has not run D1 -- the two-sided-defect seed alone (a "
                 "known class whose definition reads only ONE direction) is a gap row until both "
                 "directions have been reported, and so are the D3 anomaly hunts")
@@ -2507,18 +2507,18 @@ def discovery_contract_problems(sb: Path) -> tuple:
         have = len(probe_ids) + limitations
         if have < gap["uncovered"]:
             errors.append(
-                f"review/round2/probes.md declares {have} probe/limitation row(s) for "
+                f"targeted_review/round2/probes.md declares {have} probe/limitation row(s) for "
                 f"{gap['uncovered']} UNCOVERED gap row(s): D2 converts EVERY uncovered row "
                 f"into a concrete probe (P2-...); a row that cannot be probed is recorded as an "
                 f"analysis limitation, never silently dropped")
     if bad_probe_rows:
         errors.append(
-            "review/round2/probes.md has probe row(s) without a usable disposition "
+            "targeted_review/round2/probes.md has probe row(s) without a usable disposition "
             f"({'; '.join(bad_probe_rows[:4])}): every probe row states its status, and `unable` "
             f"states why execution was impossible")
     if probeless:
         warns.append(
-            f"review/round2/probes.md carries {probeless} non-empty row(s) with neither a P2-* "
+            f"targeted_review/round2/probes.md carries {probeless} non-empty row(s) with neither a P2-* "
             f"probe id nor an analysis-limitation note -- check they are not dropped root rows")
     # D3 -- results: one executed disposition per probe; a clean probe names the
     # locations it checked; `unable` states its reason.
@@ -2560,32 +2560,32 @@ def discovery_contract_problems(sb: Path) -> tuple:
         missing_res = [p for p in probe_ids if p not in result_ids]
         if missing_res:
             errors.append(
-                f"review/round2/probe_results.md records no result for probe(s) "
+                f"targeted_review/round2/probe_results.md records no result for probe(s) "
                 f"{', '.join(missing_res[:6])}" + (" ..." if len(missing_res) > 6 else "")
                 + ": D3 executes EVERY probe and records one disposition per row (a clean probe "
                   "records 'no anomalies -- checked: <locations>')")
         extra = [p for p in result_ids if p not in probe_ids]
         if extra:
             warns.append(
-                f"review/round2/probe_results.md reports probe id(s) {', '.join(extra[:6])} "
+                f"targeted_review/round2/probe_results.md reports probe id(s) {', '.join(extra[:6])} "
                 f"that probes.md never declares -- declare them there or drop the rows")
         if dup_result_ids:
             warns.append(
-                f"review/round2/probe_results.md records probe id(s) "
+                f"targeted_review/round2/probe_results.md records probe id(s) "
                 f"{', '.join(dup_result_ids[:6])} more than once: every row is judged, so "
                 f"retract the superseded disposition instead of leaving both in place")
         if result_problems:
-            errors.append("review/round2/probe_results.md: "
+            errors.append("targeted_review/round2/probe_results.md: "
                           + "; ".join(sorted(set(result_problems))[:4]))
         if unable_short:
             errors.append(
-                f"review/round2/probe_results.md closes {len(set(unable_short))} probe(s) "
+                f"targeted_review/round2/probe_results.md closes {len(set(unable_short))} probe(s) "
                 f"`unable` with no reason ({', '.join(sorted(set(unable_short))[:4])}): an "
                 f"unable probe states WHY it "
                 f"could not be executed")
         if no_checked:
             errors.append(
-                f"review/round2/probe_results.md closes {len(set(no_checked))} probe(s) 'no "
+                f"targeted_review/round2/probe_results.md closes {len(set(no_checked))} probe(s) 'no "
                 f"anomalies' without naming the checked locations "
                 f"({', '.join(sorted(set(no_checked))[:4])}): D3's clean closure is "
                 f"'no anomalies -- checked: <locations>'")
@@ -2594,7 +2594,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
         xj = read_json(r2 / "findings_extra.json", revive=False, lenient=True)
         if not isinstance(xj, dict) or not isinstance(xj.get("findings"), list):
             errors.append(
-                "review/round2/findings_extra.json does not carry a 'findings' list (the D4 "
+                "targeted_review/round2/findings_extra.json does not carry a 'findings' list (the D4 "
                 "deliverable: {'findings': [...], 'coverage': [...]})")
         else:
             bad, seen = [], set()
@@ -2623,7 +2623,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
                     bad.append(f"{fid}: category {f.get('category')!r} is not an integer 0-5")
             if bad:
                 errors.append(
-                    "review/round2/findings_extra.json carries malformed X-finding(s): "
+                    "targeted_review/round2/findings_extra.json carries malformed X-finding(s): "
                     + "; ".join(bad[:6]) + (" ..." if len(bad) > 6 else "")
                     + " (an X-* finding has the standard finding shape: id X-NNN, location, "
                       "category 0-5, check = the gap-row class label, severity, evidence quote, "
@@ -2643,19 +2643,19 @@ def discovery_contract_problems(sb: Path) -> tuple:
         if proposals or problems:
             if problems:
                 errors.append(
-                    "review/round2/new_sweeps.md does not carry sweeps.md-shaped proposal(s): "
+                    "targeted_review/round2/new_sweeps.md does not carry sweeps.md-shaped proposal(s): "
                     + "; ".join(problems[:6])
                     + " (each proposal is `## M<NN> -- <name>` with Purpose, Enumeration, "
                       "Artifact and Finding rules, numbered from M37)")
         elif re.search(r"(?m)^#{2,3}\s*(M\d+)\b", text):
             errors.append(
-                "review/round2/new_sweeps.md carries a `## M<NN>` heading that is not a "
+                "targeted_review/round2/new_sweeps.md carries a `## M<NN>` heading that is not a "
                 "sweeps.md-shaped proposal block: a proposal is `## M<NN> -- <name>` with "
                 "Purpose, Enumeration, Artifact and Finding rules, numbered from M37, and the "
                 "`adopt-sweep` command reads the same shape")
         elif not DISCOVERY_NO_PROPOSAL_RE.search(text):
             errors.append(
-                "review/round2/new_sweeps.md carries no `## M<NN>` proposal and does not state "
+                "targeted_review/round2/new_sweeps.md carries no `## M<NN>` proposal and does not state "
                 "that there were no new sweeps to propose: D5's zero-proposal outcome must be "
                 "explicit (and say why), never a placeholder like '# none'")
     # The round's summary (the D5 output section of references/discovery.md) reports its
@@ -2669,13 +2669,13 @@ def discovery_contract_problems(sb: Path) -> tuple:
         missing_bits = [w for w in ("gap", "probe") if w not in low]
         if missing_bits:
             errors.append(
-                f"review/round2/round2_summary.md does not state its {'/'.join(missing_bits)} "
+                f"targeted_review/round2/round2_summary.md does not state its {'/'.join(missing_bits)} "
                 f"count(s): the summary reports gap rows (covered/uncovered), probes "
                 f"(executed/clean/findings/unable), X-findings, proposed sweeps and the round's "
                 f"honest limits")
         elif not re.search(r"could not|cannot|limit", low):
             warns.append(
-                "review/round2/round2_summary.md carries no honest-limits statement ('what "
+                "targeted_review/round2/round2_summary.md carries no honest-limits statement ('what "
                 "this round could NOT check'); the round's guide requires one")
     # Continuity -- a class the previous round proposed is re-probed (or
     # explicitly dispositioned) now; D5's convergence loop must not depend on an
@@ -2694,9 +2694,9 @@ def discovery_contract_problems(sb: Path) -> tuple:
                     pass
             return "\n".join(out)
 
-        probe_blob = _blob(("review/round2/probes.md", "review/round2/probe_results.md"))
-        note_blob = _blob((FINDINGS_REL, FINDINGS_MD_REL, "review/round2/new_sweeps.md",
-                           "review/round2/round2_summary.md"))
+        probe_blob = _blob(("targeted_review/round2/probes.md", "targeted_review/round2/probe_results.md"))
+        note_blob = _blob((FINDINGS_REL, FINDINGS_MD_REL, "targeted_review/round2/new_sweeps.md",
+                           "targeted_review/round2/round2_summary.md"))
         gone = [pid for pid in prior_ids
                 if not prior_proposal_dispositioned(pid, probe_blob, note_blob)]
         if gone:
@@ -2704,9 +2704,9 @@ def discovery_contract_problems(sb: Path) -> tuple:
                 f"the previous round's discovery round proposed sweep(s) {', '.join(gone)} "
                 f"that this round re-checks NOWHERE (a passing mention does not count): every "
                 f"prior proposal must be re-probed against the current corpus and recorded -- "
-                f"run it as a probe row in review/round2/probes.md / probe_results.md, or "
+                f"run it as a probe row in targeted_review/round2/probes.md / probe_results.md, or "
                 f"disposition it as 'prior proposal <id>: no instances in base/' in "
-                f"review/round2/new_sweeps.md or round2_summary.md. A proposed class must not "
+                f"targeted_review/round2/new_sweeps.md or round2_summary.md. A proposed class must not "
                 f"vanish between rounds; the proposal's purpose is to converge into a "
                 f"mechanical check")
     return errors, warns
@@ -2745,7 +2745,7 @@ def review_owes_discovery(ctx, rec: dict) -> bool:
         return False
     if review_split_of(ctx) != "off":
         try:
-            return str(rec.get("id") or "") == rid_review_b(int(rec.get("round") or 1))
+            return str(rec.get("id") or "") == rid_targeted_review_b(int(rec.get("round") or 1))
         except Exception:                                         # noqa: BLE001
             return False
     return True
@@ -2769,7 +2769,7 @@ def cross_namespace_duplicate_notes(sb: Path, fj) -> list:
     the fallback key (the finding format does not mandate a line number, so the
     census key alone left the audit inert).
     """
-    extra = read_json(sb / REVIEW_DIR / "round2" / "findings_extra.json",
+    extra = read_json(sb / TARGETED_REVIEW_DIR / "round2" / "findings_extra.json",
                       revive=False, lenient=True)
     if not isinstance(extra, dict):
         return []
@@ -3112,9 +3112,9 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 # data row at all. Parse the table and require a disposed row.
                 for problem in _disposition_table_problems(p):
                     errs.append(f"{ARTIFACTS_REL}/{fname}: {problem}")
-    arch = sb / REVIEW_DIR / "ARCHITECTURE.md"
+    arch = sb / TARGETED_REVIEW_DIR / "ARCHITECTURE.md"
     if want_architecture and not arch.is_file():
-        errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md is missing: the J5 architecture pass must "
+        errs.append(f"{TARGETED_REVIEW_DIR}/ARCHITECTURE.md is missing: the J5 architecture pass must "
                     f"record one row per scope (document | section | paragraphs | current "
                     f"structure | reader cost | proposed reorganization | class | severity | "
                     f"disposition -- a scope that is fine gets its own OK row), because the "
@@ -3123,18 +3123,18 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         try:
             body = arch.read_text(encoding="utf-8", errors="replace")
             if not body.strip():
-                errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md is EMPTY: the J5 pass must examine "
+                errs.append(f"{TARGETED_REVIEW_DIR}/ARCHITECTURE.md is EMPTY: the J5 pass must examine "
                             f"every document scope by scope")
             elif "disposition" not in body.lower():
-                errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md carries no `disposition` column: "
+                errs.append(f"{TARGETED_REVIEW_DIR}/ARCHITECTURE.md carries no `disposition` column: "
                             f"every scope row must be disposed against its own reading-order bar")
             else:
                 # `| scope | disposition |\n|---|` used to satisfy the substring
                 # test without one disposed scope row.
                 for problem in _disposition_table_problems(arch):
-                    errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md: {problem}")
+                    errs.append(f"{TARGETED_REVIEW_DIR}/ARCHITECTURE.md: {problem}")
         except OSError as e:                                        # noqa: BLE001
-            errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md could not be read ({e})")
+            errs.append(f"{TARGETED_REVIEW_DIR}/ARCHITECTURE.md could not be read ({e})")
     # 4. finding ids must be unique and stable.
     findings = fj.get("findings")
     if isinstance(findings, list):
@@ -3503,14 +3503,14 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
     `prior_round/`, which made the convergence gate vacuous.
     """
     dst = ctx.reports_dir / f"round{int(r)}_review"
-    rec = ctx.run(rid_review(r))
+    rec = ctx.run(rid_targeted_review(r))
     if rec is None:
         return dst
     sb = ctx.sandbox_of(rec)
     b_sb = None
     try:
         if review_split_of(ctx) != "off":
-            rec_b = ctx.run(rid_review_b(r))
+            rec_b = ctx.run(rid_targeted_review_b(r))
             b_sb = ctx.sandbox_of(rec_b) if rec_b is not None else None
     except Exception:                                            # noqa: BLE001
         b_sb = None
@@ -3522,10 +3522,10 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
 
     mapping = ((FINDINGS_REL, "findings.json"),
                (FINDINGS_MD_REL, "findings.md"),
-               ("review/round2/findings_extra.json", "findings_extra.json"),
-               ("review/round2/findings_extra.md", "findings_extra.md"),
-               ("review/round2/new_sweeps.md", "new_sweeps.md"),
-               ("review/round2/round2_summary.md", "round2_summary.md"))
+               ("targeted_review/round2/findings_extra.json", "findings_extra.json"),
+               ("targeted_review/round2/findings_extra.md", "findings_extra.md"),
+               ("targeted_review/round2/new_sweeps.md", "new_sweeps.md"),
+               ("targeted_review/round2/round2_summary.md", "round2_summary.md"))
     for rel, name in mapping:
         p = _src(rel)
         # A FILE symlink is not a review deliverable: `copy2` would archive the
@@ -3587,9 +3587,9 @@ def prior_review_dir(ctx: Ctx, r: int):
     arch = ctx.reports_dir / f"round{int(r) - 1}_review" / "findings.json"
     if arch.is_file():
         return arch.parent
-    rec = ctx.run(rid_review(r - 1))
+    rec = ctx.run(rid_targeted_review(r - 1))
     if rec is not None:
-        sb = ctx.sandbox_of(rec) / REVIEW_DIR
+        sb = ctx.sandbox_of(rec) / TARGETED_REVIEW_DIR
         if (sb / "findings.json").is_file():
             return sb
     return None
@@ -3621,9 +3621,9 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
     convergence loop: every `## M<NN>` proposal in it is a class the last round could not yet
     check mechanically, so RE-PROBE each one against the current base/ corpus too. Record every
     proposal id where the orchestrator can see it -- run it as a probe row in
-    review/round2/probes.md / review/round2/probe_results.md, or write
-    "prior proposal <id>: no instances in base/" into review/round2/new_sweeps.md or
-    review/round2/round2_summary.md. The orchestrator refuses the review if a prior proposal id
+    targeted_review/round2/probes.md / targeted_review/round2/probe_results.md, or write
+    "prior proposal <id>: no instances in base/" into targeted_review/round2/new_sweeps.md or
+    targeted_review/round2/round2_summary.md. The orchestrator refuses the review if a prior proposal id
     appears NOWHERE in the round-2 artifacts (nor in findings.json/findings.md), because a
     discovered class that vanishes between rounds never becomes a mechanical check.
   * Carrying findings forward does NOT replace the sweeps: run the complete M1-M17 + J1-J5 set
@@ -3641,8 +3641,8 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
 # sheets, and a finding list must never be read from a broken file.
 # ---------------------------------------------------------------------
 STRUCTURED_OUTPUT_JSON = {
-    "review": ("_pipeline_done.json", "review/findings.json",
-               "review/round2/findings_extra.json"),
+    "targeted_review": ("_pipeline_done.json", "targeted_review/findings.json",
+               "targeted_review/round2/findings_extra.json"),
     # The probe review's finding list (with its `checked` inventory and any
     # verifier declarations): a truncated one must fail the attempt like every
     # other stage's structured output (the postcheck cannot re-run verifiers
@@ -3665,7 +3665,7 @@ STRUCTURED_OUTPUT_JSON = {
     "response": ("_pipeline_done.json", JOURNAL_RESPONSE_MAP_REL),
 }
 STRUCTURED_OUTPUT_ROOTS = {
-    "review": ("review",),
+    "targeted_review": (TARGETED_REVIEW_DIR,),
     "probe": (PROBE_DIR,),
     "rewrite": ("rewritten", "code"),
     "revise": ("revised", "code"),
@@ -3721,7 +3721,7 @@ def structured_output_files(sb: Path, rec: dict) -> list:
     run. The pipeline's own tracked-changes copies are produced independently under
     <root>/redlines/ and <root>/tracking/.
     """
-    kind = rec.get("kind")
+    kind = normalize_run_kind(rec.get("kind"))
     out, seen = [], set()
     for rel in STRUCTURED_OUTPUT_JSON.get(kind, ()):
         p = sb / rel
@@ -3804,7 +3804,8 @@ def _structured_output_scan(ctx: Ctx, rec: dict) -> tuple:
     author must fix, never something the arm did.
     """
     sb = ctx.sandbox_of(rec)
-    contract = set(STRUCTURED_OUTPUT_JSON.get(rec.get("kind"), ()))
+    kind = normalize_run_kind(rec.get("kind"))
+    contract = set(STRUCTURED_OUTPUT_JSON.get(kind, ()))
     input_digests = _input_digests(rec)
     input_keys = None
     probs, notes = [], []
@@ -5704,7 +5705,7 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
 
 
 def artifact_quality_report(review_dir: Path, require_files: bool = False) -> dict:
-    """{artifact: [problems]} for every decision table under review/.
+    """{artifact: [problems]} for every decision table under targeted_review/.
 
     EVERY table block of the artifact is checked, each against its own header:
     the seeded table and the rows the session adds itself (the M20 "classes the
@@ -5848,13 +5849,13 @@ def artifact_quality_notes(review_dir: Path) -> dict:
 
 def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: list) -> dict:
     """Record (and optionally fail) the review's decision-artifact quality."""
-    report = artifact_quality_report(sb / REVIEW_DIR, require_files=True)
+    report = artifact_quality_report(sb / TARGETED_REVIEW_DIR, require_files=True)
     rec["artifact_quality"] = report
     for rel, problems in sorted(report.items()):
         for p in problems:
             msg = f"decision artifact {rel}: {p}"
             (errs if strict_dispositions(ctx) else warns).append(msg)
-    for rel, notes in sorted(artifact_quality_notes(sb / REVIEW_DIR).items()):
+    for rel, notes in sorted(artifact_quality_notes(sb / TARGETED_REVIEW_DIR).items()):
         for n in notes:
             warns.append(f"decision artifact {rel}: {n}")
     return report
@@ -6008,7 +6009,7 @@ DSH_SESSION_ID_RE = re.compile(r'"sessionId"\s*:\s*"(session-[0-9a-fA-F-]{36})"'
 # `check_artifact_quality`): it is how a repairable review failure is told apart
 # from every other kind without a second bookkeeping channel.
 ARTIFACT_PROBLEM_PREFIX = "decision artifact "
-REL_ARTIFACT_PREFIX = f"{REVIEW_DIR}/"
+REL_ARTIFACT_PREFIX = f"{TARGETED_REVIEW_DIR}/"
 # The cells a repair may rewrite: the ones the detectors judge. Everything else
 # in a seeded row -- the document, the location, the counts, the excerpt, the
 # first sentence -- is the row's IDENTITY: deleting a row or re-wording its
@@ -6018,7 +6019,7 @@ REPAIR_EDITABLE_CELLS = ("disposition", "resolution", "verdict", "summary", "dec
 # The tables a review repair may fill cell by cell. `DECISION_ARTIFACTS` is what
 # the artifact-quality layer judges; `M1_acronyms.md` carries the M1b long-form
 # table, whose per-row disposition is what its own gate reads. Everything else
-# under review/artifacts/ stays byte-identical.
+# under targeted_review/artifacts/ stays byte-identical.
 REVIEW_REPAIR_TABLES = tuple(DECISION_ARTIFACTS) + ("artifacts/M1_acronyms.md",)
 # The skip list of the attempt archive is the same one: re-derivable input
 # corpora are verified by the postcheck's own input manifests, not here.
@@ -6046,20 +6047,20 @@ REPAIR_VISUAL_PATTERN = r"^the visual-inspection record \S+ is missing: "
 REPAIR_LANGUAGE_PATTERNS = tuple(
     rf"^{label}: no work/R6_language\.md " for label in ("rewrite", "revise", "integrate")) \
     + tuple(rf"^{label}: the language pass covers " for label in ("rewrite", "revise", "integrate"))
-# The M1b long-form table (`review/artifacts/M1_acronyms.md`) is a decision table
+# The M1b long-form table (`targeted_review/artifacts/M1_acronyms.md`) is a decision table
 # too: its rows are residue occurrences the reviewer must dispose one by one (a
 # finding, or OK with the row's own reason). The gate fires when the rows carry
 # no reason AND the coverage row stays silent -- exactly the state a scoped repair
 # can finish from the rows' own context/location columns.
-REPAIR_M1B_PATTERNS = (r"^review/artifacts/M1_acronyms\.md lists \d+ M1b long-form row\(s\)",)
+REPAIR_M1B_PATTERNS = (r"^targeted_review/artifacts/M1_acronyms\.md lists \d+ M1b long-form row\(s\)",)
 
 REPAIR_PROFILES = {
     # The reviewer's decision tables: the only stage where the postcheck itself
     # is the artifact-quality layer.
-    "review": {
+    "targeted_review": {
         "errors": (r"^decision artifact ",) + REPAIR_M1B_PATTERNS + (REPAIR_VISUAL_PATTERN,),
-        "scope": "the seeded decision tables under review/artifacts/ (including the M1b "
-                 "long-form table; fill their judged cells), the visual record and review/work/ "
+        "scope": "the seeded decision tables under targeted_review/artifacts/ (including the M1b "
+                 "long-form table; fill their judged cells), the visual record and targeted_review/work/ "
                  "scratch",
         "guard": "the row identity of every decision table",
     },
@@ -6356,7 +6357,7 @@ def _resolve_in_sandbox(sb: Path, rec: dict, cand: str) -> Path:
     """Resolve a file name from a postcheck message inside this sandbox."""
     rel = str(cand).strip("`'\"(),;:")
     kind = str(rec.get("kind") or "")
-    roots = [sb, sb / output_dir_for_kind(kind), sb / REVIEW_DIR, sb / "audit",
+    roots = [sb, sb / output_dir_for_kind(kind), sb / TARGETED_REVIEW_DIR, sb / "audit",
              sb / "judge_review", sb / output_dir_for_kind(kind) / "work"]
     for root in roots:
         p = root / rel
@@ -6402,6 +6403,7 @@ def repair_missing_deliverable(ctx: Ctx, rec: dict, problems: list) -> str:
 # --- what a repair may write, per stage ------------------------------------
 def _repair_path_writable(rel: Path, kind: str) -> bool:
     """May the repair overwrite this sandbox-relative FILE (or create it)?"""
+    kind = normalize_run_kind(kind)
     parts = tuple(p for p in rel.parts if p)
     if not parts:
         return False
@@ -6410,16 +6412,16 @@ def _repair_path_writable(rel: Path, kind: str) -> bool:
         return True                          # the completion marker / our own transcript
     if name == "manual_steps.md" and kind in ("rewrite", "revise", "integrate"):
         return True                          # the stage's manual-item list (reported only)
-    if kind == "review":
+    if kind == "targeted_review":
         # The seeded decision tables (cell-editable; M1's long-form table included)
         # and the session's scratch. The visual record and the marker may be
         # CORRECTED when the reviewer wrote them; a review that never produced one
         # has not finished, and variant B never lets a repair author it.
-        if parts[:2] == (REVIEW_DIR, "work"):
+        if parts[:2] == (TARGETED_REVIEW_DIR, "work"):
             return True
         if rel.as_posix() == VISUAL_ARTIFACT_REVIEW:
             return True
-        return rel.as_posix() in {f"{REVIEW_DIR}/{r}" for r in REVIEW_REPAIR_TABLES}
+        return rel.as_posix() in {f"{TARGETED_REVIEW_DIR}/{r}" for r in REVIEW_REPAIR_TABLES}
     if kind == "audit":
         return parts[0] == "audit"
     if kind == "judge":
@@ -6443,8 +6445,8 @@ def _repair_path_creatable(rel: Path, kind: str) -> bool:
     if _repair_path_writable(rel, kind):
         return True
     parts = tuple(p for p in rel.parts if p)
-    if kind == "review":
-        return parts[:2] in ((REVIEW_DIR, "artifacts"), (REVIEW_DIR, "work"))
+    if kind == "targeted_review":
+        return parts[:2] in ((TARGETED_REVIEW_DIR, "artifacts"), (TARGETED_REVIEW_DIR, "work"))
     if kind == "audit":
         return parts[0] == "audit"
     if kind == "judge":
@@ -6470,24 +6472,24 @@ def _repair_scope_of(rel: Path, kind: str) -> str:
     parts = tuple(p for p in rel.parts if p)
     if parts and parts[-1].lower() == MARKER_FILE.lower():
         return "file"                        # rewritten from evidence, not cell-edited
-    if kind == "review" and rel.as_posix() in {f"{REVIEW_DIR}/{r}"
+    if kind == "targeted_review" and rel.as_posix() in {f"{TARGETED_REVIEW_DIR}/{r}"
                                                for r in REVIEW_REPAIR_TABLES}:
         return "cells"
     if len(parts) > 1 and parts[1] == "work":
         return "scratch"
-    if parts and parts[0] == REVIEW_DIR and len(parts) > 1 and parts[1] == "work":
+    if parts and parts[0] == TARGETED_REVIEW_DIR and len(parts) > 1 and parts[1] == "work":
         return "scratch"
     return "file"
 
 
 def decision_artifact_rel_paths(sb: Path) -> list:
-    """The decision artifacts this sandbox actually has (as review/-relative paths)."""
-    return [rel for rel in DECISION_ARTIFACTS if (sb / REVIEW_DIR / rel).is_file()]
+    """The decision artifacts this sandbox actually has (as targeted_review/-relative paths)."""
+    return [rel for rel in DECISION_ARTIFACTS if (sb / TARGETED_REVIEW_DIR / rel).is_file()]
 
 
 def review_repair_table_rel_paths(sb: Path) -> list:
     """The review tables a repair may fill (decision artifacts + the M1b table)."""
-    return [rel for rel in REVIEW_REPAIR_TABLES if (sb / REVIEW_DIR / rel).is_file()]
+    return [rel for rel in REVIEW_REPAIR_TABLES if (sb / TARGETED_REVIEW_DIR / rel).is_file()]
 
 
 def _repair_table_rows(md_text: str) -> list:
@@ -6679,7 +6681,7 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     kind = str(rec.get("kind") or "")
     tables, digests = {}, {}
     for rel in review_repair_table_rel_paths(sb):
-        path = sb / REVIEW_DIR / rel
+        path = sb / TARGETED_REVIEW_DIR / rel
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -6720,7 +6722,7 @@ def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
     for rel, pinned in sorted((guard.get("tables") or {}).items()):
         pinned = pinned if isinstance(pinned, dict) else {"rows": pinned, "skeleton": None}
         rows, skeleton = pinned.get("rows") or [], pinned.get("skeleton")
-        path = sb / REVIEW_DIR / rel
+        path = sb / TARGETED_REVIEW_DIR / rel
         if not path.is_file():
             problems.append(f"it DELETED the decision artifact {REL_ARTIFACT_PREFIX}{rel}")
             continue
@@ -6849,7 +6851,7 @@ def repair_guard_problems(sb: Path, guard: dict, rec: dict = None) -> list:
                             f"the stage's own bookkeeping; it never authors a deliverable)")
             if len(problems) >= 6:
                 break
-    if len(problems) < 6 and kind == "review":
+    if len(problems) < 6 and kind == "targeted_review":
         problems.extend(_repair_row_identity_problems(sb, guard))
     if len(problems) < 6 and kind == "audit":
         problems.extend(_repair_audit_problems(sb, guard))
@@ -6890,11 +6892,11 @@ Everything else must stay BYTE-IDENTICAL, above all:
   * the manuscript files/package contents (documents, code, figures) -- a repair never edits
     submission content, and never "fixes" a document, a citation or a number
   * the corpus inputs (base/, non_revised/, self/, others/, target/, field/) and the
-    other stages' deliverables (review/, audit/, scores.json as far as they are not yours)
+    other stages' deliverables (targeted_review/, audit/, scores.json as far as they are not yours)
   * the records this stage's own postcheck reads from the PACKAGE (a delivered document, a
     validation result) -- if one of those is broken, no repair can clear it and the attempt fails
 """
-    if kind == "review":
+    if kind == "targeted_review":
         sb = ctx.sandbox_of(rec)
         arts = decision_artifact_rel_paths(sb)
         files = "\n".join(f"  * {REL_ARTIFACT_PREFIX}{rel}" for rel in arts)
@@ -7238,7 +7240,7 @@ def guard_changed_paths(sb: Path, guard: dict) -> list:
     before = dict(guard.get("files") or {})
     changed = []
     for rel, digest in sorted((guard.get("artifacts") or {}).items()):
-        path = sb / REVIEW_DIR / rel
+        path = sb / TARGETED_REVIEW_DIR / rel
         if not path.is_file():
             changed.append(f"{REL_ARTIFACT_PREFIX}{rel} (deleted)")
             continue
@@ -7259,7 +7261,7 @@ def guard_changed_paths(sb: Path, guard: dict) -> list:
 def _lookup_answers(sb: Path) -> dict:
     """{kind: [lookup row]} for lookups with a conclusive verdict."""
     answers = {}
-    for rel in ("work/PLACEHOLDER_LOOKUP.md", f"{REVIEW_DIR}/work/PLACEHOLDER_LOOKUP.md"):
+    for rel in ("work/PLACEHOLDER_LOOKUP.md", f"{TARGETED_REVIEW_DIR}/work/PLACEHOLDER_LOOKUP.md"):
         for row in parse_markdown_table(sb / rel):
             verdict = str(row.get("verdict") or "").strip().lower()
             if verdict not in ("found", "absent"):
@@ -7379,7 +7381,7 @@ def number_provenance_report(sb: Path, sources: list) -> dict:
     if mod is None:
         return {}
     proved = {}
-    for rel in ("work/NUMBERS_LEDGER.md", f"{REVIEW_DIR}/work/NUMBERS_LEDGER.md"):
+    for rel in ("work/NUMBERS_LEDGER.md", f"{TARGETED_REVIEW_DIR}/work/NUMBERS_LEDGER.md"):
         for row in parse_markdown_table(sb / rel):
             if str(row.get("source") or "").strip():
                 proved[str(row.get("number") or "").strip()] = str(row.get("source"))

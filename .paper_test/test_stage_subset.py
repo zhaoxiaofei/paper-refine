@@ -103,11 +103,13 @@ def statuses(root: Path) -> dict:
 def test_parser():
     print()
     print("== parser: stage names and aliases ==")
-    check("plain names parse", nb.parse_only_stages("review,revise") == {"review", "revise"})
+    check("plain names parse",
+      nb.parse_only_stages("review,revise") == {"targeted_review", "revise"}
+      and nb.parse_only_stages("targeted_review") == {"targeted_review"})
     check("aliases parse (merge -> integrate, a2 -> revise, w -> rewrite, j -> judge)",
           nb.parse_only_stages("w,a2,merge,j") == {"rewrite", "revise", "integrate", "judge"})
     check("whitespace and plurals are tolerated",
-          nb.parse_only_stages(" rewrites , reviews ") == {"rewrite", "review"})
+          nb.parse_only_stages(" rewrites , reviews ") == {"rewrite", "targeted_review"})
     check("None/empty/'all' mean every stage",
           nb.parse_only_stages(None) == set() and nb.parse_only_stages("") == set()
           and nb.parse_only_stages("all") == set())
@@ -127,7 +129,7 @@ def test_parser():
           str(spec))
     spec = nb.parse_only_spec("1-3:review")
     check("round ranges expand", spec is not None and spec.rounds == {1, 2, 3}
-          and spec.stages_for(2) == {"review"}, str(spec))
+          and spec.stages_for(2) == {"targeted_review"}, str(spec))
     check("`all` still means every round and stage",
           nb.parse_only_spec("all") is not None and nb.parse_only_spec("all").is_everything())
     for bad in ("0", "bogus", "1:bogus", "3-1"):
@@ -152,7 +154,7 @@ def test_end_to_end():
     # 1) review only
     p = run_only(root, "review")
     st = statuses(root)
-    check("--only review runs the review", st.get(("r1_review")) == ("done", "review"), str(st))
+    check("--only review runs the review", st.get(("r1_targeted_review")) == ("done", "targeted_review"), str(st))
     check("--only review does NOT run the revise/merge/judge stages",
           all((st.get(f"r1_{k}") or ("missing", None))[0] != "done"
               for k in ("a2_revise", "i1", "i2")),
@@ -163,8 +165,8 @@ def test_end_to_end():
           and "round 1 is incomplete" in (p.stdout + p.stderr),
           (p.stdout + p.stderr)[-260:])
     check("the review's M20 artifact was seeded and the run passed its contract",
-          (root / "runs" / "r1_review" / "review" / "artifacts" / "M20_formatting.md").is_file()
-          and (root / "runs" / "r1_review" / "review" / "work" / "FORMAT_SCAN.json").is_file())
+          (root / "runs" / "r1_targeted_review" / "targeted_review" / "artifacts" / "M20_formatting.md").is_file()
+          and (root / "runs" / "r1_targeted_review" / "targeted_review" / "work" / "FORMAT_SCAN.json").is_file())
     # 2) the auditor runs between the review and the revise; the revise REFUSES
     #    to start before it (the default plan contains the auditor).
     p = run_only(root, "revise")
@@ -231,8 +233,9 @@ def test_multiple_stages_and_errors():
     p = run_only(root, "review,audit,revise")
     st = statuses(root)
     check("--only review,audit,revise runs all three in one invocation",
-          st.get("r1_review") == ("done", "review") and st.get("r1_a2_revise") == ("done", "revise"),
-          str({k: st.get(k) for k in ("r1_review", "r1_a2_revise")}))
+          st.get("r1_targeted_review") == ("done", "targeted_review")
+          and st.get("r1_a2_revise") == ("done", "revise"),
+          str({k: st.get(k) for k in ("r1_targeted_review", "r1_a2_revise")}))
     check("the judge wave was not started",
           not any(k.startswith("r1_judge") and v[0] == "done" for k, v in st.items()), str(st))
     bad = cli("run", "--root", str(root), "--only", "rewrite,bogus")
@@ -273,10 +276,10 @@ def test_retry_runs_selection():
     # ONE stage of one round.
     p = retry_runs(root, "--runs", "1:review")
     out = p.stdout + p.stderr
-    check("retry --runs 1:review selects exactly r1_review and resets it",
-          p.returncode == 0 and "[retry] runs (1): r1_review" in out
-          and "r1_review" in out
-          and statuses(root).get("r1_review", ("?",))[0] != "done",
+    check("retry --runs 1:review selects exactly r1_targeted_review and resets it",
+          p.returncode == 0 and "[retry] runs (1): r1_targeted_review" in out
+          and "r1_targeted_review" in out
+          and statuses(root).get("r1_targeted_review", ("?",))[0] != "done",
           out[-260:])
     check("the round was invalidated (retry's documented round semantics)",
           (json.loads((root / "state.json").read_text(encoding="utf-8"))
@@ -312,13 +315,13 @@ def test_retry_runs_selection():
     line = next((l for l in out.splitlines() if "[retry] runs (" in l), "")
     order = [x.strip() for x in line.split(": ", 1)[1].split(",")] if ": " in line else []
     check("retry --runs 1 selects the whole round in dependency order",
-          p.returncode == 0 and order[:2] == ["r1_a1", "r1_review"]
+          p.returncode == 0 and order[:2] == ["r1_a1", "r1_targeted_review"]
           and order[-1].startswith("judge_") and "r1_a2_revise" in order
           and "r1_i1" in order,
           str(order))
     # Error handling: the grammars fail the same way, and the selectors are
     # mutually exclusive.
-    both = retry_runs(root, "--run", "r1_review", "--runs", "1:review")
+    both = retry_runs(root, "--run", "r1_targeted_review", "--runs", "1:review")
     check("--run and --runs together are refused (exit 1)",
           both.returncode == 1 and "specify ONE of" in (both.stdout + both.stderr),
           (both.stdout + both.stderr)[-200:])

@@ -157,7 +157,7 @@ def test_only_rounds():
     p = run(root, "--only", "2:review")
     st = state_of(root)
     check("--only 2:review runs round 2's review once its base exists",
-          (st["runs"].get("r2_review") or {}).get("status") == "done",
+          (st["runs"].get("r2_targeted_review") or {}).get("status") == "done",
           str({k: v.get("status") for k, v in st["runs"].items()}))
     check("round 2 does not run its audit/revise/integrate in that invocation",
           all((st["runs"].get(rid) or {}).get("status") != "done"
@@ -445,8 +445,9 @@ def test_only_agent_sessions():
           and nb.parse_only_spec("reviser1").session_tokens_for(1) == ["a2"]
           and nb.parse_only_spec("integrator2").session_tokens_for(1) == ["i2"]
           and nb.parse_only_spec("r2_i1").session_tokens_for(2) == ["i1"]
-          and nb.parse_only_spec("reviewer").session_tokens_for(1) == ["review"]
-          and nb.parse_only_spec("r1_review_b").session_tokens_for(1) == ["review_b"])
+          and nb.parse_only_spec("reviewer").session_tokens_for(1) == ["targeted_review"]
+          and nb.parse_only_spec("r1_targeted_review_b").session_tokens_for(1) == ["targeted_review_b"]
+          and nb.parse_only_spec("r1_review_b").session_tokens_for(1) == ["targeted_review_b"])
     check("A3 a stage name still means the whole stage (a2 = revise, judge1 = judge index 1)",
           nb.parse_only_spec("a2").classes_for(1) == {"revise"}
           and nb.parse_only_spec("a2").session_tokens_for(1) == []
@@ -531,9 +532,9 @@ def test_only_agent_sessions():
     st3 = state_of(root3)
     check("A10 `--only integrator2` starts nothing while the pool is missing",
           all((st3["runs"].get(rid) or {}).get("status") != "done"
-              for rid in ("r1_w1", "r1_review", "r1_a2_revise", "r1_i1", "r1_i2")),
+              for rid in ("r1_w1", "r1_targeted_review", "r1_a2_revise", "r1_i1", "r1_i2")),
           str({rid: (st3["runs"].get(rid) or {}).get("status")
-               for rid in ("r1_w1", "r1_review", "r1_a2_revise", "r1_i1", "r1_i2")}))
+               for rid in ("r1_w1", "r1_targeted_review", "r1_a2_revise", "r1_i1", "r1_i2")}))
     run(root3, "--only", "rewrite,review,audit,revise")
     run(root3, "--only", "integrator2")
     st3 = state_of(root3)
@@ -556,7 +557,7 @@ def test_only_accepts_the_printed_ids():
           and nb.parse_only_spec("2:a3").session_tokens_for(2) == ["a3"]
           and nb.parse_only_spec("r1_reviser2").session_tokens_for(1) == ["a3"]
           and nb.parse_only_spec("r1_w1").session_tokens_for(1) == ["w1"]
-          and nb.parse_only_spec("r1_review").session_tokens_for(1) == ["review"])
+          and nb.parse_only_spec("r1_targeted_review").session_tokens_for(1) == ["targeted_review"])
     check("H2 `judge_<k>` and the round-qualified index forms parse",
           nb.parse_only_spec("judge_1").judge_spec_for(1) == "j1"
           and nb.parse_only_spec("j_2").judge_spec_for(1) == "j2"
@@ -676,9 +677,9 @@ def test_agents_command():
     out = p.stdout + p.stderr
     check("G1 the dry plan lists every producing session of every round",
           p.returncode == 0
-          and all(s in out for s in ("r1_a1", "r1_w1", "r1_w2", "r1_review", "r1_audit",
+          and all(s in out for s in ("r1_a1", "r1_w1", "r1_w2", "r1_targeted_review", "r1_audit",
                                      "r1_a2_revise", "r1_i1", "r1_i3",
-                                     "r2_w1", "r2_review", "r2_a2_revise", "r2_i1", "r2_i3"))
+                                     "r2_w1", "r2_targeted_review", "r2_a2_revise", "r2_i1", "r2_i3"))
           and "r2_w2" not in out and "r1_i2" not in out,
           out[:200])
     check("G2 it lists the judge sessions of both rounds, with their targets",

@@ -102,8 +102,8 @@ def cleanup():
 
 def _x_sandbox(findings) -> Path:
     sb = tmpdir("a1") / "sb"
-    (sb / "review" / "round2").mkdir(parents=True)
-    (sb / "review" / "round2" / "findings_extra.json").write_text(
+    (sb / "targeted_review" / "round2").mkdir(parents=True)
+    (sb / "targeted_review" / "round2" / "findings_extra.json").write_text(
         json.dumps({"findings": findings}), encoding="utf-8")
     return sb
 
@@ -154,7 +154,7 @@ def _gap_table(n=25, uncovered=2, spelling="UNCOVERED"):
 
 def _round2_sb(**overrides) -> Path:
     sb = tmpdir("r2") / "sb"
-    r2 = sb / "review" / "round2"
+    r2 = sb / "targeted_review" / "round2"
     r2.mkdir(parents=True)
     files = {
         "known_index.md": "# D0\n\nKNOWN-CLASSES: M1 ... M36, J1 ... J5\n",
@@ -248,18 +248,18 @@ def test_split_archive_reads_part_b():
     print("\n== A9 a split round archives the session that owns the discovery ===")
     tmp = tmpdir("a9")
     reports = tmp / "reports"
-    a_sb, b_sb = tmp / "runs/r1_review", tmp / "runs/r1_review_b"
-    (a_sb / "review").mkdir(parents=True)
-    (b_sb / "review/round2").mkdir(parents=True)
-    (a_sb / "review/findings.json").write_text(json.dumps(
+    a_sb, b_sb = tmp / "runs/r1_targeted_review", tmp / "runs/r1_targeted_review_b"
+    (a_sb / "targeted_review").mkdir(parents=True)
+    (b_sb / "targeted_review/round2").mkdir(parents=True)
+    (a_sb / "targeted_review/findings.json").write_text(json.dumps(
         {"findings": [{"id": "F-001"}]}), encoding="utf-8")
-    (a_sb / "review/findings.md").write_text("# A only\n", encoding="utf-8")
-    (b_sb / "review/findings.json").write_text(json.dumps(
+    (a_sb / "targeted_review/findings.md").write_text("# A only\n", encoding="utf-8")
+    (b_sb / "targeted_review/findings.json").write_text(json.dumps(
         {"findings": [{"id": "F-001"}, {"id": "FB-001"}]}), encoding="utf-8")
-    (b_sb / "review/findings.md").write_text("# merged\n", encoding="utf-8")
-    (b_sb / "review/round2/findings_extra.json").write_text(json.dumps(
+    (b_sb / "targeted_review/findings.md").write_text("# merged\n", encoding="utf-8")
+    (b_sb / "targeted_review/round2/findings_extra.json").write_text(json.dumps(
         {"findings": [{"id": "X-001"}]}), encoding="utf-8")
-    (b_sb / "review/round2/new_sweeps.md").write_text("# D5\n", encoding="utf-8")
+    (b_sb / "targeted_review/round2/new_sweeps.md").write_text("# D5\n", encoding="utf-8")
 
     class _Ctx:
         cfg = {"review_split": "phases"}
@@ -268,7 +268,7 @@ def test_split_archive_reads_part_b():
             self.reports_dir = reports
 
         def run(self, rid):
-            sandbox = {"r1_review": a_sb, "r1_review_b": b_sb}.get(rid)
+            sandbox = {"r1_targeted_review": a_sb, "r1_targeted_review_b": b_sb}.get(rid)
             return {"sandbox": str(sandbox)} if sandbox else None
 
         def sandbox_of(self, rec):
@@ -299,24 +299,24 @@ FULL_IDS = [c for c in NB.REQUIRED_REVIEW_CHECKS] + [
 
 
 def _review_sb(prompt: str) -> Path:
-    sb = tmpdir("a8") / "r1_review"
+    sb = tmpdir("a8") / "r1_targeted_review"
     (sb / "base").mkdir(parents=True)
-    (sb / "review" / "round2").mkdir(parents=True)
+    (sb / "targeted_review" / "round2").mkdir(parents=True)
     in_scope = set(NB.scoped_review_checks("formatting-writing"))
     coverage = [{"check": c,
                  "disposition": ("clean -- basis: fixture" if c in in_scope else
                                  "out of scope -- this round's review is the "
                                  "formatting-and-writing-only pass")}
                 for c in FULL_IDS]
-    (sb / "review" / "findings.json").write_text(json.dumps(
+    (sb / "targeted_review" / "findings.json").write_text(json.dumps(
         {"submission_dir": "./base", "findings": [], "coverage": coverage}), encoding="utf-8")
-    (sb / "review" / "findings.md").write_text("# findings\n", encoding="utf-8")
-    (sb / "review" / "artifacts").mkdir(parents=True)
-    (sb / "review" / "ARCHITECTURE.md").write_text(
+    (sb / "targeted_review" / "findings.md").write_text("# findings\n", encoding="utf-8")
+    (sb / "targeted_review" / "artifacts").mkdir(parents=True)
+    (sb / "targeted_review" / "ARCHITECTURE.md").write_text(
         "| document | disposition |\n|---|---|\n| base | OK |\n", encoding="utf-8")
     (sb / "PROMPT.md").write_text(prompt, encoding="utf-8")
     (sb / "_pipeline_done.json").write_text(json.dumps(
-        {"id": sb.name, "kind": "review", "round": 1, "status": "done"}), encoding="utf-8")
+        {"id": sb.name, "kind": "targeted_review", "round": 1, "status": "done"}), encoding="utf-8")
     return sb
 
 
@@ -325,12 +325,12 @@ def test_selfcheck_scope():
     content_artifacts = ("M25_rewrite_parity", "M27_", "M31_artwork_legend", "M36_zotero")
     fw = _review_sb("=== THIS ROUND'S REVIEW SCOPE: FORMATTING AND WRITING ONLY (round 1) ===\n"
                     "Do NOT run the content/scientific sweeps.\n")
-    _ok, errs, _warns = NB.sandbox_selfcheck(fw, "review", "r1_review", 1)
+    _ok, errs, _warns = NB.sandbox_selfcheck(fw, "review", "r1_targeted_review", 1)
     check("A8a a formatting-writing selfcheck does not demand the content artifacts",
           not any(a in e for e in errs for a in content_artifacts), str(errs)[:300])
     errs_fw = errs
     full = _review_sb("=== THE STANDARD FULL REVIEW (round 1) ===\n")
-    _ok, errs, _warns = NB.sandbox_selfcheck(full, "review", "r1_review", 1)
+    _ok, errs, _warns = NB.sandbox_selfcheck(full, "review", "r1_targeted_review", 1)
     check("A8b a full-scope selfcheck still demands them",
           any(a in e for e in errs for a in content_artifacts), str(errs)[:300])
     check("A8c the scope marker is what flips the demand",

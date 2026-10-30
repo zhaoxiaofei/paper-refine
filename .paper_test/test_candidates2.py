@@ -155,16 +155,16 @@ def test_starred_caption_scanned():
 def review_contract_errors(tmp: Path, prior_ids, current_ids, blob_extra=""):
     sb = tmp / "sb"
     (sb / "prior_round").mkdir(parents=True, exist_ok=True)
-    (sb / "review" / "artifacts").mkdir(parents=True, exist_ok=True)
+    (sb / "targeted_review" / "artifacts").mkdir(parents=True, exist_ok=True)
     (sb / "prior_round" / "findings.json").write_text(
         json.dumps({"findings": [{"id": i} for i in prior_ids]}), encoding="utf-8")
     cur = {"submission_dir": "./base",
            "findings": [{"id": i} for i in current_ids],
            "coverage": [{"check": c, "disposition": "clean -- basis: a.md"}
                         for c in list(np.REQUIRED_REVIEW_CHECKS) + ["M19", "M18"]]}
-    (sb / "review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
-    (sb / "review" / "artifacts" / "M1.md").write_text("x", encoding="utf-8")
-    (sb / "review" / "findings.md").write_text("# findings\n" + blob_extra, encoding="utf-8")
+    (sb / "targeted_review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
+    (sb / "targeted_review" / "artifacts" / "M1.md").write_text("x", encoding="utf-8")
+    (sb / "targeted_review" / "findings.md").write_text("# findings\n" + blob_extra, encoding="utf-8")
     ctx = type("C", (), {})()
     ctx.cfg = {}
     errs, _warns = [], []
@@ -254,9 +254,9 @@ def test_field_of_one_round_completes():
         rec["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, vid)
     # the round's review pass is part of the plan too: it is done here, so the
     # scheduler has nothing left to execute and drives straight to the field
-    review = ctx.register(np.rid_review(r), "review", r, f"runs/{np.rid_review(r)}",
+    review = ctx.register(np.rid_targeted_review(r), "review", r, f"runs/{np.rid_targeted_review(r)}",
                           source_id="a1")
-    write(ctx.sandbox_of(review) / "review" / "findings.json", "{}")
+    write(ctx.sandbox_of(review) / "targeted_review" / "findings.json", "{}")
     review["status"] = "done"
     ctx.save_state()
 
@@ -319,8 +319,8 @@ def test_stale_downstream_inputs_are_reset():
     w1["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "w1")
     w1["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "w1")
     np.materialize_review(ctx, r)
-    rec_review = ctx.run(np.rid_review(r))
-    write(ctx.sandbox_of(rec_review) / "review" / "findings.json", "{}")
+    rec_review = ctx.run(np.rid_targeted_review(r))
+    write(ctx.sandbox_of(rec_review) / "targeted_review" / "findings.json", "{}")
     rec_review["status"] = "done"
 
     np.materialize_revise(ctx, r, "a2")
@@ -381,8 +381,8 @@ def test_healthy_round_is_not_reset():
     w1["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "w1")
     w1["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "w1")
     np.materialize_review(ctx, r)
-    review = ctx.run(np.rid_review(r))
-    write(ctx.sandbox_of(review) / "review" / "findings.json", "{}")
+    review = ctx.run(np.rid_targeted_review(r))
+    write(ctx.sandbox_of(review) / "targeted_review" / "findings.json", "{}")
     review["status"] = "done"
     np.materialize_revise(ctx, r, "a2")
     a2 = ctx.run(np.rid_for_fresh(r, "a2"))
@@ -403,7 +403,7 @@ def test_healthy_round_is_not_reset():
 def test_audit_is_revalidated():
     """review -> AUDIT -> revise: an in-round review retry must reset the AUDIT.
 
-    The auditor consumes a frozen COPY of review/ and its disposition is what
+    The auditor consumes a frozen COPY of targeted_review/ and its disposition is what
     every reviser acts on, so revalidating the review (and the revisers) while
     the auditor keeps its superseded copy leaves the round deciding on findings
     the round no longer contains.
@@ -423,8 +423,8 @@ def test_audit_is_revalidated():
     w1["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "w1")
     w1["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "w1")
     np.materialize_review(ctx, r)
-    review = ctx.run(np.rid_review(r))
-    write(ctx.sandbox_of(review) / "review" / "findings.json", "{}")
+    review = ctx.run(np.rid_targeted_review(r))
+    write(ctx.sandbox_of(review) / "targeted_review" / "findings.json", "{}")
     review["status"] = "done"
     np.materialize_audit(ctx, r)
     audit = ctx.run(np.rid_audit(r))
@@ -435,7 +435,7 @@ def test_audit_is_revalidated():
     # audit copy, so the auditor must be rebuilt before any reviser reads it.
     np.reset_run_record(review)
     np.rebuild_sandbox(ctx, review)
-    write(ctx.sandbox_of(review) / "review" / "findings.json", '{"changed": true}')
+    write(ctx.sandbox_of(review) / "targeted_review" / "findings.json", '{"changed": true}')
     review["status"] = "done"
     ctx.save_state()
     if not hasattr(np, "revalidate_round_inputs"):
@@ -465,9 +465,9 @@ def test_judge_inputs_are_revalidated():
     w1["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "w1")
     w1["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "w1")
     np.materialize_review(ctx, r)
-    review = ctx.run(np.rid_review(r))
-    write(ctx.sandbox_of(review) / "review" / "findings.json", "{}")
-    write(ctx.sandbox_of(review) / "review" / "artifacts" / "M1.md", "x")
+    review = ctx.run(np.rid_targeted_review(r))
+    write(ctx.sandbox_of(review) / "targeted_review" / "findings.json", "{}")
+    write(ctx.sandbox_of(review) / "targeted_review" / "artifacts" / "M1.md", "x")
     review["status"] = "done"
     np.materialize_revise(ctx, r, "a2")
     a2 = ctx.run(np.rid_for_fresh(r, "a2"))
@@ -577,8 +577,8 @@ def test_integrator_reset_reaches_the_response_letter():
     fb["status"] = "done"
     # a done review (the revise arms consume its frozen output)
     np.materialize_review(ctx, r)
-    rev = ctx.run(np.rid_review(r))
-    write(ctx.sandbox_of(rev) / "review" / "findings.json", '{"findings": []}\n')
+    rev = ctx.run(np.rid_targeted_review(r))
+    write(ctx.sandbox_of(rev) / "targeted_review" / "findings.json", '{"findings": []}\n')
     rev["status"] = "done"
     # a done revise member (the pool is a1 + a2)
     np.materialize_revise(ctx, r, "a2")
@@ -664,22 +664,22 @@ def test_split_review_uses_session_b_and_merges_in_review():
     r = 1
     np.materialize_a1(ctx, r)
     np.materialize_review(ctx, r)                       # session A
-    a = ctx.run(np.rid_review(r))
-    write(ctx.sandbox_of(a) / "review" / "findings.json",
+    a = ctx.run(np.rid_targeted_review(r))
+    write(ctx.sandbox_of(a) / "targeted_review" / "findings.json",
           '{"findings": ['
           '{"id": "FA-1", "location": "p1", "evidence": "one two three four five six"},'
           '{"id": "SAME", "location": "p2", "evidence": "shared defect quote here"}]}\n')
     a["status"] = "done"
     np.materialize_review(ctx, r, "b")                  # session B
-    b = ctx.run(np.rid_review_b(r))
-    write(ctx.sandbox_of(b) / "review" / "findings.json",
+    b = ctx.run(np.rid_targeted_review_b(r))
+    write(ctx.sandbox_of(b) / "targeted_review" / "findings.json",
           '{"findings": ['
           '{"id": "SAME", "location": "p3", "evidence": "another defect quote"},'
           '{"id": "DUP", "location": "p2", "evidence": "shared defect quote here"}]}\n')
     b["status"] = "done"
     merged = np.merge_review_parts(ctx, b)              # what postcheck_review runs
     merged_ids = sorted(str(f.get("id")) for f in
-                        (json.loads((ctx.sandbox_of(b) / "review" / "findings.json")
+                        (json.loads((ctx.sandbox_of(b) / "targeted_review" / "findings.json")
                                     .read_text(encoding="utf-8")).get("findings") or []))
     check("R6 the split merge keeps A's rows, remaps B's collision and drops B's duplicate",
           merged_ids == ["B-SAME", "FA-1", "SAME"]

@@ -97,7 +97,7 @@ def test_f002_missing_marker():
     msg = ("completion marker _pipeline_done.json missing (it is prompted as the very last "
            "step; a non-empty output directory is NOT completion) -- write "
            "`_pipeline_done.json` in the sandbox ROOT, next to PROMPT.md")
-    got = pp.repair_missing_deliverable(Ctx(), {"kind": "review"}, [msg])
+    got = pp.repair_missing_deliverable(Ctx(), {"kind": "targeted_review"}, [msg])
     check("an absent marker is still reported when PROMPT.md exists",
           got == "_pipeline_done.json", repr(got))
 

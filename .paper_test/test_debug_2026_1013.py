@@ -74,7 +74,7 @@ round's own patches found, each reproduced on the committed bytes first --
 The same block closes the double-check's one remaining static claim: `D9 a split
 round consumed list is the MERGED A+B one` EXECUTES the C03 contract (it passes
 on the fixed tree and was reverse-checked -- reverting the C03 branch to the old
-`ctx.run(rid_review(r))` read makes it fail).
+`ctx.run(rid_targeted_review(r))` read makes it fail).
 
 `PAPER_WS` retargets the suite at another copy of the tree.
 """
@@ -168,7 +168,7 @@ def test_selfcheck_and_contract_crashes():
     sb = scratch("dbg1013_h1_")
     (sb / "base").mkdir()
     try:
-        ok, errs, warns = nb.sandbox_selfcheck(sb, "review", "r1_review", 1)
+        ok, errs, warns = nb.sandbox_selfcheck(sb, "review", "r1_targeted_review", 1)
         raised = None
     except Exception as e:                                            # noqa: BLE001
         ok, errs, raised = None, [], e
@@ -554,22 +554,22 @@ def test_double_check_followups():
     # 5. C03: the round verified this statically (five sibling call sites), so
     #    the contract is EXECUTED here instead. Under `--review-split`
     #    `merge_review_parts` writes the ONE frozen list (A's rows + B's) into
-    #    session B's `review/`, so an arm with no `review/` copy of its own must
+    #    session B's `targeted_review/`, so an arm with no `targeted_review/` copy of its own must
     #    be cross-checked against THAT list, not against A's partial one. These
     #    two checks pass on the fixed tree BY CONSTRUCTION and are the reason
     #    the fix cannot silently regress: reverting the C03 read to
-    #    `ctx.run(rid_review(r))` was verified to make the first one fail.
+    #    `ctx.run(rid_targeted_review(r))` was verified to make the first one fail.
     sroot = scratch("dbg1013_split_")
     sctx = nb.Ctx(sroot)
     sctx.cfg = {"review_split": "phases"}
-    for rid, ids in (("r1_review", ["F-A1"]), ("r1_review_b", ["F-A1", "B-F-A2"])):
-        sb = sroot / "runs" / rid / "review"
+    for rid, ids in (("r1_targeted_review", ["F-A1"]), ("r1_targeted_review_b", ["F-A1", "B-F-A2"])):
+        sb = sroot / "runs" / rid / "targeted_review"
         sb.mkdir(parents=True)
         (sb / "findings.json").write_text(json.dumps(
             {"submission_dir": "base",
              "findings": [{"id": i, "check": "M1", "location": "p1", "evidence": "e"}
                           for i in ids]}), encoding="utf-8")
-        sctx.state["runs"][rid] = {"id": rid, "kind": "review", "round": 1,
+        sctx.state["runs"][rid] = {"id": rid, "kind": "targeted_review", "round": 1,
                                    "status": "done", "sandbox": f"runs/{rid}"}
     merged = [str(f.get("id")) for f in nb.round_consumed_findings(sctx, 1)]
     check("D9 a split round consumed list is the MERGED A+B one (never A alone)",

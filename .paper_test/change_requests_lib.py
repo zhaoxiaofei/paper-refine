@@ -145,10 +145,10 @@ def test_plan_and_ids():
     check("CR1a a rewrite needs the round's base only",
           nb.upstream_deps({"kind": "rewrite", "round": 1, "id": "r1_w2"}) == ["r1_a1"])
     check("CR1a the review needs the round's base",
-          nb.upstream_deps({"kind": "review", "round": 1, "id": "r1_review"}) == ["r1_a1"])
+          nb.upstream_deps({"kind": "targeted_review", "round": 1, "id": "r1_targeted_review"}) == ["r1_a1"])
     check("CR1a a revise needs the base AND the frozen review",
           nb.upstream_deps({"kind": "revise", "round": 1, "id": "r1_a2_revise"}) ==
-          ["r1_a1", "r1_review"])
+          ["r1_a1", "r1_targeted_review"])
     check("CR1a an integration run needs the WHOLE pool",
           nb.upstream_deps({"kind": "integrate", "round": 1, "id": "r1_i2",
                             "pool_ids": ["a1", "w1", "w2", "a2"]}) ==
@@ -414,10 +414,10 @@ def test_rewrite_and_revise_arms():
           prompt1[:60])
     # the single review
     rev = nb.materialize_review(ctx, 1)
-    check("CR1c the round has ONE review run", rev["id"] == "r1_review", rev["id"])
+    check("CR1c the round has ONE review run", rev["id"] == "r1_targeted_review", rev["id"])
     check("CR1c the review depends on the base only",
           nb.upstream_deps(rev) == ["r1_a1"])
-    write(ctx.sandbox_of(rev) / "review" / "findings.json", "{}")
+    write(ctx.sandbox_of(rev) / "targeted_review" / "findings.json", "{}")
     rev["status"] = "done"
     # N revisions from the same frozen review
     a2 = nb.materialize_revise(ctx, 1, "a2")
@@ -426,9 +426,9 @@ def test_rewrite_and_revise_arms():
           a2["id"] == "r1_a2_revise" and a3["id"] == "r1_a3_revise"
           and a2["produces"] == "a2" and a3["produces"] == "a3")
     check("CR1c every revise run consumes the SAME frozen review copy",
-          nb.hash_manifest(ctx.sandbox_of(a2) / "review")
-          == nb.hash_manifest(ctx.sandbox_of(a3) / "review")
-          == nb.hash_manifest(ctx.sandbox_of(rev) / "review"))
+          nb.hash_manifest(ctx.sandbox_of(a2) / nb.TARGETED_REVIEW_DIR)
+          == nb.hash_manifest(ctx.sandbox_of(a3) / nb.TARGETED_REVIEW_DIR)
+          == nb.hash_manifest(ctx.sandbox_of(rev) / nb.TARGETED_REVIEW_DIR))
     prompt_a2 = (ctx.sandbox_of(a2) / "PROMPT.md").read_text(encoding="utf-8")
     prompt_a3 = (ctx.sandbox_of(a3) / "PROMPT.md").read_text(encoding="utf-8")
     check("CR1c the revise prompts know their index and total",
@@ -549,7 +549,7 @@ def test_docx_cli():
         nb.docx_cli_available = old
     sb = Path("/tmp/paper_cr_sb")
     prompts = {
-        "review": nb.review_prompt(sb, "r1_review", 1),
+        "review": nb.review_prompt(sb, "r1_targeted_review", 1),
         "rewrite": nb.rewrite_prompt(sb, "r1_w1", 1),
         "revise": nb.revise_prompt(sb, "r1_a2_revise", 1),
         "integrate": nb.integrate_prompt(sb, "r1_i2", 1, "w1", ["a1", "a2"]),
@@ -663,17 +663,17 @@ def test_end_to_end_default_plan():
     check("CR1e e2e ONE review pass per round feeds the revise sessions",
           sum(1 for k in runs if k.endswith("_review")) == 3
           and all(runs[k]["status"] == "done"
-                  for k in ("r1_review", "r2_review", "r3_review",
+                  for k in ("r1_targeted_review", "r2_targeted_review", "r3_targeted_review",
                             "r1_a2_revise", "r2_a2_revise", "r3_a2_revise")),
-          str(sorted(k for k in runs if "review" in k or "revise" in k)))
-    r3_review_prompt = (root / "runs/r3_review/PROMPT.md").read_text(encoding="utf-8")
+          str(sorted(k for k in runs if "targeted_review" in k or "revise" in k)))
+    r3_review_prompt = (root / "runs/r3_targeted_review/PROMPT.md").read_text(encoding="utf-8")
     check("CR1e e2e round 3 keeps the FULL review scope",
           "FORMATTING AND WRITING ONLY" not in r3_review_prompt,
           str([ln for ln in r3_review_prompt.splitlines()
                if "SCOPE" in ln][:2]))
     check("CR1e e2e rounds 1-2 keep the full review scope",
           "FORMATTING AND WRITING ONLY" not in
-          (root / "runs/r1_review/PROMPT.md").read_text(encoding="utf-8"))
+          (root / "runs/r1_targeted_review/PROMPT.md").read_text(encoding="utf-8"))
     check("CR1e e2e round 3 stages NO integration run (review-audit-revise + judge only)",
           not any(re.match(r"r3_i\d+$", k) for k in runs)
           and runs["r3_a2_revise"]["status"] == "done"
@@ -760,9 +760,9 @@ def test_end_to_end_custom_plan():
           and runs["r1_a3_revise"]["status"] == "done",
           str(sorted(k for k in runs if re.search(r"_[wa]\d+", k))))
     check("CR2 e2e both revisions consumed the ONE frozen review copy",
-          nb.hash_manifest(root / "runs/r1_a2_revise/review")
-          == nb.hash_manifest(root / "runs/r1_a3_revise/review")
-          == nb.hash_manifest(root / "runs/r1_review/review"))
+          nb.hash_manifest(root / "runs/r1_a2_revise/targeted_review")
+          == nb.hash_manifest(root / "runs/r1_a3_revise/targeted_review")
+          == nb.hash_manifest(root / "runs/r1_targeted_review/targeted_review"))
     check("CR2 e2e the field is the custom pool's arms plus K=4 integrations",
           sorted(r1["field"]) == ["a2", "a3", "i1", "i2", "i3", "i4", "orig", "w1"],
           str(r1["field"]))

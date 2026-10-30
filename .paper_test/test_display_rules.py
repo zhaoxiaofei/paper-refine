@@ -22,7 +22,7 @@ blocks, which share one schema) and nowhere else:
     or a front-matter figure such as a graphical abstract that is not part of
     the numbered figure sequence. The profile names it, the scan exempts it, and
     an unrelated item is still checked;
-  * `display_rule_text` renders both rules into the review/judge/revise/rewrite
+  * `display_rule_text` renders both rules into the targeted-review/judge/revise/rewrite
     prompts, and `scan_regression_problems` FAILS a package-producing stage
     whose delivered package still carries one of those rows when the profile
     declared the rule (the stage retries with the postcheck message);
@@ -424,7 +424,7 @@ def test_figures_shipped_profiles_and_gate():
           json.dumps({k: (v or {}).get("placement") for k, v in
                       (("tables", pol2.get("tables")), ("figures", pol2.get("figures")))}))
     sb = Path(tempfile.mkdtemp(prefix="paper_fig_prompt_"))
-    review = np.review_prompt(sb, "r1_review", 1, venue=fr)
+    review = np.review_prompt(sb, "r1_targeted_review", 1, venue=fr)
     judge = np.judge_prompt(sb, "r1_judge_t_j1", 1, "tok", 1, 2, ["v1"], venue=fr)
     check("the review and judge prompts carry the figure rule (no token left)",
           "FMT-FG3" in review and "FMT-FG3" in judge
@@ -527,7 +527,7 @@ def test_prompt_and_gate():
     print("== the rule reaches the prompts, and a producing stage is gated on it ==")
     prof = np.load_venue_profile("frontiers-in-immunology")
     sb = Path(tempfile.mkdtemp(prefix="paper_table_prompt_"))
-    review = np.review_prompt(sb, "r1_review", 1, venue=prof)
+    review = np.review_prompt(sb, "r1_targeted_review", 1, venue=prof)
     judge = np.judge_prompt(sb, "r1_judge_t_j1", 1, "tok", 1, 2, ["v1"], venue=prof)
     check("the review prompt carries the venue's table rule (and no token is left)",
           "FMT-TB1" in review and "@@TABLE_RULE@@" not in review)
@@ -535,7 +535,7 @@ def test_prompt_and_gate():
           "FMT-TB1" in judge and "@@TABLE_RULE@@" not in judge)
     check("the no-rule venue prompt says so instead of inventing a rule",
           "declares NO table rule" in np.review_prompt(
-              sb, "r1_review", 1, venue=np.load_venue_profile("generic")))
+              sb, "r1_targeted_review", 1, venue=np.load_venue_profile("generic")))
     # The gate itself, over a delivered package that still carries the defect.
     root = Path(tempfile.mkdtemp(prefix="paper_table_gate_"))
     (root / "venue_profiles").mkdir(parents=True)

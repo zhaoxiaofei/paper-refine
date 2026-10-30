@@ -309,8 +309,8 @@ check("B2 the census never dethrones the incumbent on an exact statistical tie",
 
 # the frozen-review cross-check source: category 2 only
 sb = tmp / "runs" / np.rid_for_fresh(2, "a2")
-(sb / "review").mkdir(parents=True, exist_ok=True)
-(sb / "review" / "findings.json").write_text(json.dumps({
+(sb / "targeted_review").mkdir(parents=True, exist_ok=True)
+(sb / "targeted_review" / "findings.json").write_text(json.dumps({
     "findings": [{"id": "F-001", "category": 2, "severity": "Minor"},
                  {"id": "F-002", "category": "2", "severity": "Minor"},
                  {"id": "F-003", "category": 1, "severity": "Critical"},
@@ -535,7 +535,7 @@ stage_prompts = {
     "rewrite": np.rewrite_prompt(Path("/tmp/x"), "r1_w1", 1),
     "revise": np.revise_prompt(Path("/tmp/x"), "r1_a2_revise", 1),
     "integrate": np.integrate_prompt(Path("/tmp/x"), "r1_i1", 1, "a1", ["w1"]),
-    "review": np.review_prompt(Path("/tmp/x"), "r1_review", 1),
+    "review": np.review_prompt(Path("/tmp/x"), "r1_targeted_review", 1),
 }
 for name in ("rewrite", "revise", "integrate"):
     flat = " ".join(stage_prompts[name].split())
@@ -878,26 +878,26 @@ check("F6 a one-sided minor wording difference is a scored `writing` row",
           "c0", True)[0])
 
 # F7: the self-reported tie-break counts are cross-checked for every arm, not
-# only for the revise arm that happens to carry a review/ copy.
+# only for the revise arm that happens to carry a targeted_review/ copy.
 root_ctx = Path(tempfile.mkdtemp(prefix="paper_tiebreak_")) / "root"
 ctx_tb = np.Ctx(root_ctx)
 ctx_tb.cfg = {"audit": "off"}
-rev_sb = root_ctx / "runs" / "r1_review"
-(rev_sb / "review").mkdir(parents=True)
-(rev_sb / "review" / "findings.json").write_text(json.dumps({"findings": [
+rev_sb = root_ctx / "runs" / "r1_targeted_review"
+(rev_sb / "targeted_review").mkdir(parents=True)
+(rev_sb / "targeted_review" / "findings.json").write_text(json.dumps({"findings": [
     {"id": "F-001", "check": "M4", "category": 0, "severity": "Critical"},
     {"id": "F-002", "check": "M8", "category": 2, "severity": "Minor"}]}),
     encoding="utf-8")
 rew_sb = root_ctx / "runs" / "r1_w1"
 rew_sb.mkdir(parents=True)
 ctx_tb.state = {"runs": {
-    "r1_review": {"id": "r1_review", "kind": "review", "round": 1, "status": "done",
-                  "sandbox": "runs/r1_review"},
+    "r1_targeted_review": {"id": "r1_targeted_review", "kind": "targeted_review", "round": 1, "status": "done",
+                  "sandbox": "runs/r1_targeted_review"},
     "r1_w1": {"id": "r1_w1", "kind": "rewrite", "round": 1,
               "sandbox": "runs/r1_w1"}},
     "rounds": {"1": {}}, "pinned": [], "log": []}
 rec_tb = {"id": "r1_w1", "kind": "rewrite", "round": 1, "sandbox": "runs/r1_w1"}
-check("F7 the round's frozen review is found for an arm without a review/ copy",
+check("F7 the round's frozen review is found for an arm without a targeted_review/ copy",
       np.critical_findings_input(ctx_tb, rec_tb) == 1
       and np.writing_findings_input(ctx_tb, rec_tb) == 1)
 warns_tb = []

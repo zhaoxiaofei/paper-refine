@@ -19,7 +19,7 @@ from __future__ import annotations
 #   3 major     complete a MAJOR revision at the same journal. Response to
 #               reviewers REQUIRED. Rewrites NOT allowed and the manuscript is
 #               revised ONLY to address the raised concerns: every change must
-#               be traceable to a concern, so the general review-audit-revise
+#               be traceable to a concern, so the targeted review-audit-revise
 #               workflow does not run.
 #   4 minor     as 3, for a MINOR revision.
 #
@@ -44,7 +44,7 @@ JOURNAL_MODE_INIT = "init"
 JOURNAL_MODES = {
     JOURNAL_MODE_CONTINUE: {
         "option": 0,
-        "label": "the pipeline's own review/revise rounds (no journal feedback)",
+        "label": "the pipeline's own targeted-review/revise rounds (no journal feedback)",
         "feedback": False, "response": False, "rewrites": True, "scoped": False,
         "streams": (),
     },
@@ -57,7 +57,7 @@ JOURNAL_MODES = {
         "option": 0,
         "label": "init: conform the submission first -- inside the venue's own Word template "
                  "when one ships, else to the journal's author guidelines and academic "
-                 "convention -- then run the pipeline's own review/revise rounds; no journal "
+                 "convention -- then run the pipeline's own targeted-review/revise rounds; no journal "
                  "feedback",
         "feedback": False, "response": False, "rewrites": True, "scoped": False,
         "streams": (),
@@ -218,7 +218,7 @@ DEFAULT_SUBMIT_CODE = "off"
 def normalize_revision_mode(value=None) -> str:
     """The canonical revision-mode name for a configured/passed value.
 
-    The default is `continue` (the pipeline's own review/revise rounds). No
+    The default is `continue` (the pipeline's own targeted-review/revise rounds). No
     alias spellings are accepted: a mode is one of JOURNAL_MODES' keys.
     """
     return str(value or JOURNAL_MODE_CONTINUE).strip().lower()
@@ -231,7 +231,7 @@ def journal_mode_of(ctx=None) -> str:
     as `config`). An unknown value is an error, not a silent 'continue': a typo
     in the mode would otherwise silently run the wrong workflow.
 
-    When NO mode is recorded, the historical review/revise path is used. A
+    When NO mode is recorded, the historical targeted-review/revise path is used. A
     directory that happens to contain `llm_review_feedback/` does not opt the
     root into a journal mode: that would make the no-journal-mode path depend
     on an input area. Select `llm` explicitly to use that area.
@@ -677,9 +677,14 @@ DEFAULT_PUBLISH_FLATTEN_ZOTERO = False
 # `run --only`: run a subset of the round's stages. `merge` is an alias for the
 # integration stage (the pipeline's "merge from the other versions" step), and
 # `a`/`w`/`i` are the short spellings used in the round plan.
-ONLY_STAGES = ("rewrite", "review", "probe", "audit", "revise", "integrate", "judge",
-               "feedback", "concerns", "response", "conform")
-ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews": "review",
+ONLY_STAGES = ("rewrite", "targeted_review", "probe", "audit", "revise", "integrate",
+               "judge", "feedback", "concerns", "response", "conform")
+# `review` / `reviewer` are kept as ACCEPTED ALIASES: they name the same stage
+# under its pre-rename spelling, so an existing `--only review` still selects
+# the TARGETED review instead of failing.
+ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "targeted_review",
+                "reviews": "targeted_review", "review": "targeted_review",
+                "reviewer": "targeted_review",
                 "pr": "probe", "prob": "probe", "probes": "probe", "probe-review": "probe",
                 "aud": "audit", "audits": "audit", "auditor": "audit", "verify": "audit",
                 "a": "revise", "a2": "revise", "revises": "revise", "revision": "revise",
@@ -778,6 +783,22 @@ LOOKUP_PROBE_TIMEOUT = 2.5
 LOOKUP_CACHE_REL = "reports/LOOKUP_CACHE.json"
 LOOKUP_CACHE_TTL_DAYS = 14
 _LOOKUP_PROBE = {}
+
+#: The stage's PRE-RENAME session tokens. `review`/`reviewer`/`review_b` were the
+#: spellings of `targeted_review`/`targeted_review_b`; a command line, a script or
+#: a recorded selection written before the rename keeps resolving to the same
+#: session. (The stage CLASS map in `OnlySpec._token_stage` is separate on
+#: purpose: `review_b` belongs to the same CLASS as `review`, but it is a
+#: different SESSION.)
+LEGACY_SESSION_STAGES = {"review": "targeted_review", "reviewer": "targeted_review",
+                         "review_b": "targeted_review_b"}
+
+
+def normalize_session_stage(token) -> str:
+    """The canonical session token for a `--only`/`retry` session spelling."""
+    raw = str(token or "").strip().lower()
+    return LEGACY_SESSION_STAGES.get(raw, raw)
+
 
 # A candidate's corpus is its revised/ documents (plus code/), NOT the revision
 # skill's WORK directory: revised/work/ holds the A1-A9 process artifacts,
@@ -1991,8 +2012,8 @@ def artifact_policy_of(ctx) -> str:
           attempt's decision tables -- it may only fill cells, from evidence
           already in the rows -- and then re-runs the SAME postcheck. A repair
           that does not clear the problem is still a failed attempt and the
-          normal retry policy takes over. Nothing outside `review/artifacts/`
-          and `review/work/` may change, and no row may be added, removed,
+          normal retry policy takes over. Nothing outside `targeted_review/artifacts/`
+          and `targeted_review/work/` may change, and no row may be added, removed,
           reordered or re-worded (verified byte-for-byte afterwards).
       off recorded as a warning (advisory), never a failure.
 
@@ -2558,7 +2579,7 @@ CAPTION_RULE_REPORT = caption_report_text()
 # report state, which still ENUMERATES every legend's word count (the journal's
 # requirement stands; only its unpublished number is missing).
 M18_REVIEW_SWEEP_ON = """3. The PIPELINE-MANDATED caption sweep M18 (see the caption rule below): enumerate EVERY figure
-   caption/legend in the corpus into review/artifacts/M18_caption_words.md, one row per caption
+   caption/legend in the corpus into targeted_review/artifacts/M18_caption_words.md, one row per caption
    with its document, caption id, word count, and disposition (OK / over @@CAPTION_LIMIT@@ words ->
    finding id / over the SUGGESTED length but not compressible without losing content -> manual
    verification item), then audit the table row by row. Give M18 its own coverage row, exactly
@@ -2566,14 +2587,14 @@ M18_REVIEW_SWEEP_ON = """3. The PIPELINE-MANDATED caption sweep M18 (see the cap
    references/sweeps.md defines the same sweep). An M18 row is a formatting-tier item and never
    makes a version ineligible: the orchestrator reports caption lengths, it never gates on them.
    M18 is RESERVED by this pipeline for the caption sweep: if your discovery round proposes new
-   sweeps, number them from M37 upwards in review/round2/new_sweeps.md. (This pipeline always
+   sweeps, number them from M37 upwards in targeted_review/round2/new_sweeps.md. (This pipeline always
    reserves M18 for its caption sweep and M19 for its abstract/main-text length sweep, and M20
    for the OOXML formatting sweep, so proposals start at M37, after the adopted M21-M36. Say so
    in new_sweeps.md so the
    operator can renumber when adopting them into the skill.)"""
 M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (see the legend rule below; NO cap is
    configured this run): enumerate EVERY figure legend in the corpus into
-   review/artifacts/M18_caption_words.md, one row per legend with its document, legend id and
+   targeted_review/artifacts/M18_caption_words.md, one row per legend with its document, legend id and
    word count, and the disposition "recorded — no proxy cap is applied this run; the author
    compares the count with the venue's per-type legend limit (the caption rule above states
    whether the venue publishes one)" (or a finding id when the legend is defective for an
@@ -2583,7 +2604,7 @@ M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (s
    cap configured the word count alone is not a defect, is never scored and is never "fixed" by
    cutting text.
    M18 is RESERVED by this pipeline for the legend sweep: if your discovery round proposes new
-   sweeps, number them from M37 upwards in review/round2/new_sweeps.md (M18, M19 and M20
+   sweeps, number them from M37 upwards in targeted_review/round2/new_sweeps.md (M18, M19 and M20
    are reserved, and M21-M36 are adopted), and say so there so the operator can renumber when
    adopting them into the skill."""
 M18_REVISE_RULE_ON = """Figure captions: bring EVERY caption over @@CAPTION_LIMIT@@ words back under the limit by
@@ -2714,7 +2735,7 @@ def m19_blocks(profile=None) -> dict:
     band_clause = ""
     review = f"""3b. The PIPELINE-MANDATED length sweep M19 (see the length rule in the standing
    exemptions): enumerate the ABSTRACT and the MAIN TEXT of every submission document that carries
-   one -- and the PERSUADING PART of the cover letter -- into review/artifacts/M19_length.md, one
+   one -- and the PERSUADING PART of the cover letter -- into targeted_review/artifacts/M19_length.md, one
    row per section: document | section
    (abstract / main text / cover letter) | word count (for the cover letter also its TOTAL word
    count) | the relaxed limit you applied and its source | the allowed
@@ -2809,8 +2830,8 @@ def apply_m19(text: str, profile=None) -> str:
 # correspondence block. The orchestrator normalizes the mechanical classes
 # itself (FORMAT-FIX in every stage's warnings, before the corpus is pinned) and
 # the scan below hands the agents the enumerated rows for the editorial ones.
-M20_FORMAT_SCAN_REL = "review/work/FORMAT_SCAN.json"
-M20_FORMAT_ARTIFACT_REL = "review/artifacts/M20_formatting.md"
+M20_FORMAT_SCAN_REL = "targeted_review/work/FORMAT_SCAN.json"
+M20_FORMAT_ARTIFACT_REL = "targeted_review/artifacts/M20_formatting.md"
 M20_FIX_CMD = f"python {DOCX_FORMAT_MODULE} fix FILE.docx --out FILE.fixed.docx"
 M20_SCAN_CMD = f"python {DOCX_FORMAT_MODULE} scan DIR"
 M20_REVIEW_SWEEP = f"""3c. The PIPELINE-MANDATED OOXML formatting sweep M20 (always runs; the orchestrator
@@ -3100,7 +3121,7 @@ def display_kind_rule_text(prof, kind: str, block: dict) -> str:
     return "\n".join(lines)
 
 
-# ---- M25-M29 + J5: THE REWRITE-PARITY CHECKS (review/audit/revise) ----------
+# ---- M25-M29 + J5: THE REWRITE-PARITY CHECKS (targeted-review/audit/revise) ----------
 # A from-scratch rewrite fixes these classes as a side-effect of rewriting: it
 # re-aligns artwork terms with the text, completes a spelling/hyphenation
 # convention across the whole corpus, completes a claim's evidence pointers,
@@ -3119,36 +3140,36 @@ def display_kind_rule_text(prof, kind: str, block: dict) -> str:
 REWRITE_PARITY_REVIEW = """3d. The REWRITE-PARITY checks M25-M29 and the ARCHITECTURE pass J5 (the jobs a
    from-scratch rewrite performs while it rewrites; definitions in the skill's
    references/sweeps.md, sections M25-M29 and J5). Each of the SIX gets its own artifact under
-   review/artifacts/ AND its own coverage row, exactly like the older sweeps. One finding per
+   targeted_review/artifacts/ AND its own coverage row, exactly like the older sweeps. One finding per
    instance for M25-M29; J5 is one finding per SCOPE:
    * M25 figure-artwork/text parity - extract the text layer of every rendered figure/table
      artefact (`pdftotext` / slide text) and pair every artwork token (method/tool name, year,
      axis/panel/factor phrase) with the manuscript's own counterpart (the M8 term ledger /
-     review/work/GLOSSARY.md decision, the legend, the Methods sentence). Artifact:
-     review/artifacts/M25_artwork_parity.md. An artwork file is usually read-only; that does NOT
+     targeted_review/work/GLOSSARY.md decision, the legend, the Methods sentence). Artifact:
+     targeted_review/artifacts/M25_artwork_parity.md. An artwork file is usually read-only; that does NOT
      make its row `unable` - when the editable caption/main-text/SI-legend surface can be
      aligned, the finding is resolvable and the artwork regeneration is a manual follow-up.
    * M26 house-style / orthographic conventions - run the bundled
-     `enumerate_conventions.py --work review/work` over the converted corpus (both surfaces of
+     `enumerate_conventions.py --work targeted_review/work` over the converted corpus (both surfaces of
      every US/UK spelling, hyphenation and preverb family, plus data-driven candidates), decide
-     ONE authoritative form per family in review/work/STYLE_CONVENTIONS.md (corpus majority /
+     ONE authoritative form per family in targeted_review/work/STYLE_CONVENTIONS.md (corpus majority /
      the manuscript's own first use / a stated venue rule), and file ONE FINDING PER DEVIATING
-     OCCURRENCE - never one per family. Artifact: review/artifacts/M26_conventions.md.
+     OCCURRENCE - never one per family. Artifact: targeted_review/artifacts/M26_conventions.md.
    * M27 claim-to-evidence coverage - for every plural/aggregate claim (and every number whose
      sentence states a universe), enumerate the evidence items the claim needs from the shipped
      data and check the pointer set actually covers them. A resolving citation is NOT coverage
      (the S12-only pointer for a claim about both haploid samples is the recorded case).
-     Artifact: review/artifacts/M27_evidence_coverage.md.
+     Artifact: targeted_review/artifacts/M27_evidence_coverage.md.
    * M28 sibling-definition symmetry - per list/head-noun group, compare each sibling's
      first-use expansion and definition order (one expanded, two not; long form after short form
-     for one sibling and before it for another). Artifact: review/artifacts/M28_symmetry.md.
+     for one sibling and before it for another). Artifact: targeted_review/artifacts/M28_symmetry.md.
    * M29 caption-promise vs printed-schema parity - pair every promised field/panel/encoding in
      a caption with the printed table header or the artwork's own text ("eleven columns" for a
      ten-column TSV is the recorded case) AND run the reverse pairing the same way: every printed
      column/panel/encoding the caption never describes is equally a finding (the reader cannot
      interpret an undocumented column, and the caption, not the reader, owns the explanation).
-     Artifact: review/artifacts/M29_caption_schema.md.
-   * J5 architecture & rewrite-class pass - one row per SCOPE in review/ARCHITECTURE.md
+     Artifact: targeted_review/artifacts/M29_caption_schema.md.
+   * J5 architecture & rewrite-class pass - one row per SCOPE in targeted_review/ARCHITECTURE.md
      (`document | section | paragraphs | current structure | reader cost | proposed
      reorganization | class | severity | disposition`): claim-first order, one message per
      paragraph, reading order inside a passage, missing transitions, cross-section redundancy.
@@ -3178,8 +3199,8 @@ REWRITE_PARITY_AUDIT = """4. ATTACK THE REWRITE-PARITY RECORD - the classes a re
        column/panel is described nowhere is an AU-finding (M29 reads in both directions), and a
        J3 row disposed as "the wording is appropriately cautious" is an AU-finding when the
        corpus's own data prove the claim the sentence hedges (an underclaim is the other half of
-       the calibration check, not a virtue). Read `review/artifacts/CLAIM_STRENGTH.md` both ways.
-     * J5 / review/ARCHITECTURE.md: every scope row must carry a row-specific disposition. A
+       the calibration check, not a virtue). Read `targeted_review/artifacts/CLAIM_STRENGTH.md` both ways.
+     * J5 / targeted_review/ARCHITECTURE.md: every scope row must carry a row-specific disposition. A
        document with no rows, or one "OK - reads well" sentence repeated on every row, is an
        UNFILLED artifact - raise the scopes you can evidence yourself as `AU-` findings
        (`check: J5`, scope recorded).
@@ -3238,7 +3259,7 @@ def apply_rewrite_parity(text: str, where: str) -> str:
     return text.replace("@@REWRITE_PARITY@@", block)
 
 
-# ---- M30: THE SOURCE-HIERARCHY RECONCILIATION (review/audit/revise) --------
+# ---- M30: THE SOURCE-HIERARCHY RECONCILIATION (targeted-review/audit/revise) --------
 # The hierarchy (code > raw data > figures > ... > text) has always been the
 # RESOLUTION rule: it decides which side wins when two sources already
 # disagree. Its DETECTION side -- a written number, parameter, sample set or
@@ -3255,7 +3276,7 @@ HIERARCHY_RECONCILE_REVIEW = """3e. The SOURCE-HIERARCHY reconciliation (check i
    tool/protocol step, a sample set, a panel/axis label -- find the artifact that PRODUCED it
    (a raw_data/ file, a code/config file's constant or the function that prints the value, the
    figure/table source) and reconcile the two:
-   * the orchestrator seeds review/artifacts/M30_hierarchy_reconciliation.md with the rows the
+   * the orchestrator seeds targeted_review/artifacts/M30_hierarchy_reconciliation.md with the rows the
      code could pair (every written number no shipped table PROVES, against its candidate
      table column(s) -- including a cohort-size sentence against the table's own row count --
      and every module-level code/config literal). Dispose EVERY seeded row, then ADD the rows
@@ -3272,7 +3293,7 @@ HIERARCHY_RECONCILE_REVIEW = """3e. The SOURCE-HIERARCHY reconciliation (check i
      with that reason recorded;
    * NEVER "fix" the code here: the review reports. A code fix is rule C's job (paper-revise),
      and a regenerated figure/table goes to the manual list.
-   Artifact: review/artifacts/M30_hierarchy_reconciliation.md, with its own coverage row."""
+   Artifact: targeted_review/artifacts/M30_hierarchy_reconciliation.md, with its own coverage row."""
 
 HIERARCHY_RECONCILE_AUDIT = """     * M30 source-hierarchy reconciliation: a row closed "the code/raw data is out of scope",
        "raw_data/ is read-only" or "not in the written parts" is NOT a disposition when the
@@ -3314,14 +3335,14 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
              "revise": HIERARCHY_RECONCILE_REVISE,
              "rewrite": HIERARCHY_RECONCILE_REWRITE,
              "integrate": HIERARCHY_RECONCILE_INTEGRATE}.get(where, "")
-    # The block spells the hierarchy itself: the review/audit/rewrite builders
+    # The block spells the hierarchy itself: the targeted-review/audit/rewrite builders
     # fill @@SOURCE_HIERARCHY@@ only inside the attached master prose, so a
     # token left here would reach the session unresolved.
     return text.replace("@@HIERARCHY_RECONCILE@@",
                         block.replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY))
 
 
-# ---- M31-M36: THE EVIDENCE-INTEGRITY SWEEPS (review/audit/revise) ----------
+# ---- M31-M36: THE EVIDENCE-INTEGRITY SWEEPS (targeted-review/audit/revise) ----------
 # The five classes a mechanical scan can SEED but only a reader can judge: what
 # a figure actually PRINTS against what its legend says (M31), whether a
 # headline statistic can pass the correction the paper itself states (M32),
@@ -3334,14 +3355,14 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
 # PKG-1 (M35).
 EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M36 (definitions in the skill's
    references/sweeps.md, sections M31-M36). Each gets its own coverage row and its own
-   artifact under review/artifacts/:
+   artifact under targeted_review/artifacts/:
    * M31 ARTWORK-VERSUS-LEGEND consistency: for every figure compare what the PRINTED
      artwork says (axis titles, inset labels, column headers, color-bar range, legend keys)
      with the legend and the manuscript's own name for that quantity. A legend sentence whose
      only job is to explain a defect the reader sees ("printed as ...", "the legacy column
      name ...", "which denotes ...", "share the extreme color") is itself the finding: the
      artwork is corrected, never the legend extended (artifact: M31_artwork_legend.md);
-     the code-side PKG-4 rows in `review/work/EVIDENCE_PACK.md` ("Display items the submission
+     the code-side PKG-4 rows in `targeted_review/work/EVIDENCE_PACK.md` ("Display items the submission
      does not carry") are this class's packaging half: a document that CITES and legends a
      figure the package carries no file for -- ship the figure, embed it, or drop the citation;
      the PKG-5 rows in the same pack ("Display-item provenance contradictions") are the
@@ -3363,7 +3384,7 @@ EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M36 (defini
      + commit) and every statement about one repository must pin ONE revision. The code-side
      FMT-AV1 (future/conditional locator) and FMT-AV2 (one repository, two commits) rows seed
      it (artifact: M33_availability.md), and its other half is the code-side PKG-2 rows (the
-     "Submission-surface references" table in `review/work/EVIDENCE_PACK.md`): a to-be-submitted
+     "Submission-surface references" table in `targeted_review/work/EVIDENCE_PACK.md`): a to-be-submitted
      DOCUMENT that names a file the submission does not carry -- a script under `code/`, the
      `raw_data/` archive, one of the author's README files -- promises the reader something
      nobody can deliver. Such a sentence is REWRITTEN (name where the material really is, or
@@ -4777,7 +4798,7 @@ ADOPTED_SWEEPS_BLOCK = """
 DISPOSITION_MANDATE = """
 
 DECISION-ARTIFACT MANDATE — one disposition per seeded row, about THAT ROW's own bar:
-  * Every seeded table under `review/artifacts/` (M18 caption words, M19 length, M20 formatting,
+  * Every seeded table under `targeted_review/artifacts/` (M18 caption words, M19 length, M20 formatting,
     M4/NUMBERS_LEDGER numbers, M8 terms, M24 concepts, GLOSSARY, IDENTIFIERS, PLACEHOLDERS,
     PLACEHOLDER_LOOKUP, OUTLINE, CLAIM_STRENGTH, M2_references, M30_hierarchy_reconciliation)
     must end with exactly one row per instance and a disposition per row: a finding id, or
@@ -4828,7 +4849,7 @@ DECISION-ARTIFACT MANDATE — one disposition per seeded row, about THAT ROW's o
   * OUTLINE.md is the same kind of artifact: a `summary` copied back from `first sentence`, an empty
     summary cell, or one verdict on every row is unfilled, not audited.
   * A `searchable` hand-off placeholder (`[AUTHOR TO COMPLETE: ... ]`) that
-    `review/work/PLACEHOLDER_LOOKUP.md` answers is NOT a manual item any more: its lookup verdict is
+    `targeted_review/work/PLACEHOLDER_LOOKUP.md` answers is NOT a manual item any more: its lookup verdict is
     evidence (`found` -> the fact; `absent` -> the verified negative), so it becomes a finding the
     revision stage must resolve. Only an `author-only` marker (or a lookup that could not run) stays
     on the manual list.
@@ -5209,7 +5230,7 @@ The round's review ran the $paper-review skill's discovery round (D0-D5) against
 corpus and its findings are the X-* list in `frozen_discovery/findings_extra.json` (readable copy:
 `frozen_discovery/findings_extra.md`): READ-ONLY, the SAME list the round's revision arms
 resolved. This is the ONE piece of the frozen review this sandbox consumes -- there is still no
-`review/` directory, no F-* finding list and no A1 ledger here.
+`targeted_review/` directory, no F-* finding list and no A1 ledger here.
 
 Why it matters: the revise arm(s) in your pool acted on this list, so a donor may carry a safe,
 evidenced fix for an X defect that self/ (or another donor) still carries. Without the list those
@@ -5456,7 +5477,7 @@ ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — the `zot` CLI (pyzotero-cli; t
   * LEDGER: @@ZOTERO_LEDGER@@ @@ZOTERO_STAGE@@"""
 
 # The edit-oriented half of the Zotero block. Only a stage that may change a
-# citation receives it; review/judge are read-only and rewrite edits form only,
+# citation receives it; targeted-review/judge are read-only and rewrite edits form only,
 # so the producer instructions ("before touching a citation field", "PROVE THE
 # EDIT") must not be pasted into their prompts.
 ZOTERO_EDIT_GUIDANCE_EDIT = """  * LIVE-FIELD DOCX SEMANTICS: before touching a citation field, read the $zotero-use skill's
@@ -5670,14 +5691,19 @@ SOURCE_HIERARCHY = ("github code > data in raw_data/ > main figures > supplement
                     "> main tables > supplementary tables > main text > supplementary text")
 
 # Artifact locations the prompts pin down and the postchecks verify.
-REVIEW_DIR = "review"
+# The TARGETED review's output area. `review/` was this area's name until the
+# TARGETED-REVIEW rename; the constant below is the only place the name lives, so
+# a root's recorded paths follow it.
+TARGETED_REVIEW_DIR = "targeted_review"
 REVISED_DIR = "revised"
 REWRITTEN_DIR = "rewritten"          # the rewrite stage's output package
 INTEGRATED_DIR = "integrated"        # the integration stage's output package
 CODE_DIR = "code"
-FINDINGS_REL = "review/findings.json"
-FINDINGS_MD_REL = "review/findings.md"
-ARTIFACTS_REL = "review/artifacts"
+# The split review's copy of session A's output, inside session B's sandbox.
+TARGETED_REVIEW_A_DIR = "targeted_review_a"
+FINDINGS_REL = "targeted_review/findings.json"
+FINDINGS_MD_REL = "targeted_review/findings.md"
+ARTIFACTS_REL = "targeted_review/artifacts"
 # --- the discovery round's own contract (D0-D5) --------------------------
 # The discovery round is the pipeline's open-ended hunt for issue CLASSES the
 # frozen checklist does not own; its findings (X-*) feed the revisers and its
@@ -5711,8 +5737,8 @@ _DISCOVERY_STATUS_TOKENS = ("pending", "executed", "unable", "no anomalies", "no
 _DISCOVERY_UNCOVERED_RE = re.compile(
     r"\bun[\s-]?covered\b|\bnot[\s-]+(?:yet[\s-]+)?covered\b|\bpartially[\s-]+covered\b"
     r"|\bcovered\s+by\s+nothing\b|\bno\s+check\b", re.I)
-DISCOVERY_RELS = ("review/round2/findings_extra.json", "review/round2/findings_extra.md",
-                  "review/round2/new_sweeps.md")
+DISCOVERY_RELS = ("targeted_review/round2/findings_extra.json", "targeted_review/round2/findings_extra.md",
+                  "targeted_review/round2/new_sweeps.md")
 # --- the discovery list as the INTEGRATION stage receives it ----------------
 # The discovery round's X-* findings are the round's only record of defect
 # classes the frozen checklist does not own. The revisers merge them into their
@@ -5720,7 +5746,7 @@ DISCOVERY_RELS = ("review/round2/findings_extra.json", "review/round2/findings_e
 # could be dropped by an integrator as an "unnamable" difference, so the round's
 # revision work could vanish from the integrated package. The integrator is NOT
 # a blind stage, so it gets a SEED: the round's own frozen list is copied
-# byte-for-byte (review/round2/findings_extra.{json,md}, the same list the
+# byte-for-byte (targeted_review/round2/findings_extra.{json,md}, the same list the
 # revise sessions merged) into a read-only `frozen_discovery/` directory, and
 # every id must be reconciled in its ledger. The JUDGE is deliberately NOT
 # seeded -- a judge must be completely blind to where a package came from, so it

@@ -168,13 +168,13 @@ def cmd_setup(args) -> None:
     if not explicit_mode and src_path and src_path.is_dir() \
             and llm_feedback_present_in(src_path):
         print(f"[setup] note: --source carries {LLM_FEEDBACK_DIR}/, but no journal mode is "
-              f"selected; the historical review/revise path will run. Pass "
+              f"selected; the historical targeted-review/revise path will run. Pass "
               f"`--revision-mode {JOURNAL_MODE_LLM}` to use that feedback.")
     raw_revision_mode = (explicit_mode or JOURNAL_MODE_CONTINUE).strip().lower()
     revision_mode = normalize_revision_mode(raw_revision_mode)
     if revision_mode not in JOURNAL_MODES:
         die(f"--revision-mode must be one of {', '.join(JOURNAL_MODES)} (got {revision_mode!r}). "
-            f"continue=the historical workflow (the pipeline's own review/revise rounds), "
+            f"continue=the historical workflow (the pipeline's own targeted-review/revise rounds), "
             f"init=author the submission in the venue's own "
             f"Word template first (the conform stage) then run the pipeline's own rounds with "
             f"no journal feedback, 1=transfer (new journal, no response letter), 2=resubmit "
@@ -233,9 +233,9 @@ def cmd_setup(args) -> None:
                                     or PROBE_REVIEW_DEFAULT).lower(),
             }
             if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
-                forced.append("audit off (the general review audits do not run in this mode)")
+                forced.append("audit off (the targeted review's audits do not run in this mode)")
             args.audit = "off"
-            # The post-revise chain consumes the general review's frozen list
+            # The post-revise chain consumes the targeted review's frozen list
             # and may change any file of the package; a concern-scoped revision
             # has neither a general review nor that freedom, so it stays off
             # (the run records the skip if an old root still carries it on).
@@ -275,6 +275,35 @@ def cmd_setup(args) -> None:
         scoped_mode_restore["champion_select"] = str(
             getattr(args, "champion_select", None) or DEFAULT_CHAMPION_SELECT)
         scoped_mode_restore["review_scope"] = list(review_scope)
+    # THE TARGETED REVIEW'S POLICY (`--no-targeted-review`). The flag removes the
+    # round's general checklist pass and leaves the PROBE alone as the finding
+    # source, so the combinations that would leave the round with no source at
+    # all are refused HERE, before a root is built:
+    #   * a concern-scoped revision already replaces the targeted review;
+    #   * a split review is two targeted-review sessions;
+    #   * no probe means literally nothing produces findings;
+    #   * a polish round reviews the surface only, and it is a targeted review.
+    if str(getattr(args, "targeted_review", TARGETED_REVIEW_DEFAULT)).lower() == "off":
+        if scoped_mode_restore is not None:
+            die("--no-targeted-review cannot be combined with a concern-scoped revision "
+                "mode: that mode replaces the targeted review with the concerns ledger, so "
+                "the round would have no finding source at all", code=2)
+        if str(getattr(args, "review_split", "off") or "off").lower() != "off":
+            die("--no-targeted-review cannot be combined with --review-split: the split runs "
+                "two targeted-review sessions and this round runs none", code=2)
+        if str(getattr(args, "probe_review", PROBE_REVIEW_DEFAULT)).lower() == "off":
+            die("--no-targeted-review leaves the probe review as the round's only finding "
+                "source, but --probe-review off disables it too: the round would have no "
+                "findings at all (keep the probe on, or drop --no-targeted-review)", code=2)
+        if any(s in REVIEW_SCOPE_VALUES and s != "full" for s in review_scope):
+            die("--no-targeted-review needs a full-scope round: --review-scope selects WHICH "
+                f"targeted checks run, and no targeted review runs here (got {review_scope})",
+                code=2)
+        if bool(JOURNAL_MODES.get(revision_mode, {}).get("feedback")):
+            die("--no-targeted-review cannot be combined with a revision mode that consumes an "
+                "editors'/reviewers' decision letter: the targeted review is the session that "
+                "reconciles every concern, so skipping it would leave the letter unanswered",
+                code=2)
     bad_scope = [x for x in review_scope if x not in REVIEW_SCOPE_VALUES]
     if bad_scope:
         die(f"--review-scope entries must be one of {'|'.join(REVIEW_SCOPE_VALUES)}, "
@@ -697,6 +726,21 @@ def cmd_setup(args) -> None:
                "rewrites": rewrites, "revises": revises, "integrators": integrators,
                "review_scope": review_scope,
                "created": utcnow(), "version": VERSION}
+    # THE OPT-IN POLICIES. Both defaults (`high`, `on`) are the pipeline exactly
+    # as it has always been, so a default root writes NO new key and its
+    # `pipeline_config.json` is byte-identical to the pre-profile pipeline's:
+    # `--execution-profile high` cannot perturb a root it did not need to
+    # describe. A root without either key reads as `high` / `on`, and a root
+    # that opted in carries the policy that produced its artifacts (rule 10).
+    _profile = str(getattr(args, "execution_profile", EXECUTION_PROFILE_DEFAULT)
+                   or EXECUTION_PROFILE_DEFAULT).lower()
+    if _profile != EXECUTION_PROFILE_DEFAULT:
+        ctx.cfg["execution_profile"] = _profile
+    _targeted = str(getattr(args, "targeted_review", TARGETED_REVIEW_DEFAULT)
+                    or TARGETED_REVIEW_DEFAULT).lower()
+    if _targeted != TARGETED_REVIEW_DEFAULT:
+        ctx.cfg["targeted_review"] = _targeted
+        ctx.cfg["targeted_review_gap"] = TARGETED_REVIEW_GAP
     if round_indices:
         # Traceability: pipeline round k follows built-in schedule round
         # round_indices[k-1]. The recorded per-round lists below already carry
@@ -964,6 +1008,17 @@ def cmd_setup(args) -> None:
     except Exception as e:                                            # noqa: BLE001
         print(f"[setup] note: the pipeline-snapshot check could not run "
               f"({type(e).__name__}: {e})")
+    # THE RECORDED POLICIES. Both defaults are the pipeline unchanged, so
+    # printing either line only when it was actually chosen keeps a default
+    # root's setup output identical to the pre-profile pipeline's.
+    if str(ctx.cfg.get("execution_profile") or "high") != "high":
+        print(f"[setup] execution profile: {ctx.cfg.get('execution_profile')} "
+              f"(the elaborative rule sections are paged to "
+              f"{PROFILE_RULES_REL} in each session sandbox; postchecks unchanged)")
+    if str(ctx.cfg.get("targeted_review") or "on") != "on":
+        print("[setup] targeted review: OFF -- the probe review runs alone; the targeted "
+              "classes (M1-M36/J1-J5, D0-D5) are recorded as a NAMED GAP in every downstream "
+              "sandbox and in pipeline_config.json")
     print(f"[setup] next: python {root / script.name} run --root {root}")
     print(f"[setup] manual mode: add --agent manual (staging is respected; each round's revise "
           f"prompt appears only after its review marker)")
@@ -2106,7 +2161,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         die("the template-first rewrite did not pass its postcheck: "
             + "; ".join(report["errors"])[:400])
     print("[conform] the package in out/ passed the code-side postcheck; it is NOT yet "
-          "judged: run the review/revise stages (or a full `run`) when you want it in the round.")
+          "judged: run the targeted-review/revise stages (or a full `run`) when you want it in the round.")
     maybe_track_template_stage(ctx, sb)
 
 def cmd_apply_template(args) -> None:
@@ -2724,10 +2779,10 @@ def _adopt_sweep_source(arg: str) -> Path:
     """The new_sweeps.md a `--proposals` argument names (a file or a sandbox)."""
     p = Path(str(arg)).expanduser()
     if p.is_dir():
-        for rel in ("review/round2/new_sweeps.md", "new_sweeps.md"):
+        for rel in ("targeted_review/round2/new_sweeps.md", "new_sweeps.md"):
             if (p / rel).is_file():
                 return p / rel
-        die(f"{p} carries no review/round2/new_sweeps.md (nor a bare new_sweeps.md): pass the "
+        die(f"{p} carries no targeted_review/round2/new_sweeps.md (nor a bare new_sweeps.md): pass the "
             f"proposal file or a review sandbox root", code=2)
     return p
 
@@ -2735,7 +2790,7 @@ def _adopt_sweep_source(arg: str) -> Path:
 def cmd_adopt_sweep(args) -> None:
     """`adopt-sweep`: validate a discovery proposal file; with --yes, append it.
 
-    D5's proposals used to die in review/round2/new_sweeps.md ("the orchestrator
+    D5's proposals used to die in targeted_review/round2/new_sweeps.md ("the orchestrator
     ARCHIVES that file for you but does not apply the proposals itself"), so in
     an unattended chain of runs a discovered class could be re-discovered
     forever. This command is the adoption step: it parses the proposal blocks,
@@ -2873,7 +2928,7 @@ def cmd_set_revision_mode(args) -> None:
     mode_arg = normalize_revision_mode(mode_arg)
     if mode_arg not in JOURNAL_MODES:
         die(f"set-revision-mode needs one of {', '.join(JOURNAL_MODES)} (got {mode_arg!r}): "
-            f"continue (the historical workflow, the pipeline's own review/revise rounds) / "
+            f"continue (the historical workflow, the pipeline's own targeted-review/revise rounds) / "
             f"init (conform into the venue template first, "
             f"then the pipeline's own rounds) / transfer (option 1) / resubmit (option 2) / "
             f"major (option 3) / minor (option 4) / llm (option 5: the pre-filtered "

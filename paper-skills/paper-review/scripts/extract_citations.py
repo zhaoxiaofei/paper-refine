@@ -29,7 +29,7 @@ instead of printing an empty "orphans: none" (the reference list is simply not
 in the corpus).
 
 stdlib-only. Usage:
-  python extract_citations.py --work ./review/work [--out ./review]
+  python extract_citations.py --work ./targeted_review/work [--out ./targeted_review]
 """
 import argparse
 import json

@@ -489,7 +489,7 @@ def _review_errors(tmp: Path, *, prior_ids=(), findings=(), all_out=(),
                    scope="full", extra_out=()):
     sb = tmp / "sb"
     (sb / "prior_round").mkdir(parents=True)
-    (sb / "review" / "artifacts").mkdir(parents=True)
+    (sb / "targeted_review" / "artifacts").mkdir(parents=True)
     (sb / "prior_round" / "findings.json").write_text(
         json.dumps({"findings": [{"id": i} for i in prior_ids]}), encoding="utf-8")
     wanted = list(pp.REQUIRED_REVIEW_CHECKS) + [
@@ -501,11 +501,11 @@ def _review_errors(tmp: Path, *, prior_ids=(), findings=(), all_out=(),
                             else "clean -- basis: a.md")}
            for c in wanted]
     cur = {"submission_dir": "./base", "findings": list(findings), "coverage": cov}
-    (sb / "review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
+    (sb / "targeted_review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
     for name in ("M1.md", "M27_evidence_coverage.md", "M34_source_data_coverage.md"):
-        (sb / "review" / "artifacts" / name).write_text(
+        (sb / "targeted_review" / "artifacts" / name).write_text(
             "| check | disposition |\n|---|---|\n| x | clean |\n", encoding="utf-8")
-    (sb / "review" / "findings.md").write_text("# findings\n", encoding="utf-8")
+    (sb / "targeted_review" / "findings.md").write_text("# findings\n", encoding="utf-8")
     ctx = types.SimpleNamespace(cfg={})
     errs, warns = [], []
     pp.check_review_contract(ctx, sb, cur, errs, warns, scope=scope)
@@ -567,7 +567,7 @@ def test_f29_f33_f37_f38() -> None:
                               "location": "new section", "wrong": "",
                               "correct": "text", "basis": "review finding F-001",
                               "edit": "add the passage",
-                              "evidence": "review/findings.json F-001"}]}),
+                              "evidence": "targeted_review/findings.json F-001"}]}),
         encoding="utf-8")
     check("F29 a plan row naming a file that does not exist yet is accepted",
           pp._revision_plan_rows(future) is not None,

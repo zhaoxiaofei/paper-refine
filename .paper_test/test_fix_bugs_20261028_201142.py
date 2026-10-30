@@ -156,7 +156,7 @@ def test_counting() -> None:
 def _review_errors(tmp: Path, *, all_out=(), scope="full"):
     sb = tmp / "sb"
     (sb / "prior_round").mkdir(parents=True)
-    (sb / "review" / "artifacts").mkdir(parents=True)
+    (sb / "targeted_review" / "artifacts").mkdir(parents=True)
     (sb / "prior_round" / "findings.json").write_text('{"findings": []}', encoding="utf-8")
     wanted = list(pp.REQUIRED_REVIEW_CHECKS) + [
         "M19", "M18", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28",
@@ -166,11 +166,11 @@ def _review_errors(tmp: Path, *, all_out=(), scope="full"):
                             else "clean -- basis: a.md")}
            for c in wanted]
     cur = {"submission_dir": "./base", "findings": [], "coverage": cov}
-    (sb / "review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
+    (sb / "targeted_review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
     for name in ("M1.md", "M27_evidence_coverage.md", "M34_source_data_coverage.md"):
-        (sb / "review" / "artifacts" / name).write_text(
+        (sb / "targeted_review" / "artifacts" / name).write_text(
             "| check | disposition |\n|---|---|\n| x | clean |\n", encoding="utf-8")
-    (sb / "review" / "findings.md").write_text("# findings\n", encoding="utf-8")
+    (sb / "targeted_review" / "findings.md").write_text("# findings\n", encoding="utf-8")
     errs = []
     pp.check_review_contract(types.SimpleNamespace(cfg={}), sb, cur, errs, [],
                              scope=scope)

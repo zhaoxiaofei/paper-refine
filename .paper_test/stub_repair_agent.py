@@ -14,7 +14,7 @@ this wrapper decides from the prompt what it is:
       PAPER_REPAIR_STUB_NOFIX=1  change nothing (the repair does not clear the
                                problem: the attempt must fail like any other)
       PAPER_REPAIR_STUB_EVIL=1   ALSO edit a file outside that stage's scope
-                               (`review/findings.json`, or a manuscript document
+                               (`targeted_review/findings.json`, or a manuscript document
                                inside the package): the guard must reject it
       PAPER_REPAIR_STUB_DROP=1   delete the last seeded row of a DECISION table
                                instead of filling it (the guard must reject a
@@ -66,8 +66,8 @@ DECISION_TABLES = ("M20_formatting.md", "M18_caption_words.md", "M19_length.md",
 
 def stage_of(name: str) -> str:
     """The stage a sandbox belongs to ('' when it is not a stage sandbox)."""
-    if name.endswith("_review"):
-        return "review"
+    if name.endswith("_targeted_review") or name.endswith("_review"):
+        return "targeted_review"
     if name.endswith("_audit"):
         return "audit"
     if re.search(r"_w\d+$", name):
@@ -87,7 +87,7 @@ def package_dir(sb: Path, stage: str) -> Path:
 
 
 def decision_tables(sb: Path):
-    art = sb / "review" / "artifacts"
+    art = sb / "targeted_review" / "artifacts"
     if not art.is_dir():
         return []
     return [art / name for name in DECISION_TABLES if (art / name).is_file()]
@@ -95,7 +95,7 @@ def decision_tables(sb: Path):
 
 def fill_decision_tables(sb: Path) -> None:
     """`stub_agent.fill_seeded_tables`, restricted to the decision tables."""
-    art = sb / "review" / "artifacts"
+    art = sb / "targeted_review" / "artifacts"
     if not art.is_dir():
         return
     untouched = {p: p.read_bytes() for p in sorted(art.glob("*.md"))
@@ -167,7 +167,7 @@ def m1b_columns(path: Path, rows: list) -> tuple:
 
 def blank_m1b_dispositions(sb: Path) -> int:
     """Empty the M1b table's `disposition` cells (its own gate then fires)."""
-    path = sb / "review" / "artifacts" / "M1_acronyms.md"
+    path = sb / "targeted_review" / "artifacts" / "M1_acronyms.md"
     if not m1b_row_lines(path):
         # The stub's review writes only a placeholder M1 artifact; an M1b table
         # with real rows is what the gate (and the repair) is about.
@@ -188,7 +188,7 @@ def blank_m1b_dispositions(sb: Path) -> int:
         # The stub's review also reports one M1 finding; the gate (and the real
         # 2026-09-22 failure) is about a review that filed NO M1 finding and still
         # left long-form residues undisposed, so move that finding to another check.
-        fj = sb / "review" / "findings.json"
+        fj = sb / "targeted_review" / "findings.json"
         if fj.is_file():
             doc = json.loads(fj.read_text(encoding="utf-8"))
             for f in doc.get("findings") or []:
@@ -219,7 +219,7 @@ def blank_m1b_dispositions(sb: Path) -> int:
 
 def fill_m1b_dispositions(sb: Path) -> int:
     """Dispose every M1b row with its OWN recorded reason (the repair's job)."""
-    path = sb / "review" / "artifacts" / "M1_acronyms.md"
+    path = sb / "targeted_review" / "artifacts" / "M1_acronyms.md"
     rows = m1b_row_lines(path)
     if not rows:
         return 0
@@ -253,7 +253,7 @@ def fill_m1b_dispositions(sb: Path) -> int:
 # ---------------------------------------------------------------------------
 def break_stage(sb: Path, stage: str) -> str:
     """Break ONE bookkeeping file of `stage`; return a note for the log."""
-    if stage == "review":
+    if stage == "targeted_review":
         if os.environ.get("PAPER_REPAIR_STUB_M1B"):
             n = blank_m1b_dispositions(sb)
             return f"left {n} M1b long-form row(s) undisposed (its own gate must fire)"
@@ -325,7 +325,7 @@ def break_stage(sb: Path, stage: str) -> str:
 # ---------------------------------------------------------------------------
 def frozen_findings(sb: Path) -> list:
     """The frozen review's finding rows (audit/revise repairs read these)."""
-    p = sb / "review" / "findings.json"
+    p = sb / "targeted_review" / "findings.json"
     if not p.is_file():
         return []
     try:
@@ -455,7 +455,7 @@ def repair_judge(sb: Path) -> str:
 def do_repair(sb: Path, name: str) -> str:
     """Run the repair the stage's profile allows; return a note."""
     stage = stage_of(name)
-    if stage == "review":
+    if stage == "targeted_review":
         fill_decision_tables(sb)
         n_m1b = fill_m1b_dispositions(sb)
         return ("filled the seeded decision tables"
@@ -476,12 +476,12 @@ def do_repair(sb: Path, name: str) -> str:
 def go_out_of_scope(sb: Path, name: str) -> str:
     """Touch a file the stage's profile protects (the guard must reject it)."""
     stage = stage_of(name)
-    if stage == "review":
-        fj = sb / "review" / "findings.json"
+    if stage == "targeted_review":
+        fj = sb / "targeted_review" / "findings.json"
         data = json.loads(fj.read_text(encoding="utf-8"))
         data.setdefault("findings", []).append({"id": "F-999"})
         fj.write_text(json.dumps(data), encoding="utf-8")
-        return "edited review/findings.json"
+        return "edited targeted_review/findings.json"
     pkg = package_dir(sb, stage)
     # A MANUSCRIPT file: the stage's bookkeeping reports and its work/ scratch are
     # legitimately writable, so pick a file that is neither.
@@ -518,7 +518,7 @@ def main() -> int:
                 rewrite_cells(tables[0], blank=False, drop_row=True)
             return 0
         if os.environ.get("PAPER_REPAIR_STUB_DROP_OTHER"):
-            other = sb / "review" / "artifacts" / "M1_acronyms.md"
+            other = sb / "targeted_review" / "artifacts" / "M1_acronyms.md"
             if other.is_file():
                 lines = other.read_text(encoding="utf-8").splitlines()
                 # Rewrite a row's content in place: bytes change, no cell is filled.

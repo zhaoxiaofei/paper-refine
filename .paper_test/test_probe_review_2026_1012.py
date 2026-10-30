@@ -14,7 +14,7 @@ orchestrator re-runs. This suite pins:
       the audit/revision sessions wait for it; "off"/absent plans no session;
       both handlers (postcheck + rebuild) exist;
   P2  the sandbox: materialized from the base only, seeded with the claim-surface
-      and producer candidates, WITHOUT any review/finding artifact; the leftover
+      and producer candidates, WITHOUT any targeted_review/finding artifact; the leftover
       detector treats the seeds as inputs;
   P3  the contract: a compliant finding passes; a zero-finding pass with its
       `checked` inventory passes; a declared `computed` value the verifier does
@@ -109,14 +109,14 @@ def build_root(tmp: Path, probe: str = "on", audit: str = "off", review_rows=(),
     rec["corpus_digest"] = nb.recompute_corpus_digest(ctx, 1, "a1")
     rec["content_fingerprint"] = nb.corpus_content_fingerprint(ctx, 1, "a1")
     if review_rows is not None:
-        rev = ctx.register(nb.rid_review(1), "review", 1, f"runs/{nb.rid_review(1)}")
+        rev = ctx.register(nb.rid_targeted_review(1), "review", 1, f"runs/{nb.rid_targeted_review(1)}")
         rev["status"] = "done"
         rsb = ctx.sandbox_of(rev)
-        write(rsb / "review" / "findings.json",
+        write(rsb / "targeted_review" / "findings.json",
               {"submission_dir": "./base", "findings": [], "coverage": []})
-        write(rsb / "review" / "round2" / "findings_extra.json",
+        write(rsb / "targeted_review" / "round2" / "findings_extra.json",
               {"findings": list(review_rows), "coverage": []})
-        write(rsb / "review" / "round2" / "findings_extra.md", "# D4\n")
+        write(rsb / "targeted_review" / "round2" / "findings_extra.md", "# D4\n")
     if with_a2:
         vid = nb.revise_vid(1)
         rid = nb.rid_for_fresh(1, vid)
@@ -245,7 +245,7 @@ def test_sandbox():
           "raw_data/grid.tsv" in prod and "code/make_fish.py" not in prod
           and "make_fig.py" in prod, prod[:400])
     check("P2e NO review artifact, finding list or sweep is seeded",
-          not (sb / "review").exists() and not (sb / "prior_round").exists())
+          not (sb / "targeted_review").exists() and not (sb / "prior_round").exists())
     prompt = (sb / "PROMPT.md").read_text(encoding="utf-8")
     check("P2f the prompt is generic and states the verifier/re-run contract",
           "GENERIC on purpose" in prompt and "ANY defect class" in prompt
@@ -349,13 +349,13 @@ def test_merge():
     recs["r1_probe"]["status"] = "done"
     arec = nb.materialize_audit(ctx, 1)
     ids = [f.get("id") for f in nb.discovery_findings_of(
-        ctx.sandbox_of(arec) / "review" / "round2")]
+        ctx.sandbox_of(arec) / "targeted_review" / "round2")]
     check("P4b the auditor's frozen copy carries the probe finding",
           "X-901" in ids, str(ids))
     recs["r1_audit"]["status"] = "done"      # materialize_revise waits for the audit
     rrec = nb.materialize_revise(ctx, 1, "a2")
     ids = [f.get("id") for f in nb.discovery_findings_of(
-        ctx.sandbox_of(rrec) / "review" / "round2")]
+        ctx.sandbox_of(rrec) / "targeted_review" / "round2")]
     check("P4c the reviser's frozen copy carries the probe finding",
           "X-901" in ids, str(ids))
     ledger_ids = nb.frozen_finding_ids(ctx, rrec)
@@ -372,25 +372,25 @@ def test_merge():
           str([f.get("id") for f in frozen.get("findings", [])]))
     check("P4f the source review sandbox is NEVER mutated by the merge",
           "X-901" not in [f.get("id") for f in nb.discovery_findings_of(
-              ctx.sandbox_of(ctx.run("r1_review")) / "review" / "round2")])
+              ctx.sandbox_of(ctx.run("r1_targeted_review")) / "targeted_review" / "round2")])
     # P4f2-P4f4: the freshness interaction that a stub-without-findings round
     # could not see. A merged copy must NOT look stale (the audit was reset on
     # every re-entry until this was fixed), a not-done probe MUST make it look
     # stale, and re-running the merge must not duplicate rows.
     audit_sb = ctx.sandbox_of(arec)
-    review_sb = ctx.sandbox_of(ctx.run("r1_review"))
+    review_sb = ctx.sandbox_of(ctx.run("r1_targeted_review"))
     check("P4f2 a correctly merged review copy is NOT flagged stale",
-          nb._review_copy_mismatch(ctx, 1, audit_sb, review_sb / "review") is None,
-          str(nb._review_copy_mismatch(ctx, 1, audit_sb, review_sb / "review")))
+          nb._review_copy_mismatch(ctx, 1, audit_sb, review_sb / "targeted_review") is None,
+          str(nb._review_copy_mismatch(ctx, 1, audit_sb, review_sb / "targeted_review")))
     probe_rec = ctx.state["runs"]["r1_probe"]
     probe_rec["status"] = "pending"
-    stale_msg = nb._review_copy_mismatch(ctx, 1, audit_sb, review_sb / "review")
+    stale_msg = nb._review_copy_mismatch(ctx, 1, audit_sb, review_sb / "targeted_review")
     probe_rec["status"] = "done"
     check("P4f3 a not-done probe run marks the merged copy stale",
           stale_msg is not None and "probe" in str(stale_msg), str(stale_msg))
     again = nb.merge_probe_into_review_copy(ctx, 1, audit_sb)
     merged_ids = [f.get("id") for f in nb.discovery_findings_of(
-        audit_sb / "review" / "round2")]
+        audit_sb / "targeted_review" / "round2")]
     check("P4f4 re-running the merge is idempotent (no duplicated ids)",
           merged_ids.count("X-901") == 1 and len(merged_ids) == len(set(merged_ids)),
           f"{merged_ids} ({again})")
@@ -409,7 +409,7 @@ def test_merge():
     ctx2.state["runs"]["r1_probe"]["status"] = "done"
     rrec2 = nb.materialize_revise(ctx2, 1, "a2")
     ids = [f.get("id") for f in nb.discovery_findings_of(
-        ctx2.sandbox_of(rrec2) / "review" / "round2")]
+        ctx2.sandbox_of(rrec2) / "targeted_review" / "round2")]
     check("P4g a colliding probe id is remapped deterministically",
           "X-901" in ids and "X-902" in ids, str(ids))
     seed2 = nb.round_discovery_seed(ctx2, 1)
@@ -430,7 +430,7 @@ def test_merge():
     # Prune the live review list (rename it away) so the ARCHIVE owns the list,
     # with the probe run reset: no double count, and the merged archive still
     # seeds both ids.
-    review_round2 = ctx2.sandbox_of(ctx2.run("r1_review")) / "review" / "round2"
+    review_round2 = ctx2.sandbox_of(ctx2.run("r1_targeted_review")) / "targeted_review" / "round2"
     review_round2.rename(review_round2.parent / "round2_held")
     try:
         ctx2.state["runs"]["r1_probe"]["status"] = "pending"

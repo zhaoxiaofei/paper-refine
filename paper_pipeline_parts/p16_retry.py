@@ -161,7 +161,8 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
 # re-materialized at reset time, and the rest are left stale for the next
 # `run`'s staging loop -- so resetting a downstream BEFORE the upstream it
 # consumes would rebuild it from input that is about to be replaced.
-RETRY_KIND_RANK = {"a1": 0, "feedback": 1, "concerns": 1, "rewrite": 2, "review": 2,
+RETRY_KIND_RANK = {"a1": 0, "feedback": 1, "concerns": 1, "rewrite": 2,
+                    "targeted_review": 2,
                    "probe": 3, "audit": 4, "revise": 5, "response": 6, "integrate": 7,
                    "judge": 8}
 

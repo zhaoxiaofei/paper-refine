@@ -20,7 +20,7 @@ Reference-list regions are skipped, and detection resumes after them.
   OUT/artifacts/M4_numbers.md / .json
 
 stdlib-only. Usage:
-  python extract_numbers.py --work ./review/work [--out ./review]
+  python extract_numbers.py --work ./targeted_review/work [--out ./targeted_review]
 """
 import argparse
 import json

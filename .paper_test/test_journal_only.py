@@ -108,7 +108,7 @@ def test_only_vocabulary():
     check("the response alias parses", spec4 is not None and spec4.stages == {"response"})
     check("the audit session token maps to audit, not revise",
           nb.OnlySpec._token_stage("audit") == "audit" and
-          nb.OnlySpec._token_stage("r1_audit") == "review")  # only bare tokens are stages
+          nb.OnlySpec._token_stage("r1_audit") == "targeted_review")  # only bare tokens are stages
     spec5 = nb.parse_only_spec("w,feedback")
     check("round-model and journal stages combine in one item",
           spec5 is not None and spec5.stages == {"rewrite", "feedback"}, str(spec5.stages))
@@ -139,13 +139,13 @@ def test_only_in_transfer_mode():
     check("the selected feedback stage ran", status_of(root, "r1_feedback") == "done",
           status_of(root, "r1_feedback"))
     check("nothing else ran and no package was assembled",
-          status_of(root, "r1_review") != "done"
+          status_of(root, "r1_targeted_review") != "done"
           and not (root / "journal_submission").exists())
 
     r = run_root(root, "--only", "review")
     check("run --only review resumes from the finished feedback",
-          r.returncode == 3 and status_of(root, "r1_review") == "done",
-          f"rc={r.returncode} review={status_of(root, 'r1_review')}")
+          r.returncode == 3 and status_of(root, "r1_targeted_review") == "done",
+          f"rc={r.returncode} review={status_of(root, 'r1_targeted_review')}")
     check("the revise arm is still pending and the package is not assembled",
           status_of(root, "r1_a2_revise") != "done"
           and not (root / "journal_submission").exists())

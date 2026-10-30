@@ -190,11 +190,11 @@ def test_dag_scheduling():
     check("the round completes", proc.returncode == 0, out[-300:])
     names = sorted(spans)
     check("every expected session was instrumented",
-          set(names) >= {"r1_w1", "r1_w2", "r1_review", "r1_audit", "r1_a2_revise",
+          set(names) >= {"r1_w1", "r1_w2", "r1_targeted_review", "r1_audit", "r1_a2_revise",
                          "r1_i1", "r1_i2", "r1_i3", "r1_i4"}
           and sum(1 for n in names if ("_judge_" in n or n.startswith("judge_"))) == 16,
           str(names[:6]) + f" ... {len(names)} total")
-    w1, w2, rev = spans["r1_w1"], spans["r1_w2"], spans["r1_review"]
+    w1, w2, rev = spans["r1_w1"], spans["r1_w2"], spans["r1_targeted_review"]
     # Either signal counts: the stub's own span, or the scheduler's submission
     # stamps (which do not include the child's boot latency).
     submitted = submitted_spans(root, set(spans))
@@ -266,11 +266,11 @@ def test_dag_scheduling():
     ctx = nb.Ctx(root)
     ctx.load()
     plan = {e["id"]: e for e in nb.round_run_plan(ctx, 1)}
-    check("the DAG has no barrier on the rewrites (review/revise deps exclude w1/w2)",
-          all(w not in plan["r1_review"]["deps"] for w in ("r1_w1", "r1_w2"))
+    check("the DAG has no barrier on the rewrites (targeted-review/revise deps exclude w1/w2)",
+          all(w not in plan["r1_targeted_review"]["deps"] for w in ("r1_w1", "r1_w2"))
           and all(w not in plan["r1_a2_revise"]["deps"] for w in ("r1_w1", "r1_w2"))
-          and "r1_review" in plan["r1_a2_revise"]["deps"],
-          str({k: plan[k]["deps"] for k in ("r1_review", "r1_a2_revise")}))
+          and "r1_targeted_review" in plan["r1_a2_revise"]["deps"],
+          str({k: plan[k]["deps"] for k in ("r1_targeted_review", "r1_a2_revise")}))
     check("the integrations depend on the WHOLE pool",
           all(set(plan[f"r1_i{k}"]["deps"]) >= {"r1_w1", "r1_w2", "r1_a2_revise"}
               for k in (1, 2, 3, 4) if f"r1_i{k}" in plan),

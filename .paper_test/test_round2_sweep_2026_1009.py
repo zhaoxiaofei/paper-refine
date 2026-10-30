@@ -101,7 +101,7 @@ def review_contract_errors(tmp: Path, prior_f=(), prior_x=(), current_ids=(),
     """
     sb = tmp / "sb"
     (sb / "base").mkdir(parents=True, exist_ok=True)
-    (sb / "review").mkdir(parents=True, exist_ok=True)
+    (sb / "targeted_review").mkdir(parents=True, exist_ok=True)
     (sb / "prior_round").mkdir(parents=True, exist_ok=True)
     (sb / "prior_round" / "findings.json").write_text(
         json.dumps({"findings": [{"id": i} for i in prior_f]}), encoding="utf-8")
@@ -111,9 +111,9 @@ def review_contract_errors(tmp: Path, prior_f=(), prior_x=(), current_ids=(),
     cur = {"submission_dir": "./base",
            "findings": [{"id": i} for i in current_ids],
            "coverage": COVERAGE}
-    (sb / "review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
-    (sb / "review" / "findings.md").write_text("# findings\n" + blob_extra, encoding="utf-8")
-    (sb / "review" / "ARCHITECTURE.md").write_text(
+    (sb / "targeted_review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
+    (sb / "targeted_review" / "findings.md").write_text("# findings\n" + blob_extra, encoding="utf-8")
+    (sb / "targeted_review" / "ARCHITECTURE.md").write_text(
         "| document | disposition |\n|---|---|\n| base | none |\n", encoding="utf-8")
     errs, warns = [], []
     nb.check_review_contract(None, sb, cur, errs, warns, scope="full")
@@ -169,7 +169,7 @@ LIVE_DOCS = {
     "paper-review/SKILL.md":
         ["the EVIDENCE-INTEGRITY sweeps M31–M36",
          "the evidence-integrity sweeps M31–M36 (the seeded "
-         "`review/artifacts/M31_artwork_legend.md`"],
+         "`targeted_review/artifacts/M31_artwork_legend.md`"],
     "paper-revise/SKILL.md": ["the M1–M36 sweeps from paper-review"],
     "paper-revise/references/ledger.md": ["(M1–M36 / J1–J5)"],
     "prompts/identify_issues.prompt.md":
@@ -177,7 +177,7 @@ LIVE_DOCS = {
          "## APPENDIX: Sweeps M1–M36 and judgment passes J1–J5",
          "the EVIDENCE-INTEGRITY sweeps M31–M36",
          "the evidence-integrity sweeps M31–M36 (the seeded "
-         "`review/artifacts/M31_artwork_legend.md`"],
+         "`targeted_review/artifacts/M31_artwork_legend.md`"],
     "prompts/adress_issues.prompt.md":
         ["the M1–M36 sweeps from paper-review", "(M1–M36 / J1–J5)"],
     "README.md": ["M1–M36 + J1–J5 (source of truth)"],
@@ -225,8 +225,8 @@ def _gap_table(n=25, uncovered=2):
 
 
 def _round2(sb: Path, **overrides):
-    """Write a conformant review/round2/ fixture into `sb` (None deletes a file)."""
-    r2 = sb / "review/round2"
+    """Write a conformant targeted_review/round2/ fixture into `sb` (None deletes a file)."""
+    r2 = sb / "targeted_review/round2"
     r2.mkdir(parents=True, exist_ok=True)
     files = {
         "known_index.md": "# D0 (fixture)\n\nKNOWN-CLASSES: M1 ... M36, J1 ... J5\n",
@@ -323,7 +323,7 @@ def test_discovery_contract():
                                       "check": "checklist gap", "severity": "Medium",
                                       "evidence": "e", "explanation": "x"}]})
     sb = _round2(tmpdir("dc_x") / "sb")
-    (sb / "review/round2/findings_extra.json").write_text(bad_x, encoding="utf-8")
+    (sb / "targeted_review/round2/findings_extra.json").write_text(bad_x, encoding="utf-8")
     errs = discovery_errors(sb)
     check("C10 a malformed X-finding fails",
           any("malformed X-finding" in e and "severity" in e for e in errs), str(errs)[:240])
@@ -358,7 +358,7 @@ def test_prior_proposals_reprobed():
     check("P1 a prior proposal re-checked nowhere fails",
           any("re-checks NOWHERE" in e and "M37" in e for e in discovery_errors(sb)),
           str(discovery_errors(sb))[:240])
-    (sb / "review/round2/probes.md").write_text(
+    (sb / "targeted_review/round2/probes.md").write_text(
         "# D2 (fixture)\n\n| probe id | gap row | question | evidence | status |\n"
         "|---|---|---|---|---|\n"
         "| P2-001 | 24 | prior proposal M37: figure resolution | base/x | executed |\n"
@@ -368,7 +368,7 @@ def test_prior_proposals_reprobed():
           str(discovery_errors(sb))[:240])
     (sb / "prior_round/new_sweeps.md").write_text(
         "# prior\n\n## M38 — Another class (proposed)\n**Purpose:** x\n", encoding="utf-8")
-    (sb / "review/round2/new_sweeps.md").write_text(
+    (sb / "targeted_review/round2/new_sweeps.md").write_text(
         "# D5 (fixture)\n\nNo new sweep proposals: prior proposal M38: no instances in base/.\n",
         encoding="utf-8")
     check("P3 a prior proposal dispositioned as not-reproducible passes",
@@ -384,7 +384,7 @@ def test_cross_namespace_duplicates():
     print("\n== R2-XD F/X cross-namespace duplicates get a mechanical trail ==")
     sb = _round2(tmpdir("xd") / "sb")
     quote = "line 42 of the manuscript: the treated group showed a higher median value"
-    (sb / "review/round2/findings_extra.json").write_text(json.dumps({"findings": [
+    (sb / "targeted_review/round2/findings_extra.json").write_text(json.dumps({"findings": [
         {"id": "X-001", "location": "base/m.md", "category": 0, "check": "M30",
          "severity": "Major", "evidence": quote, "explanation": "x"}]}), encoding="utf-8")
     fj = {"findings": [{"id": "F-012", "location": "base/m.md", "category": 0, "check": "M30",
@@ -410,7 +410,7 @@ def test_cross_namespace_duplicates():
     # alone left the audit inert for those rows.
     plain = dict(fj["findings"][0], location="Results, paragraph 2",
                  evidence="the treated group showed a higher median value")
-    (sb / "review/round2/findings_extra.json").write_text(json.dumps({"findings": [
+    (sb / "targeted_review/round2/findings_extra.json").write_text(json.dumps({"findings": [
         dict(plain, id="X-001", explanation="x")]}), encoding="utf-8")
     notes = nb.cross_namespace_duplicate_notes(sb, {"findings": [dict(plain, id="F-012")]})
     check("XD4 a same-location/same-substance pair without a line number is reported",
@@ -424,8 +424,8 @@ def test_cross_namespace_duplicates():
 def test_probe_audit():
     print("\n== R2-PA the auditor attacks the discovery probe dispositions ==")
     sb = tmpdir("pa") / "sb"
-    (sb / "review/round2").mkdir(parents=True)
-    (sb / "review/round2/probe_results.md").write_text(
+    (sb / "targeted_review/round2").mkdir(parents=True)
+    (sb / "targeted_review/round2/probe_results.md").write_text(
         "# D3 (fixture)\n\n| probe id | disposition |\n|---|---|\n"
         "| P2-001 | executed - no anomalies - checked: base/x |\n", encoding="utf-8")
     errs = nb.probe_audit_problems(sb)

@@ -176,28 +176,28 @@ def test_partial_copies_are_repaired():
     print()
     print("== B. materialization repairs a partial (crash-truncated) copy ==")
 
-    # --- materialize_revise: base/, non_revised/ and review/ -------------------
+    # --- materialize_revise: base/, non_revised/ and targeted_review/ -------------------
     tmp = scratch("paper_bug_b1_")
     ctx = build_root(tmp)
     rev = nb.materialize_review(ctx, 1)
-    write(ctx.sandbox_of(rev) / "review" / "findings.json", "{}")
+    write(ctx.sandbox_of(rev) / "targeted_review" / "findings.json", "{}")
     rev["status"] = "done"
     rid = nb.rid_for_fresh(1, "a2")
     sb = ctx.runs_dir / rid
     # simulate "killed in the middle of the copy": only ONE file made it
     write(sb / "base" / "manuscript-b.md", "title\n")
     write(sb / "non_revised" / "manuscript-b.md", "title\n")
-    write(sb / "review" / "findings.json", "{}")
+    write(sb / "targeted_review" / "findings.json", "{}")
     rec = nb.materialize_revise(ctx, 1, "a2")
     base_ok = nb.dir_matches(sb / "base",
                              nb.hash_manifest(ctx.sandbox_of(ctx.run("r1_a1")) / "base")["files"])
     nr_ok = nb.dir_matches(sb / "non_revised", ctx.source_manifest["files"])
-    review_ok = nb.dir_matches(sb / "review",
-                               nb.hash_manifest(ctx.sandbox_of(rev) / "review")["files"])
+    review_ok = nb.dir_matches(sb / "targeted_review",
+                               nb.hash_manifest(ctx.sandbox_of(rev) / "targeted_review")["files"])
     check("B a truncated revise base/ is rebuilt from the round's base", base_ok,
           str(sorted((rec["inputs_manifest"]["base"]["files"]))))
     check("B a truncated revise non_revised/ is rebuilt from the pristine original", nr_ok)
-    check("B a truncated frozen review/ is rebuilt from the review run", review_ok)
+    check("B a truncated frozen targeted_review/ is rebuilt from the review run", review_ok)
     check("B the recorded inputs_manifest is the FULL upstream corpus",
           set(rec["inputs_manifest"]["base"]["files"]) ==
           set(nb.hash_manifest(ctx.sandbox_of(ctx.run("r1_a1")) / "base")["files"]))
@@ -540,9 +540,9 @@ def test_same_second_archives_do_not_overwrite():
     check("F both attempts' logs survive the stash", texts == ["first attempt", "second attempt"],
           str([p.name for p in logs]))
     # archive_stale_marker twice in the same second
-    nb.write_json_atomic(sb / nb.MARKER_FILE, {"stage": "review", "round": 1})
+    nb.write_json_atomic(sb / nb.MARKER_FILE, {"stage": "targeted_review", "round": 1})
     nb.archive_stale_marker(sb, rid)
-    nb.write_json_atomic(sb / nb.MARKER_FILE, {"stage": "review", "round": 1, "second": True})
+    nb.write_json_atomic(sb / nb.MARKER_FILE, {"stage": "targeted_review", "round": 1, "second": True})
     nb.archive_stale_marker(sb, rid)
     archived = [p for p in (ctx.runs_dir / nb.LOGS_DIRNAME).iterdir()
                 if "prev_marker" in p.name]

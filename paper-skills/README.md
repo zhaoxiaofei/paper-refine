@@ -14,7 +14,7 @@ originals stay read-only and nothing is ever fabricated.
 
 ```
 paper-review  (identify_issues)          paper-revise  (adress_issues)
-SUBMISSION_DIR ──► review/findings.{md,json} ──► revised/ package
+SUBMISSION_DIR ──► targeted_review/findings.{md,json} ──► revised/ package
             ▲                                    + CHANGELOG.md
             └── round2/new_sweeps.md ◄────────── + MANUAL_STEPS.md
                 (checklist growth loop)          + REVISION_REPORT.md
@@ -96,7 +96,7 @@ folder:
 - "…discover mode" — re-runs ONLY the discovery round against existing
   findings (hunts issue classes the checklist itself misses)
 
-Outputs land in `./review/`:
+Outputs land in `./targeted_review/`:
 
 | file | content |
 |---|---|
@@ -107,18 +107,18 @@ Outputs land in `./review/`:
 
 ### Step 2 — (optional) Validate the growth-loop proposals
 
-`review/round2/new_sweeps.md` proposes new sweeps (M37+; M18–M20 are
+`targeted_review/round2/new_sweeps.md` proposes new sweeps (M37+; M18–M20 are
 reserved and M21–M36 already adopted) based on what
 the discovery round caught that the checklist missed. Review them, then
 append the ones you accept to `references/sweeps.md` of the installed
 `paper-review` copy. If that directory is read-only (typical for an installed
-skill), keep the accepted text in `review/round2/new_sweeps.md` and hand the
+skill), keep the accepted text in `targeted_review/round2/new_sweeps.md` and hand the
 append to whoever owns the installation. M14–M17 shipped with this package were
 validated exactly this way (see *Validation* below).
 
 ### Step 3 — Revise (targeted fixes)
 
-- "Apply the findings in ./review to fix the submission. Never modify
+- "Apply the findings in ./targeted_review to fix the submission. Never modify
   ./submission itself."
 - "adress_issues" (legacy name)
 

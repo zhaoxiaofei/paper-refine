@@ -190,7 +190,7 @@ def test_prompts_prefer_the_mcp_tool():
     print("== every prompt tries convert_docx_to_pdf first (and renders safely) ==")
     sb = Path("/tmp/paper_mcp_sb")
     prompts = {
-        "review": nb.review_prompt(sb, "r1_review", 1),
+        "review": nb.review_prompt(sb, "r1_targeted_review", 1),
         "rewrite": nb.rewrite_prompt(sb, "r1_w1", 1),
         "revise": nb.revise_prompt(sb, "r1_a2_revise", 1),
         "integrate": nb.integrate_prompt(sb, "r1_i1", 1, "a1", ["w1"]),

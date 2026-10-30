@@ -96,7 +96,7 @@ row.
 
 V3 output: the M-sweep artifacts re-run over the ENTIRE revised corpus (using
 the paper-review scripts where applicable) PLUS any sweep definitions from
-`./review/round2/new_sweeps.md` (discovery classes — they apply now too).
+`./targeted_review/round2/new_sweeps.md` (discovery classes — they apply now too).
 Every rescan finding is classified:
 - (a) residual manual-required item — must map to an existing ledger row;
 - (b) NEW issue introduced or revealed by revision — fix immediately, assign `R-xxx`, add to the change log;

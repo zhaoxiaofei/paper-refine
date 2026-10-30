@@ -129,26 +129,26 @@ def test_f45_split_review_a_freshness():
     (a1 / "base" / "doc.txt").write_text("base\n", encoding="utf-8")
     register(ctx, "r1_a1", "a1", a1)
 
-    a = root / "runs" / "r1_review"
-    (a / "review").mkdir(parents=True)
-    (a / "review" / "findings.json").write_text('{"findings": []}\n', encoding="utf-8")
-    register(ctx, "r1_review", "review", a)
+    a = root / "runs" / "r1_targeted_review"
+    (a / "targeted_review").mkdir(parents=True)
+    (a / "targeted_review" / "findings.json").write_text('{"findings": []}\n', encoding="utf-8")
+    register(ctx, "r1_targeted_review", "review", a)
 
-    b = root / "runs" / "r1_review_b"
+    b = root / "runs" / "r1_targeted_review_b"
     (b / "base").mkdir(parents=True)
     (b / "base" / "doc.txt").write_text("base\n", encoding="utf-8")
-    (b / "review_a").mkdir()
-    (b / "review_a" / "findings.json").write_text('{"findings": []}\n', encoding="utf-8")
-    rec = register(ctx, "r1_review_b", "review", b,
+    (b / "targeted_review_a").mkdir()
+    (b / "targeted_review_a" / "findings.json").write_text('{"findings": []}\n', encoding="utf-8")
+    rec = register(ctx, "r1_targeted_review_b", "review", b,
                    inputs_manifest={"base": pp.hash_manifest(b / "base"),
-                                    "review_a": pp.hash_manifest(b / "review_a")})
+                                    "targeted_review_a": pp.hash_manifest(b / "targeted_review_a")})
     check("F45 a matching review_a is fresh", pp._input_freshness_problems(ctx, rec) == [],
           str(pp._input_freshness_problems(ctx, rec)))
-    (a / "review" / "findings.json").write_text(
+    (a / "targeted_review" / "findings.json").write_text(
         '{"findings": [{"id": "FA-1", "new": true}]}\n', encoding="utf-8")
     probs = pp._input_freshness_problems(ctx, rec)
     check("F45 a retried session A makes B's frozen review_a stale",
-          any("review_a" in p for p in probs), str(probs))
+          any("targeted_review_a" in p for p in probs), str(probs))
 
 
 # ---------------------------------------------------------------------------
@@ -191,13 +191,13 @@ def test_f46_feedback_manifest_and_freshness():
     text_file = sorted((fbsb / "feedback" / "text").glob("*.txt"))[0]
 
     # A downstream review sandbox is born with the same staged copies.
-    review = root / "runs" / "r1_review"
+    review = root / "runs" / "r1_targeted_review"
     (review / "base").mkdir(parents=True)
     shutil.copytree(root / "runs" / "r1_a1" / "base", review / "base", dirs_exist_ok=True)
     shutil.copytree(fbsb / "feedback", review / "feedback")
     shutil.copytree(fbsb / "concerns", review / "concerns")
     fb_rec["status"] = "done"
-    rec = register(ctx, "r1_review", "review", review,
+    rec = register(ctx, "r1_targeted_review", "review", review,
                    inputs_manifest={"base": pp.hash_manifest(review / "base"),
                                     "feedback": pp.hash_manifest(review / "feedback"),
                                     "concerns": pp.hash_manifest(review / "concerns")})

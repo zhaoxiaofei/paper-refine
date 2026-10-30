@@ -306,8 +306,8 @@ def test_review_split_keeps_journal_stages_fresh():
     fb = done("r1_feedback", ["concerns"])
     shutil.copytree(a1_sb / "base", fb / "base")
     resp = done("r1_response", ["concerns"])
-    done("r1_review", ["base"])
-    done("r1_review_b", ["review"])
+    done("r1_targeted_review", ["base"])
+    done("r1_targeted_review_b", ["review"])
     done("r1_w1", ["base"])
     (resp / "concerns" / "a.txt").write_text("content", encoding="utf-8")
     ctx.save_state()
@@ -462,7 +462,7 @@ def test_j1_narrative():
     ledger = json.loads((sd / "concerns" / "JF_concerns.json").read_text(encoding="utf-8"))
     check("J1 the concern ledger enumerates every reviewer point",
           len(ledger["concerns"]) >= 2, str(len(ledger["concerns"])))
-    findings = json.loads((sd / "review" / "findings.json").read_text(encoding="utf-8"))
+    findings = json.loads((sd / "targeted_review" / "findings.json").read_text(encoding="utf-8"))
     check("J1 every concern is a JF finding and nothing else",
           findings["findings"] and all(f.get("check") == "JF" and f.get("concern")
                                         for f in findings["findings"]))
@@ -553,7 +553,7 @@ def test_j3_narrative():
           and (wsb / "concerns" / "JF_concerns.json").is_file()
           and "original_submission" in prompt
           and (wsb / "feedback" / "original_submission" / "submitted_manuscript.txt").is_file())
-    rp = (root / "runs" / "r1_review" / "PROMPT.md").read_text(encoding="utf-8")
+    rp = (root / "runs" / "r1_targeted_review" / "PROMPT.md").read_text(encoding="utf-8")
     check("J3 the review prompt carries the reconciliation block",
           "JOURNAL FEEDBACK RECONCILIATION" in rp and "original_submission" in rp)
     check("J3 the reviewer-visible manuscript is staged with the letter, not as one",
@@ -573,7 +573,7 @@ def test_j4_narrative():
     files = submission_files(root)
     check("J4 the resubmit carries the response letter",
           "RESPONSE_TO_REVIEWERS.md" in files and "response_map.json" in files, str(files))
-    recon = json.loads((root / "runs" / "r1_review" / "review" / "concerns_reconciled.json")
+    recon = json.loads((root / "runs" / "r1_targeted_review" / "targeted_review" / "concerns_reconciled.json")
                        .read_text(encoding="utf-8"))["rows"]
     ledger = json.loads((root / "runs" / "r1_feedback" / "concerns" / "JF_concerns.json")
                         .read_text(encoding="utf-8"))["concerns"]
@@ -675,7 +675,7 @@ def test_j6_narrative():
     kinds = {e["kind"] for e in nb.round_run_plan(ctx_switched, 1)}
     check("J6 the switched root plans the scoped journal stages",
           {"concerns", "revise", "response"} <= kinds
-          and "review" not in kinds and "rewrite" not in kinds, str(sorted(kinds)))
+          and "targeted_review" not in kinds and "rewrite" not in kinds, str(sorted(kinds)))
     # `continue` is the default; the removed `none` spelling is refused by setup.
     tmp2 = scratch("paper_jr_continue_")
     root2 = tmp2 / "root"
@@ -753,9 +753,9 @@ def test_j6b_narrative():
     ctx.cfg["audit"] = "off"
     nb.materialize_a1(ctx, 1)
     nb.materialize_review(ctx, 1)
-    rev = ctx.run(nb.rid_review(1))
-    (ctx.sandbox_of(rev) / "review").mkdir(parents=True, exist_ok=True)
-    (ctx.sandbox_of(rev) / "review" / "findings.json").write_text('{"findings": []}\n',
+    rev = ctx.run(nb.rid_targeted_review(1))
+    (ctx.sandbox_of(rev) / nb.TARGETED_REVIEW_DIR).mkdir(parents=True, exist_ok=True)
+    (ctx.sandbox_of(rev) / "targeted_review" / "findings.json").write_text('{"findings": []}\n',
                                                                   encoding="utf-8")
     rev["status"] = "done"
     ctx.save_state()

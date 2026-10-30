@@ -345,7 +345,7 @@ check("E6 the judge prompt names the consistency tier (not cosmetic) with M1b",
 
 def fake_review_sandbox(tmp, m1_md, findings, coverage):
     sb = Path(tmp)
-    art = sb / "review" / "artifacts"
+    art = sb / "targeted_review" / "artifacts"
     art.mkdir(parents=True, exist_ok=True)
     (art / "M1_acronyms.md").write_text(m1_md, encoding="utf-8")
     # The rewrite-parity artifacts + the architecture table are part of the
@@ -358,7 +358,7 @@ def fake_review_sandbox(tmp, m1_md, findings, coverage):
                   "M36_zotero_parity.md", "M2_references.md"):
         (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
                                  encoding="utf-8")
-    (sb / "review" / "ARCHITECTURE.md").write_text(
+    (sb / "targeted_review" / "ARCHITECTURE.md").write_text(
         "| document | section | paragraphs | current structure | reader cost | "
         "proposed reorganization | class | severity | disposition |\n"
         "|---|---|---|---|---|---|---|---|---|\n"

@@ -8,7 +8,7 @@ against a real CLI run instead of a fixture:
 
     PAPER_STRAY_MARKER=<substring of the run id>
         the session does its work correctly and then MOVES `_pipeline_done.json`
-        into the stage's own directory (`audit/`, `review/`, `revised/`, ...).
+        into the stage's own directory (`audit/`, `targeted_review/`, `revised/`, ...).
         The pipeline must ADOPT it (the work is the work; only its address is
         wrong) and record a warning naming the stray path.
 
@@ -38,8 +38,8 @@ def stage_dir(name: str) -> str:
     """The stage's own output directory for a run id ("" when it has none)."""
     if "_judge_" in name or name.startswith("judge_"):
         return "judge_review"
-    if name.endswith("_review"):
-        return "review"
+    if name.endswith("_targeted_review") or name.endswith("_review"):
+        return "targeted_review"
     if name.endswith("_audit"):
         return "audit"
     if re.search(r"_a\d+_revise$", name):
