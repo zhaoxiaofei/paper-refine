@@ -168,13 +168,13 @@ def cmd_setup(args) -> None:
     if not explicit_mode and src_path and src_path.is_dir() \
             and llm_feedback_present_in(src_path):
         print(f"[setup] note: --source carries {LLM_FEEDBACK_DIR}/, but no journal mode is "
-              f"selected; the historical targeted-review/revise path will run. Pass "
+              f"selected; the historical guided-review/revise path will run. Pass "
               f"`--revision-mode {JOURNAL_MODE_LLM}` to use that feedback.")
     raw_revision_mode = (explicit_mode or JOURNAL_MODE_CONTINUE).strip().lower()
     revision_mode = normalize_revision_mode(raw_revision_mode)
     if revision_mode not in JOURNAL_MODES:
         die(f"--revision-mode must be one of {', '.join(JOURNAL_MODES)} (got {revision_mode!r}). "
-            f"continue=the historical workflow (the pipeline's own targeted-review/revise rounds), "
+            f"continue=the historical workflow (the pipeline's own guided-review/revise rounds), "
             f"init=author the submission in the venue's own "
             f"Word template first (the conform stage) then run the pipeline's own rounds with "
             f"no journal feedback, 1=transfer (new journal, no response letter), 2=resubmit "
@@ -229,13 +229,13 @@ def cmd_setup(args) -> None:
             scoped_mode_restore = {
                 "audit": str(getattr(args, "audit", DEFAULT_AUDIT) or DEFAULT_AUDIT),
                 "revision_audit": str(getattr(args, "revision_audit", "on") or "on").lower(),
-                "probe_review": str(getattr(args, "probe_review", PROBE_REVIEW_DEFAULT)
-                                    or PROBE_REVIEW_DEFAULT).lower(),
+                "cold_start_review": str(getattr(args, "cold_start_review", COLD_START_REVIEW_DEFAULT)
+                                    or COLD_START_REVIEW_DEFAULT).lower(),
             }
             if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
-                forced.append("audit off (the targeted review's audits do not run in this mode)")
+                forced.append("audit off (the guided review's audits do not run in this mode)")
             args.audit = "off"
-            # The post-revise chain consumes the targeted review's frozen list
+            # The post-revise chain consumes the guided review's frozen list
             # and may change any file of the package; a concern-scoped revision
             # has neither a general review nor that freedom, so it stays off
             # (the run records the skip if an old root still carries it on).
@@ -246,9 +246,9 @@ def cmd_setup(args) -> None:
             # The scoped review is formatting/writing only: a full discovery
             # probe would freeze X-9xx rows the reviser is asked to resolve,
             # although they are not traceable to a reviewer concern.
-            if str(getattr(args, "probe_review", PROBE_REVIEW_DEFAULT)).lower() != "off":
-                forced.append("probe review off (scoped edits are driven by the concerns)")
-            args.probe_review = "off"
+            if str(getattr(args, "cold_start_review", COLD_START_REVIEW_DEFAULT)).lower() != "off":
+                forced.append("cold-start review off (scoped edits are driven by the concerns)")
+            args.cold_start_review = "off"
             print(f"[setup] revision mode {revision_mode} (option {info['option']}): "
                   f"{info['label']}")
             for f in forced:
@@ -275,33 +275,34 @@ def cmd_setup(args) -> None:
         scoped_mode_restore["champion_select"] = str(
             getattr(args, "champion_select", None) or DEFAULT_CHAMPION_SELECT)
         scoped_mode_restore["review_scope"] = list(review_scope)
-    # THE TARGETED REVIEW'S POLICY (`--no-targeted-review`). The flag removes the
-    # round's general checklist pass and leaves the PROBE alone as the finding
+    # THE GUIDED REVIEW'S POLICY (`--no-guided-review`). The flag removes the
+    # round's general checklist pass and leaves the COLD-START review alone as the finding
     # source, so the combinations that would leave the round with no source at
     # all are refused HERE, before a root is built:
-    #   * a concern-scoped revision already replaces the targeted review;
-    #   * a split review is two targeted-review sessions;
+    #   * a concern-scoped revision already replaces the guided review;
+    #   * a split review is two guided-review sessions;
     #   * no probe means literally nothing produces findings;
-    #   * a polish round reviews the surface only, and it is a targeted review.
-    if str(getattr(args, "targeted_review", TARGETED_REVIEW_DEFAULT)).lower() == "off":
+    #   * a polish round reviews the surface only, and it is a guided review.
+    if str(getattr(args, "guided_review", GUIDED_REVIEW_DEFAULT)).lower() == "off":
         if scoped_mode_restore is not None:
-            die("--no-targeted-review cannot be combined with a concern-scoped revision "
-                "mode: that mode replaces the targeted review with the concerns ledger, so "
+            die("--no-guided-review cannot be combined with a concern-scoped revision "
+                "mode: that mode replaces the guided review with the concerns ledger, so "
                 "the round would have no finding source at all", code=2)
         if str(getattr(args, "review_split", "off") or "off").lower() != "off":
-            die("--no-targeted-review cannot be combined with --review-split: the split runs "
-                "two targeted-review sessions and this round runs none", code=2)
-        if str(getattr(args, "probe_review", PROBE_REVIEW_DEFAULT)).lower() == "off":
-            die("--no-targeted-review leaves the probe review as the round's only finding "
-                "source, but --probe-review off disables it too: the round would have no "
-                "findings at all (keep the probe on, or drop --no-targeted-review)", code=2)
+            die("--no-guided-review cannot be combined with --review-split: the split runs "
+                "two guided-review sessions and this round runs none", code=2)
+        if str(getattr(args, "cold_start_review", COLD_START_REVIEW_DEFAULT)).lower() == "off":
+            die("--no-guided-review leaves the cold-start review as the round's only finding "
+                "source, but --cold-start-review off disables it too: the round would have no "
+                "findings at all (keep the cold-start review on, or drop "
+                "--no-guided-review)", code=2)
         if any(s in REVIEW_SCOPE_VALUES and s != "full" for s in review_scope):
-            die("--no-targeted-review needs a full-scope round: --review-scope selects WHICH "
-                f"targeted checks run, and no targeted review runs here (got {review_scope})",
+            die("--no-guided-review needs a full-scope round: --review-scope selects WHICH "
+                f"guided checks run, and no guided review runs here (got {review_scope})",
                 code=2)
         if bool(JOURNAL_MODES.get(revision_mode, {}).get("feedback")):
-            die("--no-targeted-review cannot be combined with a revision mode that consumes an "
-                "editors'/reviewers' decision letter: the targeted review is the session that "
+            die("--no-guided-review cannot be combined with a revision mode that consumes an "
+                "editors'/reviewers' decision letter: the guided review is the session that "
                 "reconciles every concern, so skipping it would leave the letter unanswered",
                 code=2)
     bad_scope = [x for x in review_scope if x not in REVIEW_SCOPE_VALUES]
@@ -691,12 +692,12 @@ def cmd_setup(args) -> None:
                # non-empty; "off" leaves the revised version final. The env
                # override PAPER_REVISION_AUDIT works on an existing root.
                "revision_audit": str(getattr(args, "revision_audit", "on") or "on").lower(),
-               # The PROBE REVIEW's recorded policy: "on" (default) plans one
+               # The COLD-START REVIEW's recorded policy: "on" (default) plans one
                # extra independent session per full-scope round; "off" is the
-               # documented off switch (`set-probe-review` flips it on an
+               # documented off switch (`set-cold-start-review` flips it on an
                # existing root). A root with no key plans no probe run.
-               "probe_review": str(getattr(args, "probe_review", PROBE_REVIEW_DEFAULT)
-                                   or PROBE_REVIEW_DEFAULT),
+               "cold_start_review": str(getattr(args, "cold_start_review", COLD_START_REVIEW_DEFAULT)
+                                   or COLD_START_REVIEW_DEFAULT),
                # Whether `code/` is part of the submission (default: off -- the
                # area is revision content, never submitted unless asked for).
                "submit_code": str(getattr(args, "submit_code", DEFAULT_SUBMIT_CODE)
@@ -736,11 +737,11 @@ def cmd_setup(args) -> None:
                    or EXECUTION_PROFILE_DEFAULT).lower()
     if _profile != EXECUTION_PROFILE_DEFAULT:
         ctx.cfg["execution_profile"] = _profile
-    _targeted = str(getattr(args, "targeted_review", TARGETED_REVIEW_DEFAULT)
-                    or TARGETED_REVIEW_DEFAULT).lower()
-    if _targeted != TARGETED_REVIEW_DEFAULT:
-        ctx.cfg["targeted_review"] = _targeted
-        ctx.cfg["targeted_review_gap"] = TARGETED_REVIEW_GAP
+    _guided = str(getattr(args, "guided_review", GUIDED_REVIEW_DEFAULT)
+                    or GUIDED_REVIEW_DEFAULT).lower()
+    if _guided != GUIDED_REVIEW_DEFAULT:
+        ctx.cfg["guided_review"] = _guided
+        ctx.cfg["guided_review_gap"] = GUIDED_REVIEW_GAP
     if round_indices:
         # Traceability: pipeline round k follows built-in schedule round
         # round_indices[k-1]. The recorded per-round lists below already carry
@@ -1015,8 +1016,8 @@ def cmd_setup(args) -> None:
         print(f"[setup] execution profile: {ctx.cfg.get('execution_profile')} "
               f"(the elaborative rule sections are paged to "
               f"{PROFILE_RULES_REL} in each session sandbox; postchecks unchanged)")
-    if str(ctx.cfg.get("targeted_review") or "on") != "on":
-        print("[setup] targeted review: OFF -- the probe review runs alone; the targeted "
+    if str(ctx.cfg.get("guided_review") or "on") != "on":
+        print("[setup] guided review: OFF -- the cold-start review runs alone; the guided "
               "classes (M1-M36/J1-J5, D0-D5) are recorded as a NAMED GAP in every downstream "
               "sandbox and in pipeline_config.json")
     print(f"[setup] next: python {root / script.name} run --root {root}")
@@ -2161,7 +2162,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         die("the template-first rewrite did not pass its postcheck: "
             + "; ".join(report["errors"])[:400])
     print("[conform] the package in out/ passed the code-side postcheck; it is NOT yet "
-          "judged: run the targeted-review/revise stages (or a full `run`) when you want it in the round.")
+          "judged: run the guided-review/revise stages (or a full `run`) when you want it in the round.")
     maybe_track_template_stage(ctx, sb)
 
 def cmd_apply_template(args) -> None:
@@ -2440,54 +2441,55 @@ def cmd_set_tiebreak_defect_floor(args) -> None:
           f"used)")
 
 
-def cmd_set_probe_review(args) -> None:
-    """Set (or show) the PROBE REVIEW policy of an existing root.
+def cmd_set_cold_start_review(args) -> None:
+    """Set (or show) the COLD-START REVIEW policy of an existing root.
 
     "on" plans one extra independent session per full-scope round (see
-    `--probe-review`); "off" is the off switch. The change takes effect for
+    `--cold-start-review`); "off" is the off switch. The change takes effect for
     rounds whose review has not been materialized yet -- a round already in
     flight keeps the plan it started with, and a finished probe run keeps its
     record. Like every plan-shaping policy, it refuses to change a root that
     already has run records unless `--force` is given.
     """
-    ctx = Ctx(_venue_command_root(args, "set-probe-review"),
+    ctx = Ctx(_venue_command_root(args, "set-cold-start-review"),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
     mode_arg = str(getattr(args, "mode", None) or "").strip().lower()
     show = bool(getattr(args, "show", False)) or not mode_arg
     if show:
-        print(f"[set-probe-review] probe review: {probe_review_of(ctx)} "
+        print(f"[set-cold-start-review] cold-start review: {cold_start_review_of(ctx)} "
               f"(a root without the key plans none; `on` adds one independent discovery session "
               f"beside each full-scope round's review, with every declared verifier re-run by "
               f"the orchestrator)")
         return
-    if mode_arg not in PROBE_REVIEW_MODES:
-        die(f"set-probe-review needs one of {', '.join(PROBE_REVIEW_MODES)} (got {mode_arg!r})",
+    if mode_arg not in COLD_START_REVIEW_MODES:
+        die(f"set-cold-start-review needs one of {', '.join(COLD_START_REVIEW_MODES)} (got {mode_arg!r})",
             code=2)
     if mode_arg == "on" and journal_is_scoped(ctx):
         # A concern-scoped revision may edit only the admitted concerns: a
         # general discovery probe would add X-9xx findings that are not
         # reviewer concerns. Setup already forces the policy off; the setter
         # must not reopen the hole.
-        die("probe_review is fixed off in a concern-scoped revision mode "
-            f"({journal_mode_of(ctx)}): the probe is a general discovery pass and "
+        die("cold_start_review is fixed off in a concern-scoped revision mode "
+            f"({journal_mode_of(ctx)}): the cold-start review is a general discovery pass and "
             "its findings are not reviewer concerns", code=2)
-    begin_run_log("set-probe-review", ctx.root, sys.argv)
+    begin_run_log("set-cold-start-review", ctx.root, sys.argv)
     if ctx.state.get("runs") and not getattr(args, "force", False):
-        die(f"this root already has {len(ctx.state['runs'])} run record(s): the probe policy "
+        die(f"this root already has {len(ctx.state['runs'])} run record(s): the cold-start "
+            f"review policy "
             f"changes a future round's plan.\n"
-            f"       Re-run `set-probe-review {mode_arg} --force` if the change is intended "
+            f"       Re-run `set-cold-start-review {mode_arg} --force` if the change is intended "
             f"(rounds whose review has not been materialized yet will use it).")
-    with ctx.lock("set-probe-review"):
-        ctx.cfg["probe_review"] = mode_arg
+    with ctx.lock("set-cold-start-review"):
+        ctx.cfg["cold_start_review"] = mode_arg
         ctx.state["config"] = ctx.cfg
         write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-probe-review", detail=mode_arg)
+        ctx.log("set-cold-start-review", detail=mode_arg)
         ctx.save_state()
     detail = ("one cold-context independent discovery session per full-scope round, findings "
               "X-9xx, every declared verifier re-run at postcheck time" if mode_arg == "on"
-              else "no probe session is planned")
-    print(f"[set-probe-review] probe review: {mode_arg} ({detail})")
+              else "no cold-start session is planned")
+    print(f"[set-cold-start-review] cold-start review: {mode_arg} ({detail})")
 
 
 def cmd_set_submit_code(args) -> None:
@@ -2779,10 +2781,10 @@ def _adopt_sweep_source(arg: str) -> Path:
     """The new_sweeps.md a `--proposals` argument names (a file or a sandbox)."""
     p = Path(str(arg)).expanduser()
     if p.is_dir():
-        for rel in ("targeted_review/round2/new_sweeps.md", "new_sweeps.md"):
+        for rel in ("guided_review/round2/new_sweeps.md", "new_sweeps.md"):
             if (p / rel).is_file():
                 return p / rel
-        die(f"{p} carries no targeted_review/round2/new_sweeps.md (nor a bare new_sweeps.md): pass the "
+        die(f"{p} carries no guided_review/round2/new_sweeps.md (nor a bare new_sweeps.md): pass the "
             f"proposal file or a review sandbox root", code=2)
     return p
 
@@ -2790,7 +2792,7 @@ def _adopt_sweep_source(arg: str) -> Path:
 def cmd_adopt_sweep(args) -> None:
     """`adopt-sweep`: validate a discovery proposal file; with --yes, append it.
 
-    D5's proposals used to die in targeted_review/round2/new_sweeps.md ("the orchestrator
+    D5's proposals used to die in guided_review/round2/new_sweeps.md ("the orchestrator
     ARCHIVES that file for you but does not apply the proposals itself"), so in
     an unattended chain of runs a discovered class could be re-discovered
     forever. This command is the adoption step: it parses the proposal blocks,
@@ -2928,7 +2930,7 @@ def cmd_set_revision_mode(args) -> None:
     mode_arg = normalize_revision_mode(mode_arg)
     if mode_arg not in JOURNAL_MODES:
         die(f"set-revision-mode needs one of {', '.join(JOURNAL_MODES)} (got {mode_arg!r}): "
-            f"continue (the historical workflow, the pipeline's own targeted-review/revise rounds) / "
+            f"continue (the historical workflow, the pipeline's own guided-review/revise rounds) / "
             f"init (conform into the venue template first, "
             f"then the pipeline's own rounds) / transfer (option 1) / resubmit (option 2) / "
             f"major (option 3) / minor (option 4) / llm (option 5: the pre-filtered "
@@ -2978,8 +2980,8 @@ def cmd_set_revision_mode(args) -> None:
                 ctx.cfg.setdefault("scoped_mode_restore", {
                     "audit": str(ctx.cfg.get("audit", DEFAULT_AUDIT) or DEFAULT_AUDIT),
                     "revision_audit": str(ctx.cfg.get("revision_audit", "on") or "on").lower(),
-                    "probe_review": str(ctx.cfg.get("probe_review", PROBE_REVIEW_DEFAULT)
-                                        or PROBE_REVIEW_DEFAULT).lower(),
+                    "cold_start_review": str(ctx.cfg.get("cold_start_review", COLD_START_REVIEW_DEFAULT)
+                                        or COLD_START_REVIEW_DEFAULT).lower(),
                     # The scoped mode also forces champion_select=revise and may
                     # run with a scoped review_scope; leaving the mode must put
                     # the operator's own values back (F09).
@@ -3011,9 +3013,9 @@ def cmd_set_revision_mode(args) -> None:
             ctx.cfg["revision_audit"] = "off"
             forced.append("revision_audit=off (concern-scoped edits have no general review "
                           "to audit against)")
-            if str(ctx.cfg.get("probe_review", PROBE_REVIEW_DEFAULT)).lower() != "off":
-                ctx.cfg["probe_review"] = "off"
-                forced.append("probe_review=off (scoped edits are driven by the concerns)")
+            if str(ctx.cfg.get("cold_start_review", COLD_START_REVIEW_DEFAULT)).lower() != "off":
+                ctx.cfg["cold_start_review"] = "off"
+                forced.append("cold_start_review=off (scoped edits are driven by the concerns)")
         elif _prev_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
             # Leaving a scoped mode restores the historical plan the mode
             # replaced. Without this the root kept `rounds=1`, `rewrites=[0]`,
@@ -3035,9 +3037,9 @@ def cmd_set_revision_mode(args) -> None:
             forced.append(f"audit={ctx.cfg['audit']} (restored)")
             ctx.cfg["revision_audit"] = str(saved.get("revision_audit") or "on").lower()
             forced.append(f"revision_audit={ctx.cfg['revision_audit']} (restored)")
-            ctx.cfg["probe_review"] = str(
-                saved.get("probe_review") or PROBE_REVIEW_DEFAULT).lower()
-            forced.append(f"probe_review={ctx.cfg['probe_review']} (restored)")
+            ctx.cfg["cold_start_review"] = str(
+                saved.get("cold_start_review") or COLD_START_REVIEW_DEFAULT).lower()
+            forced.append(f"cold_start_review={ctx.cfg['cold_start_review']} (restored)")
         ctx.state["config"] = ctx.cfg
         write_json_atomic(ctx.cfg_path, ctx.cfg)
         ctx.log("set-revision-mode", detail=mode_arg)
@@ -3192,8 +3194,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             f"fresh pipeline root with `setup`.")
     print(f"[run] pristine original: {detail}")
 
-    _only_probe = parse_only_spec(getattr(args, "only", None))
-    if only_is_template_stage_only(_only_probe):
+    _only_cold_start = parse_only_spec(getattr(args, "only", None))
+    if only_is_template_stage_only(_only_cold_start):
         if journal_mode_of(ctx) not in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
             die("--only conform is the "
                 f"template-first stage of the transfer and init revision modes: this root's "

@@ -233,25 +233,25 @@ def test_c10_style_limits():
 def test_c11_missing_disposition():
     print("\n== C11: a renamed decision column is caught ==")
     tmp = scratch("fixbugs30_art_")
-    art = tmp / "targeted_review" / "artifacts"
+    art = tmp / "guided_review" / "artifacts"
     art.mkdir(parents=True)
     for rel in pp.DECISION_ARTIFACTS:
         p = art / Path(rel).name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("| foo | bar |\n|---|---|\n| x | y |\n", encoding="utf-8")
-    report = pp.artifact_quality_report(tmp / "targeted_review")
+    report = pp.artifact_quality_report(tmp / "guided_review")
     check("every renamed decision artifact reports the missing disposition column",
           len(report) == len(pp.DECISION_ARTIFACTS)
           and all("no table with a `disposition` column" in v[0] for v in report.values()),
           report)
     # A correct seeded table still passes.
     good = scratch("fixbugs30_art_good_")
-    ga = good / "targeted_review" / "artifacts"
+    ga = good / "guided_review" / "artifacts"
     ga.mkdir(parents=True)
     (ga / "M20_formatting.md").write_text(
         "| # | rule | tier | disposition |\n|---|---|---|---|\n"
         "| 1 | FMT-T9c | finding | OK — FMT-T9c: inside the bar |\n", encoding="utf-8")
-    check("a disposed table still passes", not pp.artifact_quality_report(good / "targeted_review"))
+    check("a disposed table still passes", not pp.artifact_quality_report(good / "guided_review"))
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +312,7 @@ def test_c34_review_status():
     print("\n== C34: the review contract requires `status` ==")
     sb = scratch("fixbugs30_rev_")
     (sb / "base").mkdir()
-    (sb / "targeted_review" / "artifacts").mkdir(parents=True)
+    (sb / "guided_review" / "artifacts").mkdir(parents=True)
     fj = {"submission_dir": "./base",
           "findings": [{"id": "F-001", "location": "p1", "check": "M1", "category": 2,
                         "severity": "Minor", "evidence": "e", "explanation": "x"}],

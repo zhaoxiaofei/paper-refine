@@ -1,9 +1,9 @@
 ---
 name: paper-revise
-description: Apply validated review findings to a manuscript package — targeted revisions in a revised/ copy while originals stay read-only. Re-verifies every finding against the source, plans and applies precise edits with cross-document consistency propagation, validates by diff and a full mechanical rescan, and reports precise manual steps for whatever cannot be safely automated. Use this skill whenever the user asks to fix, revise, address, apply, or correct the findings/issues/problems from a review — especially after the paper-review skill (identify_issues) produced findings.md / findings.json. Also trigger on "address the issues you found", "apply the findings", "make the revisions", "adress_issues".
+description: Apply validated review findings to a manuscript package — guided revisions in a revised/ copy while originals stay read-only. Re-verifies every finding against the source, plans and applies precise edits with cross-document consistency propagation, validates by diff and a full mechanical rescan, and reports precise manual steps for whatever cannot be safely automated. Use this skill whenever the user asks to fix, revise, address, apply, or correct the findings/issues/problems from a review — especially after the paper-review skill (identify_issues) produced findings.md / findings.json. Also trigger on "address the issues you found", "apply the findings", "make the revisions", "adress_issues".
 ---
 
-# Targeted Revision — adress_issues
+# Guided Revision — adress_issues
 
 **Target venue, article type and journal (configurable).** The rule set comes from the pipeline's
 venue profile (`venue_profiles/<id>.json`, selected with `set-venue`), the venue's content type
@@ -14,9 +14,9 @@ type -- use the profile and type of the run you are in.
 
 ## Paths
 
-- `FINDINGS_MD` = `./targeted_review/findings.md` — human-readable report from paper-review
-- `FINDINGS_JSON` = `./targeted_review/findings.json` — machine-readable; **CANONICAL list of finding IDs**
-- `EXTRA_JSON` = `./targeted_review/round2/findings_extra.json` — discovery-round findings; merge if present
+- `FINDINGS_MD` = `./guided_review/findings.md` — human-readable report from paper-review
+- `FINDINGS_JSON` = `./guided_review/findings.json` — machine-readable; **CANONICAL list of finding IDs**
+- `EXTRA_JSON` = `./guided_review/round2/findings_extra.json` — discovery-round findings; merge if present
 - `ORIGINALS` = the reviewed submission directory (default `./non_revised`; use the directory recorded in the findings report if present). **READ-ONLY, always.**
 - `REVISED` = `./revised` · `WORK` = `./revised/work` · `CODE` = `./code`
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override or absent → manual instructions)
@@ -55,7 +55,7 @@ The review's **rewrite-parity findings (M25–M29)**, **source-hierarchy finding
 - **E — Apply edits** one at a time in plan order, under rules E1–E12 in `references/edit_rules.md` (precision, Zotero fields, missing items, plagiarism/AI content, difference-tracking auxiliary `.tracking-<baseline>.<ext>` / `.logging-<baseline>.<ext>`, scientific-judgement guard, **E11** — rewrite-parity findings: align the editable surface for M25–M29, scoped restructuring for J5 with one `WORK/RESTRUCTURE_<id>.md` per finding — and **E12** — source-hierarchy findings: align the WRITTEN side with the authoritative producer, rule C for a code fix, `raw_data/` read-only).
 - **P — Propagation (A6).** Propagation order when a mismatched number/label/term/claim is corrected (it orders which occurrence you update first; the standing source hierarchy in E12 decides which value wins): supplementary tables > supplementary figures/notes > main figures & legends > Methods > main text > abstract > cover letter. For EVERY correction: script-extract all occurrences of the old AND new values across the whole revised corpus; update every occurrence; verify each row. Cross-check A6 against the A2 baseline — a baseline occurrence missing from A6 is a missed propagation; fix it.
 - **C — Code revisions** (only if analysis code is in scope). Scientific integrity rule: never change analysis code merely to make outputs match manuscript numbers — details in `references/edit_rules.md`.
-- **V — Validate.** V1 round-trip integrity (artifact `WORK/roundtrip_check.md`) · V2 locality via diff log (A7: hunks inside a J5 scope are mapped through the finding id + `WORK/RESTRUCTURE_<id>.md`; every other hunk must map to a finding id) · V3 full mechanical rescan of the revised corpus (A8: the M1–M36 sweeps from paper-review — including the M26 convention re-run and the J5 scope check — PLUS any sweep definitions in `./targeted_review/round2/new_sweeps.md`) · V4 checksum re-verification (artifact `WORK/checksums_after.txt`) · V5 final outputs.
+- **V — Validate.** V1 round-trip integrity (artifact `WORK/roundtrip_check.md`) · V2 locality via diff log (A7: hunks inside a J5 scope are mapped through the finding id + `WORK/RESTRUCTURE_<id>.md`; every other hunk must map to a finding id) · V3 full mechanical rescan of the revised corpus (A8: the M1–M36 sweeps from paper-review — including the M26 convention re-run and the J5 scope check — PLUS any sweep definitions in `./guided_review/round2/new_sweeps.md`) · V4 checksum re-verification (artifact `WORK/checksums_after.txt`) · V5 final outputs.
 
 Artifacts A1–A9 column specifications and status vocabularies: `references/ledger.md`.
 

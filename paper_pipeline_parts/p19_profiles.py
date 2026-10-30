@@ -3,7 +3,7 @@
 # literal would REPLACE that module's `__doc__` with this file's text (the
 # pre-existing parts made the same choice for the same reason).
 #
-# EXECUTION PROFILES and the TARGETED-REVIEW switch.
+# EXECUTION PROFILES and the GUIDED-REVIEW switch.
 #
 # Two operator-facing policies live here; both are recorded at `setup`, frozen
 # into the root (rule 11) and never consulted from the maintained checkout.
@@ -32,21 +32,23 @@
 #    stage needs it.  The postchecks are unchanged, so coverage is unchanged --
 #    the difference is where the instructions live, not what they demand.
 #
-# 2. `--targeted-review on|off` (and `--no-targeted-review`)
+# 2. `--guided-review on|off` (and `--no-guided-review`)
 #
-#    The round's TARGETED review (the M1-M36 / J1-J5 pass) and the
-#    probe review (the cold, unanchored discovery pass) are independent
-#    finding-generating roles.  `--no-targeted-review` runs the probe ALONE: the
-#    probe's X-9xx rows become the round's frozen finding list, and the targeted
+#    The round's GUIDED review (the M1-M36 / J1-J5 pass) and the
+#    cold-start review (the cold, unanchored discovery pass) are independent
+#    finding-generating roles.  `--no-guided-review` runs the cold-start review
+#    ALONE: its X-9xx rows become the round's frozen finding list, and the guided
 #    review's whole class is recorded as a NAMED GAP (rule 8) -- in the frozen
 #    review view every downstream stage reads, in the audit and revision prompts,
 #    in `state.json` and in the run's own record.  Nothing is silently zeroed: the
 #    gap states which checks nobody ran.
 #
-# Terminology: the non-probe review is the TARGETED REVIEW.  Its on-disk names
-# (`r<r>_review`, `targeted_review/`, the run kind `review`) are unchanged on purpose:
-# they are part of every existing root's recorded identity and of the
-# `--execution-profile high` byte-identity guarantee.
+# Terminology: the checklist pass is the GUIDED REVIEW, recorded as the run kind
+# `guided_review`, the run id `r<r>_guided_review` and the area `guided_review/`;
+# the cold, unanchored pass is the COLD-START REVIEW (`cold_start_review` /
+# `r<r>_cold_start_review` / `cold_start_review/`).  The `high` profile's
+# byte-identity guarantee is about the RULES, not these identifiers: it holds for
+# a root set up under the same vocabulary (see `.paper_test/test_execution_profile.py`).
 
 from __future__ import annotations
 
@@ -119,21 +121,21 @@ PROFILE_POINTER_TMPL = (
     "Read it in {rel} (section `{section}`) with `grep -n '^## '` then "
     "`sed -n`, in a slice of at most ~200 lines, before the work it governs.]")
 
-#: The named gap a round records when `--no-targeted-review` skipped the
-#: targeted review.  It is written into the frozen review view, so every
+#: The named gap a round records when `--no-guided-review` skipped the
+#: guided review.  It is written into the frozen review view, so every
 #: downstream session reads the same statement instead of an empty directory.
-TARGETED_REVIEW_GAP = (
-    "targeted review NOT RUN this round (`--no-targeted-review`): the round's "
+GUIDED_REVIEW_GAP = (
+    "guided review NOT RUN this round (`--no-guided-review`): the round's "
     "general checklist pass (M1-M36/J1-J5 and the D0-D5 discovery round) was "
-    "not performed, so every class it owns is UNREVIEWED here. The probe "
+    "not performed, so every class it owns is UNREVIEWED here. The cold-start "
     "review's independent, generic pass is the only discovery source of this "
     "round; its coverage.md states what it actually examined.")
 
-TARGETED_REVIEW_OFF_NOTE = """=== THIS ROUND HAS NO TARGETED REVIEW (operator policy) ===
+GUIDED_REVIEW_OFF_NOTE = """=== THIS ROUND HAS NO GUIDED REVIEW (operator policy) ===
 
-`--no-targeted-review` was set at setup: the round's general checklist pass
+`--no-guided-review` was set at setup: the round's general checklist pass
 (M1-M36 / J1-J5 and its D0-D5 discovery round) DID NOT RUN.  The frozen finding
-list you were given is the PROBE review's independent, generic output (X-9xx
+list you were given is the cold-start review's independent, generic output (X-9xx
 rows) and nothing else.
 
 What that means for you:
@@ -145,36 +147,8 @@ What that means for you:
   * Your mandate is unchanged in kind: dispose (audit) or resolve (revise, in
     a re-validation ledger row) every frozen X-9xx id you were given.
   * This gap is recorded in the run's state and in the frozen
-    `targeted_review/findings.json` coverage table. It is not yours to close.
+    `guided_review/findings.json` coverage table. It is not yours to close.
 """
-
-
-# The run kind was renamed `review` -> `targeted_review` (2026-10). A root or a
-# fixture that still records the old kind is READ under the new one, so every
-# handler table, repair profile and self-check lookup keeps finding its stage;
-# the recorded id and sandbox path are left alone (a legacy root keeps pointing
-# at the sandboxes it already has).
-LEGACY_RUN_KINDS = {"review": "targeted_review", "review_b": "targeted_review_b"}
-
-
-def normalize_run_kind(kind) -> str:
-    raw = str(kind or "").strip()
-    return LEGACY_RUN_KINDS.get(raw, raw)
-
-
-def normalize_legacy_run_kinds(runs) -> list:
-    """Rewrite legacy run kinds IN MEMORY; returns the ids it touched."""
-    touched = []
-    if not isinstance(runs, dict):
-        return touched
-    for rid, rec in runs.items():
-        if not isinstance(rec, dict):
-            continue
-        new = normalize_run_kind(rec.get("kind"))
-        if new != rec.get("kind"):
-            rec["kind"] = new
-            touched.append(str(rid))
-    return touched
 
 
 def execution_profile_of(ctx) -> str:
@@ -187,19 +161,20 @@ def execution_profile_of(ctx) -> str:
     return raw if raw in (PROFILE_HIGH, PROFILE_MEDIUM) else PROFILE_HIGH
 
 
-def targeted_review_of(ctx) -> str:
-    """Is the round's TARGETED (checklist) review stage part of the plan?
+def guided_review_of(ctx) -> str:
+    """Is the round's GUIDED (checklist) review stage part of the plan?
 
     `on` unless the operator turned it off.  A root without the key -- every
-    root created before this feature -- plans the targeted review exactly as
+    root created before this feature -- plans the guided review exactly as
     before.
     """
-    raw = str((getattr(ctx, "cfg", None) or {}).get("targeted_review") or "").strip().lower()
+    raw = str((getattr(ctx, "cfg", None) or {}).get("guided_review")
+              or "").strip().lower()
     return raw if raw in ("on", "off") else "on"
 
 
-def targeted_review_enabled(ctx) -> bool:
-    return targeted_review_of(ctx) != "off"
+def guided_review_enabled(ctx) -> bool:
+    return guided_review_of(ctx) != "off"
 
 
 def _stage_contract_header(profile: str) -> str:
@@ -278,71 +253,86 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
 
 
 # ---------------------------------------------------------------------------
-# `--no-targeted-review`: the frozen review view a round runs on when the
-# targeted review did not run.
+# `--no-guided-review`: the frozen review view a round runs on when the
+# guided review did not run.
 # ---------------------------------------------------------------------------
 
 def _frozen_review_doc(r: int) -> dict:
-    """The `targeted_review/findings.json` the downstream contracts read, gap declared."""
+    """The `guided_review/findings.json` the downstream contracts read, gap declared."""
     coverage = []
     for cid in list(REQUIRED_REVIEW_CHECKS) + ["M18", "M19", "M20",
                                                "M21", "M22", "M23", "M24",
                                                "M25", "M26", "M27", "M28", "M29", "J5"]:
         coverage.append({"check": cid,
-                         "disposition": f"unable -- {TARGETED_REVIEW_GAP}",
-                         "detail": "no targeted-review session ran this round"})
+                         "disposition": f"unable -- {GUIDED_REVIEW_GAP}",
+                         "detail": "no guided-review session ran this round"})
     return {
         "round": int(r),
         "submission_dir": "base",
-        "targeted_review": "off",
-        "named_gap": TARGETED_REVIEW_GAP,
+        "guided_review": "off",
+        "named_gap": GUIDED_REVIEW_GAP,
         "findings": [],
         "coverage": coverage,
     }
 
 
 def synthesize_frozen_review(ctx, r: int, sb) -> dict:
-    """Write the round's frozen review view into `sb` from the PROBE's findings.
+    """Write the round's frozen review view into `sb` from the COLD-START review's findings.
 
-    `--no-targeted-review` leaves the round without a review sandbox.  Every
+    `--no-guided-review` leaves the round without a review sandbox.  Every
     consumer downstream of it (the auditor, each reviser, the integrator's
-    X-* reconciliation, the reports) reads one interface: `targeted_review/findings.json`
-    plus `targeted_review/round2/findings_extra.json`.  This writes that interface, with
-    the probe's X-9xx rows in the discovery file exactly where the probe merge
+    X-* reconciliation, the reports) reads one interface: `guided_review/findings.json`
+    plus `guided_review/round2/findings_extra.json`.  This writes that interface, with
+    the cold-start review's X-9xx rows in the discovery file exactly where the merge
     puts them on a normal round, and a coverage table that states the missing
-    targeted review as a named gap instead of leaving an empty list that looks
+    guided review as a named gap instead of leaving an empty list that looks
     like a clean corpus.
     """
     from pathlib import Path
 
     sb = Path(sb)
-    rows = list(probe_findings_rows(ctx, r) or [])
+    rows = list(cold_start_findings_rows(ctx, r) or [])
     if journal_is_scoped(ctx):  # defensive: a scoped round never reaches here
         rows = []
-    target = sb / TARGETED_REVIEW_DIR
+    target = sb / GUIDED_REVIEW_DIR
     target.mkdir(parents=True, exist_ok=True)
     (target / "round2").mkdir(parents=True, exist_ok=True)
     write_json_atomic(sb / FINDINGS_REL, _frozen_review_doc(r))
-    write_text_atomic(sb / TARGETED_REVIEW_DIR / "findings.md",
-                      "# Frozen finding list — probe review only\n\n"
-                      f"{TARGETED_REVIEW_GAP}\n\n"
-                      f"The {len(rows)} X-9xx row(s) below are the probe review's "
-                      f"findings, in `targeted_review/round2/findings_extra.json`.\n")
-    discovery_json = f"{TARGETED_REVIEW_DIR}/round2/findings_extra.json"
+    write_text_atomic(sb / GUIDED_REVIEW_DIR / "findings.md",
+                      "# Frozen finding list — cold-start review only\n\n"
+                      f"{GUIDED_REVIEW_GAP}\n\n"
+                      f"The {len(rows)} X-9xx row(s) below are the cold-start review's "
+                      f"findings, in `guided_review/round2/findings_extra.json`.\n")
+    discovery_json = f"{GUIDED_REVIEW_DIR}/round2/findings_extra.json"
     write_json_atomic(sb / discovery_json,
-                      {"findings": rows, "source": "probe_review",
-                       "targeted_review": "off", "named_gap": TARGETED_REVIEW_GAP})
-    write_text_atomic(sb / f"{TARGETED_REVIEW_DIR}/round2/findings_extra.md",
-                      "# Discovery list (probe review)\n\n" + TARGETED_REVIEW_GAP + "\n")
-    return {"rows": len(rows), "named_gap": TARGETED_REVIEW_GAP}
+                      {"findings": rows, "source": "cold_start_review",
+                       "guided_review": "off", "named_gap": GUIDED_REVIEW_GAP})
+    write_text_atomic(sb / f"{GUIDED_REVIEW_DIR}/round2/findings_extra.md",
+                      "# Discovery list (cold-start review)\n\n" + GUIDED_REVIEW_GAP + "\n")
+    return {"rows": len(rows), "named_gap": GUIDED_REVIEW_GAP}
+
+
+def frozen_review_is_synthesized(ctx) -> bool:
+    """Is the round's frozen review synthesized from the cold-start review?
+
+    True only under `--no-guided-review`: the guided review is not planned, so
+    nothing produces `guided_review/findings.json` and `synthesize_frozen_review`
+    writes the gap-declaring view instead. A concern-scoped round has its own
+    producer (the concerns run) and branches on that BEFORE asking this, so the
+    predicate is never true there (`--no-guided-review` is refused with a scoped
+    mode at setup).
+    """
+    return not guided_review_enabled(ctx)
 
 
 def review_producer_rid(ctx, r: int):
-    """The run id whose output IS the round's frozen review, or None.
+    """The run id whose output defines the round's frozen review.
 
-    `None` means the targeted review did not run and the frozen view is
-    synthesized from the probe (`synthesize_frozen_review`).
+    That is the guided review (session B under `--review-split`) when the policy
+    plans it, and the cold-start review when it does not -- the run whose
+    completion gates the frozen view either way. Whether that view is COPIED or
+    SYNTHESIZED is `frozen_review_is_synthesized`.
     """
-    if not targeted_review_enabled(ctx):
-        return None
-    return rid_targeted_review_b(r) if review_split_of(ctx) != "off" else rid_targeted_review(r)
+    if not guided_review_enabled(ctx):
+        return rid_cold_start_review(r)
+    return rid_guided_review_b(r) if review_split_of(ctx) != "off" else rid_guided_review(r)

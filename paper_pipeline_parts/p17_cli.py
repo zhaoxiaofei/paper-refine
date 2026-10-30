@@ -126,9 +126,10 @@ USAGE_EXAMPLES = """usage:
           CLI than the production stages.
           --only SELECTION runs a subset in this invocation; items are a UNION:
           a round ordinal or range (--only 1,2 = only rounds 1 and 2, every
-          stage; --only 1-3), a stage name (--only review = that stage in every
-          round; rewrite, review, audit, revise, integrate, judge and the
-          aliases w, a/a2, i, merge, j), or ROUND:STAGE (--only 2:merge,3:judge
+          stage; --only 1-3), a stage name (--only audit = that stage in every
+          round; guided_review, cold_start_review, rewrite, audit, revise,
+          integrate, judge and the aliases w, a/a2, i, merge, j; `review` is the
+          review STEP and selects both discovery passes), or ROUND:STAGE (--only 2:merge,3:judge
           = round 2's integration and round 3's judge; 'all' stands for every
           stage), or ONE AGENT SESSION instead of its whole stage: --only
           rewriter2 (only w2), --only integrator1 (only i1), --only reviser1
@@ -688,7 +689,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "(`--last-modified auto` makes a concurrent edit fail the write instead "
                          "of being overwritten); this writes to your remote Zotero account, so "
                          "choose it deliberately. No mode ever creates or deletes library items, "
-                         "and targeted-review/rewrite/judge sessions can never write")
+                         "and guided-review/rewrite/judge sessions can never write")
     ps.set_defaults(func=cmd_setup)
     ps.add_argument("--review-split", choices=list(REVIEW_SPLIT_MODES), default="off",
                     help="run TWO review sessions per round on complementary scopes and merge "
@@ -711,27 +712,29 @@ def build_parser() -> argparse.ArgumentParser:
                          "non-empty, ONE bounded repair pass applies it and produces the final "
                          "revised version. OFF: both are skipped and the revised version is "
                          "final. `PAPER_REVISION_AUDIT=off` does the same on an existing root, "
-                         "and `--no-audit` skips the TARGETED-REVIEW audit (the reviser then works from "
+                         "and `--no-audit` skips the GUIDED-REVIEW audit (the reviser then works from "
                          "the frozen findings unaudited)")
-    ps.add_argument("--targeted-review", choices=list(TARGETED_REVIEW_MODES),
-                    default=TARGETED_REVIEW_DEFAULT,
-                    help="run the round's TARGETED review -- the general checklist pass "
+    ps.add_argument("--guided-review",
+                    dest="guided_review", choices=list(GUIDED_REVIEW_MODES),
+                    default=GUIDED_REVIEW_DEFAULT,
+                    help="run the round's GUIDED review -- the general checklist pass "
                          "(M1-M36 / J1-J5 and its D0-D5 discovery round) -- beside the probe "
                          "review. ON by default, which is the pipeline's documented plan. OFF "
-                         "(`--no-targeted-review`) runs the PROBE review ALONE: its X-9xx rows "
-                         "become the round's frozen finding list, and every class the targeted "
+                         "(`--no-guided-review`) runs the COLD-START REVIEW ALONE: its X-9xx rows "
+                         "become the round's frozen finding list, and every class the guided "
                          "review owns is recorded as a NAMED GAP (in the frozen review view, in "
                          "the audit/revise prompts and in state.json) -- never as a clean "
                          "result. When the stage runs, the round records it as the run kind "
-                         "`targeted_review`, the run id `r<r>_targeted_review` and the area "
-                         "`targeted_review/`. Refused with a concern-scoped revision mode, "
+                         "`guided_review`, the run id `r<r>_guided_review` and the area "
+                         "`guided_review/`. Refused with a concern-scoped revision mode, "
                          "with --review-split, "
                          "with the probe off (no finding source would remain) and outside a "
                          "full-scope round")
-    ps.add_argument("--no-targeted-review", dest="targeted_review", action="store_const",
+    ps.add_argument("--no-guided-review",
+                    dest="guided_review", action="store_const",
                     const="off",
-                    help="run the probe review alone (same as --targeted-review off); the "
-                         "targeted review's classes are recorded as a named gap")
+                    help="run the cold-start review alone (same as --guided-review off); the "
+                         "guided review's classes are recorded as a named gap")
     ps.add_argument("--execution-profile", choices=list(EXECUTION_PROFILES),
                     default=EXECUTION_PROFILE_DEFAULT,
                     help="the instruction profile the stages run under. `high` (default) is "
@@ -745,9 +748,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "postchecks, the coverage table and every deliverable are UNCHANGED. "
                          "Not to be confused with the model's reasoning effort (see "
                          "PAPER_QWEN_REASONING_EFFORT), which this flag does not touch")
-    ps.add_argument("--probe-review", choices=list(PROBE_REVIEW_MODES),
-                    default=PROBE_REVIEW_DEFAULT,
-                    help="run an INDEPENDENT PROBE session in parallel with every full-scope "
+    ps.add_argument("--cold-start-review",
+                    dest="cold_start_review", choices=list(COLD_START_REVIEW_MODES),
+                    default=COLD_START_REVIEW_DEFAULT,
+                    help="run an INDEPENDENT COLD-START REVIEW session in parallel with every full-scope "
                          "round's review: a cold-context INDEPENDENT discovery pass that is "
                          "given ONLY the corpus (the submission documents and the evidence "
                          "areas, raw_data/ and code/ included) -- never a finding list. It is "
@@ -759,12 +763,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "findings are X-9xx rows of the same standing as the discovery round's "
                          "X-* findings (the reviser must resolve them, the auditor may only drop "
                          "them with evidence, the integrator must reconcile them). ON by default "
-                         "(`--no-probe-review` turns it off; `set-probe-review off` does the "
+                         "(`--no-cold-start-review` turns it off; `set-cold-start-review off` does the "
                          "same on an existing root); it adds `r<r>_probe` beside `r<r>_review`, "
                          "and the audit/revision sessions wait for it. Skipped in a "
                          "formatting-writing polish round")
-    ps.add_argument("--no-probe-review", dest="probe_review", action="store_const",
-                    const="off", help="turn the probe review off (same as --probe-review off)")
+    ps.add_argument("--no-cold-start-review",
+                    dest="cold_start_review", action="store_const",
+                    const="off", help="turn the cold-start review off (same as --cold-start-review off)")
     ps.add_argument("--placeholder-lookup", choices=list(PLACEHOLDER_LOOKUP_MODES),
                     default=DEFAULT_PLACEHOLDER_LOOKUP,
                     help="online (default) = the orchestrator resolves searchable hand-off "
@@ -920,9 +925,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run only a subset of the pipeline in this invocation. Items are "
                          "comma-separated and combine as a UNION: a ROUND ordinal or range "
                          "(--only 1,2 = only rounds 1 and 2, every stage; --only 1-3), a STAGE "
-                         "name (--only review = that stage in every round; rewrite, review, "
-                         "audit, revise, integrate, judge, and the journal modes' feedback, "
-                         "concerns, response; aliases w, a/a2, i, merge, j, fb, resp), "
+                         "name (--only audit = that stage in every round; guided_review, "
+                         "cold_start_review, rewrite, audit, revise, integrate, judge, and the "
+                         "journal modes' feedback, concerns, response; `review` selects BOTH "
+                         "discovery passes; aliases w, a/a2, i, merge, j, fb, resp), "
                          "ROUND:STAGE (--only 2:merge,3:judge = round 2's integration and round "
                          "3's judge; '.' and '/' also separate, 'all' stands for every stage), or "
                          "ONE AGENT SESSION instead of its whole stage: --only rewriter2 runs only "
@@ -1042,8 +1048,7 @@ def build_parser() -> argparse.ArgumentParser:
                               "tables, the audit sheet); read-only, needs no --root")
     psc.add_argument("--sandbox", required=True,
                      help="the run's sandbox (the directory holding PROMPT.md)")
-    psc.add_argument("--stage", required=True,
-                    choices=list(SELFCHECK_STAGES) + list(SELFCHECK_STAGE_ALIASES),
+    psc.add_argument("--stage", required=True, choices=list(SELFCHECK_STAGES),
                      help="the run's stage/kind")
     psc.add_argument("--run-id", default=None,
                      help="the run id the marker must name (default: the sandbox's own name)")
@@ -1052,12 +1057,12 @@ def build_parser() -> argparse.ArgumentParser:
     psc.set_defaults(func=cmd_selfcheck)
 
     psw2 = sub.add_parser("adopt-sweep",
-                          help="validate a targeted_review/round2/new_sweeps.md proposal file and, with "
+                          help="validate a guided_review/round2/new_sweeps.md proposal file and, with "
                                "--yes, append its proposals to the skill's references/sweeps.md "
                                "(re-syncing the standalone prompt's appendix)")
     psw2.add_argument("--proposals", required=True, metavar="PATH",
                       help="the proposal file, or a review sandbox carrying "
-                           "targeted_review/round2/new_sweeps.md")
+                           "guided_review/round2/new_sweeps.md")
     psw2.add_argument("--sweeps", default=None, metavar="PATH",
                       help="target sweeps.md (default: paper-skills/paper-review/references/"
                            "sweeps.md beside this script)")
@@ -1153,7 +1158,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="select the revision mode (continue / init / option 1 transfer / "
                               "2 resubmit / 3 major / 4 minor / 5 llm), or show the current one")
     psm.add_argument("mode", nargs="?", default=None, metavar="MODE",
-                     help="continue (the pipeline's own targeted-review/revise rounds) | init "
+                     help="continue (the pipeline's own guided-review/revise rounds) | init "
                           "(conform into the venue's own "
                           "Word template before round 1, then the pipeline's own rounds; no "
                           "journal feedback) | transfer (option 1: new journal, no response "
@@ -1264,19 +1269,19 @@ def build_parser() -> argparse.ArgumentParser:
                      help="change the mode although this root already has run records")
     pcs.set_defaults(func=cmd_set_champion_select)
 
-    ppr = sub.add_parser("set-probe-review", parents=[common],
-                         help="set (or show) the PROBE REVIEW policy: on (one independent, "
+    ppr = sub.add_parser("set-cold-start-review", parents=[common],
+                         help="set (or show) the COLD-START REVIEW policy: on (one independent, "
                               "cold-context discovery session beside each full-scope round's "
                               "review; every declared verifier is re-run by the orchestrator) "
                               "or off (the documented off switch)")
-    ppr.add_argument("mode", nargs="?", default=None, choices=list(PROBE_REVIEW_MODES),
+    ppr.add_argument("mode", nargs="?", default=None, choices=list(COLD_START_REVIEW_MODES),
                      metavar="MODE",
                      help="on or off. Omit, or pass --show, to print the current policy")
     ppr.add_argument("--show", action="store_true",
-                     help="print the root's current probe-review policy and exit")
+                     help="print the root's current cold-start-review policy and exit")
     ppr.add_argument("--force", action="store_true",
                      help="change the policy although this root already has run records")
-    ppr.set_defaults(func=cmd_set_probe_review)
+    ppr.set_defaults(func=cmd_set_cold_start_review)
 
     pav = sub.add_parser("add-venue", parents=[common],
                          help="create/update ONE venue profile (JSON + venue_profiles/README.md) "

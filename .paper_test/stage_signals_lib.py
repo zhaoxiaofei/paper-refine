@@ -176,7 +176,7 @@ def test_rebuild_recreates_an_audit_sandbox():
     ctx.load()
     nb.materialize_a1(ctx, 1)
     rev = nb.materialize_review(ctx, 1)
-    write(ctx.sandbox_of(rev) / "targeted_review" / "findings.json",
+    write(ctx.sandbox_of(rev) / "guided_review" / "findings.json",
           {"findings": [{"id": "F-001", "location": "base", "category": 2, "check": "J3",
                          "severity": "Minor", "evidence": "e", "status": "resolvable"}]})
     rev["status"] = "done"
@@ -199,10 +199,10 @@ def test_rebuild_recreates_an_audit_sandbox():
         return
     check("the audit sandbox was rebuilt (the marker is gone)",
           not (sb / "_pipeline_done.json").is_file())
-    check("the rebuilt sandbox carries base/, non_revised/ and the frozen targeted_review/",
-          all((sb / d).is_dir() for d in ("base", "non_revised", "targeted_review", "audit")))
-    check("the frozen targeted_review/ was re-copied from the review run",
-          (sb / "targeted_review" / "findings.json").is_file())
+    check("the rebuilt sandbox carries base/, non_revised/ and the frozen guided_review/",
+          all((sb / d).is_dir() for d in ("base", "non_revised", "guided_review", "audit")))
+    check("the frozen guided_review/ was re-copied from the review run",
+          (sb / "guided_review" / "findings.json").is_file())
     check("the failed attempt's sandbox was archived, not discarded",
           (root / "runs" / f"{rec['id']}_try1_failed").is_dir())
     check("the record was reset for the next attempt",
@@ -264,12 +264,12 @@ def test_relocation_semantics():
     check("adoption is idempotent (nothing to do the second time)",
           nb.relocate_stray_signal(ctx, rec) == [])
     (sb / nb.MARKER_FILE).unlink()
-    write(stray, {"stage": "targeted_review", "run_id": "r1_targeted_review", "round": 1, "status": "complete"})
+    write(stray, {"stage": "guided_review", "run_id": "r1_guided_review", "round": 1, "status": "complete"})
     check("ANOTHER stage's marker is never adopted",
           nb.relocate_stray_signal(ctx, rec) == [] and stray.is_file())
     check("... and the failure message names it, with its stage",
           "audit/_pipeline_done.json" in nb.stray_signal_note(sb, rec, nb.MARKER_FILE)
-          and "targeted_review" in nb.stray_signal_note(sb, rec, nb.MARKER_FILE))
+          and "guided_review" in nb.stray_signal_note(sb, rec, nb.MARKER_FILE))
     write(stray, {"stage": "audit", "run_id": "r1_audit_try9", "round": 1, "status": "complete"})
     check("another RUN's marker is never adopted",
           nb.relocate_stray_signal(ctx, rec) == [] and stray.is_file())
@@ -365,10 +365,10 @@ def test_short_rows_are_named():
     print()
     print("== C. a row that is one cell short is diagnosed, not just 'EMPTY' ==")
     tmp = scratch("paper_sig_c_")
-    art = tmp / "targeted_review" / "artifacts"
+    art = tmp / "guided_review" / "artifacts"
     art.mkdir(parents=True)
     write(art / "OUTLINE.md", "# OUTLINE\n\n" + outline_rows(3, 0))
-    report = nb.artifact_quality_report(tmp / "targeted_review")
+    report = nb.artifact_quality_report(tmp / "guided_review")
     probs = report.get("artifacts/OUTLINE.md") or []
     text = " ".join(probs)
     check("the short rows are still a FAILURE (they are not waved through)",
@@ -380,8 +380,8 @@ def test_short_rows_are_named():
           "POSITIONALLY" in text and "one cell per seeded column" in text)
     check("the notes name the narrow rows too",
           any("NARROWER" in n for n in
-              (nb.artifact_quality_notes(tmp / "targeted_review").get("artifacts/OUTLINE.md") or [])),
-          str(nb.artifact_quality_notes(tmp / "targeted_review"))[:200])
+              (nb.artifact_quality_notes(tmp / "guided_review").get("artifacts/OUTLINE.md") or [])),
+          str(nb.artifact_quality_notes(tmp / "guided_review"))[:200])
     # the message keeps the shape the repair profiles match on
     check("the message still carries the `decision artifact ` prefix the repair layer matches",
           all(p.startswith("3 of 3 row(s) have an EMPTY disposition cell") for p in probs)
@@ -390,8 +390,8 @@ def test_short_rows_are_named():
     # a well-formed table produces nothing
     write(art / "OUTLINE.md", "# OUTLINE\n\n" + outline_rows(0, 4))
     check("a correctly shaped, disposed table reports nothing",
-          nb.artifact_quality_report(tmp / "targeted_review") == {},
-          str(nb.artifact_quality_report(tmp / "targeted_review"))[:200])
+          nb.artifact_quality_report(tmp / "guided_review") == {},
+          str(nb.artifact_quality_report(tmp / "guided_review"))[:200])
     # the mandate tells the session the rule (the prompt-level layer)
     check("the decision-artifact mandate forbids re-emitting a row with a different shape",
           "ROW SHAPE IS PART OF THAT CONTRACT" in nb.DISPOSITION_MANDATE)
@@ -402,8 +402,8 @@ def test_short_rows_are_named():
 # =====================================================================
 
 def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) -> Path:
-    sb = tmp / "r1_targeted_review"
-    art = sb / "targeted_review" / "artifacts"
+    sb = tmp / "r1_guided_review"
+    art = sb / "guided_review" / "artifacts"
     art.mkdir(parents=True)
     # A sandbox that is genuinely CLEAN: the review contract requires a coverage
     # row for every check id, so the fixture carries them (the pre-flight now
@@ -411,7 +411,7 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
     wanted = list(nb.REQUIRED_REVIEW_CHECKS) + ["M18", "M19", "M20",
                                                 "M21", "M22", "M23", "M24",
                                                 "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32", "M33", "M34", "M35", "M36", "J5"]
-    write(sb / "targeted_review" / "findings.json",
+    write(sb / "guided_review" / "findings.json",
           {"submission_dir": "./base", "findings": [],
            "coverage": [{"check": c, "disposition": "clean -- basis: stub artifact",
                          "detail": "stub"} for c in wanted]})
@@ -422,7 +422,7 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md", "M2_references.md"):
         write(art / fname, "| row | disposition |\n|---|---|\n| x | OK |\n")
-    write(sb / "targeted_review" / "ARCHITECTURE.md",
+    write(sb / "guided_review" / "ARCHITECTURE.md",
           "| document | section | paragraphs | current structure | reader cost | "
           "proposed reorganization | class | severity | disposition |\n"
           "|---|---|---|---|---|---|---|---|---|\n"
@@ -432,31 +432,31 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
     write(art / "VIS_visual.md", "# visual\n\npages reviewed: none\n")
     # The discovery round's D0-D5 deliverables: the pre-flight verifies them as
     # a contract too (see test_round2_sweep_2026_1009.py).
-    write(sb / "targeted_review" / "round2" / "known_index.md",
+    write(sb / "guided_review" / "round2" / "known_index.md",
           "# D0 (fixture)\n\nKNOWN-CLASSES: M1 ... M36, J1 ... J5\n")
-    write(sb / "targeted_review" / "round2" / "gap_table.md",
+    write(sb / "guided_review" / "round2" / "gap_table.md",
           "# D1 (fixture)\n\n| # | gap row | coverage |\n|---|---|---|\n"
           + "\n".join(f"| {i} | fixture class {i} | "
                       + ("COVERED (M1)" if i <= 23 else "UNCOVERED") + " |"
                       for i in range(1, 26)) + "\n")
-    write(sb / "targeted_review" / "round2" / "probes.md",
+    write(sb / "guided_review" / "round2" / "probes.md",
           "# D2 (fixture)\n\n| probe id | gap row | status |\n|---|---|---|\n"
           "| P2-001 | 24 | executed |\n| P2-002 | 25 | executed |\n")
-    write(sb / "targeted_review" / "round2" / "probe_results.md",
+    write(sb / "guided_review" / "round2" / "probe_results.md",
           "# D3 (fixture)\n\n| probe id | disposition |\n|---|---|\n"
           "| P2-001 | executed - no anomalies - checked: base/ (fixture) |\n"
           "| P2-002 | executed - no anomalies - checked: base/ (fixture) |\n")
-    write(sb / "targeted_review" / "round2" / "findings_extra.json",
+    write(sb / "guided_review" / "round2" / "findings_extra.json",
           {"findings": [], "coverage": []})
-    write(sb / "targeted_review" / "round2" / "findings_extra.md", "# D4 (fixture)\n")
-    write(sb / "targeted_review" / "round2" / "new_sweeps.md",
+    write(sb / "guided_review" / "round2" / "findings_extra.md", "# D4 (fixture)\n")
+    write(sb / "guided_review" / "round2" / "new_sweeps.md",
           "# D5 (fixture)\n\nNo new sweep proposals in this fixture.\n")
-    write(sb / "targeted_review" / "round2" / "round2_summary.md",
+    write(sb / "guided_review" / "round2" / "round2_summary.md",
           "# Round-2 summary (fixture)\n\nGap rows: 25 (23 covered, 2 uncovered). Probes: 2 "
           "executed (clean). X-findings: none. Proposed sweeps: none.\n"
           "Honest limits: fixture only.\n")
-    marker = {"stage": "targeted_review", "run_id": "r1_targeted_review", "round": 1, "status": "complete"}
-    write((sb / "targeted_review" / nb.MARKER_FILE) if marker_in_review else (sb / nb.MARKER_FILE), marker)
+    marker = {"stage": "guided_review", "run_id": "r1_guided_review", "round": 1, "status": "complete"}
+    write((sb / "guided_review" / nb.MARKER_FILE) if marker_in_review else (sb / nb.MARKER_FILE), marker)
     return sb
 
 
@@ -467,28 +467,28 @@ def test_selfcheck():
     sb = build_review_sandbox(tmp, short_rows=True, marker_in_review=True)
     before = {p.relative_to(sb).as_posix(): p.read_bytes()
               for p in sorted(sb.rglob("*")) if p.is_file()}
-    proc = cli("selfcheck", "--sandbox", str(sb), "--stage", "review",
-               "--run-id", "r1_targeted_review", "--round", "1")
+    proc = cli("selfcheck", "--sandbox", str(sb), "--stage", "guided_review",
+               "--run-id", "r1_guided_review", "--round", "1")
     out = proc.stdout + proc.stderr
     check("the self-check FAILS an attempt the postcheck would fail", proc.returncode == 1,
           out[-300:])
     check("it reports the misplaced marker, naming the stray path",
-          "targeted_review/_pipeline_done.json" in out, out[-400:])
+          "guided_review/_pipeline_done.json" in out, out[-400:])
     check("it reports the one-cell-short rows", "NARROWER than the table's 10-column header" in out)
     after = {p.relative_to(sb).as_posix(): p.read_bytes()
              for p in sorted(sb.rglob("*")) if p.is_file()}
     check("the self-check changed NOTHING on disk (read-only pre-flight)", before == after,
           str(sorted(set(after) ^ set(before))[:4]))
     # fix everything the check named, then it passes
-    write(sb / "targeted_review" / "artifacts" / "OUTLINE.md", "# OUTLINE\n\n" + outline_rows(0, 2))
-    (sb / "targeted_review" / nb.MARKER_FILE).replace(sb / nb.MARKER_FILE)
-    proc2 = cli("selfcheck", "--sandbox", str(sb), "--stage", "review",
-                "--run-id", "r1_targeted_review", "--round", "1")
+    write(sb / "guided_review" / "artifacts" / "OUTLINE.md", "# OUTLINE\n\n" + outline_rows(0, 2))
+    (sb / "guided_review" / nb.MARKER_FILE).replace(sb / nb.MARKER_FILE)
+    proc2 = cli("selfcheck", "--sandbox", str(sb), "--stage", "guided_review",
+                "--run-id", "r1_guided_review", "--round", "1")
     check("a clean sandbox passes the self-check", proc2.returncode == 0,
           (proc2.stdout + proc2.stderr)[-300:])
     # the same detectors the postcheck uses (not a parallel implementation)
     if hasattr(nb, "sandbox_selfcheck"):
-        ok, errs, warns = nb.sandbox_selfcheck(sb, "review", "r1_targeted_review", 1)
+        ok, errs, warns = nb.sandbox_selfcheck(sb, "guided_review", "r1_guided_review", 1)
         check("sandbox_selfcheck() is importable and quiet on the fixed sandbox",
               ok and not errs, str(errs)[:200])
     else:
@@ -496,10 +496,10 @@ def test_selfcheck():
     tmp2 = scratch("paper_sig_d2_")
     bad = build_review_sandbox(tmp2, short_rows=True, marker_in_review=False)
     expected = [f"decision artifact {rel}: {p}"
-                for rel, ps in sorted(nb.artifact_quality_report(bad / "targeted_review").items())
+                for rel, ps in sorted(nb.artifact_quality_report(bad / "guided_review").items())
                 for p in ps]
     if hasattr(nb, "sandbox_selfcheck"):
-        got = nb.sandbox_selfcheck(bad, "review", "r1_targeted_review", 1)[1]
+        got = nb.sandbox_selfcheck(bad, "guided_review", "r1_guided_review", 1)[1]
         check("the self-check's decision-table verdict IS the postcheck's own report",
               all(e in got for e in expected) and bool(expected), str(expected)[:200])
     if hasattr(nb, "sandbox_selfcheck"):
@@ -538,7 +538,7 @@ def test_prompts_state_the_marker_location():
     print("== D. every stage prompt states the marker's location and the self-check ==")
     sb = Path("/tmp/x")
     prompts = {
-        "targeted_review": nb.review_prompt(sb, "r1_targeted_review", 1),
+        "guided_review": nb.review_prompt(sb, "r1_guided_review", 1),
         "revise": nb.revise_prompt(sb, "r1_a2_revise", 1, 1, 1),
         "rewrite": nb.rewrite_prompt(sb, "r1_w1", 1, 1, 1),
         "integrate": nb.integrate_prompt(sb, "r1_i1", 1, "a1", ["w1", "a2"]),
@@ -602,7 +602,7 @@ def test_misplaced_deliverable_is_rescued():
     ctx.load()
     cases = (("r1_a2_revise", "revise", "revision_report.json", "revised/revision_report.json"),
              ("r1_w1", "rewrite", "REWRITE_REPORT.md", "rewritten/REWRITE_REPORT.md"),
-             ("r1_targeted_review", "review", "findings.json", "targeted_review/findings.json"),
+             ("r1_guided_review", "guided_review", "findings.json", "guided_review/findings.json"),
              ("r1_audit", "audit", "audit.json", "audit/audit.json"))
     for rid, kind, name, rel in cases:
         sb = root / "runs" / rid
@@ -663,7 +663,7 @@ def test_selfcheck_covers_the_other_stages():
 
     # reviser: the ledger must NAME every finding id of the AUDITED list
     sb, pkg = package_sandbox(tmp / "a", "r1_a2_revise", "revise")
-    write(sb / "targeted_review" / "findings.json",
+    write(sb / "guided_review" / "findings.json",
           {"findings": [{"id": "F-001"}, {"id": "F-002"}]})
     write(pkg / "revision_report.json", {"rows": [{"id": "F-001", "verdict": "fixed"}]})
     errs = nb.sandbox_selfcheck(sb, "revise", "r1_a2_revise", 1)[1]
@@ -758,7 +758,7 @@ def test_other_stages_recover_from_a_failed_attempt():
     # stages this loop does not drive end to end (see test_kind_support_tables).
     check("the rebuild table covers the revise/integrate/judge/rewrite kinds explicitly",
           hasattr(nb, "REBUILD_HANDLERS")
-          and {"revise", "integrate", "judge", "rewrite", "targeted_review", "audit"}
+          and {"revise", "integrate", "judge", "rewrite", "guided_review", "audit"}
           <= set(nb.REBUILD_HANDLERS))
 
 

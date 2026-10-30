@@ -492,7 +492,7 @@ def test_f37_bounded_repair_audit():
 # ---------------------------------------------------------------- F38/F39/F40
 def _review_sandbox(tmp: Path, m1_md: str, coverage: list, parity_body: str):
     sb = Path(tmp)
-    art = sb / "targeted_review" / "artifacts"
+    art = sb / "guided_review" / "artifacts"
     art.mkdir(parents=True, exist_ok=True)
     (art / "M1_acronyms.md").write_text(m1_md, encoding="utf-8")
     for fname in ("M25_artwork_parity.md", "M26_conventions.md", "M27_evidence_coverage.md",
@@ -501,7 +501,7 @@ def _review_sandbox(tmp: Path, m1_md: str, coverage: list, parity_body: str):
                   "M32_statistics.md", "M33_availability.md", "M34_source_data_coverage.md",
                   "M35_disclosures.md", "M36_zotero_parity.md", "M2_references.md"):
         (art / fname).write_text(parity_body, encoding="utf-8")
-    (sb / "targeted_review" / "ARCHITECTURE.md").write_text(
+    (sb / "guided_review" / "ARCHITECTURE.md").write_text(
         "| scope | disposition |\n|---|---|\n| ms | OK |\n", encoding="utf-8")
     fj = {"submission_dir": "./base", "guidelines_source": "x", "findings": [],
           "artifacts": {}, "coverage": coverage}

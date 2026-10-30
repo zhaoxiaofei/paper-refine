@@ -368,9 +368,9 @@ def build_round_root(tmp: Path) -> Path:
     write(root / "non_revised" / "manuscript-o.docx", "A")
     write(root / "round1_winner" / "manuscript-o.docx", "A")
     sandboxes = {
-        "r1_a2_targeted_review": ("targeted_review", {"base": "base/manuscript-o.docx"}),
-        "r1_a2_revise": ("revise", {"targeted_review": "targeted_review/findings.json"}),
-        "r1_b1": ("cross", {"targeted_review": "targeted_review/findings.json"}),
+        "r1_a2_guided_review": ("guided_review", {"base": "base/manuscript-o.docx"}),
+        "r1_a2_revise": ("revise", {"guided_review": "guided_review/findings.json"}),
+        "r1_b1": ("cross", {"guided_review": "guided_review/findings.json"}),
         "r1_judge_orig_j1": ("judge", {"field": "field/a2/manuscript-o.docx",
                                        "target": "target/manuscript-o.docx"}),
     }

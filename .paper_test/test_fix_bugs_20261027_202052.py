@@ -374,7 +374,7 @@ def test_pipeline_rules():
           tags == ["p", "p", "tbl"], str(tags))
     used = [f"X-{i}" for i in range(901, 1000)]
     try:
-        pp.probe_findings_for_merge(used, [{"id": "X-950"}])
+        pp.cold_start_findings_for_merge(used, [{"id": "X-950"}])
         check("G-003 an exhausted probe block refuses to emit X-1000", False)
     except RuntimeError as e:
         check("G-003 an exhausted probe block refuses to emit X-1000",
@@ -392,13 +392,13 @@ def test_pipeline_rules():
         root = jtmp / "root"
         setup = jr.run_cli("setup", "--source", str(src), "--root", str(root),
                            "--revision-mode", "major", "--journal", "iScience")
-        r = jr.run_cli("set-probe-review", "on", "--force", "--root", str(root))
-        check("G-006 set-probe-review on is refused in a scoped mode",
+        r = jr.run_cli("set-cold-start-review", "on", "--force", "--root", str(root))
+        check("G-006 set-cold-start-review on is refused in a scoped mode",
               setup.returncode == 0 and r.returncode != 0
               and "concern-scoped" in (r.stdout + r.stderr),
               f"setup={setup.returncode} rc={r.returncode} out={(r.stdout + r.stderr)[-200:]}")
     except Exception as e:  # noqa: BLE001
-        check("G-006 set-probe-review on is refused in a scoped mode", False, repr(e))
+        check("G-006 set-cold-start-review on is refused in a scoped mode", False, repr(e))
     p05 = (WS / "paper_pipeline_parts/p05_state_corpus.py").read_text("utf-8")
     check("G-007 rewrite concerns are staged for every feedback mode",
           "if journal_has_feedback(ctx) and not journal_is_scoped(ctx):" in p05

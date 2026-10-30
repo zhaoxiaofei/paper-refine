@@ -112,7 +112,7 @@ class _FakeCtx:
             "rounds": 3, "rewrites": [2, 0, 0], "revises": [1, 1, 1],
             "integrators": [3, 3, 3], "review_scope": ["formatting-writing"],
             "champion_select": "integrate", "audit": "on",
-            "revision_audit": "on", "probe_review": "on",
+            "revision_audit": "on", "cold_start_review": "on",
         }
         self.state = {"runs": {}}
         self.pristine = self.root / "pristine"
@@ -947,8 +947,11 @@ def test_f65_env_home_expansion():
                           capture_output=True, text=True, env=env)
     got = proc.stdout + proc.stderr
     home = os.path.expanduser("~")
+    # `~` must expand against the REAL home, not the cwd. WHICH profile is the
+    # machine's own choice (`headless`, `web`, ...), so the assertion pins the
+    # home-resolved profiles directory, never one profile's name.
     check("the profile path resolves under the real home",
-          f"{home}/.dsh/profiles/headless" in got, got[-300:])
+          f"{home}/.dsh/profiles/" in got, got[-300:])
     check("no cwd-relative '~/.dsh' path is reported",
           "paper-refine/~/.dsh" not in got, got[-300:])
 
@@ -1004,14 +1007,14 @@ def test_f08_winner_dir_containment():
 # ---------------------------------------------------------------- F06
 def test_f06_audit_readonly_areas():
     print()
-    print("== F06: the revision audit may not edit targeted_review/ or base/ ==")
+    print("== F06: the revision audit may not edit guided_review/ or base/ ==")
     tmp = scratch("f06_")
     sb = tmp / "runs" / "r1"
-    for name in ("base", "review", "audit", "raw_data", "code", "revised",
+    for name in ("base", "guided_review", "audit", "raw_data", "code", "revised",
                  "revision_audit"):
         (sb / name).mkdir(parents=True)
     (sb / "revised" / "manuscript.md").write_text("judged text\n", encoding="utf-8")
-    (sb / "targeted_review" / "findings.json").write_text('{"findings": []}', encoding="utf-8")
+    (sb / "guided_review" / "findings.json").write_text('{"findings": []}', encoding="utf-8")
     rec = {"id": "r1", "kind": "revise", "round": 1, "status": "done"}
 
     class C:
@@ -1040,9 +1043,9 @@ def test_f06_audit_readonly_areas():
     }
 
     def fake_session(_sb, _rec, _cmd, _timeout, _prompt, _log):
-        # The audit edits a read-only area (targeted_review/) but writes a valid,
+        # The audit edits a read-only area (guided_review/) but writes a valid,
         # empty plan where it is allowed to write.
-        (_sb / "targeted_review" / "findings.json").write_text('{"findings": ["tampered"]}',
+        (_sb / "guided_review" / "findings.json").write_text('{"findings": ["tampered"]}',
                                                      encoding="utf-8")
         (_sb / "revision_audit" / "REPAIR_PLAN.json").write_text('{"rows": []}',
                                                                 encoding="utf-8")
@@ -1060,7 +1063,7 @@ def test_f06_audit_readonly_areas():
         pp.journal_is_scoped = old["journal_is_scoped"]
         pp.round_is_done = old["round_is_done"]
     audit = rec.get("revision_audit") or {}
-    check("an audit that edits targeted_review/ fails", audit.get("status") == "failed", audit)
+    check("an audit that edits guided_review/ fails", audit.get("status") == "failed", audit)
     check("the failure names the modified area", "review" in str(audit.get("error") or ""),
           audit.get("error"))
 

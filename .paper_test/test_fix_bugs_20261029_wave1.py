@@ -617,9 +617,9 @@ def test_f36() -> None:
 # F37/F61 -- review postcheck: symlinked artifact and duplicate coverage rows
 # ---------------------------------------------------------------------------
 def _review_fixture(d: Path, symlink_m25: bool = False):
-    sb = d / "r1_targeted_review"
+    sb = d / "r1_guided_review"
     (sb / "base").mkdir(parents=True)
-    art = sb / "targeted_review" / "artifacts"
+    art = sb / "guided_review" / "artifacts"
     art.mkdir(parents=True)
     table = "| item | disposition |\n|---|---|\n| x | OK - present |\n"
     parity = ["M25_artwork_parity.md", "M2_references.md", "M26_conventions.md",

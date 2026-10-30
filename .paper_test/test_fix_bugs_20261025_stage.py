@@ -815,20 +815,20 @@ def test_review_regressions():
         cfg = {}
 
     check("an llm review depends on its feedback run",
-          pp.rid_feedback(1) in pp.upstream_deps({"kind": "targeted_review", "round": 1}, LlmCtx()))
+          pp.rid_feedback(1) in pp.upstream_deps({"kind": "guided_review", "round": 1}, LlmCtx()))
     check("a continue review has no feedback dependency",
           pp.rid_feedback(1) not in pp.upstream_deps(
-              {"kind": "targeted_review", "round": 1}, ContinueCtx()))
+              {"kind": "guided_review", "round": 1}, ContinueCtx()))
 
     # F004: a GENERAL (non-scoped) revise arm still freshness-checks its review
     # copy; the scoped-only branch had silently dropped that check.
     root = scratch("stage_fresh_")
     sb = root / "runs" / "r1_revise1"
-    upstream = root / "runs" / "r1_targeted_review"
-    (sb / "targeted_review").mkdir(parents=True)
-    (upstream / "targeted_review").mkdir(parents=True)
-    (sb / "targeted_review" / "a.json").write_text("new", encoding="utf-8")
-    (upstream / "targeted_review" / "a.json").write_text("old", encoding="utf-8")
+    upstream = root / "runs" / "r1_guided_review"
+    (sb / "guided_review").mkdir(parents=True)
+    (upstream / "guided_review").mkdir(parents=True)
+    (sb / "guided_review" / "a.json").write_text("new", encoding="utf-8")
+    (upstream / "guided_review" / "a.json").write_text("old", encoding="utf-8")
     revise_rec = {"kind": "revise", "round": 1}
 
     class FreshCtx:
@@ -836,7 +836,7 @@ def test_review_regressions():
         source_manifest = {}
 
         def run(self, rid):
-            return {"status": "done"} if rid == pp.rid_targeted_review(1) else None
+            return {"status": "done"} if rid == pp.rid_guided_review(1) else None
 
         def sandbox_of(self, rec):
             return sb if rec is revise_rec else upstream
@@ -1120,7 +1120,7 @@ def test_step2_findings():
     # The ASSEMBLED review prompt must agree with the caption rule: the M18
     # directive may not claim the venue publishes no limit while the venue's
     # published number is in the same prompt.
-    rprompt = pp.review_prompt(scratch("stage_m18prompt_"), "r1_targeted_review", 1,
+    rprompt = pp.review_prompt(scratch("stage_m18prompt_"), "r1_guided_review", 1,
                                caption_limit=0, venue=example)
     check("the assembled M18 directive does not call a published limit unpublished",
           "publishes no per-type legend limit" not in rprompt

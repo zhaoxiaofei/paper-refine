@@ -3,7 +3,7 @@
 
 Run:  python3 .paper_test/test_discovery_parity_2026_1010.py
 
-The review skill's phase-3 discovery round (D0-D5, `targeted_review/round2/`) is the only
+The review skill's phase-3 discovery round (D0-D5, `guided_review/round2/`) is the only
 source of defect classes the frozen checklist does not own; its findings (ids
 `X-*`) are what the revision arms must resolve. Two consistency gaps are closed
 here:
@@ -144,24 +144,24 @@ def build_root(tmp: Path, judges: int = 1, rewrites: int = 0, revises: int = 1,
 
     register_fresh(nb.revise_vid(1), "title\none Convention here\nmore text\n")
     # The round's review, carrying the discovery deliverables.
-    rev = ctx.register(nb.rid_targeted_review(1), "review", 1, f"runs/{nb.rid_targeted_review(1)}")
+    rev = ctx.register(nb.rid_guided_review(1), "review", 1, f"runs/{nb.rid_guided_review(1)}")
     rev["status"] = "done"
     rsb = ctx.sandbox_of(rev)
-    (rsb / "targeted_review").mkdir(parents=True, exist_ok=True)
-    write(rsb / "targeted_review" / "findings.json",
+    (rsb / "guided_review").mkdir(parents=True, exist_ok=True)
+    write(rsb / "guided_review" / "findings.json",
           {"submission_dir": "./base", "findings": [], "coverage": []})
     if discovery:
         rows = X_FINDINGS if x_findings is None else x_findings
-        write(rsb / "targeted_review" / "round2" / "findings_extra.json",
+        write(rsb / "guided_review" / "round2" / "findings_extra.json",
               {"findings": rows, "coverage": []})
-        write(rsb / "targeted_review" / "round2" / "findings_extra.md",
+        write(rsb / "guided_review" / "round2" / "findings_extra.md",
               "# D4\n\n" + "\n".join(f"- {f['id']}: {f['explanation']}" for f in rows))
     if archive:
         write(ctx.reports_dir / "round1_review" / "findings_extra.json",
               {"findings": X_FINDINGS, "coverage": []})
         write(ctx.reports_dir / "round1_review" / "findings_extra.md", "# D4 archived\n")
         # The pruned-round case: no live review sandbox content at all.
-        shutil.rmtree(rsb / "targeted_review" / "round2", ignore_errors=True)
+        shutil.rmtree(rsb / "guided_review" / "round2", ignore_errors=True)
     if audit == "on":
         arec = ctx.register(nb.rid_audit(1), "audit", 1, f"runs/{nb.rid_audit(1)}")
         arec["status"] = "done"
@@ -189,7 +189,7 @@ def test_resolution():
     ctx = build_root(scratch("disc_p1_"))
     found = nb.round_discovery_dir(ctx, 1)
     check("P1a the review sandbox owns the list",
-          found is not None and found.as_posix().endswith("runs/r1_targeted_review/targeted_review/round2"),
+          found is not None and found.as_posix().endswith("runs/r1_guided_review/guided_review/round2"),
           str(found))
     seed = nb.round_discovery_seed(ctx, 1)
     check("P1b the seed carries both X ids in file order",

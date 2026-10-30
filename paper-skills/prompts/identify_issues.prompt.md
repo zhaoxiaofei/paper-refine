@@ -16,8 +16,8 @@ target journal's own author guide and say which source you used.
 ## Paths
 
 - `SUBMISSION_DIR` = `./non_revised` (override: any explicit path or argument from the user)
-- `OUT` = `./targeted_review` — create it; ALL outputs land here
-- `WORK` = `./targeted_review/work` — corpus, scripts, state
+- `OUT` = `./guided_review` — create it; ALL outputs land here
+- `WORK` = `./guided_review/work` — corpus, scripts, state
 - `raw_data/` (the raw-data area) — when SUBMISSION_DIR carries it: the **evidence
   area**, not submission content (see below)
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override if the user provides one; if absent → fall back to manual-verification)
@@ -94,7 +94,7 @@ If a script misses a case class (e.g., a citation style it can't parse), **exten
 
 **Phase 1 — Setup.** Run `convert_corpus.py` on SUBMISSION_DIR. Review the inventory: role classification, editable vs read-only, conversion status. Every conversion failure is recorded, never skipped. Images are marked `visually unverifiable` unless OCR/VLM is available; when a renderer exists, render and LOOK. Zotero live fields: the converter marks them `[[FIELD: ...]]`; check the rendered text; an unreadable or incomplete field goes to the manual-verification list (tell the user to verify it in Word). Resolve citations READ-ONLY with `ZOT_CLI` / `$ZOTERO_SKILL` (parent bibliographic item keys, never attachment keys; confirm title, creators, year, DOI) and never write to the library: a suspected metadata error becomes a finding with the proposed correction.
 
-**Phase 2 — Sweeps.** Mechanical sweeps M1–M17 plus M18 (legend lengths, always enumerated), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity; the pipeline seeds `targeted_review/work/FORMAT_SCAN.json` and `targeted_review/artifacts/M20_formatting.md`, and every row must be disposed), the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the rewrite-parity checks M25–M29 (artwork/text parity, house-style conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise parity), the source-hierarchy reconciliation M30 (the seeded `targeted_review/artifacts/M30_hierarchy_reconciliation.md` rows, disposed, plus the producers the code cannot see), the evidence-integrity sweeps M31–M36 (the seeded `targeted_review/artifacts/M31_artwork_legend.md` through `targeted_review/artifacts/M36_zotero_parity.md` artifacts, every row disposed) and judgment passes J1–J5 (J5 writes `OUT/ARCHITECTURE.md`, one row per scope): procedures, artifact columns, finding rules, classification, and the finding format are specified in the appendix below — follow it exactly. One sweep at a time; finish one artifact before starting the next. For long documents, sweep file by file, then merge so every artifact spans the whole corpus.
+**Phase 2 — Sweeps.** Mechanical sweeps M1–M17 plus M18 (legend lengths, always enumerated), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity; the pipeline seeds `guided_review/work/FORMAT_SCAN.json` and `guided_review/artifacts/M20_formatting.md`, and every row must be disposed), the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the rewrite-parity checks M25–M29 (artwork/text parity, house-style conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise parity), the source-hierarchy reconciliation M30 (the seeded `guided_review/artifacts/M30_hierarchy_reconciliation.md` rows, disposed, plus the producers the code cannot see), the evidence-integrity sweeps M31–M36 (the seeded `guided_review/artifacts/M31_artwork_legend.md` through `guided_review/artifacts/M36_zotero_parity.md` artifacts, every row disposed) and judgment passes J1–J5 (J5 writes `OUT/ARCHITECTURE.md`, one row per scope): procedures, artifact columns, finding rules, classification, and the finding format are specified in the appendix below — follow it exactly. One sweep at a time; finish one artifact before starting the next. For long documents, sweep file by file, then merge so every artifact spans the whole corpus.
 
 **Phase 3 — Discovery round.** D0–D5 per `references/discovery.md`: hunt issue classes OUTSIDE the checklist; outputs `OUT/round2/findings_extra.{md,json}` and `OUT/round2/new_sweeps.md`. If the user passes `discover` as the argument, run ONLY this phase against existing findings and stop.
 
@@ -132,7 +132,7 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 ## Acceptance checks (for the human, after the run)
 
 1. `findings.md` coverage table lists every defined check ID: M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows), M21–M24 (the earlier adopted sweeps), M25–M29 (the rewrite-parity checks), M30 (the source-hierarchy reconciliation) and M31–M36 (the evidence-integrity sweeps, including M36's Zotero live-field refresh parity).
-2. Every sweep with findings has a matching artifact file in `targeted_review/artifacts/` (M8's occurrence enumerations live in `targeted_review/work/occurrences_*.md`). A sweep with findings but no artifact means it worked from impression — re-run that sweep.
+2. Every sweep with findings has a matching artifact file in `guided_review/artifacts/` (M8's occurrence enumerations live in `guided_review/work/occurrences_*.md`). A sweep with findings but no artifact means it worked from impression — re-run that sweep.
 3. Each finding points to a specific word/number/phrase with a verbatim quote, not a whole passage.
 4. `findings.json` exists and every finding has all eight fields.
 
@@ -489,7 +489,7 @@ and `.bib` entries (a commented-out or verbatim `\cite` is not a call-out),
 numbered and unnumbered reference lists. Extend it in WORK/ for other styles
 (e.g. superscript numbers) instead of eyeballing.
 
-The orchestrator ALSO seeds `targeted_review/artifacts/M2_references.md` (copied to
+The orchestrator ALSO seeds `guided_review/artifacts/M2_references.md` (copied to
 `work/M2_references.md`): one row per reference ENTRY that carries a DOI, with
 its own public-API verdict for that DOI (`found` / `absent` / `error` /
 `skipped` / `not selected`), what the endpoint returned (year and title), and
@@ -820,7 +820,7 @@ placeholder-domain?
 **E-mail-address rule (M12/M14):** an address is a contact FACT, never an inferable
 typo. Report a mismatch or a reserved/placeholder domain, but never propose a
 replacement address and never infer a domain from the affiliation, the author's name
-or the journal. A targeted-review/probe/audit session files the mismatch and the query only
+or the journal. A guided-review/probe/audit session files the mismatch and the query only
 (identification); a revision may change the address only to one the input corpus
 already carries verbatim, or to one a recorded web-search result verifies in
 `work/EMAIL_VERIFICATION.json` (query, source URL, checked date, verbatim quote).
@@ -1045,8 +1045,8 @@ formatting visible, enumerable and repairable. The orchestrator enumerates it
 (the code-side scan of the reviewed corpus) and normalizes the mechanical
 classes before a candidate is fingerprinted, pinned or judged.
 
-**Enumeration:** `targeted_review/work/FORMAT_SCAN.json` (the code-side scan of `base/`,
-repeated as rows in `targeted_review/artifacts/M20_formatting.md`): every `.docx` of the
+**Enumeration:** `guided_review/work/FORMAT_SCAN.json` (the code-side scan of `base/`,
+repeated as rows in `guided_review/artifacts/M20_formatting.md`): every `.docx` of the
 corpus, skipping the difference-tracking auxiliaries (`*.tracking-<baseline>.<ext>`
 / `*.logging-<baseline>.<ext>`) and stage scratch (`work/`). AUDIT that table
 row by row and ADD every
@@ -1110,8 +1110,8 @@ rule | severity | location | evidence | fix kind | disposition.
   in the journal's styles" is the PIPELINE's convention, not the journal's, and
   the pipeline's disposition gate fails that closure.
 
-**Artifact:** `targeted_review/artifacts/M20_formatting.md` (the seeded table, every row
-disposed) plus `targeted_review/work/FORMAT_SCAN.json`.
+**Artifact:** `guided_review/artifacts/M20_formatting.md` (the seeded table, every row
+disposed) plus `guided_review/work/FORMAT_SCAN.json`.
 
 Formatting never makes a version ineligible and never decides a comparison on
 its own; a uniform candidate may be preferred to an inconsistent one by at most
@@ -1248,7 +1248,7 @@ per-paragraph claim map this pass reads.
    where one would do (Results vs Discussion, main text vs legend vs cover
    letter) — one row per repeated scope pair, with both locations.
 
-**Artifact.** `targeted_review/ARCHITECTURE.md`: one row per scope —
+**Artifact.** `guided_review/ARCHITECTURE.md`: one row per scope —
 `document | section | paragraphs | current structure | reader cost | proposed
 reorganization | class | severity | disposition`.
 A scope that is fine gets its own row with a row-specific
@@ -1286,7 +1286,7 @@ summary note with their reasons.
 
 The coverage table carries every check ID this skill defines: M1–M36 and
 J1–J5 (M18, M19 and M20 are always active). J5's row names
-`targeted_review/ARCHITECTURE.md` as its basis.
+`guided_review/ARCHITECTURE.md` as its basis.
 
 ---
 
@@ -1432,7 +1432,7 @@ a first-use-only disambiguation).
 
 These five sweeps exist because a from-scratch rewrite fixes them as a
 side-effect of rewriting, while an instance-level review that does not know
-the class is looking for them files nothing and the targeted reviser then has
+the class is looking for them files nothing and the guided reviser then has
 nothing to fix. They are MECHANICAL checks (enumerate → artifact → audit →
 report) and their findings are normal findings; each one is Minor or Major
 `consistency`/`completeness`/`correctness` evidence, and the fix is always an
@@ -1608,7 +1608,7 @@ snapshot, the figure/table sources), so M30 makes every such comparison a row.
 surface (abstract, main text, legend, cover letter; Methods for a parameter or
 step) find the artifact that PRODUCED it: a `raw_data/` file, a code/config
 file's constant or the function that prints the value, the figure/table source.
-The pipeline seeds `targeted_review/artifacts/M30_hierarchy_reconciliation.md` with what
+The pipeline seeds `guided_review/artifacts/M30_hierarchy_reconciliation.md` with what
 the code can pair for itself — table A: every written number the shipped data
 tables do not already PROVE, against its candidate producer column(s), with the
 mechanical check the code can make (a cohort-size sentence against the table's
@@ -1624,7 +1624,7 @@ producer and not a written surface: it documents what the review requires
 (J1 / category 0 may cite it as external context) and is never quoted as
 something the submission says.
 
-**Artifact.** `targeted_review/artifacts/M30_hierarchy_reconciliation.md`:
+**Artifact.** `guided_review/artifacts/M30_hierarchy_reconciliation.md`:
 `document | kind | number | unit | sentence | candidate producer | producer
 summary | seed check | disposition` for table A and
 `file | line | symbol | value | context | disposition` for table B, plus the
@@ -1847,7 +1847,7 @@ single file and exits non-zero on a high finding — run it after EVERY external
 refresh (in Word: `Zotero` → `Refresh`), and before flattening fields for a
 submission copy.
 
-**Artifact.** `targeted_review/artifacts/M36_zotero_parity.md`:
+**Artifact.** `guided_review/artifacts/M36_zotero_parity.md`:
 `field | item key | number shown | rank | entry text | disposition` for the rows
 the scan seeds, plus the rows the session adds (e.g. a field the refresh skipped
 because its item could not be resolved).
@@ -1923,9 +1923,9 @@ Phase 2 sweeps.
 
 **Inputs:**
 - `SUBMISSION_DIR` = the reviewed directory (default `./non_revised`)
-- `PRIOR` = `./targeted_review/findings.json` (canonical prior findings; also `./targeted_review/findings.md`)
-- `WORK` = `./targeted_review/work` — converted corpus from the prior run; REUSE it (reconvert only missing files)
-- `OUT2` = `./targeted_review/round2` (create it; ALL outputs here)
+- `PRIOR` = `./guided_review/findings.json` (canonical prior findings; also `./guided_review/findings.md`)
+- `WORK` = `./guided_review/work` — converted corpus from the prior run; REUSE it (reconvert only missing files)
+- `OUT2` = `./guided_review/round2` (create it; ALL outputs here)
 
 If PRIOR is missing, STOP and tell the user to run the standard review first.
 
@@ -2102,7 +2102,7 @@ disposition stays the auditor's and the revisers' job:
   Purpose, Enumeration, Artifact and Finding rules) numbered from M37, with no
   duplicate ids; or an explicit statement that there were no proposals (and
   why) — a bare `# none` is refused. The operator adopts validated proposals
-  with `paper_pipeline.py adopt-sweep --proposals targeted_review/round2/new_sweeps.md`
+  with `paper_pipeline.py adopt-sweep --proposals guided_review/round2/new_sweeps.md`
   (`--yes` writes them into `references/sweeps.md`).
 - `OUT2/round2_summary.md` — the round's counts (gap rows, probes, X-findings,
   proposed sweeps); a missing honest-limits statement is reported as a WARNING

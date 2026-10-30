@@ -368,7 +368,7 @@ def test_concern_reconciliation_duplicates():
     print("== P8 two rows for one concern are refused ==")
     tmp = scratch("dbg1015_reconc_")
     root = tmp / "root"
-    sb = tmp / "targeted_review"
+    sb = tmp / "guided_review"
     sb.mkdir(parents=True)
     fb_sb = tmp / "fb"
     fb_sb.mkdir(parents=True)
@@ -387,8 +387,8 @@ def test_concern_reconciliation_duplicates():
     (fb_sb / "concerns" / "JF_concerns.json").write_text(
         json.dumps({"concerns": [{"id": "C1", "text": "a"}, {"id": "C2", "text": "b"}]}),
         encoding="utf-8")
-    (sb / nb.TARGETED_REVIEW_DIR).mkdir(parents=True)
-    (sb / nb.TARGETED_REVIEW_DIR / "concerns_reconciled.json").write_text(json.dumps({
+    (sb / nb.GUIDED_REVIEW_DIR).mkdir(parents=True)
+    (sb / nb.GUIDED_REVIEW_DIR / "concerns_reconciled.json").write_text(json.dumps({
         "rows": [{"id": "C1", "status": "manual", "rationale": "x"},
                  {"id": "C2", "status": "manual", "rationale": "y"},
                  {"id": "C2", "status": "not-applicable", "rationale": "z"}]}),

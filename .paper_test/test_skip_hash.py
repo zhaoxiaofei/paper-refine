@@ -204,7 +204,7 @@ def test_tampered_sandbox_input_and_fresh_recording():
           and decision_of(root)["certification"].get("hash_checks") == "verified",
           (clean.stdout + clean.stderr)[-160:])
     # Now tamper one run's frozen input: the default path blocks, the flag skips.
-    victim = root / "runs" / "r1_targeted_review" / "base" / "manuscript.md"
+    victim = root / "runs" / "r1_guided_review" / "base" / "manuscript.md"
     assert victim.is_file(), victim
     with open(victim, "a", encoding="utf-8") as f:
         f.write("\ntampered input\n")

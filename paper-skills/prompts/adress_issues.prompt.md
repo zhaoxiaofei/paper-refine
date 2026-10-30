@@ -1,8 +1,8 @@
-# adress_issues (targeted revision) — standalone prompt fallback
-Paste this entire file as the prompt for a revision task when you cannot install Codex skills. It consumes targeted_review/findings.md + findings.json produced by the identify_issues prompt (or the paper-review skill). Replace placeholder paths (FINDINGS_MD/FINDINGS_JSON, ORIGINALS, ZOTERO_SKILL) with your own. The paper-review scripts are reused for propagation and rescans.
+# adress_issues (guided revision) — standalone prompt fallback
+Paste this entire file as the prompt for a revision task when you cannot install Codex skills. It consumes guided_review/findings.md + findings.json produced by the identify_issues prompt (or the paper-review skill). Replace placeholder paths (FINDINGS_MD/FINDINGS_JSON, ORIGINALS, ZOTERO_SKILL) with your own. The paper-review scripts are reused for propagation and rescans.
 ---
 ## PROMPT BODY (SKILL.md)
-# Targeted Revision — adress_issues
+# Guided Revision — adress_issues
 
 **Target venue, article type and journal (configurable).** The rule set comes from the pipeline's
 venue profile (`venue_profiles/<id>.json`, selected with `set-venue`), the venue's content type
@@ -13,9 +13,9 @@ type -- use the profile and type of the run you are in.
 
 ## Paths
 
-- `FINDINGS_MD` = `./targeted_review/findings.md` — human-readable report from paper-review
-- `FINDINGS_JSON` = `./targeted_review/findings.json` — machine-readable; **CANONICAL list of finding IDs**
-- `EXTRA_JSON` = `./targeted_review/round2/findings_extra.json` — discovery-round findings; merge if present
+- `FINDINGS_MD` = `./guided_review/findings.md` — human-readable report from paper-review
+- `FINDINGS_JSON` = `./guided_review/findings.json` — machine-readable; **CANONICAL list of finding IDs**
+- `EXTRA_JSON` = `./guided_review/round2/findings_extra.json` — discovery-round findings; merge if present
 - `ORIGINALS` = the reviewed submission directory (default `./non_revised`; use the directory recorded in the findings report if present). **READ-ONLY, always.**
 - `REVISED` = `./revised` · `WORK` = `./revised/work` · `CODE` = `./code`
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override or absent → manual instructions)
@@ -52,7 +52,7 @@ The review's **rewrite-parity findings (M25–M29)**, **source-hierarchy finding
 - **E — Apply edits** one at a time in plan order, under rules E1–E12 in `references/edit_rules.md` (precision, Zotero fields, missing items, plagiarism/AI content, difference-tracking auxiliary `.tracking-<baseline>.<ext>` / `.logging-<baseline>.<ext>`, scientific-judgement guard, **E11** — rewrite-parity findings: align the editable surface for M25–M29, scoped restructuring for J5 with one `WORK/RESTRUCTURE_<id>.md` per finding — and **E12** — source-hierarchy findings: align the WRITTEN side with the authoritative producer, rule C for a code fix, `raw_data/` read-only).
 - **P — Propagation (A6).** Propagation order when a mismatched number/label/term/claim is corrected (it orders which occurrence you update first; the standing source hierarchy in E12 decides which value wins): supplementary tables > supplementary figures/notes > main figures & legends > Methods > main text > abstract > cover letter. For EVERY correction: script-extract all occurrences of the old AND new values across the whole revised corpus; update every occurrence; verify each row. Cross-check A6 against the A2 baseline — a baseline occurrence missing from A6 is a missed propagation; fix it.
 - **C — Code revisions** (only if analysis code is in scope). Scientific integrity rule: never change analysis code merely to make outputs match manuscript numbers — details in `references/edit_rules.md`.
-- **V — Validate.** V1 round-trip integrity (artifact `WORK/roundtrip_check.md`) · V2 locality via diff log (A7: hunks inside a J5 scope are mapped through the finding id + `WORK/RESTRUCTURE_<id>.md`; every other hunk must map to a finding id) · V3 full mechanical rescan of the revised corpus (A8: the M1–M36 sweeps from paper-review — including the M26 convention re-run and the J5 scope check — PLUS any sweep definitions in `./targeted_review/round2/new_sweeps.md`) · V4 checksum re-verification (artifact `WORK/checksums_after.txt`) · V5 final outputs.
+- **V — Validate.** V1 round-trip integrity (artifact `WORK/roundtrip_check.md`) · V2 locality via diff log (A7: hunks inside a J5 scope are mapped through the finding id + `WORK/RESTRUCTURE_<id>.md`; every other hunk must map to a finding id) · V3 full mechanical rescan of the revised corpus (A8: the M1–M36 sweeps from paper-review — including the M26 convention re-run and the J5 scope check — PLUS any sweep definitions in `./guided_review/round2/new_sweeps.md`) · V4 checksum re-verification (artifact `WORK/checksums_after.txt`) · V5 final outputs.
 
 Artifacts A1–A9 column specifications and status vocabularies: `references/ledger.md`.
 
@@ -179,7 +179,7 @@ row.
 
 V3 output: the M-sweep artifacts re-run over the ENTIRE revised corpus (using
 the paper-review scripts where applicable) PLUS any sweep definitions from
-`./targeted_review/round2/new_sweeps.md` (discovery classes — they apply now too).
+`./guided_review/round2/new_sweeps.md` (discovery classes — they apply now too).
 Every rescan finding is classified:
 - (a) residual manual-required item — must map to an existing ledger row;
 - (b) NEW issue introduced or revealed by revision — fix immediately, assign `R-xxx`, add to the change log;
@@ -490,7 +490,7 @@ the dependent manuscript numbers become `manual-required` with rerun
 instructions; never guess their new values. If the MANUSCRIPT is wrong: fix
 the manuscript instead.
 
-Make minimal, targeted changes; run available tests/linters if the
+Make minimal, guided changes; run available tests/linters if the
 environment can be set up; otherwise perform a static review and say so.
 Record changes in A9.
 
@@ -553,7 +553,7 @@ Dispose every row:
     keep it byte-identical and add a HIGH-PRIORITY manual query; never replace it
     with a plausible domain, never delete a real address (a reserved/example
     placeholder may be removed), and never propose a replacement address in a
-    targeted-review/audit/probe finding. The orchestrator fails a package that adds an
+    guided-review/audit/probe finding. The orchestrator fails a package that adds an
     address with neither an in-corpus match nor a matching verification row.
   - OPAQUE IDENTIFIERS AND EXTERNALLY-ASSIGNED FACTS FOLLOW THE SAME RULE: a DOI,
     accession (GEO/SRA/BioProject/BioSample/...), ORCID, UUID/UID, git commit
@@ -619,7 +619,7 @@ with evidence) and may add `AU-*` findings. Rules:
 * every `AU-*` finding is a NORMAL finding: resolve it or hand it over with a
   reason, exactly like an `F-*` row;
 * the auditor never edits the package, so any edit its finding requires is
-  yours, and it goes through the same E1/E5 rules (targeted, tracked auxiliary,
+  yours, and it goes through the same E1/E5 rules (guided, tracked auxiliary,
   ledgered).
 
 ## E9 — The L1–L11 language pass (every package-producing stage)
@@ -681,7 +681,7 @@ when the package is fingerprinted; do NOT fight it and do NOT re-introduce it:
   the orchestrator restores the ratio from the image's own pixels; never
   hand-resize an image, your extent would be overwritten.
 
-The half the orchestrator reports but does not edit is YOURS — one targeted
+The half the orchestrator reports but does not edit is YOURS — one guided
 edit per instance, ledgered under the M20 row, never a blanket replacement:
 
 * doubled spaces, space-before-punctuation and bracket spacing where the
@@ -831,7 +831,7 @@ tables > supplementary tables > main text > supplementary text`).
   cell to the producer's value, exactly as the hierarchy dictates, and propagate
   the value to every occurrence (P1). Record the before → after and the producer
   (`file:symbol/row`) in the ledger row.
-* **The CODE is the wrong side**: rule C owns the fix — a minimal, targeted code
+* **The CODE is the wrong side**: rule C owns the fix — a minimal, guided code
   edit under `code/`, a `code/README_RERUN.md`, and the dependent numbers,
   figures and tables become `manual-required` with the rerun instructions (never
   guess a new value, never regenerate a figure here). Say so in the ledger row

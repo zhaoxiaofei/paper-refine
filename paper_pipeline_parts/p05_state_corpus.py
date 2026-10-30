@@ -17,14 +17,14 @@ def rid_rewrite(r: int, k: int) -> str:
     return f"r{r}_{rewrite_vid(k)}"
 
 
-def rid_targeted_review(r: int) -> str:
+def rid_guided_review(r: int) -> str:
     """The round's SINGLE review run (its findings feed every revise session)."""
-    return f"r{r}_targeted_review"
+    return f"r{r}_guided_review"
 
 
-def rid_targeted_review_b(r: int) -> str:
+def rid_guided_review_b(r: int) -> str:
     """The SECOND review run when `--review-split` is on (part B)."""
-    return f"r{r}_targeted_review_b"
+    return f"r{r}_guided_review_b"
 
 
 def rid_feedback(r: int) -> str:
@@ -65,8 +65,8 @@ def rid_audit(r: int) -> str:
     return f"r{r}_audit"
 
 
-def rid_probe(r: int) -> str:
-    """The round's PROBE REVIEW run (an INDEPENDENT discovery session).
+def rid_cold_start_review(r: int) -> str:
+    """The round's COLD-START REVIEW run (an INDEPENDENT discovery session).
 
     One extra session per round, launched IN PARALLEL with the review and
     feeding the same frozen finding list (its findings carry the reserved
@@ -79,7 +79,7 @@ def rid_probe(r: int) -> str:
     fails); findings without a verifier are evidence rows like any other
     finding.
     """
-    return f"r{r}_probe"
+    return f"r{r}_cold_start_review"
 
 
 REVIEW_SPLIT_MODES = ("off", "phases", "aspects")
@@ -111,7 +111,7 @@ def review_split_of(ctx: Ctx) -> str:
     return raw if raw in REVIEW_SPLIT_MODES else "off"
 
 
-# --- the PROBE REVIEW stage (`setup --probe-review`, default on) -------------
+# --- the COLD-START REVIEW stage (`setup --cold-start-review`, default on) -------------
 # A second, INDEPENDENT discovery channel -- generic by design. It is a
 # cold-context session that is given the corpus (the submission documents AND
 # the evidence areas, `raw_data/` and `code/` included) and NOTHING else: never
@@ -130,20 +130,20 @@ def review_split_of(ctx: Ctx) -> str:
 # drop them with evidence, the integrator must reconcile them, and the JUDGE
 # panel stays blind to the list (it re-derives its own generic pass).
 #
-# The mode is recorded at setup (`probe_review`: "on"/"off"). A root that
+# The mode is recorded at setup (`cold_start_review`: "on"/"off"). A root that
 # carries no such key -- everything created before this feature -- plans no
-# probe run; `set-probe-review on` opts it in. `--only` can, of course, select
+# probe run; `set-cold-start-review on` opts it in. `--only` can, of course, select
 # or skip the session for one invocation, but the recorded policy is the off
 # switch.
-PROBE_REVIEW_MODES = ("on", "off")
-PROBE_REVIEW_DEFAULT = "on"
-PROBE_DIR = "probe_review"
-PROBE_FINDINGS_REL = f"{PROBE_DIR}/findings_probe.json"
-PROBE_FINDINGS_MD_REL = f"{PROBE_DIR}/findings_probe.md"
-PROBE_COVERAGE_REL = f"{PROBE_DIR}/coverage.md"
-PROBE_REPRO_REL = f"{PROBE_DIR}/REPRODUCTION.md"
-PROBE_SURFACES_REL = f"{PROBE_DIR}/CLAIM_SURFACES.md"
-PROBE_PRODUCERS_REL = f"{PROBE_DIR}/PRODUCERS.md"
+COLD_START_REVIEW_MODES = ("on", "off")
+COLD_START_REVIEW_DEFAULT = "on"
+COLD_START_DIR = "cold_start_review"
+COLD_START_FINDINGS_REL = f"{COLD_START_DIR}/findings_cold_start_review.json"
+COLD_START_FINDINGS_MD_REL = f"{COLD_START_DIR}/findings_cold_start_review.md"
+COLD_START_COVERAGE_REL = f"{COLD_START_DIR}/coverage.md"
+COLD_START_REPRO_REL = f"{COLD_START_DIR}/REPRODUCTION.md"
+COLD_START_SURFACES_REL = f"{COLD_START_DIR}/CLAIM_SURFACES.md"
+COLD_START_PRODUCERS_REL = f"{COLD_START_DIR}/PRODUCERS.md"
 # The third seeded CANDIDATE list (2026-10-16): what THIS submission promises,
 # and whether each promise resolves. The two audits of the 2026-10-15b packages
 # both found "the supplement the documents cite is not in the declared submitted
@@ -152,32 +152,33 @@ PROBE_PRODUCERS_REL = f"{PROBE_DIR}/PRODUCERS.md"
 # because nothing on the page is WRONG. The ledger turns that direction into a
 # disposal task: every obligation is a row, and a row with no disposition is a
 # hole in `coverage.md`.
-PROBE_OBLIGATIONS_REL = f"{PROBE_DIR}/OBLIGATIONS.md"
-PROBE_SCRIPT_PREFIX = f"{PROBE_DIR}/scripts/"
+COLD_START_OBLIGATIONS_REL = f"{COLD_START_DIR}/OBLIGATIONS.md"
+COLD_START_SCRIPT_PREFIX = f"{COLD_START_DIR}/scripts/"
 # The reserved finding-id block: probe findings are X-9xx, so a collision with the
 # discovery round's own sequential X-0xx ids is impossible by construction (and
 # the merge still remaps defensively if a session ignores the block).
-PROBE_ID_RE = re.compile(r"^X-9\d{2}$")
-PROBE_FINDING_ID_BASE = 900
+COLD_START_ID_RE = re.compile(r"^X-9\d{2}$")
+COLD_START_FINDING_ID_BASE = 900
 # Every DECLARED verifier is re-run at postcheck time. The timeout is per
 # script; the scripts are the session's own, offline and deterministic by
 # contract. The count and the aggregate wall-clock are ALSO bounded: one probe
 # could declare 99 verifiers (the reserved X-901..X-999 block) and make postcheck
 # run for hours (the 2026-10-28 audit's F56).
-PROBE_REPRO_TIMEOUT = 120
-PROBE_REPRO_MAX_VERIFIERS = 50
-PROBE_REPRO_TOTAL_BUDGET = 600
+COLD_START_REPRO_TIMEOUT = 120
+COLD_START_REPRO_MAX_VERIFIERS = 50
+COLD_START_REPRO_TOTAL_BUDGET = 600
 
 
-def probe_review_of(ctx) -> str:
-    """Is the round's probe-review stage part of the plan?
+def cold_start_review_of(ctx) -> str:
+    """Is the round's cold-start-review stage part of the plan?
 
     The recorded policy wins; a root without the key (created before the
-    feature) plans no probe session. An unknown value falls back to "off"
+    feature) plans no cold-start session. An unknown value falls back to "off"
     rather than to the more expensive mode.
     """
-    raw = str((getattr(ctx, "cfg", None) or {}).get("probe_review") or "").strip().lower()
-    return raw if raw in PROBE_REVIEW_MODES else "off"
+    raw = str((getattr(ctx, "cfg", None) or {}).get("cold_start_review")
+              or "").strip().lower()
+    return raw if raw in COLD_START_REVIEW_MODES else "off"
 
 
 def rid_revise(r: int, vid: str) -> str:
@@ -241,13 +242,13 @@ def upstream_deps(rec: dict, ctx=None) -> list:
                                                         JOURNAL_MODE_RESUBMIT):
             deps.append(rid_feedback(r))
         return deps
-    if kind == "targeted_review":
+    if kind == "guided_review":
         deps = [rid_a1(r)]
-        if rec.get("id") == rid_targeted_review_b(r):
-            # A split part B consumes part A's targeted_review/ (merge_review_parts
-            # freezes A's findings into B's targeted_review/findings.json), so an A
+        if rec.get("id") == rid_guided_review_b(r):
+            # A split part B consumes part A's guided_review/ (merge_review_parts
+            # freezes A's findings into B's guided_review/findings.json), so an A
             # retry must defer B instead of rebuilding it from stale output.
-            deps.append(rid_targeted_review(r))
+            deps.append(rid_guided_review(r))
         # `materialize_review` now stages the concern ledger for EVERY feedback
         # mode that is not scoped -- transfer/resubmit AND `llm` -- because the
         # llm review reconciles that ledger too. List it here as well, or a
@@ -256,22 +257,22 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         if ctx is not None and journal_has_feedback(ctx) and not journal_is_scoped(ctx):
             deps.append(rid_feedback(r))
         return deps
-    if kind == "probe":
-        # The probe review is materialized from the round base, like every other
+    if kind == "cold_start_review":
+        # The cold-start review is materialized from the round base, like every other
         # base-consuming kind. Without this branch `upstream_deps` returned []
         # for a probe, `unmet_deps` was empty, and a `retry`/`--only` on a probe
         # whose base was still pending bypassed the DepsNotMet defer path and
-        # died inside materialize_probe's RuntimeError instead.
+        # died inside materialize_cold_start_review's RuntimeError instead.
         return [rid_a1(r)]
     if kind == "audit":
-        return [rec.get("upstream_run_id") or rid_targeted_review(r)]
+        return [rec.get("upstream_run_id") or rid_guided_review(r)]
     if kind == "revise":
         # With the auditor enabled the reviser consumes the AUDITED list, so the
         # audit run (not the bare review) is the dependency that must be done.
         # A scoped (major/minor) revision consumes the CONCERNS run instead of a
         # general review; the materializer records which run that is, so the
         # retry/rebuild path never blocks on a run this root does not have.
-        deps = [rid_a1(r), rec.get("upstream_run_id") or rid_targeted_review(r)]
+        deps = [rid_a1(r), rec.get("upstream_run_id") or rid_guided_review(r)]
         # `register()` initializes inputs_manifest to None; `.get(k, {})` does
         # not cover an existing None, and the AttributeError used to break
         # retry/rebuild for a registered-but-unmaterialized revise run.
@@ -648,6 +649,23 @@ class Ctx:
                         f"{pin['id']!r} (it must be ONE path component under "
                         f"{self.pins_dir}).\n       {self.state_path}\n"
                         f"       Restore state.json from a backup.")
+            # A root created before the 2026-10 renames records `review`/`probe`
+            # (and, after the intermediate rename, `targeted_review`). The current
+            # vocabulary has no handler for those kinds, so say so once, here,
+            # instead of failing later with "unknown run kind" over a root that
+            # cannot be repaired in place.
+            _PRIOR_KINDS = {"review": "guided_review", "review_b": "guided_review_b",
+                            "targeted_review": "guided_review",
+                            "targeted_review_b": "guided_review_b",
+                            "probe": "cold_start_review"}
+            _prior = sorted({str(r.get("kind")) for r in st["runs"].values()
+                             if isinstance(r, dict) and str(r.get("kind")) in _PRIOR_KINDS})
+            if _prior:
+                die(f"this root predates the review-role rename: it records the run kind(s) "
+                    f"{', '.join(_prior)} (now "
+                    f"{', '.join(sorted({_PRIOR_KINDS[k] for k in _prior}))}). Existing roots are "
+                    f"never migrated -- point --root at a fresh `setup` root and carry the "
+                    f"corpus over.", code=2)
             for rid, rec in st["runs"].items():
                 if not isinstance(rec, dict) or "kind" not in rec or "round" not in rec:
                     die(f"state.json is not a round-pipeline registry: run record {rid!r} "
@@ -678,11 +696,6 @@ class Ctx:
                         f"component (the retry/prune paths are built from it).\n"
                         f"       {self.state_path}\n"
                         f"       Restore state.json from a backup.")
-            # A registry written before the TARGETED-REVIEW rename records the
-            # stage as `review`; read it under the new kind so every handler
-            # table, repair profile and self-check keeps resolving (the id and
-            # the sandbox path stay exactly as recorded).
-            normalize_legacy_run_kinds(st["runs"])
             st.setdefault("rounds", {})
             st.setdefault("pinned", [])
             st.setdefault("log", [])
@@ -1021,10 +1034,6 @@ class Ctx:
         return (self.state.get("rounds") or {}).get(str(int(r))) or {}
 
     def register(self, rid: str, kind: str, round_no: int, sandbox_rel: str, **extra) -> dict:
-        # The run kind is recorded in its canonical spelling: the stage was
-        # renamed `review` -> `targeted_review`, and a caller that still passes
-        # the old token must not create a record no handler table can resolve.
-        kind = normalize_run_kind(kind)
         rec = self.state["runs"].get(rid)
         if rec is None:
             rec = {"id": rid, "kind": kind, "round": int(round_no), "sandbox": sandbox_rel,
@@ -2437,7 +2446,7 @@ def sample_labels(r: int, vid: str, j: int, k: int, salt: str = "") -> list:
 
 
 def freshness_vid(rec: dict):
-    """The round-local version id a run produces (None for targeted-review/judge runs).
+    """The round-local version id a run produces (None for guided-review/judge runs).
 
     The run record carries `produces` for every content-producing arm, which is
     what keeps the mapping correct for any M/N plan instead of re-deriving it
@@ -2887,9 +2896,9 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
 
     All M rewrites are staged FIRST in the round -- before the review -- because
     the order the round asks for is "create the rewritten candidates, add them
-    to the pool, then targeted-review/revise and integrate". A rewrite sandbox consumes
+    to the pool, then guided-review/revise and integrate". A rewrite sandbox consumes
     nothing but the round's own base, so retrying one never invalidates the
-    targeted-review/revise arm, and retrying the review never invalidates a rewrite (see
+    guided-review/revise arm, and retrying the review never invalidates a rewrite (see
     revalidate_round_inputs).
     """
     vid = rewrite_vid(k)
@@ -2949,8 +2958,8 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
 
 
 def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
-    """(ii) Phase-1 sandbox: base/ + non_revised/ + prior_round/ (r>1) + targeted_review/ (OUT)."""
-    rid = rid_targeted_review(r) if part == "a" else rid_targeted_review_b(r)
+    """(ii) Phase-1 sandbox: base/ + non_revised/ + prior_round/ (r>1) + guided_review/ (OUT)."""
+    rid = rid_guided_review(r) if part == "a" else rid_guided_review_b(r)
     sb = ctx.runs_dir / rid
     a1 = ctx.run(rid_a1(r))
     if a1 is None:
@@ -3008,11 +3017,11 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
         # The second session's scope is complementary; it does NOT merge (the
         # orchestrator concatenates the two findings files after both finish),
         # but it can read the other session's OUTPUT once it is complete.
-        a_sb = ctx.sandbox_of(ctx.run(rid_targeted_review(r)) or {"sandbox": f"runs/{rid_targeted_review(r)}"})
-        if (a_sb / TARGETED_REVIEW_DIR).is_dir():
-            ensure_copy(a_sb / TARGETED_REVIEW_DIR, sb / TARGETED_REVIEW_A_DIR)
-            inputs[TARGETED_REVIEW_A_DIR] = hash_manifest(sb / TARGETED_REVIEW_A_DIR)
-    (sb / TARGETED_REVIEW_DIR).mkdir(exist_ok=True)
+        a_sb = ctx.sandbox_of(ctx.run(rid_guided_review(r)) or {"sandbox": f"runs/{rid_guided_review(r)}"})
+        if (a_sb / GUIDED_REVIEW_DIR).is_dir():
+            ensure_copy(a_sb / GUIDED_REVIEW_DIR, sb / GUIDED_REVIEW_A_DIR)
+            inputs[GUIDED_REVIEW_A_DIR] = hash_manifest(sb / GUIDED_REVIEW_A_DIR)
+    (sb / GUIDED_REVIEW_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     # Seed the M20 formatting sweep: the code-side OOXML scan IS the enumeration
@@ -3046,14 +3055,14 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                                venue=venue_profile_of(ctx),
                                                venue_norm=venue_norm_for(ctx),
                                                execution_profile=execution_profile_of(ctx)))
-    rec = ctx.register(rid, "targeted_review", r, f"runs/{rid}",
+    rec = ctx.register(rid, "guided_review", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
     rec["inputs_manifest"] = inputs
     return rec
 
 
 def materialize_audit(ctx: Ctx, r: int) -> dict:
-    """The AUDITOR sandbox: base/ + non_revised/ + the FROZEN targeted_review/, read-only.
+    """The AUDITOR sandbox: base/ + non_revised/ + the FROZEN guided_review/, read-only.
 
     The audit stage only exists when `setup --audit on` was given. It is a
     decision session, not an editing session: it writes `audit/` and nothing
@@ -3065,32 +3074,28 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     a1 = ctx.run(rid_a1(r))
     if a1 is None:
         raise RuntimeError(f"cannot materialize {rid}: {rid_a1(r)} does not exist")
-    # With `--no-targeted-review` there is no review sandbox: the frozen review
-    # view is synthesized from the probe's X-9xx rows, with the targeted
+    # With `--no-guided-review` there is no review sandbox: the frozen review
+    # view is synthesized from the cold-start review's X-9xx rows, with the guided
     # review's classes recorded as a named gap (see p19_profiles.py).
     merge_rid = review_producer_rid(ctx, r)
-    if merge_rid is not None:
-        rev_rec = _require_done(ctx, merge_rid,
-                                "the auditor consumes the round's frozen targeted_review/ output")
-        _stage_frozen_review = ctx.sandbox_of(rev_rec) / TARGETED_REVIEW_DIR
-    else:
-        _stage_frozen_review = None
+    rev_rec = _require_done(ctx, merge_rid,
+                            "the auditor consumes the round's frozen guided_review/ output")
+    _stage_frozen_review = (None if frozen_review_is_synthesized(ctx)
+                            else ctx.sandbox_of(rev_rec) / GUIDED_REVIEW_DIR)
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     if _stage_frozen_review is not None:
-        ensure_copy(_stage_frozen_review, sb / TARGETED_REVIEW_DIR)
+        ensure_copy(_stage_frozen_review, sb / GUIDED_REVIEW_DIR)
     else:
-        _require_done(ctx, rid_probe(r),
-                      "the auditor consumes the round's frozen targeted_review/ output")
         synthesize_frozen_review(ctx, r, sb)
-    # The PROBE session is an independent producer of X-9xx rows: merge them
+    # The COLD-START REVIEW session is an independent producer of X-9xx rows: merge them
     # into THIS sandbox's frozen review copy (never into the source review), so
     # the auditor disposes them beside every other frozen id.
-    # A concern-scoped revision has no probe session and must never absorb
+    # A concern-scoped revision has no cold-start session and must never absorb
     # general X-9xx discovery rows: they are not reviewer concerns.
-    probe_merge = ({} if journal_is_scoped(ctx) or merge_rid is None
-                   else merge_probe_into_review_copy(ctx, r, sb))
+    cold_start_merge = ({} if journal_is_scoped(ctx) or _stage_frozen_review is None
+                        else merge_cold_start_into_review_copy(ctx, r, sb))
     if journal_has_feedback(ctx) and merge_rid is not None:
         # The auditor disposes JF findings against the real letter, and a
         # concern the reviewers raised against the earlier version can only be
@@ -3115,13 +3120,13 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
                                               author_to_complete=author_to_complete_mode_of(ctx),
                                               venue_norm=venue_norm_for(ctx),
                                               execution_profile=execution_profile_of(ctx),
-                                              targeted_review_off=not targeted_review_enabled(ctx)))
+                                              guided_review_off=not guided_review_enabled(ctx)))
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
-    rec["probe_merge"] = probe_merge
+    rec["cold_start_merge"] = cold_start_merge
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
-                              "targeted_review": hash_manifest(sb / TARGETED_REVIEW_DIR)}
+                              "guided_review": hash_manifest(sb / GUIDED_REVIEW_DIR)}
     if (sb / "feedback").is_dir():
         rec["inputs_manifest"]["feedback"] = hash_manifest(sb / "feedback",
                                                           follow_dir_links=True)
@@ -3131,12 +3136,12 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
 
 
 # =====================================================================
-# THE PROBE REVIEW (see `rid_probe` / `PROBE_REVIEW_MODES`)
+# THE COLD-START REVIEW (see `rid_cold_start_review` / `COLD_START_REVIEW_MODES`)
 #
-#   probe_review/          — the ONLY output directory (see PROBE_DIR)
+#   cold_start_review/          — the ONLY output directory (see COLD_START_DIR)
 #     CLAIM_SURFACES.md    — seeded: claim-bearing sentences (a CANDIDATE list)
 #     PRODUCERS.md         — seeded: the corpus's own table/code inventory
-#     findings_probe.json/md — the findings (any class; X-9xx ids) + `checked`
+#     findings_cold_start_review.json/md — the findings (any class; X-9xx ids) + `checked`
 #     coverage.md          — the areas examined, counts and honest limits
 #     scripts/*.py         — every declared verifier, re-runnable
 #     REPRODUCTION.md      — code-written by the postcheck (NOT the session)
@@ -3146,7 +3151,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
 # computation is trustworthy; different -> the attempt FAILS (a computation the
 # probe cannot reproduce is a correctness blocker, not a finding). The findings
 # (X-9xx) ride in the round's discovery list
-# (`targeted_review/round2/findings_extra.json` in every downstream copy), so the
+# (`guided_review/round2/findings_extra.json` in every downstream copy), so the
 # reviser must resolve them, the auditor may only drop them with evidence, and
 # the integrator must reconcile them.
 # =====================================================================
@@ -3160,18 +3165,18 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
 # reportable as a claim its own producer contradicts.
 
 
-def seeded_probe_paths(sb: Path) -> set:
-    """Every file the probe materializer writes before the agent starts.
+def seeded_cold_start_paths(sb: Path) -> set:
+    """Every file the cold-start-review materializer writes before the agent starts.
 
     `leftovers_present` treats them as INPUTS: a freshly materialized probe
     sandbox must not read as "already worked in".
     """
-    return {sb / PROBE_SURFACES_REL, sb / PROBE_PRODUCERS_REL,
-            sb / PROBE_OBLIGATIONS_REL}
+    return {sb / COLD_START_SURFACES_REL, sb / COLD_START_PRODUCERS_REL,
+            sb / COLD_START_OBLIGATIONS_REL}
 
 
-def probe_obligation_rows(root: Path, limit: int = 200) -> list:
-    """Rows for `PROBE_OBLIGATIONS.md`: what the submission promises, resolved.
+def cold_start_obligation_rows(root: Path, limit: int = 200) -> list:
+    """Rows for `COLD_START_OBLIGATIONS_REL`: what the submission promises, resolved.
 
     Three families, each derived from the corpus's own declarations -- nothing
     here reads a checklist or a rule the venue did not state:
@@ -3235,8 +3240,8 @@ def probe_obligation_rows(root: Path, limit: int = 200) -> list:
     return rows[:limit]
 
 
-def probe_table_inventory(corpus: Path, limit: int = 400) -> list:
-    """Rows for `PROBE_PRODUCERS.md`: the corpus's own data tables + code files.
+def cold_start_table_inventory(corpus: Path, limit: int = 400) -> list:
+    """Rows for `COLD_START_PRODUCERS_REL`: the corpus's own data tables + code files.
 
     Deterministic and cheap: tabular files get their header columns and data-row
     count, everything else is listed by path. This is the producer CANDIDATE
@@ -3277,18 +3282,18 @@ def probe_table_inventory(corpus: Path, limit: int = 400) -> list:
     return rows
 
 
-def seed_probe_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
-    """Write the probe sandbox's two candidate inventories (inputs, not answers).
+def seed_cold_start_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
+    """Write the cold-start-review sandbox's two candidate inventories (inputs, not answers).
 
     CLAIM_SURFACES.md is the same paragraph model the review's claim-strength
-    ledger uses, so the probe cannot silently miss a claim surface the pipeline
+    ledger uses, so the cold-start review cannot silently miss a claim surface the pipeline
     knows exists; PRODUCERS.md is the data/code inventory. Both are marked as
     CANDIDATE lists: the prompt requires the session to read the surfaces and
     the producers itself and to account for every surface in coverage.md.
     """
     corpus = sb / "base"
     try:
-        ev = code_side_evidence(ctx, corpus, f"{rid_probe(r)}:probe")
+        ev = code_side_evidence(ctx, corpus, f"{rid_cold_start_review(r)}:probe")
     except Exception as e:                                        # noqa: BLE001
         ev = {"error": f"{type(e).__name__}: {e}"}
     claim_rows = []
@@ -3300,7 +3305,7 @@ def seed_probe_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
             "marker(s)": ", ".join(markers) if isinstance(markers, (list, tuple))
             else str(markers or ""),
             "sentence": (c.get("sentence") or "")[:160]})
-    write_text_atomic(sb / PROBE_SURFACES_REL, (
+    write_text_atomic(sb / COLD_START_SURFACES_REL, (
         "# CLAIM SURFACES — seeded CANDIDATE list (the enumeration is YOURS)\n\n"
         "Every claim-bearing sentence the orchestrator's paragraph model found (the same model the "
         "review's J3 claim-strength ledger uses). `direction` = the polarity the model saw: `over` "
@@ -3311,18 +3316,18 @@ def seed_probe_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
             claim_rows, ["document", "paragraph", "kind", "direction", "marker(s)", "sentence"],
             "no claim-bearing sentence was found by the code-side model")
         + "\n"))
-    write_text_atomic(sb / PROBE_PRODUCERS_REL, (
+    write_text_atomic(sb / COLD_START_PRODUCERS_REL, (
         "# PRODUCERS — seeded CANDIDATE list (data tables and code in the corpus)\n\n"
         "The corpus's own `" + "/`, `".join(RAW_DATA_DIRNAMES) + "/` files and its `code/` "
         "directory. Tabular files show their header columns and data-row count so a claim can be "
         "paired with the column that must support it. This list is NOT the enumeration: read the "
         "files you need, and use a producer the corpus carries even when it is not listed here.\n\n"
         + _evidence_artifact_table(
-            probe_table_inventory(corpus),
+            cold_start_table_inventory(corpus),
             ["file", "data rows", "columns (first 14)"],
             "no producer file (data table or code) was found in the corpus")
         + "\n"))
-    write_text_atomic(sb / PROBE_OBLIGATIONS_REL, (
+    write_text_atomic(sb / COLD_START_OBLIGATIONS_REL, (
         "# OBLIGATIONS — seeded CANDIDATE list (what THIS submission promises)\n\n"
         "Completeness runs in TWO directions. The other two lists point at what the corpus SAYS "
         "(claims, producers); this one points at what the corpus OWES its own reader — the "
@@ -3337,24 +3342,24 @@ def seed_probe_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
         "appears in the text)? A missing section or a cited-but-absent item belongs to this "
         "family even though nothing on the page is wrong.\n\n"
         + _evidence_artifact_table(
-            probe_obligation_rows(corpus),
+            cold_start_obligation_rows(corpus),
             ["family", "obligation", "resolves", "where"],
             "no obligation could be derived (no README declaration, no pointer, no display item)")
         + "\n"))
     return {"claims": len(claim_rows)}
 
 
-def materialize_probe(ctx: Ctx, r: int) -> dict:
-    """The PROBE REVIEW sandbox (see `rid_probe`): a cold-context discovery pass.
+def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
+    """The COLD-START REVIEW sandbox (see `rid_cold_start_review`): a cold-context discovery pass.
 
-    Materialized from the round base ONLY. Deliberately absent: `targeted_review/`,
+    Materialized from the round base ONLY. Deliberately absent: `guided_review/`,
     `prior_round/`, any finding list, any sweep artifact. The session's value
     is that it re-derives its own read of the corpus -- and its own
     computations -- in a context that has not just disposed the checklist's
     rows. The seeds are CANDIDATE lists, not a scope: any defect class may be
     reported.
     """
-    rid = rid_probe(r)
+    rid = rid_cold_start_review(r)
     a1 = ctx.run(rid_a1(r))
     if a1 is None:
         raise RuntimeError(f"cannot materialize {rid}: {rid_a1(r)} does not exist")
@@ -3362,17 +3367,17 @@ def materialize_probe(ctx: Ctx, r: int) -> dict:
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    (sb / PROBE_DIR).mkdir(exist_ok=True)
-    seed_probe_surfaces(ctx, sb, r)
+    (sb / COLD_START_DIR).mkdir(exist_ok=True)
+    seed_cold_start_surfaces(ctx, sb, r)
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / PROMPT_FILE
     if not prompt.is_file():
-        write_text_atomic(prompt, probe_prompt(sb, rid, r, prior_failure=note,
+        write_text_atomic(prompt, cold_start_review_prompt(sb, rid, r, prior_failure=note,
                                                venue=venue_profile_of(ctx),
                                                author_to_complete=author_to_complete_mode_of(ctx),
                                                execution_profile=execution_profile_of(ctx),
-                                               targeted_review_off=not targeted_review_enabled(ctx)))
-    rec = ctx.register(rid, "probe", r, f"runs/{rid}",
+                                               guided_review_off=not guided_review_enabled(ctx)))
+    rec = ctx.register(rid, "cold_start_review", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR,
@@ -3380,7 +3385,7 @@ def materialize_probe(ctx: Ctx, r: int) -> dict:
     return rec
 
 
-def _probe_value_equal(declared, produced) -> bool:
+def _cold_start_value_equal(declared, produced) -> bool:
     """Is the declared `computed` value equal to what the script re-printed?
 
     Whitespace-insensitive; two numbers compare NUMERICALLY (0.912 == 0.9120,
@@ -3403,8 +3408,8 @@ def _probe_value_equal(declared, produced) -> bool:
         return False
 
 
-def _probe_contract_problems(sb: Path) -> tuple:
-    """(errors, warnings, findings) for `probe_review/findings_probe.json`.
+def _cold_start_contract_problems(sb: Path) -> tuple:
+    """(errors, warnings, findings) for `cold_start_review/findings_cold_start_review.json`.
 
     Sandbox-local and pure, exactly like the review's contract helpers, so the
     session's pre-flight (`sandbox_selfcheck`) applies the detectors the
@@ -3416,26 +3421,26 @@ def _probe_contract_problems(sb: Path) -> tuple:
     carry a `verifier` -- a re-runnable script plus the exact value it prints --
     when the defect can be shown by computation. What is checked here:
 
-      * `checked`: every AREA the probe examined, with its candidate and finding
+      * `checked`: every AREA the cold-start review examined, with its candidate and finding
         counts, so a zero-finding outcome is an examined corpus and not an
         unrun pass;
       * every finding's standard shape, unique id in the reserved X-9xx block;
-      * every declared verifier: a relative script under `probe_review/scripts/`
+      * every declared verifier: a relative script under `cold_start_review/scripts/`
         that exists, plus the non-empty `computed` value it must print (the
-        orchestrator re-runs it -- see `probe_reproduction`).
+        orchestrator re-runs it -- see `cold_start_reproduction`).
     """
     errs, warns = [], []
-    p = sb / PROBE_FINDINGS_REL
+    p = sb / COLD_START_FINDINGS_REL
     if not p.is_file():
-        return ([f"{PROBE_FINDINGS_REL} is missing: the probe's findings (an EMPTY list is "
+        return ([f"{COLD_START_FINDINGS_REL} is missing: the cold-start review's findings (an EMPTY list is "
                  f"legal) and its `checked` inventory are the deliverable, and that artifact is "
                  f"what distinguishes an examined corpus from an unrun pass"], [], [])
     doc = read_json(p, revive=False, lenient=True)               # agent-written
     if not isinstance(doc, dict):
-        return ([f"{PROBE_FINDINGS_REL} does not parse as a JSON object"], [], [])
+        return ([f"{COLD_START_FINDINGS_REL} does not parse as a JSON object"], [], [])
     checked = doc.get("checked")
     if not isinstance(checked, list) or not checked:
-        errs.append(f"{PROBE_FINDINGS_REL} carries no 'checked' list: every area the probe "
+        errs.append(f"{COLD_START_FINDINGS_REL} carries no 'checked' list: every area the probe "
                     f"examined (documents and sections, raw_data/, code/, figures, references, "
                     f"cross-document consistency, ...) is listed with the number of candidates "
                     f"examined and the findings filed, so a zero-finding outcome is an examined "
@@ -3443,7 +3448,7 @@ def _probe_contract_problems(sb: Path) -> tuple:
         checked = []
     for c in checked:
         if not isinstance(c, dict) or not str(c.get("area") or "").strip():
-            errs.append(f"{PROBE_FINDINGS_REL}: a `checked` row has no 'area' name")
+            errs.append(f"{COLD_START_FINDINGS_REL}: a `checked` row has no 'area' name")
             continue
         area = str(c["area"]).strip()
         for key in ("examined", "findings"):
@@ -3452,79 +3457,79 @@ def _probe_contract_problems(sb: Path) -> tuple:
             except (TypeError, ValueError):
                 value = -1
             if value < 0:
-                errs.append(f"{PROBE_FINDINGS_REL}: checked area {area!r} carries no usable "
+                errs.append(f"{COLD_START_FINDINGS_REL}: checked area {area!r} carries no usable "
                             f"{key!r} count")
     raw = doc.get("findings")
     if not isinstance(raw, list):
-        errs.append(f"{PROBE_FINDINGS_REL} carries no 'findings' list (an empty list is legal "
+        errs.append(f"{COLD_START_FINDINGS_REL} carries no 'findings' list (an empty list is legal "
                     f"when `checked` documents the examination)")
         raw = []
     findings, seen = [], set()
     for i, f in enumerate(raw):
         if not isinstance(f, dict):
-            errs.append(f"{PROBE_FINDINGS_REL}: finding {i} is not an object")
+            errs.append(f"{COLD_START_FINDINGS_REL}: finding {i} is not an object")
             continue
         fid = str(f.get("id") or "").strip()
-        if not PROBE_ID_RE.match(fid):
-            errs.append(f"{PROBE_FINDINGS_REL}: id {fid or '(none)'!r} is outside the reserved "
+        if not COLD_START_ID_RE.match(fid):
+            errs.append(f"{COLD_START_FINDINGS_REL}: id {fid or '(none)'!r} is outside the reserved "
                         f"probe block X-901...X-999")
             continue
         if fid in seen:
-            errs.append(f"{PROBE_FINDINGS_REL}: duplicate id {fid}")
+            errs.append(f"{COLD_START_FINDINGS_REL}: duplicate id {fid}")
         seen.add(fid)
         for key in ("location", "evidence", "explanation"):
             if not str(f.get(key) or "").strip():
-                errs.append(f"{PROBE_FINDINGS_REL} {fid}: no {key}")
+                errs.append(f"{COLD_START_FINDINGS_REL} {fid}: no {key}")
         if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
-            errs.append(f"{PROBE_FINDINGS_REL} {fid}: severity {f.get('severity')!r} is not one "
+            errs.append(f"{COLD_START_FINDINGS_REL} {fid}: severity {f.get('severity')!r} is not one "
                         f"of {'/'.join(s.capitalize() for s in DISCOVERY_SEVERITIES)}")
         try:
             ok_cat = 0 <= int(f.get("category")) <= 5
         except (TypeError, ValueError):
             ok_cat = False
         if not ok_cat:
-            errs.append(f"{PROBE_FINDINGS_REL} {fid}: category {f.get('category')!r} is not an "
+            errs.append(f"{COLD_START_FINDINGS_REL} {fid}: category {f.get('category')!r} is not an "
                         f"integer 0-5")
         verifier = f.get("verifier")
         if verifier is not None:
             if not isinstance(verifier, dict):
-                errs.append(f"{PROBE_FINDINGS_REL} {fid}: `verifier` is not an object "
+                errs.append(f"{COLD_START_FINDINGS_REL} {fid}: `verifier` is not an object "
                             f"({{script, computed, shows}}) -- omit it when no computation can "
                             f"show the defect")
             else:
                 script = str(verifier.get("script") or "").strip()
                 if not script:
-                    errs.append(f"{PROBE_FINDINGS_REL} {fid}: the verifier carries no `script`")
+                    errs.append(f"{COLD_START_FINDINGS_REL} {fid}: the verifier carries no `script`")
                 else:
                     sp = Path(script)
                     if sp.is_absolute() or ".." in sp.parts \
-                            or not script.startswith(PROBE_SCRIPT_PREFIX):
-                        errs.append(f"{PROBE_FINDINGS_REL} {fid}: verifier script {script!r} "
-                                    f"must be a relative path under {PROBE_SCRIPT_PREFIX}")
+                            or not script.startswith(COLD_START_SCRIPT_PREFIX):
+                        errs.append(f"{COLD_START_FINDINGS_REL} {fid}: verifier script {script!r} "
+                                    f"must be a relative path under {COLD_START_SCRIPT_PREFIX}")
                     elif not (sb / sp).is_file():
-                        errs.append(f"{PROBE_FINDINGS_REL} {fid}: verifier script {script!r} "
+                        errs.append(f"{COLD_START_FINDINGS_REL} {fid}: verifier script {script!r} "
                                     f"does not exist")
                 if not str(verifier.get("computed") or "").strip():
-                    errs.append(f"{PROBE_FINDINGS_REL} {fid}: the verifier carries no `computed` "
+                    errs.append(f"{COLD_START_FINDINGS_REL} {fid}: the verifier carries no `computed` "
                                 f"value (EXACTLY the last non-empty stdout line the script "
                                 f"prints)")
         findings.append(f)
     verifier_count = sum(1 for f in findings if isinstance(f.get("verifier"), dict))
-    if verifier_count > PROBE_REPRO_MAX_VERIFIERS:
-        errs.append(f"{PROBE_FINDINGS_REL}: {verifier_count} verifier(s) declared but at most "
-                    f"{PROBE_REPRO_MAX_VERIFIERS} are re-run per attempt; a verifier is a "
+    if verifier_count > COLD_START_REPRO_MAX_VERIFIERS:
+        errs.append(f"{COLD_START_FINDINGS_REL}: {verifier_count} verifier(s) declared but at most "
+                    f"{COLD_START_REPRO_MAX_VERIFIERS} are re-run per attempt; a verifier is a "
                     f"computation the orchestrator must be able to re-run within its budget")
     return errs, warns, findings
 
 
-def probe_reproduction(sb: Path, findings: list) -> dict:
+def cold_start_reproduction(sb: Path, findings: list) -> dict:
     """Re-run every DECLARED verifier and record what it printed.
 
     A finding's `verifier` is {script, computed, shows}: the script's last
     non-empty stdout line must equal `computed`. The orchestrator runs it itself
     (offline, bounded, cwd = the sandbox root); a mismatch, a missing script, a
     non-zero exit, an empty output or a timeout is an error the caller turns into
-    a failed attempt -- a computation the probe cannot reproduce is a
+    a failed attempt -- a computation the cold-start review cannot reproduce is a
     correctness blocker, not a finding. Findings WITHOUT a verifier are
     evidence/quotation rows: they are not re-run (their evidence is the quoted
     text or file:line reference), and they carry status `no-verifier` in the
@@ -3540,13 +3545,13 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
             results.append({"row": fid, "script": "", "declared": "", "produced": "",
                             "status": "no-verifier", "detail": ""})
             continue
-        if (ran >= PROBE_REPRO_MAX_VERIFIERS
-                or time.monotonic() - started > PROBE_REPRO_TOTAL_BUDGET):
+        if (ran >= COLD_START_REPRO_MAX_VERIFIERS
+                or time.monotonic() - started > COLD_START_REPRO_TOTAL_BUDGET):
             results.append({"row": fid, "script": str(verifier.get("script") or ""),
                             "declared": "", "produced": "",
                             "status": "skipped-over-budget",
-                            "detail": (f"only {PROBE_REPRO_MAX_VERIFIERS} verifier(s) and "
-                                       f"{PROBE_REPRO_TOTAL_BUDGET}s of aggregate postcheck "
+                            "detail": (f"only {COLD_START_REPRO_MAX_VERIFIERS} verifier(s) and "
+                                       f"{COLD_START_REPRO_TOTAL_BUDGET}s of aggregate postcheck "
                                        f"time are run per attempt")})
             continue
         ran += 1
@@ -3555,14 +3560,14 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
                  "declared": " ".join(str(verifier.get("computed") or "").split()),
                  "produced": "", "status": "", "detail": ""}
         target = sb / script if script else None
-        # The verifier must live under `probe_review/scripts/`, by REAL path:
-        # `is_within(target, sb / PROBE_DIR)` resolved both sides, so replacing
-        # `probe_review` with a symlink to /tmp/outside made the outside script
+        # The verifier must live under `cold_start_review/scripts/`, by REAL path:
+        # `is_within(target, sb / COLD_START_DIR)` resolved both sides, so replacing
+        # `cold_start_review` with a symlink to /tmp/outside made the outside script
         # and the anchor agree and the orchestrator executed it.
         try:
-            root = sb.resolve() / PROBE_SCRIPT_PREFIX
-            scripts_dir = sb / PROBE_DIR / "scripts"
-            safe = (target is not None and not (sb / PROBE_DIR).is_symlink()
+            root = sb.resolve() / COLD_START_SCRIPT_PREFIX
+            scripts_dir = sb / COLD_START_DIR / "scripts"
+            safe = (target is not None and not (sb / COLD_START_DIR).is_symlink()
                     and not scripts_dir.is_symlink()
                     and target.is_file()
                     and target.resolve().is_relative_to(root))
@@ -3579,7 +3584,7 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
             # a verifier that floods stdout is an over-budget failure, never
             # unbounded memory in the orchestrator (F61).
             rc, out, _err = run_bounded(
-                [sys.executable, str(target)], PROBE_REPRO_TIMEOUT, cwd=str(sb))
+                [sys.executable, str(target)], COLD_START_REPRO_TIMEOUT, cwd=str(sb))
             text = (out or b"").decode("utf-8", "replace")
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             produced = lines[-1] if lines else ""
@@ -3588,12 +3593,12 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
                 entry.update(status="failed", detail=f"exit {rc}")
             elif not produced:
                 entry.update(status="empty")
-            elif _probe_value_equal(entry["declared"], produced):
+            elif _cold_start_value_equal(entry["declared"], produced):
                 entry.update(status="reproduced")
             else:
                 entry.update(status="mismatch")
         except subprocess.TimeoutExpired:
-            entry.update(status="timeout", detail=f"over {PROBE_REPRO_TIMEOUT}s")
+            entry.update(status="timeout", detail=f"over {COLD_START_REPRO_TIMEOUT}s")
         except ToolOutputOverBudget as e:
             entry.update(status="failed", detail=str(e)[:120])
         except OSError as e:                                     # noqa: BLE001
@@ -3608,9 +3613,9 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
             "mismatches": mismatches, "broken": broken, "results": results}
 
 
-def _write_probe_reproduction(sb: Path, repro: dict) -> None:
-    """The code-written reproduction record (`probe_review/REPRODUCTION.md`)."""
-    lines = ["# PROBE REPRODUCTION — the orchestrator re-ran every declared verifier", "",
+def _write_cold_start_reproduction(sb: Path, repro: dict) -> None:
+    """The code-written reproduction record (`cold_start_review/REPRODUCTION.md`)."""
+    lines = ["# COLD-START REVIEW REPRODUCTION — the orchestrator re-ran every declared verifier", "",
              "| finding | script | declared | re-run printed | status |",
              "|---|---|---|---|---|"]
     for r in repro.get("results") or ():
@@ -3621,13 +3626,14 @@ def _write_probe_reproduction(sb: Path, repro: dict) -> None:
     lines += ["", f"{repro.get('reproduced', 0)} of {repro.get('verified', 0)} declared "
                   f"verifier(s) reproduced exactly; {len(repro.get('mismatches') or [])} "
                   f"mismatch(es), {len(repro.get('broken') or [])} broken script(s). A mismatch "
-                  "or a broken script fails the attempt: a computation the probe cannot "
+                  "or a broken script fails the attempt: a computation the cold-start review "
+                  "cannot "
                   "reproduce is a correctness blocker, not a finding.", ""]
-    write_text_atomic(sb / PROBE_REPRO_REL, "\n".join(lines))
+    write_text_atomic(sb / COLD_START_REPRO_REL, "\n".join(lines))
 
 
-def postcheck_probe(ctx: Ctx, rec: dict):
-    """The probe session's contract: the checked inventory, the findings, and
+def postcheck_cold_start_review(ctx: Ctx, rec: dict):
+    """The cold-start session's contract: the checked inventory, the findings, and
     every DECLARED verifier RE-RUN.
 
     Structural plus computational. The findings are generic (any category, any
@@ -3636,45 +3642,45 @@ def postcheck_probe(ctx: Ctx, rec: dict):
     finding that carries a verifier, the orchestrator re-runs the script and
     compares its last stdout line with the declared `computed` value. A mismatch
     is a hard error (the attempt fails and is retried), never a warning --
-    a computation the probe cannot reproduce is a correctness blocker.
+    a computation the cold-start review cannot reproduce is a correctness blocker.
     """
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
     marker = marker_json(sb, rec["kind"])
-    _marker_checks(rec, marker, "probe", errs, warns, sb=sb)
+    _marker_checks(rec, marker, "cold_start_review", errs, warns, sb=sb)
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
-    perrs, pwarns, findings = _probe_contract_problems(sb)
+    perrs, pwarns, findings = _cold_start_contract_problems(sb)
     errs.extend(perrs)
     warns.extend(pwarns)
-    coverage = sb / PROBE_COVERAGE_REL
+    coverage = sb / COLD_START_COVERAGE_REL
     if coverage.is_symlink() or not coverage.is_file():
-        errs.append(f"{PROBE_COVERAGE_REL} is missing: the areas examined, the counts and the "
+        errs.append(f"{COLD_START_COVERAGE_REL} is missing: the areas examined, the counts and the "
                     f"round's honest limits are part of the deliverable")
     else:
         # Agent-written prose: use the shared regular-file/no-follow/byte-budget
         # reader. A huge or blocking COVERAGE.md could hang/OOM postcheck (F57).
         coverage_text = read_text_bounded(coverage)
         if coverage_text is None:
-            errs.append(f"{PROBE_COVERAGE_REL} could not be read (it is a symlink/"
+            errs.append(f"{COLD_START_COVERAGE_REL} could not be read (it is a symlink/"
                         f"non-regular file or over the byte budget)")
         elif not coverage_text.strip():
-            errs.append(f"{PROBE_COVERAGE_REL} is EMPTY: account for the areas examined, the "
+            errs.append(f"{COLD_START_COVERAGE_REL} is EMPTY: account for the areas examined, the "
                         f"findings they produced and what could not be checked")
-    repro = probe_reproduction(sb, findings)
+    repro = cold_start_reproduction(sb, findings)
     if findings:
-        _write_probe_reproduction(sb, repro)
+        _write_cold_start_reproduction(sb, repro)
     findings_ids = sorted(str(f.get("id") or "").strip() for f in findings)
     repro["findings"] = findings_ids
-    rec["probe_review"] = repro
+    rec["cold_start_review"] = repro
     for r in repro["results"]:
         if r["status"] == "mismatch":
-            errs.append(f"{PROBE_FINDINGS_REL} {r['row']}: the re-run of `{r['script']}` printed "
+            errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the re-run of `{r['script']}` printed "
                         f"{r['produced']!r} where the finding declares {r['declared']!r} -- the "
                         f"declared computation does not reproduce (a correctness blocker: fix "
                         f"the script or the declared value)")
         elif r["status"] in ("missing", "timeout", "failed", "empty"):
-            errs.append(f"{PROBE_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
+            errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
                         f"{'is missing' if r['status'] == 'missing' else r['status']}"
                         + (f" ({r['detail']})" if r["detail"] else "")
                         + " -- a declared verifier must be a re-runnable script that prints its "
@@ -3685,21 +3691,21 @@ def postcheck_probe(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
-def probe_findings_rows(ctx: Ctx, r: int) -> list:
-    """The probe session's X-9xx findings ([] when the round ran no probe).
+def cold_start_findings_rows(ctx: Ctx, r: int) -> list:
+    """The cold-start session's X-9xx findings ([] when the round ran none).
 
-    A FINISHED probe run wins, even when its list is empty -- falling back to
-    the archive could resurrect a superseded list. A root whose probe sandbox is
-    gone (pruned, or a decision re-derived later) reads the archived copy under
-    `reports/round<r>_review/`, so the frozen list stays reproducible.
+    A FINISHED cold-start run wins, even when its list is empty -- falling back
+    to the archive could resurrect a superseded list. A root whose cold-start
+    sandbox is gone (pruned, or a decision re-derived later) reads the archived
+    copy under `reports/round<r>_review/`, so the frozen list stays reproducible.
     """
     try:
         r = int(r)
     except (TypeError, ValueError):
         return []
-    rec = ctx.run(rid_probe(r))
+    rec = ctx.run(rid_cold_start_review(r))
     if rec is not None and str(rec.get("status") or "") == "done":
-        live = ctx.sandbox_of(rec) / PROBE_FINDINGS_REL
+        live = ctx.sandbox_of(rec) / COLD_START_FINDINGS_REL
         if live.is_file():
             doc = read_json(live, revive=False, lenient=True)
             found = doc.get("findings") if isinstance(doc, dict) else []
@@ -3713,16 +3719,16 @@ def probe_findings_rows(ctx: Ctx, r: int) -> list:
     # same defects under remapped ids.
     archived = read_json(ctx.reports_dir / f"round{r}_review" / "findings_extra.json",
                          revive=False, lenient=True)
-    if isinstance(archived, dict) and isinstance(archived.get("probe_merge"), dict):
+    if isinstance(archived, dict) and isinstance(archived.get("cold_start_merge"), dict):
         return []
-    doc = read_json(ctx.reports_dir / f"round{r}_review" / "findings_probe.json",
+    doc = read_json(ctx.reports_dir / f"round{r}_review" / "findings_cold_start_review.json",
                     revive=False, lenient=True)
     found = doc.get("findings") if isinstance(doc, dict) else []
     return [f for f in (found or ()) if isinstance(f, dict)
             and str(f.get("id") or "").strip()]
 
 
-def probe_review_upstream_doc(ctx: Ctx, r: int) -> dict:
+def cold_start_review_upstream_doc(ctx: Ctx, r: int) -> dict:
     """The UNMERGED review `round2/findings_extra.json` doc ({} when none).
 
     Resolved like every other downstream consumer: the concerns run in a scoped
@@ -3733,12 +3739,12 @@ def probe_review_upstream_doc(ctx: Ctx, r: int) -> dict:
     if journal_is_scoped(ctx):
         rid, archive = rid_concerns(r), f"round{int(r)}_concerns"
     elif review_split_of(ctx) != "off":
-        rid, archive = rid_targeted_review_b(r), f"round{int(r)}_review"
+        rid, archive = rid_guided_review_b(r), f"round{int(r)}_review"
     else:
-        rid, archive = rid_targeted_review(r), f"round{int(r)}_review"
+        rid, archive = rid_guided_review(r), f"round{int(r)}_review"
     rec = ctx.run(rid)
     if rec is not None and str(rec.get("status") or "") == "done":
-        doc = read_json(ctx.sandbox_of(rec) / TARGETED_REVIEW_DIR / "round2" / "findings_extra.json",
+        doc = read_json(ctx.sandbox_of(rec) / GUIDED_REVIEW_DIR / "round2" / "findings_extra.json",
                         revive=False, lenient=True)
         if isinstance(doc, dict):
             return doc
@@ -3747,7 +3753,7 @@ def probe_review_upstream_doc(ctx: Ctx, r: int) -> dict:
     return doc if isinstance(doc, dict) else {}
 
 
-def probe_findings_for_merge(existing_ids, rows) -> tuple:
+def cold_start_findings_for_merge(existing_ids, rows) -> tuple:
     """(findings with collision-free ids, remap) against the ids already in a list.
 
     Deterministic, in row order: a probe row whose id is already used (or that
@@ -3762,12 +3768,12 @@ def probe_findings_for_merge(existing_ids, rows) -> tuple:
         fid = str(row.get("id") or "").strip()
         new = fid
         if not DISCOVERY_X_ID_RE.match(new) or new in used:
-            k = PROBE_FINDING_ID_BASE + 1
+            k = COLD_START_FINDING_ID_BASE + 1
             while f"X-{k:03d}" in used:
                 k += 1
-            if k > PROBE_FINDING_ID_BASE + 99:
+            if k > COLD_START_FINDING_ID_BASE + 99:
                 # Fail closed: X-1000 is outside the reserved X-9xx block and
-                # no longer matches PROBE_ID_RE, so every downstream probe-id
+                # no longer matches COLD_START_ID_RE, so every downstream probe-id
                 # check would misclassify it.
                 raise RuntimeError(
                     "the reserved probe id block X-901..X-999 is exhausted: "
@@ -3780,54 +3786,54 @@ def probe_findings_for_merge(existing_ids, rows) -> tuple:
     return out, remap
 
 
-def probe_merged_review_doc(ctx: Ctx, r: int, base_doc) -> tuple:
+def cold_start_merged_review_doc(ctx: Ctx, r: int, base_doc) -> tuple:
     """(merged doc or None, rows added, remap) for one review-copy merge.
 
-    The ONE place that computes what `merge_probe_into_review_copy` writes, so
+    The ONE place that computes what `merge_cold_start_into_review_copy` writes, so
     the materializer and the input-freshness check (`_review_copy_mismatch`)
     cannot disagree about the expected content. `None` means the probe carried
     no findings and the copy is the upstream bytes, unchanged.
     """
-    rows = probe_findings_rows(ctx, r)
+    rows = cold_start_findings_rows(ctx, r)
     if not rows:
         return None, [], {}
     doc = base_doc if isinstance(base_doc, dict) else {}
-    block = doc.get("probe_merge")
-    if isinstance(block, dict) and str(block.get("source") or "") == rid_probe(r):
+    block = doc.get("cold_start_merge")
+    if isinstance(block, dict) and str(block.get("source") or "") == rid_cold_start_review(r):
         # The base is ALREADY the merged doc (only reachable through the archive
-        # fallback of probe_review_upstream_doc): merging again would duplicate
+        # fallback of cold_start_review_upstream_doc): merging again would duplicate
         # every row under remapped ids.
         return doc, [], block.get("id_remap") or {}
     existing = [f for f in (doc.get("findings") or []) if isinstance(f, dict)]
-    merged_rows, remap = probe_findings_for_merge([f.get("id") for f in existing], rows)
+    merged_rows, remap = cold_start_findings_for_merge([f.get("id") for f in existing], rows)
     merged = dict(doc)
     merged["findings"] = existing + merged_rows
-    merged["probe_merge"] = {"source": rid_probe(r), "rows": len(merged_rows),
+    merged["cold_start_merge"] = {"source": rid_cold_start_review(r), "rows": len(merged_rows),
                              "id_remap": remap}
     return merged, merged_rows, remap
 
 
-def merge_probe_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
-    """Merge the probe session's X-9xx findings into THIS sandbox's review copy.
+def merge_cold_start_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
+    """Merge the cold-start session's X-9xx findings into THIS sandbox's review copy.
 
     The probe findings have the same standing as the discovery round's X-* rows,
     so they travel in the ONE file every downstream contract reads
-    (`targeted_review/round2/findings_extra.json`). The SOURCE review sandbox is never
+    (`guided_review/round2/findings_extra.json`). The SOURCE review sandbox is never
     mutated -- it is frozen and byte-verified -- and every consumer (auditor,
     each reviser) gets the same merged copy. Colliding ids are remapped
-    deterministically (see `probe_findings_for_merge`) and the merge block records
+    deterministically (see `cold_start_findings_for_merge`) and the merge block records
     the remap.
     """
-    rows = probe_findings_rows(ctx, r)
+    rows = cold_start_findings_rows(ctx, r)
     if not rows:
         return {"rows": 0, "remap": {}}
-    target = sb / TARGETED_REVIEW_DIR / "round2" / "findings_extra.json"
+    target = sb / GUIDED_REVIEW_DIR / "round2" / "findings_extra.json"
     # Compute the expected merge from the UNMERGED upstream review (never from
     # the copy, which may already carry a merge block): writing the expected doc
     # is idempotent, replaces a stale merge after a probe retry, and cannot
     # duplicate rows under remapped ids.
-    merged, merged_rows, remap = probe_merged_review_doc(
-        ctx, r, probe_review_upstream_doc(ctx, r))
+    merged, merged_rows, remap = cold_start_merged_review_doc(
+        ctx, r, cold_start_review_upstream_doc(ctx, r))
     if merged is None:
         return {"rows": 0, "remap": {}}
     current = read_json(target, revive=False, lenient=True)
@@ -3835,7 +3841,7 @@ def merge_probe_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
         return {"rows": len(merged_rows), "remap": remap, "skipped": True}
     target.parent.mkdir(parents=True, exist_ok=True)
     write_json_atomic(target, merged)
-    lines = ["# Probe findings (X-9xx) — merged into this sandbox's frozen review", "",
+    lines = ["# Cold-start review findings (X-9xx) — merged into this sandbox's frozen review", "",
              "| id | location | severity | category | explanation |", "|---|---|---|---|---|"]
     for f in merged_rows:
         lines.append("| {i} | {loc} | {sev} | {cat} | {expl} |".format(
@@ -3845,7 +3851,7 @@ def merge_probe_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
     if remap:
         lines += ["", "id remap (collision with an existing finding): "
                       + ", ".join(f"{k} -> {v}" for k, v in sorted(remap.items())), ""]
-    write_text_atomic(sb / PROBE_FINDINGS_MD_REL, "\n".join(lines) + "\n")
+    write_text_atomic(sb / COLD_START_FINDINGS_MD_REL, "\n".join(lines) + "\n")
     return {"rows": len(merged_rows), "remap": remap}
 
 
@@ -3853,18 +3859,18 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     """Phase-2 sandbox for ONE reviewed-and-then-revised candidate.
 
     Created ONLY once the round's review marker exists. Each of the round's N
-    revise sessions receives its OWN read-only copy of the SAME frozen targeted_review/,
+    revise sessions receives its OWN read-only copy of the SAME frozen guided_review/,
     so the N candidates are independent revisions of one finding list.
 
     A4 rationale for the split: Phase 1's context (sweep artifacts, coverage
     table, discovery output) is the largest in the pipeline, while Phase 2 needs
-    bounded context for targeted edits; a failure in either phase is retryable
+    bounded context for guided edits; a failure in either phase is retryable
     without re-paying the other; and the two skills already communicate through
     findings.json, so the split exposes an interface that already exists. The
     handoff is between SESSIONS, not within one prompt -- a single prompt that
     asks the agent to "review, then revise" defeats the purpose.
 
-    The targeted_review/ directory is handed over as a READ-ONLY copy. Read-only-ness is
+    The guided_review/ directory is handed over as a READ-ONLY copy. Read-only-ness is
     enforced by the prompt plus the byte-identity postcheck, which is a HARD
     failure. The alternative we did not pick is chmod 0444/0555 hardening: this
     pipeline may run on Windows/drvfs roots where read-only files break
@@ -3874,39 +3880,37 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     _m, n = round_counts(ctx, r)
     rid = rid_for_fresh(r, vid)
     sb = ctx.runs_dir / rid
-    review_only = False
     if journal_is_scoped(ctx):
         # A major/minor revision consumes the concerns run's finding list, not a
         # general review: that is what keeps the edits concern-scoped.
-        merge_rid = rid_concerns(r)
-    elif not targeted_review_enabled(ctx):
-        # `--no-targeted-review`: the probe's X-9xx rows ARE the frozen list and
-        # the targeted classes are a recorded gap (p19_profiles.py).
-        merge_rid = rid_probe(r)
-        review_only = True
+        merge_rid, review_only = rid_concerns(r), False
     else:
-        merge_rid = rid_targeted_review_b(r) if review_split_of(ctx) != "off" else rid_targeted_review(r)
+        # ONE policy for "which run defines the round's frozen review" (p19),
+        # shared with the auditor: the guided review (or its split session B)
+        # when the policy plans it, and the cold-start review when it does not.
+        review_only = frozen_review_is_synthesized(ctx)
+        merge_rid = review_producer_rid(ctx, r)
     rev_rec = _require_done(ctx, merge_rid,
-                            "every revise session consumes the round's frozen targeted_review/ output")
+                            "every revise session consumes the round's frozen guided_review/ output")
     _require_done(ctx, rid_a1(r), "every revise session edits a copy of the round's base")
     src_sb = ctx.sandbox_of(rev_rec)
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(ctx.run(rid_a1(r))) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    # The frozen targeted_review/ is the authoritative finding list: a partial copy must
+    # The frozen guided_review/ is the authoritative finding list: a partial copy must
     # never be trusted (the revision ledger keys on every finding id).
     if review_only:
         synthesize_frozen_review(ctx, r, sb)
     else:
-        ensure_copy(src_sb / TARGETED_REVIEW_DIR, sb / TARGETED_REVIEW_DIR)
-    # The PROBE session's X-9xx findings are part of the frozen list this
+        ensure_copy(src_sb / GUIDED_REVIEW_DIR, sb / GUIDED_REVIEW_DIR)
+    # The COLD-START REVIEW session's X-9xx findings are part of the frozen list this
     # reviser must resolve: merge them into THIS sandbox's review copy (the
     # source review sandbox is never touched; every consumer gets the same
-    # merged list -- see merge_probe_into_review_copy).
-    # A concern-scoped revision has no probe session and must never absorb
+    # merged list -- see merge_cold_start_into_review_copy).
+    # A concern-scoped revision has no cold-start session and must never absorb
     # general X-9xx discovery rows: they are not reviewer concerns.
-    probe_merge = ({} if journal_is_scoped(ctx) or review_only
-                   else merge_probe_into_review_copy(ctx, r, sb))
+    cold_start_merge = ({} if journal_is_scoped(ctx) or review_only
+                   else merge_cold_start_into_review_copy(ctx, r, sb))
     if journal_has_feedback(ctx) and not review_only:
         if (src_sb / "concerns").is_dir():
             ensure_copy(src_sb / "concerns", sb / "concerns")
@@ -3915,7 +3919,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     aud_manifest = None
     if audit_enabled(ctx) and not journal_is_scoped(ctx):
         # The reviser acts on the AUDITED list: the auditor's drops (with their
-        # evidence) and its `AU-` additions travel beside the frozen targeted_review/.
+        # evidence) and its `AU-` additions travel beside the frozen guided_review/.
         aud_rec = _require_done(ctx, rid_audit(r),
                                 "the reviser consumes the AUDITED finding list (--audit on)")
         ensure_copy(ctx.sandbox_of(aud_rec) / "audit", sb / "audit")
@@ -3959,13 +3963,13 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                               else ""),
                                                venue_norm=venue_norm_for(ctx),
                                                execution_profile=execution_profile_of(ctx),
-                                               targeted_review_off=not targeted_review_enabled(ctx)))
+                                               guided_review_off=not guided_review_enabled(ctx)))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
-    rec["probe_merge"] = probe_merge
+    rec["cold_start_merge"] = cold_start_merge
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
-                              "targeted_review": hash_manifest(sb / TARGETED_REVIEW_DIR)}
+                              "guided_review": hash_manifest(sb / GUIDED_REVIEW_DIR)}
     if (sb / "feedback").is_dir():
         rec["inputs_manifest"]["feedback"] = hash_manifest(sb / "feedback",
                                                           follow_dir_links=True)
@@ -4304,7 +4308,7 @@ def build_field(ctx: Ctx, r: int) -> tuple:
 def _rebuild_review(ctx: Ctx, rec: dict) -> None:
     """Rebuild session A or B of a split review (the run id names the part)."""
     r = int(rec["round"])
-    part = "b" if str(rec.get("id")) == rid_targeted_review_b(r) else "a"
+    part = "b" if str(rec.get("id")) == rid_guided_review_b(r) else "a"
     materialize_review(ctx, r, part)
 
 
@@ -4317,8 +4321,8 @@ def _rebuild_judge(ctx: Ctx, rec: dict) -> None:
 REBUILD_HANDLERS = {
     "a1": lambda ctx, rec: materialize_a1(ctx, int(rec["round"])),
     "rewrite": lambda ctx, rec: materialize_rewrite(ctx, int(rec["round"]), _vid_index(rec)),
-    "targeted_review": _rebuild_review,
-    "probe": lambda ctx, rec: materialize_probe(ctx, int(rec["round"])),
+    "guided_review": _rebuild_review,
+    "cold_start_review": lambda ctx, rec: materialize_cold_start_review(ctx, int(rec["round"])),
     "audit": lambda ctx, rec: materialize_audit(ctx, int(rec["round"])),
     "revise": lambda ctx, rec: materialize_revise(ctx, int(rec["round"]), _rec_vid(rec)),
     "integrate": lambda ctx, rec: materialize_integrate(ctx, int(rec["round"]), _vid_index(rec)),
@@ -4351,7 +4355,7 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
             print(f"  [warn] {rec['id']}: could not keep attempt {attempt_number(rec)}'s sandbox "
                   f"({e}); its diagnostics stay in state.json's attempts_log")
             rmtree_force(sb, ignore_errors=True)
-    kind = normalize_run_kind(rec["kind"])   # a pre-rename record says `review`
+    kind = rec["kind"]
     handler = REBUILD_HANDLERS.get(kind)
     if handler is None:
         # A PIPELINE BUG, not a property of this run: the operator's only way
@@ -4432,7 +4436,7 @@ def reset_run_record(rec: dict) -> None:
 # Input-freshness revalidation (in-round retries).
 #
 # materialize_a1() digest-checks the round base before reusing it, but the
-# rewrite/targeted-review/revise/integrate/judge materializers only ever CREATE an input
+# rewrite/guided-review/revise/integrate/judge materializers only ever CREATE an input
 # when it is missing. `retry` invalidates COMPLETED rounds only, so after an
 # upstream run of the current round is retried, a downstream sandbox keeps the
 # superseded input bytes -- and the next materialization re-hashes those bytes
@@ -4450,7 +4454,7 @@ def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
     """None when the sandbox's frozen review copy is what this round must hold.
 
     The audit and revision sandboxes receive the review WITH the probe findings
-    merged into `round2/findings_extra.json` (`merge_probe_into_review_copy`),
+    merged into `round2/findings_extra.json` (`merge_cold_start_into_review_copy`),
     so comparing the whole area against the raw upstream review marked every
     such sandbox stale as soon as the probe filed anything -- each new
     invocation reset the audit and blocked the revisers. Compare the area
@@ -4459,12 +4463,12 @@ def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
     changes the list still drifts (and resets the downstream sandboxes, which is
     the point), and a probe run that is not done means the copy is out of date.
     """
-    prec = ctx.run(rid_probe(r))
-    if probe_review_of(ctx) != "off" and prec is not None \
+    prec = ctx.run(rid_cold_start_review(r))
+    if cold_start_review_of(ctx) != "off" and prec is not None \
             and str(prec.get("status") or "") != "done":
-        return (f"the probe run {rid_probe(r)} is not done: the findings this round's auditor "
+        return (f"the probe run {rid_cold_start_review(r)} is not done: the findings this round's auditor "
                 f"and revisers consume will change")
-    cur = hash_manifest(sb / TARGETED_REVIEW_DIR).get("files") or {}
+    cur = hash_manifest(sb / GUIDED_REVIEW_DIR).get("files") or {}
     want = hash_manifest(upstream_dir).get("files") or {}
     rel = "round2/findings_extra.json"
     differing = sorted({k for k in set(cur) | set(want) if cur.get(k) != want.get(k)})
@@ -4473,12 +4477,12 @@ def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
         return None
     others = [k for k in differing if k != rel]
     if others:
-        return (f"{TARGETED_REVIEW_DIR}/ no longer matches its current upstream source "
+        return (f"{GUIDED_REVIEW_DIR}/ no longer matches its current upstream source "
                 f"({', '.join(others[:3])})")
-    expected, _rows, _remap = probe_merged_review_doc(ctx, r, probe_review_upstream_doc(ctx, r))
-    actual = read_json(sb / TARGETED_REVIEW_DIR / rel, revive=False, lenient=True)
+    expected, _rows, _remap = cold_start_merged_review_doc(ctx, r, cold_start_review_upstream_doc(ctx, r))
+    actual = read_json(sb / GUIDED_REVIEW_DIR / rel, revive=False, lenient=True)
     if expected is None or actual != expected:
-        return (f"{TARGETED_REVIEW_DIR}/{rel} no longer matches the frozen list this round's auditor "
+        return (f"{GUIDED_REVIEW_DIR}/{rel} no longer matches the frozen list this round's auditor "
                 f"and revisers must consume (the probe findings changed)")
     return None
 
@@ -4490,7 +4494,7 @@ def _journal_staged_freshness_problems(ctx: Ctx, r: int, sb: Path) -> list:
     A feedback retry re-stages them from the canonical source, but a downstream
     sandbox keeps the copy it was born with and its own recorded manifest still
     matches that stale copy -- so nothing marked it stale. Compare the areas
-    against the CURRENT ledger run, exactly like the targeted_review/base checks above.
+    against the CURRENT ledger run, exactly like the guided_review/base checks above.
     """
     try:
         src_sb = _journal_concern_source(ctx, r)
@@ -4512,7 +4516,7 @@ def _journal_staged_freshness_problems(ctx: Ctx, r: int, sb: Path) -> list:
 
 def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
     """Input-area drift for ONE run, measured against its CURRENT upstream."""
-    kind, r = normalize_run_kind(rec["kind"]), int(rec["round"])
+    kind, r = rec["kind"], int(rec["round"])
     sb = ctx.sandbox_of(rec)
     src_ok = bool(ctx.source_manifest)
 
@@ -4538,7 +4542,7 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
             probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
-    elif kind == "targeted_review":
+    elif kind == "guided_review":
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
@@ -4563,19 +4567,19 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
                 probs.append("prior_audit/UNRESOLVED.md no longer matches the prior audit")
         elif (sb / "prior_audit").is_dir():
             probs.append("prior_audit/ is present but the prior audit no longer has observations")
-        # Session B's frozen input is session A's targeted_review/ OUTPUT. Retrying A
-        # changes it, but B's own targeted_review_a/ still matches the manifest B recorded
+        # Session B's frozen input is session A's guided_review/ OUTPUT. Retrying A
+        # changes it, but B's own guided_review_a/ still matches the manifest B recorded
         # when it was built, so the old checks above never saw the drift. Compare
-        # the copy against A's CURRENT targeted_review/ (the audit and every reviser
+        # the copy against A's CURRENT guided_review/ (the audit and every reviser
         # consume B's merged list, so a stale copy would silently freeze an old
         # finding set).
-        if review_split_of(ctx) != "off" and rec.get("id") == rid_targeted_review_b(r):
-            a_rec = ctx.run(rid_targeted_review(r))
+        if review_split_of(ctx) != "off" and rec.get("id") == rid_guided_review_b(r):
+            a_rec = ctx.run(rid_guided_review(r))
             if a_rec is None or a_rec.get("status") != "done":
                 probs.append("upstream review session A is not done")
-            elif not manifests_equal(hash_manifest(sb / TARGETED_REVIEW_A_DIR),
-                                     hash_manifest(ctx.sandbox_of(a_rec) / TARGETED_REVIEW_DIR)):
-                probs.append(f"{TARGETED_REVIEW_A_DIR}/ no longer matches session A's current review")
+            elif not manifests_equal(hash_manifest(sb / GUIDED_REVIEW_A_DIR),
+                                     hash_manifest(ctx.sandbox_of(a_rec) / GUIDED_REVIEW_DIR)):
+                probs.append(f"{GUIDED_REVIEW_A_DIR}/ no longer matches session A's current review")
     elif kind == "revise":
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
@@ -4585,22 +4589,22 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         # list, not a general review: pointing this check at the review run
         # would mark every scoped revision stale on every re-run.
         # With --review-split the revise sandbox holds SESSION B's frozen review
-        # (materialize_revise copies rid_targeted_review_b), so hashing session A's dir
+        # (materialize_revise copies rid_guided_review_b), so hashing session A's dir
         # made every revise arm look stale on every re-entry.
         rev_rid = (rid_concerns(r) if journal_is_scoped(ctx)
-                   else rid_targeted_review_b(r) if review_split_of(ctx) != "off" else rid_targeted_review(r))
+                   else rid_guided_review_b(r) if review_split_of(ctx) != "off" else rid_guided_review(r))
         rev_rec = ctx.run(rev_rid)
         if rev_rec is None or rev_rec.get("status") != "done":
-            probs.append("upstream targeted_review/concerns run is not done")
+            probs.append("upstream guided_review/concerns run is not done")
         else:
             # BOTH revise paths receive the probe merge (materialize_revise
-            # calls merge_probe_into_review_copy): a scoped revise on the
+            # calls merge_cold_start_into_review_copy): a scoped revise on the
             # concerns review, a general revise on the review. Compare against
             # the merged copy in either case -- the old scoped-only branch left
             # the general path with no review check at all after F004.
             probs.append(_review_copy_mismatch(ctx, r, sb,
-                                               ctx.sandbox_of(rev_rec) / TARGETED_REVIEW_DIR))
-    elif kind == "probe":
+                                               ctx.sandbox_of(rev_rec) / GUIDED_REVIEW_DIR))
+    elif kind == "cold_start_review":
         # The probe reads the round base and the pristine original, like every
         # other round-family session; its own provenance record is written by
         # the postcheck, so only the INPUT areas are drift-checked here.
@@ -4641,13 +4645,13 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
             probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
-        merge_rid = rid_targeted_review_b(r) if review_split_of(ctx) != "off" else rid_targeted_review(r)
+        merge_rid = rid_guided_review_b(r) if review_split_of(ctx) != "off" else rid_guided_review(r)
         rv = ctx.run(merge_rid)
         if rv is None or rv.get("status") != "done":
             probs.append("upstream review run is not done")
         else:
             probs.append(_review_copy_mismatch(ctx, r, sb,
-                                               ctx.sandbox_of(rv) / TARGETED_REVIEW_DIR))
+                                               ctx.sandbox_of(rv) / GUIDED_REVIEW_DIR))
     elif kind == "integrate":
         self_id = rec.get("self_id")
         others = list(rec.get("other_ids") or [])
@@ -4717,8 +4721,9 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # reach the audit sandbox too (it is not an arm of the pool, so nothing else
     # in this function would ever look at it).
     audit_ids = [rid_audit(r)] if ctx.run(rid_audit(r)) is not None else []
-    probe_ids = [rid_probe(r)] if ctx.run(rid_probe(r)) is not None else []
-    order = ((rewrite_ids + ([rid_targeted_review(r)] if n else []) + probe_ids + audit_ids
+    cold_start_ids = ([rid_cold_start_review(r)]
+                       if ctx.run(rid_cold_start_review(r)) is not None else [])
+    order = ((rewrite_ids + ([rid_guided_review(r)] if n else []) + cold_start_ids + audit_ids
               + revise_ids + integrate_ids)
              + ([j_feedback] if j_feedback else []) + ([j_concerns] if j_concerns else [])
              + ([j_response] if j_response else []))
@@ -4727,7 +4732,7 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         # assignment REPLACED the whole list, so a `--review-split` run in a
         # journal mode never revalidated a stale feedback/concerns/response
         # sandbox: the drift survived and the response letter stayed "done".
-        order = (rewrite_ids + [rid_targeted_review(r), rid_targeted_review_b(r)] + probe_ids + audit_ids
+        order = (rewrite_ids + [rid_guided_review(r), rid_guided_review_b(r)] + cold_start_ids + audit_ids
                  + revise_ids + integrate_ids
                  + ([j_feedback] if j_feedback else [])
                  + ([j_concerns] if j_concerns else [])
@@ -4736,9 +4741,9 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # Any arm's content change invalidates every judge session of the round (the
     # panel scores the whole field), and every pool member feeds every
     # integration run that takes it as a donor.
-    dependents = {rid_a1(r): rewrite_ids + ([rid_targeted_review(r)] if n else []) + probe_ids,
-                  rid_targeted_review(r): list(audit_ids) + list(revise_ids)}
-    for _pid in probe_ids:
+    dependents = {rid_a1(r): rewrite_ids + ([rid_guided_review(r)] if n else []) + cold_start_ids,
+                  rid_guided_review(r): list(audit_ids) + list(revise_ids)}
+    for _pid in cold_start_ids:
         # The auditor and every reviser consume the merged review copy, so a
         # reset probe must reach them (their frozen list is derived from it).
         dependents[_pid] = list(audit_ids) + list(revise_ids)
@@ -4747,7 +4752,7 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         dependents[_aid] = list(revise_ids)
     if j_feedback:
         dependents.setdefault(rid_a1(r), []).append(j_feedback)
-        dependents[j_feedback] = (list(rewrite_ids) + ([rid_targeted_review(r)] if n else []))
+        dependents[j_feedback] = (list(rewrite_ids) + ([rid_guided_review(r)] if n else []))
     if j_concerns:
         dependents.setdefault(rid_a1(r), []).append(j_concerns)
         dependents[j_concerns] = list(revise_ids)
@@ -4766,9 +4771,9 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         if j_feedback:
             dependents.setdefault(j_feedback, []).append(j_response)
     if n and review_split_of(ctx) != "off":
-        # B's frozen input is A's targeted_review/ output, so resetting A resets B too.
-        dependents[rid_targeted_review(r)] = [rid_targeted_review_b(r)] + dependents[rid_targeted_review(r)]
-        dependents[rid_targeted_review_b(r)] = list(audit_ids) + list(revise_ids)
+        # B's frozen input is A's guided_review/ output, so resetting A resets B too.
+        dependents[rid_guided_review(r)] = [rid_guided_review_b(r)] + dependents[rid_guided_review(r)]
+        dependents[rid_guided_review_b(r)] = list(audit_ids) + list(revise_ids)
     for k_idx, vid in enumerate(pool):
         if vid == A1_ID:
             continue

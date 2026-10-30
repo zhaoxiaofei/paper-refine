@@ -108,7 +108,7 @@ def test_prompts():
     check("the revision audit never edits", "you do NOT edit the manuscript" in ra)
     check("the plan schema is named", "RP-001" in ra and "REPAIR_PLAN.json" in ra)
     check("the revision audit reads the merged probe list, not a missing directory",
-          "probe_review/" not in ra and "targeted_review/round2/findings_extra.json" in ra)
+          "cold_start_review/" not in ra and "guided_review/round2/findings_extra.json" in ra)
     rr = pp.revision_repair_prompt(sb, "r1_a2_revise", 1, 2)
     check("the repair re-validates every row", "RE-VALIDATE EVERY PLANNED REPAIR" in rr)
     check("the repair applies only confirmed rows", "Apply only `confirmed` rows" in rr)
@@ -133,7 +133,7 @@ def test_chain_guards():
                "location": "Results, paragraph 3", "wrong": "n = 12",
                "correct": "n = 13", "basis": "raw_data/table1.csv row 2",
                "edit": "replace n = 12 with n = 13",
-               "evidence": "targeted_review/findings.json F-001"}
+               "evidence": "guided_review/findings.json F-001"}
         row.update(over)
         return row
 

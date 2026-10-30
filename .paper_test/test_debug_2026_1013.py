@@ -13,7 +13,7 @@ Every check below was a real, reproduced failure before this round's patches:
     when findings.json carried no coverage table;
   * `upstream_deps` had no `probe` branch, so a `retry`/`--only` on a probe whose
     round base was pending bypassed the DepsNotMet defer path and died in
-    `materialize_probe`'s RuntimeError instead of waiting;
+    `materialize_cold_start_review`'s RuntimeError instead of waiting;
   * `repair_reference_entries` appended TWO edits for one paragraph when two
     rules fired on one entry (FMT-R1 fused volume + FMT-R2 bare year), and
     `apply_edits` splices at ORIGINAL offsets -- the second replacement ate the
@@ -74,7 +74,7 @@ round's own patches found, each reproduced on the committed bytes first --
 The same block closes the double-check's one remaining static claim: `D9 a split
 round consumed list is the MERGED A+B one` EXECUTES the C03 contract (it passes
 on the fixed tree and was reverse-checked -- reverting the C03 branch to the old
-`ctx.run(rid_targeted_review(r))` read makes it fail).
+`ctx.run(rid_guided_review(r))` read makes it fail).
 
 `PAPER_WS` retargets the suite at another copy of the tree.
 """
@@ -168,7 +168,7 @@ def test_selfcheck_and_contract_crashes():
     sb = scratch("dbg1013_h1_")
     (sb / "base").mkdir()
     try:
-        ok, errs, warns = nb.sandbox_selfcheck(sb, "review", "r1_targeted_review", 1)
+        ok, errs, warns = nb.sandbox_selfcheck(sb, "guided_review", "r1_guided_review", 1)
         raised = None
     except Exception as e:                                            # noqa: BLE001
         ok, errs, raised = None, [], e
@@ -205,11 +205,11 @@ def test_selfcheck_and_contract_crashes():
 
 def test_probe_dependency():
     print()
-    print("== D3 the probe review declares its round base as an upstream dep ==")
-    deps = nb.upstream_deps({"kind": "probe", "round": 2})
+    print("== D3 the cold-start review declares its round base as an upstream dep ==")
+    deps = nb.upstream_deps({"kind": "cold_start_review", "round": 2})
     check("D3 upstream_deps(probe) names r2_a1", deps == [nb.rid_a1(2)], str(deps))
     ctx = _FakeCtx()                                   # no runs at all: base missing
-    blocked = nb.unmet_deps(ctx, {"kind": "probe", "round": 2})
+    blocked = nb.unmet_deps(ctx, {"kind": "cold_start_review", "round": 2})
     check("D3 a missing base is a DepsNotMet defer, not an empty list",
           bool(blocked) and "r2_a1" in blocked[0], str(blocked))
 
@@ -554,22 +554,22 @@ def test_double_check_followups():
     # 5. C03: the round verified this statically (five sibling call sites), so
     #    the contract is EXECUTED here instead. Under `--review-split`
     #    `merge_review_parts` writes the ONE frozen list (A's rows + B's) into
-    #    session B's `targeted_review/`, so an arm with no `targeted_review/` copy of its own must
+    #    session B's `guided_review/`, so an arm with no `guided_review/` copy of its own must
     #    be cross-checked against THAT list, not against A's partial one. These
     #    two checks pass on the fixed tree BY CONSTRUCTION and are the reason
     #    the fix cannot silently regress: reverting the C03 read to
-    #    `ctx.run(rid_targeted_review(r))` was verified to make the first one fail.
+    #    `ctx.run(rid_guided_review(r))` was verified to make the first one fail.
     sroot = scratch("dbg1013_split_")
     sctx = nb.Ctx(sroot)
     sctx.cfg = {"review_split": "phases"}
-    for rid, ids in (("r1_targeted_review", ["F-A1"]), ("r1_targeted_review_b", ["F-A1", "B-F-A2"])):
-        sb = sroot / "runs" / rid / "targeted_review"
+    for rid, ids in (("r1_guided_review", ["F-A1"]), ("r1_guided_review_b", ["F-A1", "B-F-A2"])):
+        sb = sroot / "runs" / rid / "guided_review"
         sb.mkdir(parents=True)
         (sb / "findings.json").write_text(json.dumps(
             {"submission_dir": "base",
              "findings": [{"id": i, "check": "M1", "location": "p1", "evidence": "e"}
                           for i in ids]}), encoding="utf-8")
-        sctx.state["runs"][rid] = {"id": rid, "kind": "targeted_review", "round": 1,
+        sctx.state["runs"][rid] = {"id": rid, "kind": "guided_review", "round": 1,
                                    "status": "done", "sandbox": f"runs/{rid}"}
     merged = [str(f.get("id")) for f in nb.round_consumed_findings(sctx, 1)]
     check("D9 a split round consumed list is the MERGED A+B one (never A alone)",

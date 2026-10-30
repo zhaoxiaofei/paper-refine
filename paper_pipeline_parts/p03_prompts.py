@@ -132,7 +132,7 @@ Explicit requirements that override skill defaults where they conflict:
       fallback — when a same-named file already exists in revised/ (a re-run, or two source
       versions), give the NEW copy "_rev2", "_rev3", … before the extension.
       This overrides any different rename default in the skill.
-3. Targeted revisions: each edit must be precise and localized to the exact paragraph, sentence,
+3. Guided revisions: each edit must be precise and localized to the exact paragraph, sentence,
    or field containing the issue; preserve styles, numbering, equations, and layouts; never
    reflow or "improve" untouched text.
 4. Validation: cross-check every modified section in the revised copies to confirm the original
@@ -299,7 +299,7 @@ Layout (paths relative to the sandbox root):
                   run. This directory is your SUBMISSION_DIR.
   non_revised/  — the pristine original submission. READ-ONLY, hash-verified the same way. It is
                   present only as the regression reference: do NOT review it, do NOT edit it, and do
-                  not copy its content into targeted_review/.
+                  not copy its content into guided_review/.
                   PIPELINE BOOKKEEPING: if base/ contains the pipeline's own report files
                   (CHANGELOG.md, MANUAL_STEPS.md, REVISION_REPORT.md, revision_report.json,
                   DIFF_LEDGER.md) from an earlier round, they are NOT submission content -- do not
@@ -320,14 +320,14 @@ Layout (paths relative to the sandbox root):
                   raw_data/ for facts and as the producer side of an M30 comparison; read the
                   feedback areas for what the review requires. A feedback or response document
                   kept elsewhere in the corpus is treated the same way (skipped by name).
-  targeted_review/       — THE OUTPUT DIRECTORY (the paper-review skill's OUT). Create it if it does not
-                  exist. Every artifact you produce goes here: targeted_review/findings.json,
-                  targeted_review/findings.md, targeted_review/artifacts/<CHECK_ID>.md, targeted_review/work/, and the
-                  discovery round under targeted_review/round2/ (findings_extra.md, findings_extra.json,
-                  new_sweeps.md). Do NOT write anything of yours outside targeted_review/.
+  guided_review/       — THE OUTPUT DIRECTORY (the paper-review skill's OUT). Create it if it does not
+                  exist. Every artifact you produce goes here: guided_review/findings.json,
+                  guided_review/findings.md, guided_review/artifacts/<CHECK_ID>.md, guided_review/work/, and the
+                  discovery round under guided_review/round2/ (findings_extra.md, findings_extra.json,
+                  new_sweeps.md). Do NOT write anything of yours outside guided_review/.
 
 Path mapping for the skill (its defaults assume ./non_revised as input):
-  SUBMISSION_DIR = ./base        OUT = ./targeted_review        WORK = ./targeted_review/work
+  SUBMISSION_DIR = ./base        OUT = ./guided_review        WORK = ./guided_review/work
 
 === PHASE 1 ONLY — SEPARATE-SESSION HANDOFF (this overrides the master prompt) ===
 
@@ -356,7 +356,7 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
    adopted sweeps M21-M24, the REWRITE-PARITY checks M25-M29, the SOURCE-HIERARCHY
    reconciliation M30 and the
    judgment passes J1-J5, one sweep at a
-   time, each with its own artifact under targeted_review/artifacts/.
+   time, each with its own artifact under guided_review/artifacts/.
 @@M18_REVIEW_SWEEP@@
 @@M19_REVIEW_SWEEP@@
 @@M20_REVIEW_SWEEP@@
@@ -367,7 +367,7 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
 @@EVIDENCE_PACK_RULE@@
 4. The discovery round D0-D5 (references/discovery.md): the checklist-gap table, the probes and
    their EXECUTED dispositions, the X-* findings and the proposed new sweeps, all written under
-   targeted_review/round2/. The orchestrator verifies this phase's deliverables as a contract:
+   guided_review/round2/. The orchestrator verifies this phase's deliverables as a contract:
    D0 known_index.md names the frozen class range; D1 gap_table.md carries >=25 class rows, each
    marked COVERED (by which check) or UNCOVERED, with at least one UNCOVERED row; D2 probes.md
    turns EVERY uncovered row into a probe (P2-...) or records it as an analysis limitation, and
@@ -437,7 +437,7 @@ Skill discipline that the orchestrator will check for:
   * Stay inside the sandbox. The $paper-review skill's closing advice to validate proposed new sweeps
     with the user and append them to its references/sweeps.md does NOT apply to this run: the skill
     documents are READ-ONLY here and the user is never asked anything. Write every proposal to
-    targeted_review/round2/new_sweeps.md instead; the orchestrator ARCHIVES that file for you (under
+    guided_review/round2/new_sweeps.md instead; the orchestrator ARCHIVES that file for you (under
     reports/) but does not apply the proposals itself.
 
 @@PLACEHOLDER_RULE@@
@@ -455,9 +455,9 @@ Skill discipline that the orchestrator will check for:
 @@ZOTERO_CLI_RULE@@
 
 === CANONICAL OUTPUTS (these exact paths; the pipeline reads them) ===
-  targeted_review/findings.md    — the full report: inventory, artifacts, findings, per-document index,
+  guided_review/findings.md    — the full report: inventory, artifacts, findings, per-document index,
                           coverage table, summary note.
-  targeted_review/findings.json  — machine-readable. Exactly this shape (extra keys are tolerated, missing
+  guided_review/findings.json  — machine-readable. Exactly this shape (extra keys are tolerated, missing
                           ones are not):
     {"submission_dir": "./base", "guidelines_source": "<string>",
      "findings": [{"id": "F-001", "location": "...", "category": 0, "check": "M1",
@@ -467,8 +467,8 @@ Skill discipline that the orchestrator will check for:
      "coverage": [{"check": "M1", "disposition": "N findings", "detail": "..."}]}
     Every finding id must be unique and stable (F-001, F-002, ...); Phase 2 consumes this file as
     the authoritative finding list, so ids must not be renumbered later.
-  targeted_review/artifacts/     — one file per mechanical sweep.
-  targeted_review/round2/        — the complete D0-D5 set: known_index.md, gap_table.md, probes.md,
+  guided_review/artifacts/     — one file per mechanical sweep.
+  guided_review/round2/        — the complete D0-D5 set: known_index.md, gap_table.md, probes.md,
                           probe_results.md, findings_extra.json, findings_extra.md, new_sweeps.md and
                           round2_summary.md (the D0-D5 section below and the postcheck use
                           this same list; do not deliver only a subset).
@@ -492,13 +492,13 @@ needed -- read-only.)
 @@MARKER_ROOT@@
 After the skill's verification pass AND the self-check below, write _pipeline_done.json in the
 sandbox root with exactly this structure:
-  {"stage": "targeted_review", "run_id": "@@RUN_ID@@", "round": @@ROUND@@,
+  {"stage": "guided_review", "run_id": "@@RUN_ID@@", "round": @@ROUND@@,
    "status": "complete" | "failed", "error": null | "<short reason>",
    "summary": {"findings_total": <int>, "critical_found": <int>,
                "major_found": <int>, "minor_found": <int>}}
 If you cannot finish for any reason, still write the marker with "status": "failed" and a short
 reason in "error" -- never leave the sandbox without a marker. The marker is the orchestrator's ONLY
-completion signal: a non-empty targeted_review/ without it is treated as unfinished, and the orchestrator
+completion signal: a non-empty guided_review/ without it is treated as unfinished, and the orchestrator
 will not launch a second agent into this sandbox (it waits, or the operator resets it with
 `retry --run <ID>`; a reset archives this sandbox's logs first).
 @@SELFCHECK@@
@@ -513,7 +513,7 @@ REVIEW_TAIL = """
 
 The master excerpt's closing instruction -- "automatically begin the revision (do not stop for my
 confirmation)" -- does NOT apply to this session. This is PHASE 1 ONLY: produce the review artifacts
-under targeted_review/ and then write _pipeline_done.json with stage="targeted_review" as the very
+under guided_review/ and then write _pipeline_done.json with stage="guided_review" as the very
 last step. The
 orchestrator chains Phase 2 itself, in a separate sandbox, as soon as that marker is detected. Do
 not create revised/, do not edit base/ or non_revised/, and do not ask the user anything.
@@ -526,7 +526,7 @@ You are REVISE run @@RUN_ID@@ — round @@ROUND@@, PHASE 2 OF 2, revision @@REVI
 @@REVISE_TOTAL@@ — inside an isolated orchestration pipeline. Your sandbox is:
   @@SANDBOX@@
 This round has @@REVISE_TOTAL@@ reviewed-and-then-revised candidates. They are independent sessions
-that all consume the SAME frozen targeted_review/ copy (one review pass per round) and all start from the
+that all consume the SAME frozen guided_review/ copy (one review pass per round) and all start from the
 same base/; you cannot see the other revise sessions and must not try to guess or duplicate what
 they did. Your own package is judged on its merits.
 @@PRIOR_FAILURE@@
@@ -546,11 +546,11 @@ Layout (paths relative to the sandbox root):
   non_revised/  — the pristine original submission. READ-ONLY (hash-verified). It is the ORIGINAL
                   regression reference: nothing in revised/ may be worse than this, ever. Do not
                   edit it and do not copy it over revised/ wholesale.
-  targeted_review/       — a READ-ONLY copy of the Phase 1 sandbox's targeted_review/ directory, containing the frozen
-                  targeted_review/findings.json (authoritative finding list, ids F-*), targeted_review/findings.md,
-                  targeted_review/artifacts/, targeted_review/work/ and targeted_review/round2/ (X-* discovery findings).
-                  DO NOT MODIFY ANYTHING UNDER targeted_review/ — not one byte. The orchestrator verifies
-                  targeted_review/ is byte-identical after your run and a single changed byte FAILS this run.
+  guided_review/       — a READ-ONLY copy of the Phase 1 sandbox's guided_review/ directory, containing the frozen
+                  guided_review/findings.json (authoritative finding list, ids F-*), guided_review/findings.md,
+                  guided_review/artifacts/, guided_review/work/ and guided_review/round2/ (X-* discovery findings).
+                  DO NOT MODIFY ANYTHING UNDER guided_review/ — not one byte. The orchestrator verifies
+                  guided_review/ is byte-identical after your run and a single changed byte FAILS this run.
 @@AUDIT_BLOCK@@
   revised/      — YOU create this; your revision package goes here (revised documents, CHANGELOG.md,
                   MANUAL_STEPS.md, REVISION_REPORT.md, revision_report.json, work/).
@@ -561,16 +561,16 @@ Layout (paths relative to the sandbox root):
   code/         — revised analysis code + rerun instructions, if source code is in scope.
 
 Path mapping for the skills:
-  FINDINGS_JSON = ./targeted_review/findings.json      FINDINGS_MD = ./targeted_review/findings.md
-  EXTRA_JSON    = ./targeted_review/round2/findings_extra.json (merge it if present)
+  FINDINGS_JSON = ./guided_review/findings.json      FINDINGS_MD = ./guided_review/findings.md
+  EXTRA_JSON    = ./guided_review/round2/findings_extra.json (merge it if present)
   BASE / ORIGINALS = ./base (edit a copy of this) and ./non_revised (READ-ONLY original)
   REVISED = ./revised      WORK = ./revised/work      CODE = ./code
 
 === PHASE 2 ONLY — CONSUME THE FROZEN FINDINGS (this overrides the master prompt) ===
 
 PHASE 2 ONLY. The findings you act on were produced by a prior, independent $paper-review session;
-they are in targeted_review/findings.json and are the authoritative, frozen finding list. Do NOT re-run the
-review; do NOT modify anything under targeted_review/; start at R0 and proceed through V5. The findings file
+they are in guided_review/findings.json and are the authoritative, frozen finding list. Do NOT re-run the
+review; do NOT modify anything under guided_review/; start at R0 and proceed through V5. The findings file
 may record an absolute submission_dir from the Phase 1 sandbox -- that path does not exist here;
 ignore it and use ./base.
 
@@ -585,8 +585,8 @@ Phase 1's marker exists.
 Run the complete $paper-revise workflow -- R0 through V5 -- as specified by the skill, on ./base, with
 the artifacts landing in ./revised. Read the skill's SKILL.md and its references first
 (references/ledger.md, references/edit_rules.md). Required procedure, in order:
-  R0  setup/safety: inventory + sha256 of every original; load targeted_review/findings.json and, when
-      present, targeted_review/round2/findings_extra.json; build the A1 revision-ledger skeleton
+  R0  setup/safety: inventory + sha256 of every original; load guided_review/findings.json and, when
+      present, guided_review/round2/findings_extra.json; build the A1 revision-ledger skeleton
       PROGRAMMATICALLY so that no finding id can be silently dropped (F-* and X-* are separate
       namespaces; every id appears exactly once, "not addressed" is not a status). The
       machine-readable ledger (revised/revision_report.json) must NAME every one of those ids as
@@ -656,7 +656,7 @@ Explicit requirements that override skill defaults where they conflict:
      leave it out and record a precise recompile step (which file, exact command, expected output)
      in revised/MANUAL_STEPS.md. Never ship a derived file that contradicts the content you just
      revised.
-  2. Targeted edits only: each edit is precise and localized to the exact paragraph, sentence, or
+  2. Guided edits only: each edit is precise and localized to the exact paragraph, sentence, or
      field containing the issue; preserve styles, numbering, equations, tables, and figure
      placement; NEVER reflow or "improve" untouched text. Files that need no change are copied from
      base/ into revised/ unchanged.
@@ -686,7 +686,7 @@ Explicit requirements that override skill defaults where they conflict:
      and was downloaded from https://github.com/drguptavivek/zotero-use] may be read.)
   7. @@M18_REVISE_RULE@@
   8. Acronym long-form repetition findings (review check M1, rule (k); evidence: the M1b instance
-     table in targeted_review/artifacts/M1_acronyms.md, one row per un-abbreviated long-form occurrence that
+     table in guided_review/artifacts/M1_acronyms.md, one row per un-abbreviated long-form occurrence that
      follows the acronym's first use in its context -- e.g. the long form used throughout the main
      text after "Copy-number (CN)" was introduced in the abstract): fix by substituting the defined
      acronym for each flagged occurrence, one A6 row per occurrence. Never expand short forms that
@@ -789,7 +789,7 @@ REVISE_TAIL = """
 === END-OF-PROMPT REMINDER (overrides restated) ===
 
 This is PHASE 2 ONLY and it is a separate session from the review: act on the frozen
-targeted_review/findings.json you were given, never re-run the review, never modify targeted_review/, keep base/ and
+guided_review/findings.json you were given, never re-run the review, never modify guided_review/, keep base/ and
 non_revised/ read-only, put every deliverable inside revised/ (plus code/ when in scope), and write
 _pipeline_done.json with stage="revise" as the very last step. The master excerpt's instruction to
 treat "non_revised/" as the directory to revise is overridden: your BASE is base/, and every file
@@ -815,7 +815,7 @@ their references and bundled scripts). Keep your working directory at the sandbo
 Layout (paths relative to the sandbox root):
   base/         — the round's base revision A1_@@ROUND@@. READ-ONLY (hash-verified after your run).
   non_revised/  — the pristine original submission. READ-ONLY (hash-verified). Regression reference.
-  targeted_review/       — the FROZEN review of this round: findings.json/findings.md (the authoritative
+  guided_review/       — the FROZEN review of this round: findings.json/findings.md (the authoritative
                   finding list, ids F-*/X-*), artifacts/ (the seeded, disposed sweep tables) and
                   work/ (the code-side scans the reviewer was given). READ-ONLY, byte-verified: you
                   must not modify one byte of it.
@@ -841,8 +841,8 @@ abstract's own bar, a 4-item enumeration inside a 250-word paragraph, a journal 
 times in a cover letter) were inside that pile. Your job is to attack exactly that.
 
 === TASK ===
-1. DISPOSE EVERY FROZEN FINDING. For each id in targeted_review/findings.json (plus
-   targeted_review/round2/findings_extra.json when present), re-locate the quoted text in base/ and decide:
+1. DISPOSE EVERY FROZEN FINDING. For each id in guided_review/findings.json (plus
+   guided_review/round2/findings_extra.json when present), re-locate the quoted text in base/ and decide:
      * `confirm`  — the finding is real: keep it (the revisers must resolve it); or
      * `drop`     — the finding is NOT real, and you say exactly why, with evidence: the quoted
                     text does not exist in base/ (quote the nearest real text), the finding
@@ -866,7 +866,7 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    dropped id), so a drop here is what keeps a non-defect from being "fixed" and re-scored as if it
    were one. The judge panel is blind and re-derives its own discovery findings -- it never reads
    your dispositions, and nothing about this stage reaches it.
-2. ATTACK THE DISPOSITIONS. The seeded tables (work/ and targeted_review/artifacts/) contain rows the
+2. ATTACK THE DISPOSITIONS. The seeded tables (work/ and guided_review/artifacts/) contain rows the
    reviewer closed as `OK — <reason>`. For every row whose rule is FINDING-TIER (the tier column of
    work/FORMAT_SCAN.json, and the rule list in your evidence pack), ask: is the reason about THIS
    row's bar, or is it boilerplate? If the row is a real defect, record it in
@@ -901,7 +901,7 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    shipped data files prove it; a term family competing for one concept (work/M24_concepts.md).
    Each is recorded in `audit/UNRESOLVED.md` as an observation when it is a defect, not a note.
 3g. ATTACK THE DISCOVERY ROUND'S PROBE DISPOSITIONS. When the frozen review carries
-   targeted_review/round2/probe_results.md, every probe row is a disposition the reviewer wrote and
+   guided_review/round2/probe_results.md, every probe row is a disposition the reviewer wrote and
    nothing has audited: a probe closed `no anomalies -- checked: <locations>` with no locations,
    with the same blanket sentence as many other rows, or one whose checked locations cannot
    answer its own question is a boilerplate closure of the same kind task 2 attacks. For every
@@ -929,7 +929,7 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
      your verdict).
    * `audit/DISPOSITION_AUDIT.md` — one row per finding-tier scan row you examined, with your
      verdict (`stands` / `needs-evidence`).
-   * `audit/PROBE_AUDIT.md` — when the frozen review carries targeted_review/round2/probe_results.md,
+   * `audit/PROBE_AUDIT.md` — when the frozen review carries guided_review/round2/probe_results.md,
      one row per probe (probe id | reviewer's disposition | your verdict
      `stands`/`needs-evidence` | evidence).
 6. State in `audit.json` → `notes` how many finding-tier rows you examined. A run that examined
@@ -954,7 +954,7 @@ treated as unfinished).
 @@DERIVED_OUTPUTS_RULE@@@@VALIDATION_RULE@@@@VISUAL_INSPECTION_RULE@@@@DOCX_CLI_RULE@@@@ZOTERO_CLI_RULE@@
 * You never edit the corpus, the review, or a candidate package; you only read them and write your
   records in `audit/` (the completion marker goes in the sandbox ROOT, not in `audit/`). The
-  orchestrator verifies base/, non_revised/ and targeted_review/ are byte-identical after you.
+  orchestrator verifies base/, non_revised/ and guided_review/ are byte-identical after you.
 * This audit adds no findings. A defect you notice outside the frozen list is an OBSERVATION in
   `audit/UNRESOLVED.md` (location + re-runnable evidence), never an `AU-` row; the next review
   files it on the shared scale. An observation must name one instance, not aggregate ("several
@@ -983,7 +983,7 @@ AUDIT_TAIL = """
 You are the auditor, not the reviewer and not the reviser: dispose every frozen finding (confirm or
 drop-with-evidence), record any defect you notice outside the frozen list as an OBSERVATION in
 `audit/UNRESOLVED.md` (never as an `AU-` finding: `audit.json`'s `adds` stays `[]`), keep base/,
-non_revised/ and targeted_review/ byte-identical, write every record
+non_revised/ and guided_review/ byte-identical, write every record
 inside `audit/`, and finish with `_pipeline_done.json` (stage="audit") IN THE SANDBOX ROOT --
 next to PROMPT.md, NOT inside `audit/` -- carrying
 `{"stage": "audit", "status": "complete", "error": null,
@@ -1089,7 +1089,7 @@ never by choosing the more recently read donor, and record the resolution.
 
 @@ZOTERO_CLI_RULE@@
 
-Porting rules: every port is ONE targeted edit in integrated/, following the revision edit rules
+Porting rules: every port is ONE guided edit in integrated/, following the revision edit rules
 (precise and localized; preserve styles, numbering, equations, tables, figure placement; never
 reflow untouched text). Never invent content, citations, numbers, or accession IDs, and never
 introduce a finding, improvement or third reading that is absent from self/ and the donors. A
@@ -1131,7 +1131,7 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
 
 === WHAT DOES NOT APPLY IN THIS SANDBOX (explicit carve-outs — read before the excerpts) ===
 
-  * There is NO targeted_review/ directory here, and NO targeted_review/findings.json. The $paper-revise steps that
+  * There is NO guided_review/ directory here, and NO guided_review/findings.json. The $paper-revise steps that
     consume the F-* list are NEUTRALISED for this run: do NOT build an A1 ledger keyed to finding
     IDs, do NOT look for those files, and do NOT stop to ask the user for a review (the skill's
     "findings files missing -> STOP and ask the user" rule does not apply here).
@@ -1171,8 +1171,8 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
      rest; the revision skill's V3 covers a wider set than this stage does), checksum
      verification that self/, every others/<id>/ and non_revised/ are untouched, and the final
      reports.
-     NOTE: this sandbox intentionally has no targeted_review/ directory, so the revision skill's V3 pointer to
-     "./targeted_review/round2/new_sweeps.md" is vacuous here. Rescan with the standard frozen set
+     NOTE: this sandbox intentionally has no guided_review/ directory, so the revision skill's V3 pointer to
+     "./guided_review/round2/new_sweeps.md" is vacuous here. Rescan with the standard frozen set
      (M1-M17 + J1-J4)@@M18_INTEGRATE_CLAUSE@@; if some other sweep file is genuinely absent, record
      that instead of inventing results. When `frozen_discovery/` is present, the rescan ALSO
      re-locates every X-* finding in integrated/ and records, per id, whether the defect is
@@ -1272,8 +1272,8 @@ Layout (paths relative to the sandbox root):
 
 === THIS IS A REWRITE, NOT A REVISION, AND NOT A REVIEW ===
 
-There is NO targeted_review/ directory here and NO findings file: you are not the reviewer, and you are not
-the revision arm that consumes targeted_review/findings.json. Do not build a finding ledger, do not re-run
+There is NO guided_review/ directory here and NO findings file: you are not the reviewer, and you are not
+the revision arm that consumes guided_review/findings.json. Do not build a finding ledger, do not re-run
 the review workflow, and do not ask the user anything -- nothing is blocked on you.
 
 YOUR JOB: produce a COMPLETE, SELF-CONTAINED ALTERNATIVE VERSION of the base manuscript -- the same
@@ -1473,7 +1473,7 @@ REWRITE_TAIL = """
 === END-OF-PROMPT REMINDER (overrides restated, because the excerpts above have the last word) ===
 
 This is the REWRITE stage and it runs FIRST in its round, before the review. It is NOT a review and
-NOT a revision: there is no targeted_review/ directory here, there is no findings list to consume, and the
+NOT a revision: there is no guided_review/ directory here, there is no findings list to consume, and the
 excerpts above are attached only for their STYLE, structure and formatting rules (including the
 source hierarchy and the "never invent content" rule). Produce a COMPLETE rewritten candidate in
 rewritten/ -- alternative organization, rewritten prose, the same scientific content, nothing
@@ -2521,7 +2521,7 @@ def zotero_cli_block(role: str, mode: str = DEFAULT_ZOTERO_MODE,
         mode = DEFAULT_ZOTERO_MODE
     # The FIELD CONTINUITY rule is role-specific: only the edit roles may add,
     # edit or delete a citation; rewrite preserves form but edits no content;
-    # targeted-review/judge are read-only and report a bad field instead of repairing it.
+    # guided-review/judge are read-only and report a bad field instead of repairing it.
     if role == "edit" and mode in ("edit", "apply"):
         field_rule = ZOTERO_FIELD_CONTINUITY_RULE
         edit_guidance = ZOTERO_EDIT_GUIDANCE_EDIT
@@ -2560,7 +2560,7 @@ def zotero_cli_block(role: str, mode: str = DEFAULT_ZOTERO_MODE,
             .replace("@@ZOTERO_FIELD_CONTINUITY@@", field_rule))
 
 
-VISUAL_ARTIFACT_REVIEW = "targeted_review/artifacts/VIS_visual.md"
+VISUAL_ARTIFACT_REVIEW = "guided_review/artifacts/VIS_visual.md"
 VISUAL_ARTIFACT_AUDIT = "audit/VIS_visual.md"
 VISUAL_ARTIFACT_JUDGE = "judge_review/artifacts/VIS_visual.md"
 VISUAL_ARTIFACT_REVISED = "revised/VISUAL_CHECK.md"
@@ -2593,7 +2593,7 @@ def review_prompt(sandbox: Path, run_id: str, r: int,
                   scope: str = "full", venue=None, journal_block: str = "",
                   venue_norm: str = "", author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
                   execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
-    """Phase 1 prompt: $paper-review only, writing targeted_review/* (Section C1)."""
+    """Phase 1 prompt: $paper-review only, writing guided_review/* (Section C1)."""
     prof = _as_profile(venue)
     prior = (PRIOR_ROUND_RULE.replace("@@ROUND@@", str(int(r)))
              .replace("@@PREV@@", str(int(r) - 1))) if prior_round else PRIOR_ROUND_RULE_NONE
@@ -2672,8 +2672,8 @@ the surface, and the revisers may not change a claim here."""
     text += DISPOSITION_MANDATE
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack)
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
-    text = text.replace("@@MARKER_ROOT@@", marker_root_rule(TARGETED_REVIEW_DIR))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("targeted_review", run_id, r))
+    text = text.replace("@@MARKER_ROOT@@", marker_root_rule(GUIDED_REVIEW_DIR))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("guided_review", run_id, r))
     text = text + shared + split_block + scope_block + attached_head(prof) + "\n" \
         + attached_phase1(prof) + REVIEW_TAIL + journal_block + venue_norm
     pageable = [(title, value) for _token, title, value in blocks]
@@ -2681,7 +2681,7 @@ the surface, and the revisers may not change a claim here."""
                  ("DISPOSITION MANDATE", DISPOSITION_MANDATE),
                  ("EVIDENCE PACK", evidence_pack)]
     pageable += pageable_rule_blocks(prof, author_to_complete)
-    text = page_stage_prompt(sandbox, text, pageable, "targeted_review", execution_profile)
+    text = page_stage_prompt(sandbox, text, pageable, "guided_review", execution_profile)
     return apply_author_to_complete_prompt(text, author_to_complete)
 
 
@@ -2720,8 +2720,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                   journal_block: str = "", venue_norm: str = "",
                   author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
                   execution_profile: str = EXECUTION_PROFILE_DEFAULT,
-                  targeted_review_off: bool = False) -> str:
-    """Phase 2 prompt: $paper-revise, consuming the round's frozen targeted_review/ copy."""
+                  guided_review_off: bool = False) -> str:
+    """Phase 2 prompt: $paper-revise, consuming the round's frozen guided_review/ copy."""
     prof = _as_profile(venue)
     audit_block = ("""
   audit/        — the AUDITOR's record for this round (present because the operator enabled
@@ -2769,8 +2769,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                              + REVISE_TAIL + journal_block + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete),
                              "revise", execution_profile)
-    if targeted_review_off:
-        text = TARGETED_REVIEW_OFF_NOTE + text
+    if guided_review_off:
+        text = GUIDED_REVIEW_OFF_NOTE + text
     return apply_author_to_complete_prompt(text, author_to_complete)
 
 
@@ -2779,7 +2779,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
                  zotero: str = DEFAULT_ZOTERO_MODE, venue=None,
                  venue_norm: str = "", author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
                  execution_profile: str = EXECUTION_PROFILE_DEFAULT,
-                 targeted_review_off: bool = False) -> str:
+                 guided_review_off: bool = False) -> str:
     """The AUDITOR prompt: review -> AUDIT -> revise.
 
     The auditor consumes the round's FROZEN review (read-only) and produces the
@@ -2817,14 +2817,15 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
                              + AUDIT_TAIL + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete),
                              "audit", execution_profile)
-    if targeted_review_off:
-        text = TARGETED_REVIEW_OFF_NOTE + text
+    if guided_review_off:
+        text = GUIDED_REVIEW_OFF_NOTE + text
     return apply_author_to_complete_prompt(text, author_to_complete)
 
 
-PROBE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+COLD_START_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
-You are PROBE run @@RUN_ID@@ — round @@ROUND@@ — an INDEPENDENT DISCOVERY session inside an
+You are the COLD-START REVIEW run @@RUN_ID@@ — round @@ROUND@@ — an INDEPENDENT DISCOVERY
+session inside an
 orchestrated manuscript-revision pipeline. Your sandbox is:
   @@SANDBOX@@
 @@PRIOR_FAILURE@@
@@ -2851,12 +2852,12 @@ Layout (paths relative to the sandbox root):
                            — `raw_data/` (data tables, figure/table sources, analysis snapshot)
                            and `code/` when present. READ-ONLY (hash-verified after your run).
   non_revised/           — the pristine original. READ-ONLY. Do not review or touch it.
-  probe_review/          — YOUR OUTPUT DIRECTORY. All deliverables go here.
-  probe_review/CLAIM_SURFACES.md — seeded CANDIDATE list (claim-bearing sentences the
+  cold_start_review/          — YOUR OUTPUT DIRECTORY. All deliverables go here.
+  cold_start_review/CLAIM_SURFACES.md — seeded CANDIDATE list (claim-bearing sentences the
                            orchestrator's paragraph model found). A starting point, NOT the scope.
-  probe_review/PRODUCERS.md — seeded CANDIDATE list (the corpus's data tables with their columns
+  cold_start_review/PRODUCERS.md — seeded CANDIDATE list (the corpus's data tables with their columns
                            and row counts, and its code files). A starting point, NOT the scope.
-  probe_review/OBLIGATIONS.md — seeded CANDIDATE list (what THIS submission promises: the
+  cold_start_review/OBLIGATIONS.md — seeded CANDIDATE list (what THIS submission promises: the
                            submitted set its README declares, the display items the documents
                            cite, the file names they write, and where each one resolves). A
                            starting point, NOT the scope.
@@ -2912,24 +2913,24 @@ Layout (paths relative to the sandbox root):
    `coverage.md`: "shipped as X", "intentionally omitted because Y". A silent skip is a missing
    deliverable, not a clean result.
 
-2. VERIFY BY COMPUTATION wherever you can: write a small script under `probe_review/scripts/`
+2. VERIFY BY COMPUTATION wherever you can: write a small script under `cold_start_review/scripts/`
    that reads the corpus's own files and prints its result as the LAST non-empty stdout line — a
    number, a ratio, a rank list, a count, a short canonical string. Attach it to the finding:
 
-       "verifier": {"script": "probe_review/scripts/xxx.py",
+       "verifier": {"script": "cold_start_review/scripts/xxx.py",
                     "computed": "<EXACTLY the last non-empty stdout line the script prints>",
                     "shows":  "<what the computation demonstrates about the defect>"}
 
    The script must read ONLY files inside this sandbox (relative paths from the sandbox root),
    be deterministic and offline (no network, no randomness, no clock dependence), and be
-   re-runnable exactly as `python3 probe_review/scripts/<name>.py` from the sandbox root.
+   re-runnable exactly as `python3 cold_start_review/scripts/<name>.py` from the sandbox root.
    PREFER FEWER, REAL COMPUTATIONS OVER MANY SHAKY ONES: a verifier that does not reproduce
    fails the whole attempt (see below). Omit the verifier when no computation can show the
    defect — the evidence quote and location then carry the finding, and that is fully
    acceptable. Never write a script that merely re-prints the claim or hard-codes the answer.
 
-3. FILE THE FINDINGS in `probe_review/findings_probe.json` (plus a readable
-   `probe_review/findings_probe.md`), one finding per instance, in the pipeline's standard shape:
+3. FILE THE FINDINGS in `cold_start_review/findings_cold_start_review.json` (plus a readable
+   `cold_start_review/findings_cold_start_review.md`), one finding per instance, in the pipeline's standard shape:
 
    {"id": "X-901...", "location": "<document/section, figure/legend, or file:line>",
     "category": <0-5>, "check": "<short class label, e.g. 'stale sidecar'>",
@@ -2946,7 +2947,7 @@ Layout (paths relative to the sandbox root):
    documents what was examined; a missing findings file or a missing/empty `coverage.md` is
    not.
 
-4. WRITE `probe_review/coverage.md`: the `checked` areas with their candidate/finding counts,
+4. WRITE `cold_start_review/coverage.md`: the `checked` areas with their candidate/finding counts,
    what you could NOT check and why, and the exact commands you re-ran to satisfy yourself.
    This round's honest limits are part of the deliverable.
 
@@ -3011,15 +3012,16 @@ the package's own file names included.
 
 === WHAT FAILS THE RUN ===
   * a declared verifier whose re-run does not reproduce `computed` (a mismatch, a missing
-    script, a non-zero exit, an empty output, a timeout) — a computation the probe cannot
+    script, a non-zero exit, an empty output, a timeout) — a computation the cold-start review
+cannot
     reproduce is a correctness blocker, not a finding;
   * a finding outside the X-9xx block, or missing location / evidence / explanation / category /
     severity;
   * a missing findings file, or a missing/empty `coverage.md`;
   * reading or writing outside this sandbox.
 
-=== DELIVERABLES (all under probe_review/) ===
-  * `findings_probe.json` + `findings_probe.md` — the findings (an empty list is legal, with
+=== DELIVERABLES (all under cold_start_review/) ===
+  * `findings_cold_start_review.json` + `findings_cold_start_review.md` — the findings (an empty list is legal, with
     the `checked` inventory)
   * `coverage.md`                                — the areas examined, counts and honest limits
   * `scripts/*.py`                               — every declared verifier, re-runnable
@@ -3032,25 +3034,26 @@ The finding vocabulary below is the one every session uses — classify each fin
 """
 
 
-PROBE_TAIL = """
+COLD_START_TAIL = """
 
 === END-OF-PROMPT REMINDER ===
 
-You are the PROBE, not the reviewer and not the reviser: survey the corpus, dispose every
+You are the COLD-START REVIEW, not the reviewer and not the reviser: survey the corpus, dispose every
 candidate, file every defect you find as an X-9xx finding (with a re-runnable verifier wherever
 a computation can show it), account for every area you examined in coverage.md, and change
-nothing. Finish by running the pre-flight check, then write `_pipeline_done.json` (stage="probe")
-IN THE SANDBOX ROOT — next to PROMPT.md, NOT inside `probe_review/` — carrying
-{"stage": "probe", "run_id": "...", "round": N, "status": "complete", "findings": N,
+nothing. Finish by running the pre-flight check, then write `_pipeline_done.json`
+(stage="cold_start_review")
+IN THE SANDBOX ROOT — next to PROMPT.md, NOT inside `cold_start_review/` — carrying
+{"stage": "cold_start_review", "run_id": "...", "round": N, "status": "complete", "findings": N,
  "verified": N, "areas": N}.
 """
 
 
-PROBE_SOLE_SOURCE_NOTE = """=== THIS ROUND HAS NO TARGETED REVIEW: YOU ARE THE ONLY COVERAGE ===
+COLD_START_SOLE_SOURCE_NOTE = """=== THIS ROUND HAS NO GUIDED REVIEW: YOU ARE THE ONLY COVERAGE ===
 
-`--no-targeted-review` is set on this root: the round's general checklist pass
+`--no-guided-review` is set on this root: the round's general checklist pass
 (M1-M36 / J1-J5 and its D0-D5 discovery round) DID NOT RUN and will not run.
-Your `probe_review/coverage.md` is the round's ONLY statement of what was
+Your `cold_start_review/coverage.md` is the round's ONLY statement of what was
 examined and what was not.
 
 Two consequences for this session:
@@ -3066,11 +3069,11 @@ Two consequences for this session:
 """
 
 
-def probe_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
+def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
                  venue=None, author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
                  execution_profile: str = EXECUTION_PROFILE_DEFAULT,
-                 targeted_review_off: bool = False) -> str:
-    """The PROBE REVIEW prompt: a generic, cold-context independent discovery pass.
+                 guided_review_off: bool = False) -> str:
+    """The COLD-START REVIEW prompt: a generic, cold-context independent discovery pass.
 
     Self-contained by design: the session is handed no checklist, no finding
     list and no review artifact, so the prompt states the method, the finding
@@ -3079,7 +3082,7 @@ def probe_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     be filed, and the verifier is a tool for the rows a computation can show.
     """
     prof = _as_profile(venue)
-    text = (PROBE_DIRECTIVES
+    text = (COLD_START_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
@@ -3087,13 +3090,13 @@ def probe_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
-            .replace("@@SELFCHECK@@", selfcheck_block("probe", run_id, r)))
-    text = text.replace("@@MARKER_ROOT@@", marker_root_rule(PROBE_DIR))
-    text = page_stage_prompt(sandbox, text + shared_blocks() + PROBE_TAIL,
+            .replace("@@SELFCHECK@@", selfcheck_block("cold_start_review", run_id, r)))
+    text = text.replace("@@MARKER_ROOT@@", marker_root_rule(COLD_START_DIR))
+    text = page_stage_prompt(sandbox, text + shared_blocks() + COLD_START_TAIL,
                              pageable_rule_blocks(prof, author_to_complete),
-                             "probe", execution_profile)
-    if targeted_review_off:
-        text = PROBE_SOLE_SOURCE_NOTE + text
+                             "cold_start_review", execution_profile)
+    if guided_review_off:
+        text = COLD_START_SOLE_SOURCE_NOTE + text
     return apply_author_to_complete_prompt(text, author_to_complete)
 
 
@@ -3300,8 +3303,9 @@ the reviewer, not the review auditor, and not the reviser:
 Inputs (paths relative to the sandbox root):
   base/                    the round's base (read-only)
   revised/                 the revision under audit (read-only to you)
-  targeted_review/findings.json     the frozen review findings (plus targeted_review/round2/findings_extra.json when
-                           the discovery round ran; the probe's X-9xx rows are merged there too)
+  guided_review/findings.json     the frozen review findings (plus guided_review/round2/findings_extra.json when
+                           the discovery round ran; the cold-start review's X-9xx rows are
+                           merged there too)
   audit/audit.json, audit/AUDIT.md   the review auditor's dispositions, when present
   revised/CHANGELOG.md, revised/REVISION_REPORT.md, revised/revision_report.json,
   revised/MANUAL_STEPS.md
@@ -3375,22 +3379,26 @@ Write `revision_audit/REPAIR_PLAN.json` (and a readable `revision_audit/REPAIR_P
 An empty plan is `{"rows": []}` — that is a valid, complete audit. Do NOT put a row in the plan that
 you have not confirmed; a false row makes the bounded repair write a new error.
 
-Write only under `revision_audit/`. Never touch `base/`, `revised/`, `targeted_review/`, `audit/`, `raw_data/`
+Write only under `revision_audit/`. Never touch `base/`, `revised/`, `guided_review/`, `audit/`, `raw_data/`
 or `code/`.
 """
 
 
-def revision_audit_prompt(sandbox: Path, run_id: str, r: int) -> str:
+def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
+                          execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
     """The REVISION AUDITOR prompt: audit the revision, write the repair plan only."""
     text = (REVISION_AUDIT_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r))))
-    # The audit is a full session like the targeted-review/revise ones: it gets the
+    # The audit is a full session like the guided-review/revise ones: it gets the
     # shared decision rules, the source hierarchy and the context-budget rule.
-    text = apply_hierarchy_reconcile(text + shared_blocks(), "revise")
+    shared = shared_blocks()
+    text = apply_hierarchy_reconcile(text + shared, "revise")
     text = with_context_budget(text)
-    return apply_author_to_complete_prompt(text)
+    text = apply_author_to_complete_prompt(text)
+    return page_stage_prompt(sandbox, text, [("SHARED DECISION RULES", shared)],
+                             "revision_audit", execution_profile)
 
 
 REVISION_REPAIR_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
@@ -3399,7 +3407,7 @@ You are the BOUNDED REPAIR session — run @@RUN_ID@@, round @@ROUND@@ — a REV
 an orchestrated manuscript-revision pipeline. Your sandbox is:
   @@SANDBOX@@
 Write inside this sandbox: `revised/` and your own `revised/REPAIR_LEDGER.*`; never touch `base/`,
-`targeted_review/`, `audit/`, `revision_audit/`, `raw_data/` or `code/`.
+`guided_review/`, `audit/`, `revision_audit/`, `raw_data/` or `code/`.
 
 WHAT THIS STAGE IS. The revision auditor wrote `revision_audit/REPAIR_PLAN.json` with @@ROWS@@
 confirmed row(s). You apply that plan to `revised/` and produce the arm's revised version, final
@@ -3441,16 +3449,20 @@ files changed.
 """
 
 
-def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int) -> str:
+def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int,
+                           execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
     """The BOUNDED REPAIR prompt: re-validate the plan, apply only confirmed rows."""
     text = (REVISION_REPAIR_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@ROWS@@", str(int(rows))))
-    text = apply_hierarchy_reconcile(text + shared_blocks(), "revise")
+    shared = shared_blocks()
+    text = apply_hierarchy_reconcile(text + shared, "revise")
     text = with_context_budget(text)
-    return apply_author_to_complete_prompt(text)
+    text = apply_author_to_complete_prompt(text)
+    return page_stage_prompt(sandbox, text, [("SHARED DECISION RULES", shared)],
+                             "revision_repair", execution_profile)
 
 REVISION_AUDIT_PROMPT = revision_audit_prompt
 REVISION_REPAIR_PROMPT_FN = revision_repair_prompt

@@ -175,10 +175,10 @@ def test_context_overflow_gate():
           nb.agent_failure_kind("", "agent exited rc=1") == "")
 
     root = scratch("paper_resume_overflow_")
-    sb = root / "runs" / "r1_targeted_review"
+    sb = root / "runs" / "r1_guided_review"
     sb.mkdir(parents=True)
     ctx = nb.Ctx(root)
-    rec = {"id": "r1_targeted_review", "kind": "targeted_review", "round": 1, "sandbox": "runs/r1_targeted_review",
+    rec = {"id": "r1_guided_review", "kind": "guided_review", "round": 1, "sandbox": "runs/r1_guided_review",
            "status": "failed", "agent_session_id": SID,
            "last_error": ("the agent request exceeded the provider's payload/context limit"),
            "last_failure_kind": "context_overflow",
@@ -187,7 +187,7 @@ def test_context_overflow_gate():
     check("the gate refuses to resend the oversized session",
           argv == [] and key == SID and reason == "", f"{argv} / {reason}")
 
-    prompts = (nb.review_prompt(Path("/tmp/sb"), "r1_targeted_review", 1),
+    prompts = (nb.review_prompt(Path("/tmp/sb"), "r1_guided_review", 1),
                nb.revise_prompt(Path("/tmp/sb"), "r1_a2_revise", 1),
                nb.judge_prompt(Path("/tmp/sb"), "r1_judge", 1, "t", 1, 1, ["v1"]))
     check("every session gets an explicit bounded-context rule",

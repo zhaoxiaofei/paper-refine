@@ -225,16 +225,16 @@ def test_pipeline_fixes():
                 "--force"])
     cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
     check("F59 a scoped mode turns the probe off",
-          proc.returncode == 0 and cfg.get("probe_review") == "off"
+          proc.returncode == 0 and cfg.get("cold_start_review") == "off"
           and cfg.get("revision_audit") == "off",
-          json.dumps({k: cfg.get(k) for k in ("probe_review", "revision_audit")}))
+          json.dumps({k: cfg.get(k) for k in ("cold_start_review", "revision_audit")}))
     proc = run([WS / "paper_pipeline.py", "set-revision-mode", "--root", root, "continue",
                 "--force"])
     cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
     check("F13/F59 leaving a scoped mode restores the operator's audit and probe policies",
           proc.returncode == 0 and cfg.get("revision_audit") == "off"
-          and cfg.get("probe_review") == "on",
-          json.dumps({k: cfg.get(k) for k in ("probe_review", "revision_audit")}))
+          and cfg.get("cold_start_review") == "on",
+          json.dumps({k: cfg.get(k) for k in ("cold_start_review", "revision_audit")}))
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
     check("F52 setup records the operator source manifest before normalization",
           isinstance(state.get("source_manifest_raw"), dict) and state["source_manifest_raw"])

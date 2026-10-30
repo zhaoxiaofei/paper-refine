@@ -96,8 +96,8 @@ def build_revise_sandbox(ctx, tamper=True, drop=()):
     pris_name = nb.PRISTINE_DIR
     shutil.copytree(ctx.pristine, sb / "base")
     shutil.copytree(ctx.pristine, sb / pris_name)
-    (sb / "targeted_review").mkdir()
-    (sb / "targeted_review" / "findings.json").write_text(json.dumps(
+    (sb / "guided_review").mkdir()
+    (sb / "guided_review" / "findings.json").write_text(json.dumps(
         {"submission_dir": "./base", "guidelines_source": "test",
          "findings": [{"id": "F-001", "location": "x", "category": 0, "check": "M1",
                        "severity": "Minor", "evidence": "e", "explanation": "x",
@@ -139,7 +139,7 @@ def build_revise_sandbox(ctx, tamper=True, drop=()):
                        source_id="a1")
     rec["inputs_manifest"] = {"base": nb.hash_manifest(sb / "base"),
                               pris_name: nb.hash_manifest(sb / pris_name),
-                              "targeted_review": nb.hash_manifest(sb / "targeted_review")}
+                              "guided_review": nb.hash_manifest(sb / "guided_review")}
     return rec, sb
 
 

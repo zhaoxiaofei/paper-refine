@@ -22,7 +22,7 @@ Output: WORK/occurrences_<slug>.md + .json with one row per occurrence
 other). Use --out DIR to write the artifacts somewhere else.
 
 stdlib-only. Usage:
-  python extract_occurrences.py --work ./targeted_review/work --term "scRNA-seq"
+  python extract_occurrences.py --work ./guided_review/work --term "scRNA-seq"
   python extract_occurrences.py --work ./revised/work --value "0.031"
   python extract_occurrences.py --work ./revised/work --value "0.021" --value "0.031"
 """

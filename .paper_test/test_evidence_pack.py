@@ -118,7 +118,7 @@ def test_seeding_layouts():
     corpus = tmp / "corpus"
     make_corpus(corpus)
     ctx = type("C", (), {"cfg": {}})()
-    for where, sub in (("review", nb.TARGETED_REVIEW_DIR), ("stage", "work")):
+    for where, sub in (("review", nb.GUIDED_REVIEW_DIR), ("stage", "work")):
         sb = tmp / f"run_{where}"
         sb.mkdir()
         ev = nb.seed_evidence_pack(ctx, sb, corpus, where)
@@ -179,10 +179,10 @@ def test_seeded_tables_survive_a_re_materialization():
     sb = tmp / "run_review"
     sb.mkdir()
     nb.seed_evidence_pack(ctx, sb, corpus, "review")
-    m20 = sb / "targeted_review" / "artifacts" / "M20_formatting.md"
+    m20 = sb / "guided_review" / "artifacts" / "M20_formatting.md"
     m20.write_text("# M20\n\n| # | rule | disposition |\n|---|---|---|\n"
                    "| 1 | FMT-T1 | OK — disposed by the session |\n", encoding="utf-8")
-    deleted = sb / "targeted_review" / "artifacts" / "M18_caption_words.md"
+    deleted = sb / "guided_review" / "artifacts" / "M18_caption_words.md"
     deleted.unlink()
     nb.seed_evidence_pack(ctx, sb, corpus, "review")
     check("the session's edited table is NOT overwritten",
@@ -197,7 +197,7 @@ def test_prompts():
     print("== every prompt carries the evidence-pack block ==")
     tmp = Path("/tmp/paper_ev_prompts")
     prompts = {
-        "review": nb.review_prompt(tmp, "r1_targeted_review", 1),
+        "review": nb.review_prompt(tmp, "r1_guided_review", 1),
         "revise": nb.revise_prompt(tmp, "r1_a2_revise", 1),
         "rewrite": nb.rewrite_prompt(tmp, "r1_w1", 1),
         "integrate": nb.integrate_prompt(tmp, "r1_i1", 1, "a1", ["w1"]),
@@ -219,7 +219,7 @@ def test_prompts():
           "paper_docx_format.py scan" in prompts["judge"]
           and "judge_review/artifacts/" in prompts["judge"])
     check("the review prompt names the seeded artifact tables",
-          "targeted_review/artifacts/M18_caption_words.md" in prompts["review"])
+          "guided_review/artifacts/M18_caption_words.md" in prompts["review"])
     check("a stage prompt points at its sandbox-level pack",
           "work/CODE_SCANS.json" in prompts["revise"])
 
@@ -283,16 +283,16 @@ def test_stub_round_sessions():
           (root / "runs" / "r1_w1" / "work" / "CODE_SCANS.json").is_file(),
           (p.stdout + p.stderr)[-160:])
     p = run_only(root, "review")
-    rev_sb = root / "runs" / "r1_targeted_review"
+    rev_sb = root / "runs" / "r1_guided_review"
     check("--only review seeds the review's pack + the three artifact tables",
-          (rev_sb / "targeted_review" / "work" / "CODE_SCANS.json").is_file()
-          and all((rev_sb / "targeted_review" / "artifacts" / n).is_file() for n in
+          (rev_sb / "guided_review" / "work" / "CODE_SCANS.json").is_file()
+          and all((rev_sb / "guided_review" / "artifacts" / n).is_file() for n in
                   ("M18_caption_words.md", "M19_length.md", "M20_formatting.md",
                    "M4_numbers.md", "M8_terms.md", "OUTLINE.md", "PLACEHOLDERS.md")))
     p = run_only(root, "audit")          # the auditor sits between review and revise
     check("--only audit seeds the auditor's pack and the frozen review",
           (root / "runs" / "r1_audit" / "work" / "CODE_SCANS.json").is_file()
-          and (root / "runs" / "r1_audit" / "targeted_review" / "findings.json").is_file(),
+          and (root / "runs" / "r1_audit" / "guided_review" / "findings.json").is_file(),
           (p.stdout + p.stderr)[-160:])
     p = run_only(root, "revise")
     check("--only revise seeds the revise session's pack",
@@ -348,8 +348,8 @@ def test_stub_round_sessions():
         leaked.append(rel)
     check("the judge sandbox contains no orchestrator artifact (blinding)",
           leaked == [], f"leaked: {leaked[:6]}")
-    check("no targeted_review/ directory is handed to a judge",
-          not (first / "targeted_review").exists())
+    check("no guided_review/ directory is handed to a judge",
+          not (first / "guided_review").exists())
     check("the judge prompt in the sandbox carries the blinding rule",
           "BLINDING RULE" in (first / "PROMPT.md").read_text(encoding="utf-8"))
     check("a freshly materialized judge sandbox is not treated as started",

@@ -162,8 +162,8 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
 # `run`'s staging loop -- so resetting a downstream BEFORE the upstream it
 # consumes would rebuild it from input that is about to be replaced.
 RETRY_KIND_RANK = {"a1": 0, "feedback": 1, "concerns": 1, "rewrite": 2,
-                    "targeted_review": 2,
-                   "probe": 3, "audit": 4, "revise": 5, "response": 6, "integrate": 7,
+                    "guided_review": 2,
+                   "cold_start_review": 3, "audit": 4, "revise": 5, "response": 6, "integrate": 7,
                    "judge": 8}
 
 
@@ -292,7 +292,7 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
         # stages, ROUND:STAGE, single sessions, judge selectors and judge run
         # ids), so the operator can reset exactly the part of the pipeline an
         # equivalent `run --only` invocation would have driven.
-        only = parse_only_spec(args.runs, flag="--runs", probe_with_review=False)
+        only = parse_only_spec(args.runs, flag="--runs")
         if only is None or not only:
             die("--runs: the selection names nothing; pass rounds, stages or sessions "
                 "(e.g. `--runs 1:review,1:feedback`; the grammar is the one documented for "

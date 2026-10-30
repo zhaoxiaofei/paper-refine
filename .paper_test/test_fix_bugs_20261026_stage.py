@@ -97,7 +97,7 @@ def test_f002_missing_marker():
     msg = ("completion marker _pipeline_done.json missing (it is prompted as the very last "
            "step; a non-empty output directory is NOT completion) -- write "
            "`_pipeline_done.json` in the sandbox ROOT, next to PROMPT.md")
-    got = pp.repair_missing_deliverable(Ctx(), {"kind": "targeted_review"}, [msg])
+    got = pp.repair_missing_deliverable(Ctx(), {"kind": "guided_review"}, [msg])
     check("an absent marker is still reported when PROMPT.md exists",
           got == "_pipeline_done.json", repr(got))
 
@@ -665,25 +665,25 @@ def test_f188_nested_evidence_symlink():
 
 
 # ---------------------------------------------------------------- F-189
-def test_f189_probe_script_containment():
-    print("\n== F-189: a replaced probe_review directory cannot execute outside ==")
+def test_f189_cold_start_script_containment():
+    print("\n== F-189: a replaced cold_start_review directory cannot execute outside ==")
     d = scratch("f189_")
     sb = d / "sb"
     sb.mkdir()
     outside = d / "outside"
     (outside / "scripts").mkdir(parents=True)
     (outside / "scripts" / "evil.py").write_text("print('REPRODUCED')\n")
-    os.symlink(outside, sb / "probe_review")
-    out = pp.probe_reproduction(sb, [{"id": "X-901", "verifier": {
-        "script": "probe_review/scripts/evil.py", "computed": "REPRODUCED"}}])
+    os.symlink(outside, sb / "cold_start_review")
+    out = pp.cold_start_reproduction(sb, [{"id": "X-901", "verifier": {
+        "script": "cold_start_review/scripts/evil.py", "computed": "REPRODUCED"}}])
     check("the outside script is not executed",
           out["results"][0]["status"] == "missing" and out["reproduced"] == 0,
           repr(out))
     sb2 = d / "sb2"
-    (sb2 / "probe_review").mkdir(parents=True)
-    os.symlink(outside, sb2 / "probe_review" / "scripts")
-    out2 = pp.probe_reproduction(sb2, [{"id": "X-902", "verifier": {
-        "script": "probe_review/scripts/evil.py", "computed": "REPRODUCED"}}])
+    (sb2 / "cold_start_review").mkdir(parents=True)
+    os.symlink(outside, sb2 / "cold_start_review" / "scripts")
+    out2 = pp.cold_start_reproduction(sb2, [{"id": "X-902", "verifier": {
+        "script": "cold_start_review/scripts/evil.py", "computed": "REPRODUCED"}}])
     check("a replaced scripts directory is refused",
           out2["results"][0]["status"] == "missing" and out2["reproduced"] == 0,
           repr(out2))
@@ -795,7 +795,7 @@ if __name__ == "__main__":
                test_f104_zero_timeout,
                test_f153_foreign_guard, test_f157_section_headings,
                test_f160_numbered_keywords, test_f186_leading_whitespace,
-               test_f187_inline_table_position, test_f188_nested_evidence_symlink, test_f189_probe_script_containment,
+               test_f187_inline_table_position, test_f188_nested_evidence_symlink, test_f189_cold_start_script_containment,
                test_f067_empty_value,
                test_f203_qwen_content, test_f205_italic_double_splice,
                test_f206_doubled_word_case, test_f210_keepnext_order):

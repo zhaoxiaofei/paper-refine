@@ -156,7 +156,7 @@ def test_fact_preservation_prompts():
     check("the review discovery prompt forbids invented structural findings",
           "Discovery findings obey shared rule D8" in pp.REVIEW_DIRECTIVES)
     check("the probe prompt forbids inventing a structural requirement",
-          "Do NOT invent a structural requirement" in pp.PROBE_DIRECTIVES)
+          "Do NOT invent a structural requirement" in pp.COLD_START_DIRECTIVES)
 
 
 def test_operational_contract():

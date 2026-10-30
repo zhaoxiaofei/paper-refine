@@ -34,10 +34,10 @@ A family with only ONE surface form is not a finding and is only listed in the
 decision table for the record.
 
 stdlib-only. Usage:
-  python enumerate_conventions.py --work ./targeted_review/work
+  python enumerate_conventions.py --work ./guided_review/work
   python enumerate_conventions.py --work ./revised/work --corpus ./revised/work/corpus
-  python enumerate_conventions.py --work ./targeted_review/work --out ./targeted_review/artifacts
-  python enumerate_conventions.py --work ./targeted_review/work --families my_families.json
+  python enumerate_conventions.py --work ./guided_review/work --out ./guided_review/artifacts
+  python enumerate_conventions.py --work ./guided_review/work --families my_families.json
 """
 from __future__ import annotations
 

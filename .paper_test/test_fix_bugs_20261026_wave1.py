@@ -158,9 +158,9 @@ def test_pipeline_helpers():
           prev == ["human_review_feedback/response_to_reviewers.docx",
                    "human_review_feedback/uncover_response.docx"], str(prev))
     check("F-193 a one-ulp difference is not reproduced",
-          pp._probe_value_equal("9007199254740993", "9007199254740992") is False)
+          pp._cold_start_value_equal("9007199254740993", "9007199254740992") is False)
     check("F-193 0.031 and 3.1e-2 still compare equal",
-          pp._probe_value_equal("0.031", "3.1e-2") is True)
+          pp._cold_start_value_equal("0.031", "3.1e-2") is True)
     refs = pp._numbered_reference_titles(
         ["References.", "[1] Smith J. A title. 2020.", "2) Doe A. Another. 2021."])
     check("F-141/F-165 bracket/parenthesis numbering and 'References.' are read",

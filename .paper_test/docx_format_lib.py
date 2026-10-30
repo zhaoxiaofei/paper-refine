@@ -1338,7 +1338,7 @@ def test_pipeline_wiring():
           str(list(sig.parameters)))
     args = type("A", (), {"format_gate": True})()
     check("decide exposes --format-gate", hasattr(args, "format_gate"))
-    prompts = {"review": nb.review_prompt(Path(tmp) / "sb", "r1_targeted_review", 1),
+    prompts = {"review": nb.review_prompt(Path(tmp) / "sb", "r1_guided_review", 1),
                "revise": nb.revise_prompt(Path(tmp) / "sb", "r1_a2_revise", 1),
                "rewrite": nb.rewrite_prompt(Path(tmp) / "sb", "r1_w1", 1),
                "integrate": nb.integrate_prompt(Path(tmp) / "sb", "r1_i1", 1, "a1", ["w1"])}
@@ -1483,9 +1483,9 @@ def test_review_m20_seeding():
     nb.materialize_a1(ctx, 1)
     rec = nb.materialize_review(ctx, 1)
     sb = ctx.sandbox_of(rec)
-    scan_path = sb / "targeted_review" / "work" / "FORMAT_SCAN.json"
-    art_path = sb / "targeted_review" / "artifacts" / "M20_formatting.md"
-    check("the code-side scan is seeded into targeted_review/work/", scan_path.is_file())
+    scan_path = sb / "guided_review" / "work" / "FORMAT_SCAN.json"
+    art_path = sb / "guided_review" / "artifacts" / "M20_formatting.md"
+    check("the code-side scan is seeded into guided_review/work/", scan_path.is_file())
     seeded = json.loads(scan_path.read_text(encoding="utf-8")) if scan_path.is_file() else {}
     seeded_rules = {r["rule"] for r in seeded.get("rows") or []}
     art_text = art_path.read_text(encoding="utf-8") if art_path.is_file() else ""

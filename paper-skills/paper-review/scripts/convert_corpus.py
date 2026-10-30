@@ -51,7 +51,7 @@ stdlib-only by design (docx/xlsx read via zipfile + XML) so it runs in any
 Python 3.8+ environment, including sandboxed Codex sandboxes.
 
 Usage:
-  python convert_corpus.py --submission ./non_revised --work ./targeted_review/work
+  python convert_corpus.py --submission ./non_revised --work ./guided_review/work
 """
 import argparse
 import hashlib
@@ -708,7 +708,7 @@ def convert_one(path: str, rel: str) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--submission", required=True, help="SUBMISSION_DIR")
-    ap.add_argument("--work", required=True, help="WORK dir (e.g. ./targeted_review/work)")
+    ap.add_argument("--work", required=True, help="WORK dir (e.g. ./guided_review/work)")
     args = ap.parse_args()
 
     sub = os.path.abspath(args.submission)

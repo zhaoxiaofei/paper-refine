@@ -58,7 +58,7 @@ hereafter CN") is recorded only through its long-form occurrence, not as a
 definition.
 
 stdlib-only. Usage:
-  python extract_acronyms.py --work ./targeted_review/work [--out ./targeted_review]
+  python extract_acronyms.py --work ./guided_review/work [--out ./guided_review]
 """
 import argparse
 import json
@@ -924,7 +924,7 @@ def main():
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     work = os.path.abspath(args.work)
-    # OUT defaults to the parent of WORK (e.g. ./targeted_review when WORK=./targeted_review/work)
+    # OUT defaults to the parent of WORK (e.g. ./guided_review when WORK=./guided_review/work)
     out = os.path.abspath(args.out) if args.out else os.path.dirname(work.rstrip("/"))
     corpus = os.path.join(work, "corpus")
     art_dir = os.path.join(out, "artifacts")

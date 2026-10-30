@@ -435,10 +435,10 @@ def test_seed_and_gate():
     sb = tmp / "sb"
     sb.mkdir()
     prov = nb.seed_provenance_pack(ctx, sb, [(root / "non_revised", "", nb.CORPUS_EXCLUDE_TOP)],
-                                   {}, sb / "targeted_review" / "work",
-                                   art=sb / "targeted_review" / "artifacts", where="review")
-    art = sb / "targeted_review" / "artifacts" / "M2_references.md"
-    work = sb / "targeted_review" / "work" / "M2_references.md"
+                                   {}, sb / "guided_review" / "work",
+                                   art=sb / "guided_review" / "artifacts", where="review")
+    art = sb / "guided_review" / "artifacts" / "M2_references.md"
+    work = sb / "guided_review" / "work" / "M2_references.md"
     check("the seed counts one row per entry carrying a DOI",
           prov.get("references") == 2, str(prov.get("references")))
     check("the table is seeded into work/ and the review's artifacts/ alike",
@@ -450,7 +450,7 @@ def test_seed_and_gate():
           "2119" in body)
     check("the table is a gated decision table",
           "artifacts/M2_references.md" in nb.DECISION_ARTIFACTS)
-    rep = nb.artifact_quality_report(sb / "targeted_review")
+    rep = nb.artifact_quality_report(sb / "guided_review")
     check("the disposition gate flags the undisposed rows",
           "EMPTY disposition" in (rep.get("artifacts/M2_references.md") or [""])[0],
           str(rep.get("artifacts/M2_references.md"))[:120])
@@ -465,7 +465,7 @@ def test_seed_and_gate():
         cells[-1] = " OK — skipped (lookups off): re-derived by hand, resolves "
         filled.append("|" + "|".join(cells) + "|")
     art.write_text("\n".join(filled) + "\n", encoding="utf-8")
-    rep2 = nb.artifact_quality_report(sb / "targeted_review")
+    rep2 = nb.artifact_quality_report(sb / "guided_review")
     check("a disposed table passes the same gate",
           not rep2.get("artifacts/M2_references.md"),
           str(rep2.get("artifacts/M2_references.md"))[:120])

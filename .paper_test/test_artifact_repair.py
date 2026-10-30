@@ -15,7 +15,7 @@ rows with one sentence:
   B. scope       ONLY a review whose every postcheck error is an artifact-quality
                  message is repairable; one other error, the wrong policy, the
                  wrong stage, or an attempt already repaired is not.
-  C. guard       the repair's three scopes: `targeted_review/work/` scratch is free, the
+  C. guard       the repair's three scopes: `guided_review/work/` scratch is free, the
                  decision tables are cell-editable but their ROWS are identity
                  (no add/delete/reorder/re-word), and everything else --
                  findings.json/md, round2/, the other artifact files, the
@@ -160,9 +160,9 @@ def rec_of(kind: str, errors: list, **extra):
 # One representative BOOKKEEPING problem per stage -- the class the repair exists
 # for -- plus one CONTENT problem per stage that must stay a plain failure.
 REPAIRABLE = {
-    "targeted_review": [ART_PROBLEM,
-               "targeted_review/artifacts/M1_acronyms.md lists 25 M1b long-form row(s) (un-abbreviated long "
-               "forms used again after the acronym's first use), but targeted_review/findings.json raises "
+    "guided_review": [ART_PROBLEM,
+               "guided_review/artifacts/M1_acronyms.md lists 25 M1b long-form row(s) (un-abbreviated long "
+               "forms used again after the acronym's first use), but guided_review/findings.json raises "
                "no M1 finding, the M1 coverage row (its disposition and its detail cell) neither "
                "mentions M1b nor disposes those rows, and the table's own rows carry no recorded "
                "reason."],
@@ -181,8 +181,8 @@ REPAIRABLE = {
               "disposition per frozen check id for EVERY opponent (M1, M2, ...)"],
 }
 NOT_REPAIRABLE = {
-    "targeted_review": ["targeted_review/findings.json is missing (it is the deliverable Phase 2 consumes)"],
-    "audit": ["targeted_review/ was modified after the sandbox was built"],
+    "guided_review": ["guided_review/findings.json is missing (it is the deliverable Phase 2 consumes)"],
+    "audit": ["guided_review/ was modified after the sandbox was built"],
     "rewrite": ["rewritten/ is missing or empty (the full rewritten candidate is this stage's "
                 "deliverable; a non-empty rewritten/ is required, though it is not by itself a "
                 "completion signal)"],
@@ -223,7 +223,7 @@ check("B5 a clean attempt has nothing to repair",
 # is MISSING is therefore never repairable -- the stage stopped before writing it
 # (or before doing the work), and the attempt must fail so the stage is re-run.
 MISSING_DELIVERABLES = {
-    "targeted_review": "the visual-inspection record targeted_review/artifacts/VISUAL_CHECK.md is missing: the "
+    "guided_review": "the visual-inspection record guided_review/artifacts/VISUAL_CHECK.md is missing: the "
               "prompts require a visual-inspection record (convert the Word documents to PDF, "
               "render the pages to images and LOOK at them)",
     "audit": "audit/audit.json is missing: the auditor's disposition sheet is the deliverable "
@@ -244,7 +244,7 @@ for kind, err in sorted(MISSING_DELIVERABLES.items()):
 check("V1 the marker is never authored either (its own message is in every profile)",
       nb.repairable_artifact_failure(
           fake_ctx("fix"),
-          rec_of("targeted_review", ["completion marker _pipeline_done.json missing (it is prompted as "
+          rec_of("guided_review", ["completion marker _pipeline_done.json missing (it is prompted as "
                             "the very last step; a non-empty output directory is NOT "
                             "completion)"])) == [])
 
@@ -258,88 +258,88 @@ def fake_rec(kind: str) -> dict:
 
 
 # --- review: the decision tables (cells editable, rows are identity) ---------
-sb = scratch("paper_rep_guard_") / "r1_targeted_review"
+sb = scratch("paper_rep_guard_") / "r1_guided_review"
 write(sb / "PROMPT.md", "stage prompt\n")
 write(sb / "base" / "manuscript-b.md", "title\n")
-write(sb / "targeted_review" / "findings.json", json.dumps({"findings": []}))
-write(sb / "targeted_review" / "round2" / "new_sweeps.md", "# none\n")
-write(sb / "targeted_review" / "work" / "notes.md", "scratch\n")
-write(sb / "targeted_review" / "artifacts" / "M1_acronyms.md",
+write(sb / "guided_review" / "findings.json", json.dumps({"findings": []}))
+write(sb / "guided_review" / "round2" / "new_sweeps.md", "# none\n")
+write(sb / "guided_review" / "work" / "notes.md", "scratch\n")
+write(sb / "guided_review" / "artifacts" / "M1_acronyms.md",
       "| acronym | context | disposition |\n|---|---|---|\n| CN | main text | OK — rule M1(k) |\n")
 OUTLINE = ("| # | document | heading | paragraph | summary | disposition |\n|---|---|---|---|---|---|\n"
            "| 1 | d.docx | Intro | 0 | claim one |  |\n"
            "| 2 | d.docx | Intro | 1 | claim two |  |\n")
-write(sb / "targeted_review" / "artifacts" / "OUTLINE.md", OUTLINE)
-rec_review = fake_rec("targeted_review")
+write(sb / "guided_review" / "artifacts" / "OUTLINE.md", OUTLINE)
+rec_review = fake_rec("guided_review")
 guard = nb.snapshot_repair_guard(sb, rec_review)
 check("C1 the snapshot covers the protected files and every repair-editable table",
-      "targeted_review/findings.json" in guard["files"]
+      "guided_review/findings.json" in guard["files"]
       and "PROMPT.md" in guard["files"]
       # M1's long-form table is cell-editable (its own gate reads the row reasons),
       # so it is pinned by ROW IDENTITY instead of by byte digest.
       and "artifacts/M1_acronyms.md" in guard["tables"]
-      and "targeted_review/work/notes.md" not in guard["files"]
+      and "guided_review/work/notes.md" not in guard["files"]
       and "base/manuscript-b.md" not in guard["files"]
       and len(guard["tables"]["artifacts/OUTLINE.md"]) == 2,
       f"files={sorted(guard['files'])} tables={sorted(guard['tables'])}")
 
-write(sb / "targeted_review" / "artifacts" / "OUTLINE.md",
+write(sb / "guided_review" / "artifacts" / "OUTLINE.md",
       OUTLINE.replace("| claim one |  |", "| the introduction | OK — one topic |")
             .replace("| claim two |  |",
                      "| the introduction | unable — manual verification required: the author "
                      "must confirm the second claim |"))
-write(sb / "targeted_review" / "work" / "notes.md", "more scratch in a file the stage wrote\n")
+write(sb / "guided_review" / "work" / "notes.md", "more scratch in a file the stage wrote\n")
 check("C2 filling judged cells and completing EXISTING scratch are in scope",
       nb.repair_guard_problems(sb, guard, rec_review) == [],
       str(nb.repair_guard_problems(sb, guard, rec_review)))
-write(sb / "targeted_review" / "work" / "fill.py", "print('scratch')\n")
-write(sb / "targeted_review" / "artifacts" / "REPAIR_NOTES.md", "what I filled\n")
+write(sb / "guided_review" / "work" / "fill.py", "print('scratch')\n")
+write(sb / "guided_review" / "artifacts" / "REPAIR_NOTES.md", "what I filled\n")
 problems = nb.repair_guard_problems(sb, guard, rec_review)
 check("C2b a NEW file is out of scope, even in work/ (variant B: /tmp is the scratch)",
-      any("CREATED targeted_review/work/fill.py" in p for p in problems)
+      any("CREATED guided_review/work/fill.py" in p for p in problems)
       and any("which the stage never wrote" in p for p in problems),
       str(problems)[:240])
-(sb / "targeted_review" / "work" / "fill.py").unlink()
-(sb / "targeted_review" / "artifacts" / "REPAIR_NOTES.md").unlink()
+(sb / "guided_review" / "work" / "fill.py").unlink()
+(sb / "guided_review" / "artifacts" / "REPAIR_NOTES.md").unlink()
 
-write(sb / "targeted_review" / "artifacts" / "OUTLINE.md", OUTLINE.replace("Intro", "Introduction"))
+write(sb / "guided_review" / "artifacts" / "OUTLINE.md", OUTLINE.replace("Intro", "Introduction"))
 problems = nb.repair_guard_problems(sb, guard, rec_review)
 check("C3 re-wording a row's own evidence is rejected",
-      any("rewrote the seeded rows of targeted_review/artifacts/OUTLINE.md" in p for p in problems),
+      any("rewrote the seeded rows of guided_review/artifacts/OUTLINE.md" in p for p in problems),
       str(problems)[:200])
 
-write(sb / "targeted_review" / "artifacts" / "OUTLINE.md", "\n".join(OUTLINE.splitlines()[:3]) + "\n")
+write(sb / "guided_review" / "artifacts" / "OUTLINE.md", "\n".join(OUTLINE.splitlines()[:3]) + "\n")
 problems = nb.repair_guard_problems(sb, guard, rec_review)
 check("C4 deleting a seeded row is rejected",
       any("a row was deleted, added or reordered" in p for p in problems), str(problems)[:200])
-write(sb / "targeted_review" / "artifacts" / "OUTLINE.md", OUTLINE)
+write(sb / "guided_review" / "artifacts" / "OUTLINE.md", OUTLINE)
 
-dirty = json.loads((sb / "targeted_review" / "findings.json").read_text(encoding="utf-8"))
+dirty = json.loads((sb / "guided_review" / "findings.json").read_text(encoding="utf-8"))
 dirty["findings"].append({"id": "F-999"})
-write(sb / "targeted_review" / "findings.json", json.dumps(dirty))
-write(sb / "targeted_review" / "artifacts" / "M1_acronyms.md", "| acronym |\n|---|\n| CN |\n")
+write(sb / "guided_review" / "findings.json", json.dumps(dirty))
+write(sb / "guided_review" / "artifacts" / "M1_acronyms.md", "| acronym |\n|---|\n| CN |\n")
 write(sb / "PROMPT.md", "rewritten\n")
 problems = nb.repair_guard_problems(sb, guard, rec_review)
 check("C5 editing the finding list, the M1b table's rows or the prompt is rejected",
-      any("MODIFIED targeted_review/findings.json" in p for p in problems)
-      and any("rewrote the seeded rows of targeted_review/artifacts/M1_acronyms.md" in p for p in problems)
+      any("MODIFIED guided_review/findings.json" in p for p in problems)
+      and any("rewrote the seeded rows of guided_review/artifacts/M1_acronyms.md" in p for p in problems)
       and any("MODIFIED PROMPT.md" in p for p in problems), str(problems)[:240])
-write(sb / "targeted_review" / "findings.json", json.dumps({"findings": []}))
-write(sb / "targeted_review" / "artifacts" / "M1_acronyms.md",
+write(sb / "guided_review" / "findings.json", json.dumps({"findings": []}))
+write(sb / "guided_review" / "artifacts" / "M1_acronyms.md",
       "| acronym | context | disposition |\n|---|---|---|\n| CN | main text | OK — rule M1(k) |\n")
 write(sb / "PROMPT.md", "stage prompt\n")
 check("C6 the fixture is back in scope after C5",
       nb.repair_guard_problems(sb, guard, rec_review) == [],
       str(nb.repair_guard_problems(sb, guard, rec_review))[:200])
-write(sb / "targeted_review" / "round2" / "sneaky.md", "x\n")
+write(sb / "guided_review" / "round2" / "sneaky.md", "x\n")
 check("C7 a file CREATED outside the writable scope is rejected",
-      any("CREATED targeted_review/round2/sneaky.md" in p
+      any("CREATED guided_review/round2/sneaky.md" in p
           for p in nb.repair_guard_problems(sb, guard, rec_review)),
       str(nb.repair_guard_problems(sb, guard, rec_review))[:200])
 
 # --- audit: existing dispositions stand, only `confirm` may be added ---------
 sb_a = scratch("paper_rep_audit_") / "r1_audit"
-write(sb_a / "targeted_review" / "findings.json", json.dumps({"findings": [{"id": "F-001"}]}))
+write(sb_a / "guided_review" / "findings.json", json.dumps({"findings": [{"id": "F-001"}]}))
 AUDIT = {"dispositions": [{"id": "F-001", "verdict": "drop", "reason": "x" * 30,
                            "evidence": "y" * 50}],
          "adds": [{"id": "AU-1"}]}
@@ -418,7 +418,7 @@ write(sb_r / "revised" / "manuscript-b.docx", "PK-docx-bytes")
 write(sb_r / "revised" / "REVISION_REPORT.md", "# report\n")
 write(sb_r / "revised" / "work" / "R6_language.md", "| step |\n|---|\n")
 write(sb_r / "revised" / "revision_report.json", json.dumps([{"id": "F-001"}]))
-write(sb_r / "targeted_review" / "findings.json", json.dumps({"findings": []}))
+write(sb_r / "guided_review" / "findings.json", json.dumps({"findings": []}))
 rec_rev = fake_rec("revise")
 guard_r = nb.snapshot_repair_guard(sb_r, rec_rev)
 write(sb_r / "revised" / "revision_report.json", json.dumps([{"id": "F-001"}, {"id": "F-002"}]))
@@ -437,17 +437,17 @@ problems = nb.repair_guard_problems(sb_r, guard_r, rec_rev)
 check("C15 editing a manuscript file inside the package is rejected",
       any("MODIFIED revised/manuscript-b.docx" in p for p in problems), str(problems)[:200])
 write(sb_r / "revised" / "manuscript-b.docx", "PK-docx-bytes")
-write(sb_r / "targeted_review" / "findings.json", json.dumps({"findings": [{"id": "F-1"}]}))
+write(sb_r / "guided_review" / "findings.json", json.dumps({"findings": [{"id": "F-1"}]}))
 check("C16 editing the frozen review is rejected for a package stage",
-      any("MODIFIED targeted_review/findings.json" in p
+      any("MODIFIED guided_review/findings.json" in p
           for p in nb.repair_guard_problems(sb_r, guard_r, rec_rev)),
       str(nb.repair_guard_problems(sb_r, guard_r, rec_rev))[:200])
 
 print()
 print("== D. the repair prompt, per stage ==")
-ART_REVIEW = "targeted_review/artifacts/OUTLINE.md"
+ART_REVIEW = "guided_review/artifacts/OUTLINE.md"
 prompt_cases = {
-    "targeted_review": (sb, ART_PROBLEM, ["THE TABLES IN PLAY", "Never close many rows with the same "
+    "guided_review": (sb, ART_PROBLEM, ["THE TABLES IN PLAY", "Never close many rows with the same "
                                 "sentence"]),
     "audit": (sb_a, REPAIRABLE["audit"][0], ["ONLY add a `confirm` row", "audit/audit.json",
                                              "may NOT create, widen"]),
@@ -480,7 +480,7 @@ print("== E. end to end with a stub repairer ==")
 def run_review(tmp: Path, policy: str, env_extra: dict = None):
     root = setup_root(tmp, policy)
     env = dict(os.environ)
-    env["PAPER_REPAIR_STUB_BAD"] = "r1_targeted_review"
+    env["PAPER_REPAIR_STUB_BAD"] = "r1_guided_review"
     env.update(env_extra or {})
     proc = subprocess.run([sys.executable, str(root / "paper_pipeline.py"), "run",
                            "--root", str(root), "--only", "review", "--retries", "0",
@@ -488,7 +488,7 @@ def run_review(tmp: Path, policy: str, env_extra: dict = None):
                            json.dumps([sys.executable, str(STUB_REPAIR)])],
                           capture_output=True, text=True, timeout=900, env=env)
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
-    return root, proc, state["runs"]["r1_targeted_review"]
+    return root, proc, state["runs"]["r1_guided_review"]
 
 
 root_fix, proc_fix, rec_fix = run_review(scratch("paper_rep_e2e_fix_"), "fix")
@@ -504,8 +504,8 @@ check("E3 the repair's own attempt is in the history as `artifact-repair`",
       == [(1, "postcheck", False), (2, "artifact-repair", True)],
       str([(e["attempt"], e["source"], e["ok"]) for e in rec_fix["attempts_log"]]))
 check("E4 the record names the artifacts the repair rewrote (its diff)",
-      bool(repairs) and any("targeted_review/artifacts/OUTLINE.md" in c for c in repairs[0]["changed"])
-      and any("targeted_review/artifacts/M20_formatting.md" in c for c in repairs[0]["changed"]),
+      bool(repairs) and any("guided_review/artifacts/OUTLINE.md" in c for c in repairs[0]["changed"])
+      and any("guided_review/artifacts/M20_formatting.md" in c for c in repairs[0]["changed"]),
       str((repairs or [{}])[0].get("changed"))[:200])
 check("E5 the record carries the problems it was given and its transcript",
       bool(repairs) and len(repairs[0]["problems"]) >= 9
@@ -514,7 +514,7 @@ check("E5 the record carries the problems it was given and its transcript",
 history = "\n".join(nb.attempt_history_lines(ctx_of(root_fix)))
 check("E6 the attempt history shows the repair and what it changed",
       "artifact repair (attempt 2" in history and "cleared" in history
-      and "targeted_review/artifacts/OUTLINE.md" in history, history[:240])
+      and "guided_review/artifacts/OUTLINE.md" in history, history[:240])
 
 root_nofix, proc_nofix, rec_nofix = run_review(scratch("paper_rep_e2e_nofix_"), "fix",
                                                {"PAPER_REPAIR_STUB_NOFIX": "1"})
@@ -528,11 +528,11 @@ check("E8 the failed repair is reported with the problems that remain",
       len(rep_nofix.get("postcheck_errors") or []) >= 9,
       str(len(rep_nofix.get("postcheck_errors") or [])))
 
-for env_name, want in (("PAPER_REPAIR_STUB_EVIL", "targeted_review/findings.json"),
+for env_name, want in (("PAPER_REPAIR_STUB_EVIL", "guided_review/findings.json"),
                        ("PAPER_REPAIR_STUB_DROP", "a row was deleted, added or reordered"),
                        ("PAPER_REPAIR_STUB_DROP_OTHER",
                         "rewrote the header, the prose or a non-editable column of "
-                        "targeted_review/artifacts/M1_acronyms.md")):
+                        "guided_review/artifacts/M1_acronyms.md")):
     root_bad, proc_bad, rec_bad = run_review(scratch(f"paper_rep_e2e_{env_name.lower()}_"), "fix",
                                              {env_name: "1"})
     rep_bad = (rec_bad.get("repairs") or [{}])[0]
@@ -598,7 +598,7 @@ check("F1 audit: a broken disposition sheet is repaired and the run is done",
            for r in state_a["runs"].values()]))
 audit_doc = json.loads((root_a / "runs" / "r1_audit" / "audit" / "audit.json")
                        .read_text(encoding="utf-8"))
-frozen = json.loads((root_a / "runs" / "r1_audit" / "targeted_review" / "findings.json")
+frozen = json.loads((root_a / "runs" / "r1_audit" / "guided_review" / "findings.json")
                     .read_text(encoding="utf-8"))["findings"]
 ids = {str(r.get("id")) for r in audit_doc["dispositions"]}
 check("F2 audit: every frozen id is disposed again, and no verdict was invented as a drop",
@@ -632,7 +632,7 @@ root_r, proc_r, state_r = run_stages(scratch("paper_rep_f_revise_"), "fix", stag
                                      bad="r1_a2_revise", revises="1", audit="off")
 ledger = json.loads((root_r / "runs" / "r1_a2_revise" / "revised" / "revision_report.json")
                     .read_text(encoding="utf-8"))
-frozen_r = json.loads((root_r / "runs" / "r1_a2_revise" / "targeted_review" / "findings.json")
+frozen_r = json.loads((root_r / "runs" / "r1_a2_revise" / "guided_review" / "findings.json")
                       .read_text(encoding="utf-8"))["findings"]
 named = {str((row or {}).get("id")) for row in ledger if isinstance(row, dict)}
 check("F4 revise: the ledger names every frozen id again and the run is done",
@@ -717,12 +717,12 @@ check("F11 the invocation's console is kept in reports/run-*.log (attempts inclu
 
 # --- the M1b long-form gate: the class that failed the 2026-09-22 roots -----
 root_m1b, proc_m1b, state_m1b = run_stages(
-    scratch("paper_rep_f_m1b_"), "fix", stages="review,audit", bad="r1_targeted_review", revises="1",
+    scratch("paper_rep_f_m1b_"), "fix", stages="review,audit", bad="r1_guided_review", revises="1",
     env_extra={"PAPER_REPAIR_STUB_M1B": "1"})
-rec_m1b = state_m1b["runs"]["r1_targeted_review"]
-m1_art = root_m1b / "runs" / "r1_targeted_review" / "targeted_review" / "artifacts" / "M1_acronyms.md"
+rec_m1b = state_m1b["runs"]["r1_guided_review"]
+m1_art = root_m1b / "runs" / "r1_guided_review" / "guided_review" / "artifacts" / "M1_acronyms.md"
 check("F12 the M1b gate (undisposed long-form rows) is repaired, not retried from scratch",
-      repaired(state_m1b, "r1_targeted_review")
+      repaired(state_m1b, "r1_guided_review")
       and "M1b" in "\n".join((proc_m1b.stdout + proc_m1b.stderr).splitlines()),
       str([(e["attempt"], e["source"], e["ok"]) for e in (rec_m1b.get("attempts_log") or [])]))
 check("F13 every M1b row carries its own recorded reason after the repair",
@@ -736,31 +736,31 @@ _ctx_m1b.cfg = {"artifact_policy": "fix"}
 check("F14 the M1b failure is on the review profile's repairable list",
       nb.repairable_artifact_failure(
           _ctx_m1b,
-          {"id": "r1_targeted_review", "kind": "targeted_review", "round": 1, "attempts_done": 1,
+          {"id": "r1_guided_review", "kind": "guided_review", "round": 1, "attempts_done": 1,
            "postcheck": {"ok": False, "errors": [
                m for m in (rec_m1b["attempts_log"][0].get("errors") or [])
-               if m.startswith("targeted_review/artifacts/M1_acronyms.md")], "warnings": []}})
+               if m.startswith("guided_review/artifacts/M1_acronyms.md")], "warnings": []}})
       == [m for m in (rec_m1b["attempts_log"][0].get("errors") or [])
-          if m.startswith("targeted_review/artifacts/M1_acronyms.md")])
+          if m.startswith("guided_review/artifacts/M1_acronyms.md")])
 
 
 # --- an ADOPTED run (a resume over a finished sandbox) gets the same repair ---
 print()
 print("== G. a resume adopts a finished sandbox and repairs its bookkeeping ==")
 root_g = setup_root(scratch("paper_rep_g_"), "fix", revises="1")
-env_g = dict(os.environ, PAPER_REPAIR_STUB_BAD="r1_targeted_review", PAPER_REPAIR_STUB_NOFIX="1")
+env_g = dict(os.environ, PAPER_REPAIR_STUB_BAD="r1_guided_review", PAPER_REPAIR_STUB_NOFIX="1")
 subprocess.run([sys.executable, str(root_g / "paper_pipeline.py"), "run", "--root", str(root_g),
                 "--only", "review,audit", "--retries", "0", "--retry-backoff", "0",
                 "--agent-cmd", json.dumps([sys.executable, str(STUB_REPAIR)])],
                capture_output=True, text=True, env=env_g, timeout=900)
 state_g = json.loads((root_g / "state.json").read_text(encoding="utf-8"))
 check("G1 the first invocation fails (its repair did nothing) and keeps the sandbox",
-      state_g["runs"]["r1_targeted_review"]["status"] == "failed"
-      and (root_g / "runs" / "r1_targeted_review_try1_failed").is_dir(),
-      state_g["runs"]["r1_targeted_review"]["status"])
+      state_g["runs"]["r1_guided_review"]["status"] == "failed"
+      and (root_g / "runs" / "r1_guided_review_try1_failed").is_dir(),
+      state_g["runs"]["r1_guided_review"]["status"])
 # Put the kept sandbox back and re-open the run: this is what a resume looks like.
-(root_g / "runs" / "r1_targeted_review_try1_failed").rename(root_g / "runs" / "r1_targeted_review")
-state_g["runs"]["r1_targeted_review"]["status"] = "pending"
+(root_g / "runs" / "r1_guided_review_try1_failed").rename(root_g / "runs" / "r1_guided_review")
+state_g["runs"]["r1_guided_review"]["status"] = "pending"
 (root_g / "state.json").write_text(json.dumps(state_g), encoding="utf-8")
 proc_g = subprocess.run([sys.executable, str(root_g / "paper_pipeline.py"), "run", "--root",
                          str(root_g), "--only", "review,audit", "--retries", "0",
@@ -768,7 +768,7 @@ proc_g = subprocess.run([sys.executable, str(root_g / "paper_pipeline.py"), "run
                          json.dumps([sys.executable, str(STUB_REPAIR)])],
                         capture_output=True, text=True, timeout=900)
 state_g2 = json.loads((root_g / "state.json").read_text(encoding="utf-8"))
-rec_g = state_g2["runs"]["r1_targeted_review"]
+rec_g = state_g2["runs"]["r1_guided_review"]
 sources_g = [e.get("source") for e in rec_g.get("attempts_log") or []]
 check("G2 the resume adopts the finished sandbox and repairs it (no re-run)",
       rec_g["status"] == "done"
@@ -778,7 +778,7 @@ check("G2 the resume adopts the finished sandbox and repairs it (no re-run)",
       str([(e["attempt"], e["source"], e["ok"]) for e in rec_g.get("attempts_log") or []])[:200])
 check("G3 the repair is recorded with the files it filled",
       bool(rec_g.get("repairs")) and rec_g["repairs"][-1]["ok"] is True
-      and any("targeted_review/artifacts/GLOSSARY.md" in c for c in rec_g["repairs"][-1]["changed"]),
+      and any("guided_review/artifacts/GLOSSARY.md" in c for c in rec_g["repairs"][-1]["changed"]),
       str(rec_g["repairs"][-1].get("changed"))[:160])
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`--execution-profile` and `--targeted-review`: the recorded policies.
+"""`--execution-profile` and `--guided-review`: the recorded policies.
 
 Run:  python3 .paper_test/test_execution_profile.py
 
@@ -14,7 +14,7 @@ What this suite pins:
   * `medium` keeps every rule but pages the elaborative ones: each stage prompt
     is materially smaller, the paged text really ships in the sandbox
     (`INSTRUCTIONS/PROFILE_RULES.md`), and the stage contract is stated inline.
-  * `--no-targeted-review` plans NO targeted review, runs the probe as the only
+  * `--no-guided-review` plans NO guided review, runs the probe as the only
     finding source, synthesizes the frozen review view with the missing pass
     recorded as a NAMED GAP, and tells the audit/revise sessions so.
     `setup` refuses every combination that would leave the round with no
@@ -45,17 +45,17 @@ FAILS = []
 #     python .paper_test/render_stage_prompts.py .
 # and paste the hashes here in the SAME commit that changes the prompts.
 GOLDEN = {
-    "review": "a9216565102f083b",
-    "review_split_a": "d44b1f4ebd7dbecf",
-    "review_scoped": "ac42072dc9239a54",
-    "probe": "dafe1cd1bf133e71",
-    "audit": "f709f6d2f0c23698",
-    "revise": "e9a7c4ff9d3246ce",
-    "integrate": "4fefd3fc7d52e2a5",
-    "rewrite": "15826fb228711410",
+    "review": "a781a7284eeb9ccf",
+    "review_split_a": "8acbdb1f60a171b4",
+    "review_scoped": "be7f6ba4186c618c",
+    "cold_start_review": "7d168e9e6f95c876",
+    "audit": "d2d4579cfd1dec78",
+    "revise": "1db4da9a492b5c65",
+    "integrate": "0e2a94a006921bf9",
+    "rewrite": "a7331dbb7a9d95a4",
     "judge": "0031c40b30aeec88",
-    "revision_audit": "7d409cbce6d9e9be",
-    "revision_repair": "a97c481d4a17ffc8",
+    "revision_audit": "074eaee68fccba2b",
+    "revision_repair": "afcc7d353ce5e7e2",
 }
 
 
@@ -94,17 +94,17 @@ def render_prompts() -> dict:
     """Every stage prompt, path-normalised exactly as the golden capture was."""
     P = pipeline_module()
     prof = P.load_venue_profile("generic")
-    sb = (WS / "tmp" / "render-sandbox" / "r1_targeted_review").resolve()
+    sb = (WS / "tmp" / "render-sandbox" / "r1_guided_review").resolve()
     import shutil
     shutil.rmtree(sb, ignore_errors=True)
     (sb / "base").mkdir(parents=True)
     (sb / "base" / "manuscript.md").write_text("# m\n\ntext.\n", encoding="utf-8")
     out = {
-        "review": P.review_prompt(sb, "r1_targeted_review", 1, venue=prof, scope="full"),
-        "review_split_a": P.review_prompt(sb, "r1_targeted_review", 1, venue=prof, split="a"),
-        "review_scoped": P.review_prompt(sb, "r1_targeted_review", 1, venue=prof,
+        "review": P.review_prompt(sb, "r1_guided_review", 1, venue=prof, scope="full"),
+        "review_split_a": P.review_prompt(sb, "r1_guided_review", 1, venue=prof, split="a"),
+        "review_scoped": P.review_prompt(sb, "r1_guided_review", 1, venue=prof,
                                          scope="formatting-writing"),
-        "probe": P.probe_prompt(sb, "r1_probe", 1, venue=prof),
+        "cold_start_review": P.cold_start_review_prompt(sb, "r1_cold_start_review", 1, venue=prof),
         "audit": P.audit_prompt(sb, "r1_audit", 1, venue=prof),
         "revise": P.revise_prompt(sb, "r1_a2_revise", 1, venue=prof, audit=True),
         "integrate": P.integrate_prompt(sb, "r1_i1", 1, "v1", ["v2", "v3"], venue=prof),
@@ -138,13 +138,13 @@ def test_medium_profile_pages_the_elaborations() -> None:
     """`medium` is materially smaller, ships the paged rules, states the contract."""
     P = pipeline_module()
     prof = P.load_venue_profile("generic")
-    sb = (WS / "tmp" / "render-sandbox" / "r2_targeted_review").resolve()
+    sb = (WS / "tmp" / "render-sandbox" / "r2_guided_review").resolve()
     import shutil
     shutil.rmtree(sb, ignore_errors=True)
     (sb / "base").mkdir(parents=True)
     calls = {
-        "review": lambda p: P.review_prompt(sb, "r1_targeted_review", 1, venue=prof, execution_profile=p),
-        "probe": lambda p: P.probe_prompt(sb, "r1_probe", 1, venue=prof, execution_profile=p),
+        "review": lambda p: P.review_prompt(sb, "r1_guided_review", 1, venue=prof, execution_profile=p),
+        "cold_start_review": lambda p: P.cold_start_review_prompt(sb, "r1_cold_start_review", 1, venue=prof, execution_profile=p),
         "audit": lambda p: P.audit_prompt(sb, "r1_audit", 1, venue=prof, execution_profile=p),
         "revise": lambda p: P.revise_prompt(sb, "r1_a2_revise", 1, venue=prof, execution_profile=p),
         "integrate": lambda p: P.integrate_prompt(sb, "r1_i1", 1, "v1", ["v2"], venue=prof,
@@ -185,7 +185,7 @@ def test_config_records_the_policy() -> None:
     src = make_source(tmp)
     default_root, med_root, off_root = tmp / "default", tmp / "medium", tmp / "off"
     for root, extra in ((default_root, []), (med_root, ["--execution-profile", "medium"]),
-                        (off_root, ["--no-targeted-review"])):
+                        (off_root, ["--no-guided-review"])):
         proc = cli("setup", "--source", str(src), "--root", str(root),
                    "--venue", "generic", *extra)
         check(f"setup succeeds: {' '.join(extra) or 'default'}", proc.returncode == 0,
@@ -193,22 +193,22 @@ def test_config_records_the_policy() -> None:
     cfg = json.loads((default_root / "pipeline_config.json").read_text(encoding="utf-8"))
     check("high/default: pipeline_config.json carries no execution_profile key",
           "execution_profile" not in cfg)
-    check("high/default: pipeline_config.json carries no targeted_review key",
-          "targeted_review" not in cfg)
+    check("high/default: pipeline_config.json carries no guided_review key",
+          "guided_review" not in cfg)
     med = json.loads((med_root / "pipeline_config.json").read_text(encoding="utf-8"))
     check("medium: the profile is recorded in pipeline_config.json",
           med.get("execution_profile") == "medium")
     off = json.loads((off_root / "pipeline_config.json").read_text(encoding="utf-8"))
-    check("no-targeted-review: the policy is recorded", off.get("targeted_review") == "off")
-    check("no-targeted-review: the NAMED GAP is recorded with it",
-          "M1-M36" in str(off.get("targeted_review_gap"))
-          and "UNREVIEWED" in str(off.get("targeted_review_gap")))
+    check("no-guided-review: the policy is recorded", off.get("guided_review") == "off")
+    check("no-guided-review: the NAMED GAP is recorded with it",
+          "M1-M36" in str(off.get("guided_review_gap"))
+          and "UNREVIEWED" in str(off.get("guided_review_gap")))
     # The policy must survive into the root's own config mirror.
     P = pipeline_module()
     ctx = P.Ctx(off_root)
     ctx.load()
-    check("no-targeted-review: the loaded root reports the policy",
-          P.targeted_review_of(ctx) == "off")
+    check("no-guided-review: the loaded root reports the policy",
+          P.guided_review_of(ctx) == "off")
     medctx = P.Ctx(med_root)
     medctx.load()
     check("medium: the loaded root reports its profile",
@@ -217,38 +217,38 @@ def test_config_records_the_policy() -> None:
           P.execution_profile_of(P.Ctx(default_root)) == "high")
 
 
-def test_plan_drops_the_targeted_review() -> None:
-    """`--no-targeted-review` plans no review run and keeps the probe."""
+def test_plan_drops_the_guided_review() -> None:
+    """`--no-guided-review` plans no review run and keeps the probe."""
     tmp = Path(tempfile.mkdtemp())
     src = make_source(tmp)
     root = tmp / "off"
     proc = cli("setup", "--source", str(src), "--root", str(root), "--venue", "generic",
-               "--rounds", "2", "--rewrites", "0", "--revises", "1", "--no-targeted-review")
-    check("setup: --no-targeted-review root is built", proc.returncode == 0,
+               "--rounds", "2", "--rewrites", "0", "--revises", "1", "--no-guided-review")
+    check("setup: --no-guided-review root is built", proc.returncode == 0,
           (proc.stderr or proc.stdout)[-300:])
     P = pipeline_module()
     ctx = P.Ctx(root)
     ctx.load()
     ids = [e["id"] for e in P.round_run_plan(ctx, 1)]
-    check("plan: no r1_targeted_review session is planned", "r1_targeted_review" not in ids, str(ids))
-    check("plan: no split review session is planned", "r1_targeted_review_b" not in ids, str(ids))
-    check("plan: the probe IS planned", "r1_probe" in ids, str(ids))
+    check("plan: no r1_guided_review session is planned", "r1_guided_review" not in ids, str(ids))
+    check("plan: no split review session is planned", "r1_guided_review_b" not in ids, str(ids))
+    check("plan: the probe IS planned", "r1_cold_start_review" in ids, str(ids))
     deps = {e["id"]: e["deps"] for e in P.round_run_plan(ctx, 1)}
-    check("plan: the auditor consumes the probe", "r1_probe" in deps.get("r1_audit", []),
+    check("plan: the auditor consumes the probe", "r1_cold_start_review" in deps.get("r1_audit", []),
           str(deps.get("r1_audit")))
     check("plan: the reviser consumes the probe, never a review",
-          "r1_probe" in deps.get("r1_a2_revise", [])
-          and "r1_targeted_review" not in deps.get("r1_a2_revise", []),
+          "r1_cold_start_review" in deps.get("r1_a2_revise", [])
+          and "r1_guided_review" not in deps.get("r1_a2_revise", []),
           str(deps.get("r1_a2_revise")))
-    # The default root still plans the targeted review.
+    # The default root still plans the guided review.
     on_root = tmp / "on"
     cli("setup", "--source", str(src), "--root", str(on_root), "--venue", "generic",
         "--rounds", "1", "--rewrites", "0", "--revises", "1")
     on_ctx = P.Ctx(on_root)
     on_ctx.load()
     on_ids = [e["id"] for e in P.round_run_plan(on_ctx, 1)]
-    check("plan: a default root still plans r1_targeted_review + r1_probe",
-          "r1_targeted_review" in on_ids and "r1_probe" in on_ids, str(on_ids))
+    check("plan: a default root still plans r1_guided_review + r1_cold_start_review",
+          "r1_guided_review" in on_ids and "r1_cold_start_review" in on_ids, str(on_ids))
 
 
 def test_setup_refuses_a_round_with_no_finding_source() -> None:
@@ -256,29 +256,29 @@ def test_setup_refuses_a_round_with_no_finding_source() -> None:
     tmp = Path(tempfile.mkdtemp())
     src = make_source(tmp)
     cases = {
-        "probe off": ["--no-targeted-review", "--no-probe-review"],
-        "review split": ["--no-targeted-review", "--review-split", "phases"],
-        "scoped mode": ["--no-targeted-review", "--revision-mode", "major"],
-        "polish scope": ["--no-targeted-review", "--review-scope", "formatting-writing"],
-        "decision letter": ["--no-targeted-review", "--revision-mode", "resubmit"],
+        "probe off": ["--no-guided-review", "--no-cold-start-review"],
+        "review split": ["--no-guided-review", "--review-split", "phases"],
+        "scoped mode": ["--no-guided-review", "--revision-mode", "major"],
+        "polish scope": ["--no-guided-review", "--review-scope", "formatting-writing"],
+        "decision letter": ["--no-guided-review", "--revision-mode", "resubmit"],
     }
     for name, extra in cases.items():
         root = tmp / ("r-" + name.replace(" ", "-"))
         proc = cli("setup", "--source", str(src), "--root", str(root),
                    "--venue", "generic", *extra)
-        check(f"setup refuses --no-targeted-review with {name}",
-              proc.returncode != 0 and "--no-targeted-review" in (proc.stderr + proc.stdout),
+        check(f"setup refuses --no-guided-review with {name}",
+              proc.returncode != 0 and "--no-guided-review" in (proc.stderr + proc.stdout),
               (proc.stderr or proc.stdout)[-200:])
 
 
-def test_end_to_end_without_targeted_review() -> None:
+def test_end_to_end_without_guided_review() -> None:
     """A full stub round runs on the probe alone and records the gap everywhere."""
     tmp = Path(tempfile.mkdtemp())
     src = make_source(tmp)
     root = tmp / "root"
     proc = cli("setup", "--source", str(src), "--root", str(root), "--venue", "generic",
                "--rounds", "1", "--rewrites", "0", "--revises", "1", "--judges", "1",
-               "--no-targeted-review")
+               "--no-guided-review")
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     proc = cli("run", "--root", str(root),
                "--agent-cmd", json.dumps([sys.executable, str(STUB)]),
@@ -290,32 +290,32 @@ def test_end_to_end_without_targeted_review() -> None:
     runs = state.get("runs") or {}
     kinds = [rec.get("kind") for rec in runs.values()]
     check("e2e: no review run was recorded", "review" not in kinds, str(sorted(set(kinds))))
-    check("e2e: the probe, audit and revise runs exist",
-          {"probe", "audit", "revise"} <= set(kinds), str(sorted(set(kinds))))
+    check("e2e: the cold-start review, audit and revise runs exist",
+          {"cold_start_review", "audit", "revise"} <= set(kinds), str(sorted(set(kinds))))
     for sandbox in sorted(root.glob("runs/*")):
-        rel = sandbox / "targeted_review" / "findings.json"
+        rel = sandbox / "guided_review" / "findings.json"
         if sandbox.name in ("r1_audit", "r1_a2_revise"):
             check(f"e2e: {sandbox.name} received the synthesized frozen review", rel.is_file())
             if rel.is_file():
                 doc = json.loads(rel.read_text(encoding="utf-8"))
                 check(f"e2e: {sandbox.name}'s frozen review records the NAMED GAP",
-                      doc.get("targeted_review") == "off"
+                      doc.get("guided_review") == "off"
                       and "UNREVIEWED" in str(doc.get("named_gap"))
                       and all("unable" in str(row.get("disposition"))
                               for row in doc.get("coverage") or []))
-                extra = sandbox / "targeted_review" / "round2" / "findings_extra.json"
+                extra = sandbox / "guided_review" / "round2" / "findings_extra.json"
                 check(f"e2e: {sandbox.name}'s discovery list names the probe as its source",
                       extra.is_file()
                       and json.loads(extra.read_text(encoding="utf-8")).get("source")
-                      == "probe_review")
-    check("e2e: the audit prompt states that no targeted review ran",
-          "NO TARGETED REVIEW" in (root / "runs" / "r1_audit" / "PROMPT.md")
+                      == "cold_start_review")
+    check("e2e: the audit prompt states that no guided review ran",
+          "NO GUIDED REVIEW" in (root / "runs" / "r1_audit" / "PROMPT.md")
           .read_text(encoding="utf-8"))
-    check("e2e: the revise prompt states that no targeted review ran",
-          "NO TARGETED REVIEW" in (root / "runs" / "r1_a2_revise" / "PROMPT.md")
+    check("e2e: the revise prompt states that no guided review ran",
+          "NO GUIDED REVIEW" in (root / "runs" / "r1_a2_revise" / "PROMPT.md")
           .read_text(encoding="utf-8"))
     check("e2e: the probe prompt makes it the round's only coverage",
-          "ONLY COVERAGE" in (root / "runs" / "r1_probe" / "PROMPT.md").read_text(encoding="utf-8"))
+          "ONLY COVERAGE" in (root / "runs" / "r1_cold_start_review" / "PROMPT.md").read_text(encoding="utf-8"))
 
 
 def test_medium_end_to_end() -> None:
@@ -347,12 +347,12 @@ if __name__ == "__main__":
     test_high_profile_is_the_old_pipeline()
     test_medium_profile_pages_the_elaborations()
     test_config_records_the_policy()
-    test_plan_drops_the_targeted_review()
+    test_plan_drops_the_guided_review()
     test_setup_refuses_a_round_with_no_finding_source()
-    test_end_to_end_without_targeted_review()
+    test_end_to_end_without_guided_review()
     test_medium_end_to_end()
     print()
     if FAILS:
         print(f"FAILED: {len(FAILS)} check(s): {', '.join(FAILS)}")
         sys.exit(1)
-    print("EXECUTION PROFILE + TARGETED REVIEW: ALL CHECKS PASSED")
+    print("EXECUTION PROFILE + GUIDED REVIEW: ALL CHECKS PASSED")

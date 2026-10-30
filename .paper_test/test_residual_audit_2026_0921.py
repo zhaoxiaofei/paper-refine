@@ -511,7 +511,7 @@ def test_collect_residuals():
                          "residual": {"searchable_placeholders": 1, "answerable_placeholders": 1,
                                       "answered_kinds": ["preprint"],
                                       "unsourced_numbers_in_abstract_legends": 3}},
-        "r1_targeted_review": {"id": "r1_targeted_review", "kind": "targeted_review", "status": "done",
+        "r1_guided_review": {"id": "r1_guided_review", "kind": "guided_review", "status": "done",
                       "artifact_quality": {"artifacts/M20_formatting.md":
                                            ["96 of 191 dispositions repeat the SAME sentence"]}},
     }}
@@ -550,16 +550,16 @@ def test_stub_round_with_audit():
             "--agent-cmd", json.dumps([sys.executable, str(STUB)]), "--retries", "0")
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
     check("the review stage completes",
-          (state["runs"].get("r1_targeted_review") or {}).get("status") == "done",
-          json.dumps(((state["runs"].get("r1_targeted_review") or {}).get("postcheck") or {})
+          (state["runs"].get("r1_guided_review") or {}).get("status") == "done",
+          json.dumps(((state["runs"].get("r1_guided_review") or {}).get("postcheck") or {})
                      .get("errors") or [])[:300])
-    review = root / "runs" / "r1_targeted_review" / "targeted_review"
+    review = root / "runs" / "r1_guided_review" / "guided_review"
     for rel in ("work/PROVENANCE.json", "work/NUMBERS_LEDGER.md",
                 "artifacts/NUMBERS_LEDGER.md", "artifacts/IDENTIFIERS.md",
                 "artifacts/PLACEHOLDER_LOOKUP.md", "artifacts/M24_concepts.md",
                 "artifacts/GLOSSARY.md"):
         check(f"the review sandbox carries {rel}", (review / rel).is_file())
-    prompt = (root / "runs" / "r1_targeted_review" / "PROMPT.md").read_text(encoding="utf-8")
+    prompt = (root / "runs" / "r1_guided_review" / "PROMPT.md").read_text(encoding="utf-8")
     check("the review prompt carries the decision-artifact mandate",
           "DECISION-ARTIFACT MANDATE" in prompt and "tier" in prompt)
     check("the audit stage did not run before it was asked for",
@@ -575,13 +575,13 @@ def test_stub_round_with_audit():
     check("the auditor wrote its artifact", (audit / "audit" / "audit.json").is_file())
     aprompt = (audit / "PROMPT.md").read_text(encoding="utf-8")
     check("the auditor sandbox has the frozen review and the evidence pack",
-          (audit / "targeted_review" / "findings.json").is_file()
+          (audit / "guided_review" / "findings.json").is_file()
           and (audit / "work" / "NUMBERS_LEDGER.md").is_file())
     arec = state["runs"].get("r1_audit") or {}
     check("the audit run is recorded as done with its effect",
           arec.get("status") == "done" and (arec.get("audit_effect") or {}).get("added") == 0,
           json.dumps(arec.get("audit_effect") or {})[:200])
-    rrec = state["runs"].get("r1_targeted_review") or {}
+    rrec = state["runs"].get("r1_guided_review") or {}
     check("the compliant stub leaves NO artifact-quality problem (strict mode passed)",
           rrec.get("artifact_quality") == {}
           and (rrec.get("postcheck") or {}).get("ok") is True,
@@ -597,7 +597,7 @@ def test_stub_round_with_audit():
           str(res)[:200])
     broken = dict(state)
     broken["runs"] = dict(state["runs"])
-    broken["runs"]["r1_targeted_review"] = dict(broken["runs"]["r1_targeted_review"],
+    broken["runs"]["r1_guided_review"] = dict(broken["runs"]["r1_guided_review"],
                                        artifact_quality={"artifacts/M20_formatting.md":
                                                          ["96 of 200 dispositions repeat the "
                                                           "SAME sentence"]})
@@ -616,7 +616,7 @@ def test_seeded_paths_cover_every_new_artifact():
     src = tmp / "src"
     make_text_corpus(src)
     ctx = type("C", (), {"cfg": {"placeholder_lookup": "off"}})()
-    for where, sub in (("review", nb.TARGETED_REVIEW_DIR), ("audit", None), ("stage", None)):
+    for where, sub in (("review", nb.GUIDED_REVIEW_DIR), ("audit", None), ("stage", None)):
         sb = tmp / f"run_{where}"
         sb.mkdir()
         nb.seed_evidence_pack(ctx, sb, src, where)

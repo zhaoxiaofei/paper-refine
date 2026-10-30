@@ -92,8 +92,8 @@ def build_corpus(root: Path) -> Path:
 def main() -> int:
     tmp = scratch("paper_ev_")
     sub = build_corpus(tmp)
-    work = tmp / "targeted_review" / "work"
-    out = tmp / "targeted_review"
+    work = tmp / "guided_review" / "work"
+    out = tmp / "guided_review"
 
     print("== E1: convert_corpus.py -- the evidence area is not submission content ==")
     r = subprocess.run([sys.executable, str(SCRIPTS / "convert_corpus.py"),

@@ -265,7 +265,7 @@ def test_m18_coverage_contract():
     tmp = scratch("paper_de_m18_")
     sb = tmp / "runs" / "r1_a2_review"
     write(sb / "base" / "ms.md", "text\n")
-    write(sb / "targeted_review" / "artifacts" / "M1_acronyms.md", "| row |\n|---|\n")
+    write(sb / "guided_review" / "artifacts" / "M1_acronyms.md", "| row |\n|---|\n")
     ctx = type("C", (), {"cfg": {}})()
     cov = ([{"check": f"M{i}", "disposition": "clean -- basis: x"} for i in range(1, 18)]
            + [{"check": f"J{i}", "disposition": "clean -- basis: x"} for i in range(1, 5)]
@@ -277,7 +277,7 @@ def test_m18_coverage_contract():
     check("D6 a review without an M18 coverage row fails the contract",
           any("M18" in e for e in errs), str(errs))
 
-    prompt = nb.review_prompt(tmp, "r1_targeted_review", 1)
+    prompt = nb.review_prompt(tmp, "r1_guided_review", 1)
     flat = re.sub(r"\s+", " ", prompt)
     check("D6 the no-cap review prompt no longer says M18 may be omitted",
           "M18 need not appear" not in flat, flat[flat.find("M18 need not appear") - 120:][:200]

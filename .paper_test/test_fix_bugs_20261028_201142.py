@@ -156,7 +156,7 @@ def test_counting() -> None:
 def _review_errors(tmp: Path, *, all_out=(), scope="full"):
     sb = tmp / "sb"
     (sb / "prior_round").mkdir(parents=True)
-    (sb / "targeted_review" / "artifacts").mkdir(parents=True)
+    (sb / "guided_review" / "artifacts").mkdir(parents=True)
     (sb / "prior_round" / "findings.json").write_text('{"findings": []}', encoding="utf-8")
     wanted = list(pp.REQUIRED_REVIEW_CHECKS) + [
         "M19", "M18", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28",
@@ -166,11 +166,11 @@ def _review_errors(tmp: Path, *, all_out=(), scope="full"):
                             else "clean -- basis: a.md")}
            for c in wanted]
     cur = {"submission_dir": "./base", "findings": [], "coverage": cov}
-    (sb / "targeted_review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
+    (sb / "guided_review" / "findings.json").write_text(json.dumps(cur), encoding="utf-8")
     for name in ("M1.md", "M27_evidence_coverage.md", "M34_source_data_coverage.md"):
-        (sb / "targeted_review" / "artifacts" / name).write_text(
+        (sb / "guided_review" / "artifacts" / name).write_text(
             "| check | disposition |\n|---|---|\n| x | clean |\n", encoding="utf-8")
-    (sb / "targeted_review" / "findings.md").write_text("# findings\n", encoding="utf-8")
+    (sb / "guided_review" / "findings.md").write_text("# findings\n", encoding="utf-8")
     errs = []
     pp.check_review_contract(types.SimpleNamespace(cfg={}), sb, cur, errs, [],
                              scope=scope)
@@ -360,17 +360,17 @@ def test_resources() -> None:
           pf._xfa_dataset_report(big) == (False, -1, False)
           and pf._pdf_carries_an_image(big) is False)
 
-    sb = scratch("f56_"); (sb / "probe_review" / "scripts").mkdir(parents=True)
-    (sb / "probe_review" / "scripts" / "v.py").write_text("print('1')", encoding="utf-8")
+    sb = scratch("f56_"); (sb / "cold_start_review" / "scripts").mkdir(parents=True)
+    (sb / "cold_start_review" / "scripts" / "v.py").write_text("print('1')", encoding="utf-8")
     findings = [{"id": f"X-{900 + i:03d}",
-                 "verifier": {"script": "probe_review/scripts/v.py", "computed": "1"}}
+                 "verifier": {"script": "cold_start_review/scripts/v.py", "computed": "1"}}
                 for i in range(1, 8)]
-    old = pp.PROBE_REPRO_MAX_VERIFIERS
-    pp.PROBE_REPRO_MAX_VERIFIERS = 3
+    old = pp.COLD_START_REPRO_MAX_VERIFIERS
+    pp.COLD_START_REPRO_MAX_VERIFIERS = 3
     try:
-        rep = pp.probe_reproduction(sb, findings)
+        rep = pp.cold_start_reproduction(sb, findings)
     finally:
-        pp.PROBE_REPRO_MAX_VERIFIERS = old
+        pp.COLD_START_REPRO_MAX_VERIFIERS = old
     check("F56 the verifier count is capped",
           [r["status"] for r in rep["results"]] == ["reproduced"] * 3
           + ["skipped-over-budget"] * 4, [r["status"] for r in rep["results"]])

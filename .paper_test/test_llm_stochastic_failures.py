@@ -472,35 +472,35 @@ def main() -> int:
         sb.mkdir(parents=True)
         shutil.copytree(ctx.pristine, sb / "base")
         shutil.copytree(ctx.pristine, sb / "non_revised")
-        (sb / "targeted_review").mkdir()
-        (sb / "targeted_review" / "findings.json").write_text(json.dumps(
+        (sb / "guided_review").mkdir()
+        (sb / "guided_review" / "findings.json").write_text(json.dumps(
             {"submission_dir": "./base", "guidelines_source": "t",
              "findings": [{"id": "F-001", "location": "x", "category": 0, "check": "M1",
                            "severity": "Minor", "evidence": "e", "explanation": "x",
                            "status": "resolvable"}], "artifacts": {}, "coverage": []}))
         (sb / "_pipeline_done.json").write_text(json.dumps(
-            {"stage": "targeted_review", "run_id": rid, "round": 1, "status": "complete"}))
+            {"stage": "guided_review", "run_id": rid, "round": 1, "status": "complete"}))
         mutate(sb)
-        rec = ctx.register(rid, "review", 1, "runs/" + rid, source_id="a1")
+        rec = ctx.register(rid, "guided_review", 1, "runs/" + rid, source_id="a1")
         rec["inputs_manifest"] = {"base": nb.hash_manifest(sb / "base"),
                                   "non_revised": nb.hash_manifest(sb / "non_revised")}
         result = run_postcheck(ctx, rec)
         return tmp, rec, result
 
     tmp, rec, (ok, errs, warns, crash) = review_case(
-        lambda sb: (sb / "targeted_review" / "findings.json").write_text('["F-001"]'))
+        lambda sb: (sb / "guided_review" / "findings.json").write_text('["F-001"]'))
     check("E1 findings.json as a list fails cleanly", crash is None and ok is False, str(errs[:1]))
     cleanup(tmp)
 
     tmp, rec, (ok, errs, warns, crash) = review_case(
-        lambda sb: (sb / "targeted_review" / "findings.json").write_text("null"))
+        lambda sb: (sb / "guided_review" / "findings.json").write_text("null"))
     check("E2 findings.json as JSON null fails cleanly",
           crash is None and ok is False and any("JSON object" in e for e in errs), str(errs[:1]))
     cleanup(tmp)
 
     tmp, rec, (ok, errs, warns, crash) = review_case(
-        lambda sb: (sb / "targeted_review" / "findings.json").write_text(
-            (sb / "targeted_review" / "findings.json").read_text()[:120]))
+        lambda sb: (sb / "guided_review" / "findings.json").write_text(
+            (sb / "guided_review" / "findings.json").read_text()[:120]))
     check("E3 truncated findings.json fails cleanly",
           crash is None and ok is False and any("malformed" in e for e in errs), str(errs[:1]))
     cleanup(tmp)

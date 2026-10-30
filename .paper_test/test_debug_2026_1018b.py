@@ -372,7 +372,7 @@ def test_context_overflow_prose_is_not_an_error() -> None:
 
     sb = scratch("paper_debug1018b_exec_")
     (sb / "PROMPT.md").write_text("noop", encoding="utf-8")
-    rec = {"id": "r1_targeted_review", "kind": "targeted_review", "round": 1, "sandbox": str(sb)}
+    rec = {"id": "r1_guided_review", "kind": "guided_review", "round": 1, "sandbox": str(sb)}
     cmd = [sys.executable, "-c",
            "print(\"The results were: 413 cells in the request group were too "
            "large to analyse.\"); raise SystemExit(1)"]

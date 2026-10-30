@@ -21,7 +21,7 @@ suite pins the fix:
     side of a Methods parameter, skipping scratch and bookkeeping;
   * `code_side_evidence` carries both families and `seed_evidence_pack` seeds
     `M30_hierarchy_reconciliation.md` (two tables, disposition columns) for the
-    targeted-review/audit/stage layouts and under `targeted_review/artifacts/` for the review; the
+    guided-review/audit/stage layouts and under `guided_review/artifacts/` for the review; the
     quality layer reports an undisposed row;
   * the review contract requires the M30 coverage row and the artifact;
   * all five working prompts carry their M30 block (the review enumerates, the
@@ -199,7 +199,7 @@ def test_evidence_and_seeding():
           str((ev.get("code_literals") or {}).get("rows"))[:160])
     check("the evidence summary names the M30 rows",
           "M30 hierarchy rows" in nb.evidence_pack_summary(ev))
-    for where, sub in (("review", nb.TARGETED_REVIEW_DIR), ("audit", ""), ("stage", "")):
+    for where, sub in (("review", nb.GUIDED_REVIEW_DIR), ("audit", ""), ("stage", "")):
         sb = tmp / f"run_{where}"
         sb.mkdir()
         nb.seed_evidence_pack(ctx, sb, corpus, where)
@@ -212,7 +212,7 @@ def test_evidence_and_seeding():
               and "## B. code/config literals" in text
               and "## C. written NEGATIVE claims a shipped table contradicts" in text
               and text.count("| disposition |") == 3, text[:200])
-    art = tmp / "run_review" / "targeted_review" / "artifacts" / "M30_hierarchy_reconciliation.md"
+    art = tmp / "run_review" / "guided_review" / "artifacts" / "M30_hierarchy_reconciliation.md"
     check("the review's artifacts/ copy is seeded (the decision table)",
           art.is_file() and "seed check" in art.read_text(encoding="utf-8"))
     check("the review decision-artifact list includes the ledger",
@@ -225,7 +225,7 @@ def test_undisposed_row_is_a_problem():
     print()
     print("== an undisposed M30 row is a decision-artifact problem ==")
     tmp = scratch("paper_m30_quality_")
-    art = tmp / "targeted_review" / "artifacts"
+    art = tmp / "guided_review" / "artifacts"
     art.mkdir(parents=True)
     (art / "M30_hierarchy_reconciliation.md").write_text(
         "# M30\n\n## A\n\n| # | document | kind | number | unit | sentence | candidate producer | "
@@ -233,7 +233,7 @@ def test_undisposed_row_is_a_problem():
         "|---|---|---|---|---|---|---|---|---|---|\n"
         "| 1 | ms.md | abstract | 12 | | We analysed 12 samples. | raw_data/x.csv:sample | "
         "3 row(s) | differs |  |\n", encoding="utf-8")
-    report = nb.artifact_quality_report(tmp / "targeted_review")
+    report = nb.artifact_quality_report(tmp / "guided_review")
     check("the undisposed ledger row is reported",
           "artifacts/M30_hierarchy_reconciliation.md" in report, str(report)[:200])
 
@@ -247,9 +247,9 @@ def test_review_contract():
     print()
     print("== the review contract requires the M30 coverage row and artifact ==")
     tmp = scratch("paper_m30_contract_")
-    sb = tmp / "r1_targeted_review"
+    sb = tmp / "r1_guided_review"
     (sb / "base").mkdir(parents=True)
-    art = sb / "targeted_review" / "artifacts"
+    art = sb / "guided_review" / "artifacts"
     art.mkdir(parents=True)
     (art / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
     ids = ([f"M{i}" for i in range(1, 18)] + ["M18", "M19", "M20", "M21", "M22", "M23",
@@ -271,7 +271,7 @@ def test_review_contract():
                   "M36_zotero_parity.md", "M2_references.md"):
         (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
                                  encoding="utf-8")
-    (sb / "targeted_review" / "ARCHITECTURE.md").write_text(
+    (sb / "guided_review" / "ARCHITECTURE.md").write_text(
         "| document | section | paragraphs | current structure | reader cost | "
         "proposed reorganization | class | severity | disposition |\n"
         "|---|---|---|---|---|---|---|---|---|\n"
@@ -292,7 +292,7 @@ def test_review_contract():
 def prompts() -> dict:
     P = Path("/tmp/x")
     return {
-        "review": nb.review_prompt(P, "r1_targeted_review", 1),
+        "review": nb.review_prompt(P, "r1_guided_review", 1),
         "audit": nb.audit_prompt(P, "r1_audit", 1),
         "rewrite": nb.rewrite_prompt(P, "r1_w1", 1, index=1, total=2),
         "revise": nb.revise_prompt(P, "r1_a2_revise", 1),
@@ -351,7 +351,7 @@ def test_skill_docs():
         encoding="utf-8")
     check("sweeps.md defines M30 with purpose/enumeration/artifact/finding rules",
           "## M30 — Source-hierarchy reconciliation" in sweeps
-          and "**Artifact.** `targeted_review/artifacts/M30_hierarchy_reconciliation.md`" in sweeps
+          and "**Artifact.** `guided_review/artifacts/M30_hierarchy_reconciliation.md`" in sweeps
           and "one finding per incompatible instance" in sweeps)
     check("sweeps.md carries the hierarchy and the seeded tables",
           "github code > data in raw_data/" in sweeps
@@ -394,15 +394,15 @@ def test_stub_review_round():
     # evidence is the run record: the review finished and its postcheck passed
     # under the default strict-artifact policy.
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
-    rec = (state.get("runs") or {}).get("r1_targeted_review") or {}
+    rec = (state.get("runs") or {}).get("r1_guided_review") or {}
     check("the review run completes under the default strict-artifact policy",
           rec.get("status") == "done" and (rec.get("postcheck") or {}).get("ok") is True,
           json.dumps(rec.get("postcheck") or rec)[:300])
-    sb = root / "runs" / "r1_targeted_review"
-    art = sb / "targeted_review" / "artifacts" / "M30_hierarchy_reconciliation.md"
+    sb = root / "runs" / "r1_guided_review"
+    art = sb / "guided_review" / "artifacts" / "M30_hierarchy_reconciliation.md"
     check("the run's M30 artifact exists and is disposed",
           art.is_file() and "| disposition |" in art.read_text(encoding="utf-8"))
-    seeded = sb / "targeted_review" / "work" / "M30_hierarchy_reconciliation.md"
+    seeded = sb / "guided_review" / "work" / "M30_hierarchy_reconciliation.md"
     check("the seeded working copy carries the machine-found rows",
           seeded.is_file() and "raw_data/calls.csv" in seeded.read_text(encoding="utf-8"),
           seeded.read_text(encoding="utf-8")[:120] if seeded.is_file() else "missing")

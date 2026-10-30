@@ -316,7 +316,7 @@ def test_wiring():
         check(f"the {where} prompt carries the M36 class",
               "M36" in block and "Zotero" in block)
     prof = pp.load_venue_profile("nature-biotechnology")
-    prompt = pp.review_prompt(Path("/tmp/zp_sb"), "r1_targeted_review", 1, venue=prof)
+    prompt = pp.review_prompt(Path("/tmp/zp_sb"), "r1_guided_review", 1, venue=prof)
     check("the review prompt tells the session how to resolve a stale marker",
           "zotero-check" in prompt and "M36_zotero_parity.md" in prompt)
     check("discovery proposals now start at M37",

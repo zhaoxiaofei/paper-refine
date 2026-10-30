@@ -152,7 +152,7 @@ def test_context_overflow_both_streams() -> None:
           pp.agent_failure_kind("", "agent exited rc=1") == "")
     sb = scratch("paper_exec_1018_")
     (sb / "PROMPT.md").write_text("noop", encoding="utf-8")
-    rec = {"id": "r1_targeted_review", "kind": "targeted_review", "round": 1, "sandbox": str(sb)}
+    rec = {"id": "r1_guided_review", "kind": "guided_review", "round": 1, "sandbox": str(sb)}
     cmd = [sys.executable, "-c",
            "import sys; print('ERROR: unexpected status 413 Payload Too Large'); "
            "print('warning: retrying request once', file=sys.stderr); sys.exit(1)"]
@@ -166,7 +166,7 @@ def test_context_overflow_both_streams() -> None:
 # ---------------------------------------------------------------------------
 def test_context_budget_is_global() -> None:
     print("\n== C04: every session prompt carries the context budget ==")
-    role = {"id": "r1_targeted_review", "kind": "targeted_review", "round": 1}
+    role = {"id": "r1_guided_review", "kind": "guided_review", "round": 1}
     prompts = {
         "continuation": pp.resume_prompt(role, ["x"], "stopped", 0),
         "defect audit": pp._defect_audit_prompt(1, 2),

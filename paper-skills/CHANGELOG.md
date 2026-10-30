@@ -763,7 +763,7 @@ carries the DETECTION side as **M30**:
   including a cohort-size sentence against the table's own row count) and
   `code_literal_rows` (module-level code/config literals such as
   `N_SAMPLES = 15`), all bounded and only on claim-bearing surfaces. The
-  pipeline seeds them as `targeted_review/artifacts/M30_hierarchy_reconciliation.md`
+  pipeline seeds them as `guided_review/artifacts/M30_hierarchy_reconciliation.md`
   (a decision table) and as `work/M30_hierarchy_reconciliation.md` in the other
   layouts.
 - The auditor attacks the old closures ("the code is out of scope",
@@ -800,7 +800,7 @@ makes every pair symmetric:
 - A new code-side ledger `claim_strength_rows` (`paper_docx_format.py`)
   enumerates one row per claim-bearing paragraph per direction (`under` =
   hedges, `over` = maximal claims), seeded as
-  `targeted_review/artifacts/CLAIM_STRENGTH.md` (a decision table under the
+  `guided_review/artifacts/CLAIM_STRENGTH.md` (a decision table under the
   strict-artifacts policy) and `work/CLAIM_STRENGTH.md` for the other layouts.
   The code cannot decide the calibration — it guarantees the quiet direction is
   enumerated too, and a hedge the evidence requires is an `OK` row.
@@ -833,7 +833,7 @@ enumerative work:
   parity · house-style/orthographic conventions · claim→evidence coverage ·
   sibling-definition symmetry · caption-promise vs printed-schema parity) and
   **J5** (the architecture/rewrite-class pass, one row per scope in
-  `targeted_review/ARCHITECTURE.md`, findings carrying a `scope` key); M1(a) now states
+  `guided_review/ARCHITECTURE.md`, findings carrying a `scope` key); M1(a) now states
   that an acronym-first compound is "used before it is defined" and that "it is
   a proper name" is not a disposition when the sentence itself prints the
   expansion; J5 findings are the one deliberate exception to the
@@ -848,9 +848,9 @@ enumerative work:
   J5 licenses SCOPED restructuring (reorder/split/merge/transition edits inside
   the finding's declared scope) under a content freeze, a numbering check and
   one `WORK/RESTRUCTURE_<finding-id>.md` artifact per finding.
-- `paper_pipeline.py`'s targeted-review/audit/revise prompts carry the new checks, the
+- `paper_pipeline.py`'s guided-review/audit/revise prompts carry the new checks, the
   review's coverage contract requires M25–M29 + J5 with their artifacts (and a
-  disposed `targeted_review/ARCHITECTURE.md`), the auditor attacks the dispositions that
+  disposed `guided_review/ARCHITECTURE.md`), the auditor attacks the dispositions that
   closed these classes (M1 name-bar rows, "artwork is read-only", per-document
   convention rows, unfilled architecture tables), and the revise postcheck warns
   when the convention re-run / restructuring notes are missing. The judge

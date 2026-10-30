@@ -133,7 +133,7 @@ def test_author_to_complete_policy():
           "PIPELINE HAND-OFF PLACEHOLDERS" in pp.placeholder_rule_text("document"))
     check("the off rule sends the item to MANUAL_STEPS",
           "MANUAL_STEPS.md" in pp.placeholder_rule_text("off"))
-    for fn in (pp.review_prompt, pp.audit_prompt, pp.probe_prompt,
+    for fn in (pp.review_prompt, pp.audit_prompt, pp.cold_start_review_prompt,
                pp.revise_prompt, pp.integrate_prompt, pp.rewrite_prompt):
         args = (Path("/tmp/sb"), "r1_a1", 1) if fn is not pp.integrate_prompt else (
             Path("/tmp/sb"), "r1_i1", 1, "a1", ["a2"])
@@ -157,7 +157,7 @@ def test_author_to_complete_policy():
                                    author_to_complete="document"),
         "audit": pp.audit_prompt(Path("/tmp/sb"), "r1_au", 1,
                                  author_to_complete="document"),
-        "probe": pp.probe_prompt(Path("/tmp/sb"), "r1_p", 1,
+        "probe": pp.cold_start_review_prompt(Path("/tmp/sb"), "r1_p", 1,
                                  author_to_complete="document"),
         "revise": pp.revise_prompt(Path("/tmp/sb"), "r1_a2", 1,
                                    author_to_complete="document"),
@@ -175,7 +175,7 @@ def test_author_to_complete_policy():
                                             author_to_complete=mode),
                  "audit": pp.audit_prompt(Path("/tmp/sb"), "r1_au", 1,
                                           author_to_complete=mode),
-                 "probe": pp.probe_prompt(Path("/tmp/sb"), "r1_p", 1,
+                 "probe": pp.cold_start_review_prompt(Path("/tmp/sb"), "r1_p", 1,
                                           author_to_complete=mode),
                  "revise": pp.revise_prompt(Path("/tmp/sb"), "r1_a2", 1,
                                             author_to_complete=mode),

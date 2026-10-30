@@ -276,7 +276,7 @@ the dependent manuscript numbers become `manual-required` with rerun
 instructions; never guess their new values. If the MANUSCRIPT is wrong: fix
 the manuscript instead.
 
-Make minimal, targeted changes; run available tests/linters if the
+Make minimal, guided changes; run available tests/linters if the
 environment can be set up; otherwise perform a static review and say so.
 Record changes in A9.
 
@@ -339,7 +339,7 @@ Dispose every row:
     keep it byte-identical and add a HIGH-PRIORITY manual query; never replace it
     with a plausible domain, never delete a real address (a reserved/example
     placeholder may be removed), and never propose a replacement address in a
-    targeted-review/audit/probe finding. The orchestrator fails a package that adds an
+    guided-review/audit/probe finding. The orchestrator fails a package that adds an
     address with neither an in-corpus match nor a matching verification row.
   - OPAQUE IDENTIFIERS AND EXTERNALLY-ASSIGNED FACTS FOLLOW THE SAME RULE: a DOI,
     accession (GEO/SRA/BioProject/BioSample/...), ORCID, UUID/UID, git commit
@@ -405,7 +405,7 @@ with evidence) and may add `AU-*` findings. Rules:
 * every `AU-*` finding is a NORMAL finding: resolve it or hand it over with a
   reason, exactly like an `F-*` row;
 * the auditor never edits the package, so any edit its finding requires is
-  yours, and it goes through the same E1/E5 rules (targeted, tracked auxiliary,
+  yours, and it goes through the same E1/E5 rules (guided, tracked auxiliary,
   ledgered).
 
 ## E9 — The L1–L11 language pass (every package-producing stage)
@@ -467,7 +467,7 @@ when the package is fingerprinted; do NOT fight it and do NOT re-introduce it:
   the orchestrator restores the ratio from the image's own pixels; never
   hand-resize an image, your extent would be overwritten.
 
-The half the orchestrator reports but does not edit is YOURS — one targeted
+The half the orchestrator reports but does not edit is YOURS — one guided
 edit per instance, ledgered under the M20 row, never a blanket replacement:
 
 * doubled spaces, space-before-punctuation and bracket spacing where the
@@ -617,7 +617,7 @@ tables > supplementary tables > main text > supplementary text`).
   cell to the producer's value, exactly as the hierarchy dictates, and propagate
   the value to every occurrence (P1). Record the before → after and the producer
   (`file:symbol/row`) in the ledger row.
-* **The CODE is the wrong side**: rule C owns the fix — a minimal, targeted code
+* **The CODE is the wrong side**: rule C owns the fix — a minimal, guided code
   edit under `code/`, a `code/README_RERUN.md`, and the dependent numbers,
   figures and tables become `manual-required` with the rerun instructions (never
   guess a new value, never regenerate a figure here). Say so in the ledger row

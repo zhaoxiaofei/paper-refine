@@ -384,7 +384,7 @@ def test_judge_prompt_and_ids():
           errs3b == [] and any("no 'stage' field" in w for w in warns3b),
           f"{errs3b} / {warns3b}")
     errs3c = []
-    nb._marker_checks(rec, {"stage": "targeted_review", "status": "complete", "run_id": rid}, "judge",
+    nb._marker_checks(rec, {"stage": "guided_review", "status": "complete", "run_id": rid}, "judge",
                       errs3c, [])
     check("a root marker naming a DIFFERENT stage still fails", any("stage mismatch" in e
                                                                    for e in errs3c), str(errs3c))

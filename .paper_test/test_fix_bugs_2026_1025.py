@@ -148,8 +148,8 @@ def test_pipeline_text():
     check("the documented w2_j1 split still works",
           pp.judge_item_parts("w2_j1") == (None, "w2", 1))
     check("numeric probe values compare exactly",
-          pp._probe_value_equal("0.912", "0.9120") is True
-          and pp._probe_value_equal("0.912", "0.9121") is False)
+          pp._cold_start_value_equal("0.912", "0.9120") is True
+          and pp._cold_start_value_equal("0.912", "0.9121") is False)
     pdf = (b"%PDF-1.7\n1 0 obj\n<< /ID [<AABB><CCDD>] >>\nendobj\n"
            b"stream\n/ID [<EEFF><0011>]\nendstream\ntrailer\n"
            b"<< /ID [(abc)(def)] >>\n%%EOF")

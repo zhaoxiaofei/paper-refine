@@ -234,7 +234,7 @@ def test_pack_and_templates(tmp: Path):
 
 def test_prompt_norm(tmp: Path):
     print()
-    print("== the norm reaches targeted-review/rewrite as an ADVISORY block ==")
+    print("== the norm reaches guided-review/rewrite as an ADVISORY block ==")
     block = np.venue_norm_block("demo", root=tmp)
     check("venue_norm_block finds the pack through the root's venue_profiles/",
           "VENUE TEMPLATE / STRUCTURE" in block and "| 1 | Abstract | 2/3 |" in block
@@ -252,8 +252,8 @@ def test_prompt_norm(tmp: Path):
     check("the default add-venue prompt asks for the OA downloads",
           "aim for 8-15" in flat_dl and "obey robots.txt" in flat_dl
           and "never bypass a login" in flat_dl)
-    base_review = np.review_prompt(Path("/tmp/x"), "r1_targeted_review", 1)
-    with_norm = np.review_prompt(Path("/tmp/x"), "r1_targeted_review", 1, venue_norm=block)
+    base_review = np.review_prompt(Path("/tmp/x"), "r1_guided_review", 1)
+    with_norm = np.review_prompt(Path("/tmp/x"), "r1_guided_review", 1, venue_norm=block)
     check("the review prompt gains the block only when it is passed",
           "VENUE TEMPLATE / STRUCTURE" not in base_review
           and "VENUE TEMPLATE / STRUCTURE" in with_norm
@@ -406,7 +406,7 @@ def test_official_template(tmp: Path):
     check("the session sandbox declares the conformance evidence it seeds",
           any(str(p).endswith("work/OFFICIAL_TEMPLATE.json")
               for p in np.seeded_evidence_paths(tmp / "sb"))
-          and any(str(p).endswith("targeted_review/work/OFFICIAL_TEMPLATE.md")
+          and any(str(p).endswith("guided_review/work/OFFICIAL_TEMPLATE.md")
                   for p in np.seeded_evidence_paths(tmp / "sb")))
 
 

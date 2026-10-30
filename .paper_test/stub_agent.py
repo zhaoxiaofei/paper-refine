@@ -33,8 +33,8 @@ def stub_discovery_x_findings() -> list:
 def frozen_finding_rows(review: Path) -> list:
     """Every finding row a compliant session must consume: F-* AND X-*.
 
-    The revision and audit stages read `targeted_review/findings.json` PLUS the
-    discovery round's `targeted_review/round2/findings_extra.json` (paper-revise merges
+    The revision and audit stages read `guided_review/findings.json` PLUS the
+    discovery round's `guided_review/round2/findings_extra.json` (paper-revise merges
     both namespaces). A stub that reads only findings.json silently drops the
     X-* list -- exactly the inconsistency the pipeline's contracts check for.
     """
@@ -269,7 +269,7 @@ SCOPED_OUT_IDS = ("M2", "M4", "M5", "M13", "M14", "M15", "M16", "M21", "M22", "M
 
 
 def do_review(sb: Path, name: str, round_no: int) -> int:
-    out = sb / "targeted_review"
+    out = sb / "guided_review"
     (out / "artifacts").mkdir(parents=True, exist_ok=True)
     (out / "round2").mkdir(parents=True, exist_ok=True)
     scoped = "FORMATTING AND WRITING ONLY" in (
@@ -332,7 +332,7 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                          "detail": "stub"}]
                      + [{"check": "M20",
                          "disposition": "0 findings -- code-side formatting rows disposed",
-                         "detail": "stub: targeted_review/work/FORMAT_SCAN.json audited"}]
+                         "detail": "stub: guided_review/work/FORMAT_SCAN.json audited"}]
                      + [{"check": c,
                          "disposition": ("out of scope -- this round's review is the "
                                          "formatting-and-writing-only pass" if scoped and c in
@@ -424,7 +424,7 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "corpus (stub).\n", encoding="utf-8")
     fill_seeded_tables(out / "artifacts")
     write_json(sb / "_pipeline_done.json", {
-        "stage": "targeted_review", "run_id": name, "round": round_no, "status": "complete",
+        "stage": "guided_review", "run_id": name, "round": round_no, "status": "complete",
         "error": None, "summary": {"findings_total": 1, "critical_found": 0,
                                    "major_found": 0, "minor_found": 1}})
     return 0
@@ -487,7 +487,7 @@ def do_concerns(sb: Path, name: str, round_no: int) -> int:
         + "\n".join(f"| {r['id']} | {r['source']} | {r['author']} | {r['action']} | "
                     f"{r['disposition']} | {r['quote']} | {r['summary']} | — |" for r in rows)
         + "\n", encoding="utf-8")
-    rev = sb / "targeted_review"
+    rev = sb / "guided_review"
     (rev / "artifacts").mkdir(parents=True, exist_ok=True)
     findings = [{"id": r["id"], "location": "base", "category": 0, "check": "JF",
                  "severity": "Major", "evidence": r["quote"],
@@ -572,17 +572,17 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
     return 0
 
 
-def do_probe(sb: Path, name: str, round_no: int) -> int:
-    """The PROBE REVIEW stub: a compliant, generic probe deliverable set.
+def do_cold_start_review(sb: Path, name: str, round_no: int) -> int:
+    """The COLD-START REVIEW stub: a compliant, generic probe deliverable set.
 
-    Reads the format the pipeline's `postcheck_probe` enforces: a `checked`
+    Reads the format the pipeline's `postcheck_cold_start_review` enforces: a `checked`
     inventory and a findings list (possibly empty). With
-    `PAPER_STUB_PROBE_FINDING` set, one finding X-901 is filed with a real
+    `PAPER_STUB_COLD_START_FINDING` set, one finding X-901 is filed with a real
     verifier -- the stub writes the script and then RUNS it, so the
     orchestrator's own re-run reproduces the declared value -- which exercises
     the merge/disposition/reconciliation chain end to end.
     """
-    out = sb / "probe_review"
+    out = sb / "cold_start_review"
     (out / "scripts").mkdir(parents=True, exist_ok=True)
     doc_count = sum(1 for p in (sb / "base").rglob("*") if p.is_file())
     script = out / "scripts" / "pr001.py"
@@ -598,7 +598,7 @@ def do_probe(sb: Path, name: str, round_no: int) -> int:
     checked = [{"area": "corpus inventory", "examined": doc_count, "findings": 0},
                {"area": "submission documents", "examined": doc_count, "findings": 0}]
     findings = []
-    if os.environ.get("PAPER_STUB_PROBE_FINDING"):
+    if os.environ.get("PAPER_STUB_COLD_START_FINDING"):
         checked.append({"area": "stub producer", "examined": 1, "findings": 1})
         findings.append({
             "id": "X-901", "location": "base/manuscript (stub)", "category": 1,
@@ -606,11 +606,11 @@ def do_probe(sb: Path, name: str, round_no: int) -> int:
             "evidence": "stub: the corpus inventory contradicts the stub claim",
             "explanation": "stub probe finding for the merge/disposition chain",
             "status": "resolvable",
-            "verifier": {"script": "probe_review/scripts/pr001.py",
+            "verifier": {"script": "cold_start_review/scripts/pr001.py",
                          "computed": computed,
                          "shows": "the corpus inventory the stub claim was checked against"}})
-    write_json(out / "findings_probe.json", {"checked": checked, "findings": findings})
-    (out / "findings_probe.md").write_text(
+    write_json(out / "findings_cold_start_review.json", {"checked": checked, "findings": findings})
+    (out / "findings_cold_start_review.md").write_text(
         ("| id | severity | explanation |\n|---|---|---|\n"
          + "\n".join(f"| {f['id']} | {f['severity']} | {f['explanation']} |"
                      for f in findings) + "\n") if findings else "(no findings)\n",
@@ -621,7 +621,8 @@ def do_probe(sb: Path, name: str, round_no: int) -> int:
                     for c in checked)
         + "\n- limitations: the stub checks only the corpus inventory\n", encoding="utf-8")
     write_json(sb / "_pipeline_done.json",
-               {"stage": "probe", "run_id": name, "round": round_no, "status": "complete",
+               {"stage": "cold_start_review", "run_id": name, "round": round_no,
+                "status": "complete",
                 "findings": len(findings), "verified": len(findings),
                 "areas": len(checked)})
     return 0
@@ -636,7 +637,7 @@ def do_audit(sb: Path, name: str, round_no: int) -> int:
     with evidence, promoted `AU-` findings) is exercised by the unit fixtures of
     `test_residual_audit_2026_0921.py`, not by the stub round.
     """
-    rev = sb / "targeted_review"
+    rev = sb / "guided_review"
     frozen = frozen_finding_rows(rev)
     out = sb / "audit"
     out.mkdir(parents=True, exist_ok=True)
@@ -698,7 +699,7 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
     (out / "REVISION_REPORT.md").write_text("# report (stub)\n", encoding="utf-8")
     language_pass_artifact(out, "revised documents")
     # The ledger contract: one row per finding id from the frozen review -- the
-    # revise stage consumes targeted_review/findings.json AND targeted_review/round2/
+    # revise stage consumes guided_review/findings.json AND guided_review/round2/
     # findings_extra.json (the discovery round's X-* ids); the cross stage works
     # from the self/ package, which carries the same ledger back in. A run that
     # lists no row at all cannot prove "no finding was silently dropped".
@@ -709,7 +710,7 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
                                           "visual_check.md")
                and "work" not in p.relative_to(out).parts[:-1]]
     rows = []
-    for rel in ("targeted_review/findings.json", "targeted_review/round2/findings_extra.json",
+    for rel in ("guided_review/findings.json", "guided_review/round2/findings_extra.json",
                 "revised/revision_report.json"):
         p = sb / rel
         if not p.is_file():
@@ -1063,10 +1064,10 @@ def main(prompt_text: str = None) -> int:
         return do_concerns(sb, name, round_no)
     if name.endswith("_response"):
         return do_response(sb, name, round_no)
-    if name.endswith("_review"):
+    if name.endswith("_cold_start_review") or name.endswith("_cold_start_review"):
+        return do_cold_start_review(sb, name, round_no)
+    if name.endswith("_review") or name.endswith("_guided_review"):
         return do_review(sb, name, round_no)
-    if name.endswith("_probe"):
-        return do_probe(sb, name, round_no)
     if name.endswith("_audit"):
         return do_audit(sb, name, round_no)
     if re.search(r"_w\d+$", name):
