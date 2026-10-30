@@ -2460,10 +2460,15 @@ def prior_failure_block(rec: dict) -> str:
     return PRIOR_FAILURE_NOTE.replace("@@PRIOR_FAILURE@@", note)
 
 
-def visual_inspection_block(artifact_rel: str) -> str:
-    """The visual-inspection block for one prompt (with its artifact path)."""
+def visual_inspection_block(artifact_rel: str, profile=None) -> str:
+    """The visual-inspection block for one prompt (with its artifact path).
+
+    The page-budget bullet is filled from the venue profile: a rule the venue
+    did not state is reported as a GAP, never asserted (AGENTS rule 3).
+    """
     return (VISUAL_INSPECTION_RULE
             .replace("@@VISUAL_TOOLS@@", visual_tools_summary())
+            .replace("@@PAGE_BUDGET_INSPECTION@@", page_budget_inspection(profile))
             .replace("@@VISUAL_ARTIFACT@@", artifact_rel))
 
 
@@ -2640,7 +2645,7 @@ the surface, and the revisers may not change a claim here."""
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", validation_block("review"))
             .replace("@@VISUAL_INSPECTION_RULE@@",
-                     visual_inspection_block(VISUAL_ARTIFACT_REVIEW))
+                     visual_inspection_block(VISUAL_ARTIFACT_REVIEW, prof))
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("review", zotero))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof)))
@@ -2718,7 +2723,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@VISUAL_INSPECTION_RULE@@",
-                     visual_inspection_block(VISUAL_ARTIFACT_REVISED))
+                     visual_inspection_block(VISUAL_ARTIFACT_REVISED, prof))
             .replace("@@VALIDATION_RULE@@", VALIDATION_RULE)
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@",
@@ -2771,7 +2776,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", VALIDATION_RULE)
             .replace("@@VISUAL_INSPECTION_RULE@@",
-                     visual_inspection_block(VISUAL_ARTIFACT_AUDIT))
+                     visual_inspection_block(VISUAL_ARTIFACT_AUDIT, prof))
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("review", zotero))
             .replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("audit")))
@@ -3059,7 +3064,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@VISUAL_INSPECTION_RULE@@",
-                     visual_inspection_block(VISUAL_ARTIFACT_INTEGRATED))
+                     visual_inspection_block(VISUAL_ARTIFACT_INTEGRATED, prof))
             .replace("@@VALIDATION_RULE@@", VALIDATION_RULE)
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@",
@@ -3115,7 +3120,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VISUAL_INSPECTION_RULE@@",
-                     visual_inspection_block(VISUAL_ARTIFACT_REWRITTEN))
+                     visual_inspection_block(VISUAL_ARTIFACT_REWRITTEN, prof))
             .replace("@@VALIDATION_RULE@@", VALIDATION_RULE)
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("rewrite", zotero))
@@ -3165,7 +3170,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", validation_block("judge"))
             .replace("@@VISUAL_INSPECTION_RULE@@",
-                     visual_inspection_block(VISUAL_ARTIFACT_JUDGE))
+                     visual_inspection_block(VISUAL_ARTIFACT_JUDGE, prof))
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("judge", zotero))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof)))

@@ -484,6 +484,45 @@ def _clean_captions(captions, prefix: str, problems: list):
 EMPTY_LENGTH_LIMITS = {"source": "", "abstract": {"base": None, "relaxation": None},
                        "main_text": {"base": None, "relaxation": None},
                        "cover_letter": {"min": None, "max": None, "total_max": None, "source": ""}}
+
+
+def _clean_page_budget(raw, prefix: str, problems: list):
+    """Validate the venue's optional PAGE-BUDGET block (None = states none).
+
+    AGENTS rule 3: a page budget or a front-page keyword rule is a VENUE rule,
+    so it is carried by the profile (with its source) instead of being asserted
+    for every venue by the prompt text. `None` means the venue states none: the
+    prompts then record the missing rule as a GAP and file no page-budget
+    finding. A profile that states a rule must name the document that states it.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        problems.append(f"{prefix} must be an object, or null when the venue states no "
+                        f"page budget (got {type(raw).__name__})")
+        return None
+    keywords = raw.get("front_page_keywords")
+    if keywords is None:
+        keywords = False
+    elif not isinstance(keywords, bool):
+        problems.append(f"{prefix}.front_page_keywords must be true or false")
+        keywords = False
+    clean = {
+        "front_page_keywords": keywords,
+        "cover_letter_max_pages": _profile_int(
+            raw.get("cover_letter_max_pages"),
+            f"{prefix}.cover_letter_max_pages", problems, minimum=1),
+        "source": str(raw.get("source") or "").strip(),
+    }
+    if (clean["front_page_keywords"] or clean["cover_letter_max_pages"] is not None) \
+            and not clean["source"]:
+        problems.append(f"{prefix}.source is required when the profile states a page "
+                        f"budget (a rule must name the venue document that states it)")
+    if not clean["front_page_keywords"] and clean["cover_letter_max_pages"] is None:
+        return None
+    return clean
+
+
 EMPTY_CAPTIONS = {"published_limit": None, "default_cap": 0, "source": ""}
 # The venue's DISPLAY-ITEM rules (the formatter's `policy["tables"]` and
 # `policy["figures"]`, rules FMT-TB1..3 / FMT-FG1..3): where a table or a figure
@@ -779,6 +818,11 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
                     "source": str(figure_text_raw.get("source") or "").strip(),
                 }
 
+    # Validate the page budget BEFORE the raise: `_clean_page_budget` appends
+    # its problems to the same list, so calling it inside the return expression
+    # (after the check) silently accepted a malformed block.
+    clean_page_budget = _clean_page_budget(out.get("page_budget"), "page_budget",
+                                           problems)
     if problems:
         raise VenueProfileError(f"{origin}: " + "; ".join(problems))
 
@@ -815,6 +859,7 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "length_limits": clean_limits,
         "counting": clean_counting,
         "captions": clean_captions,
+        "page_budget": clean_page_budget,
         "tables": clean_tables or copy.deepcopy(EMPTY_TABLES),
         "figures": clean_figures or copy.deepcopy(EMPTY_FIGURES),
         "foreign_container_headings": foreign,
@@ -2766,6 +2811,11 @@ def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
             inherited["figure_text"] = copy.deepcopy(fresh.data["figure_text"])
         if "image_dpi" in missing and (fresh.data.get("image_dpi") or {}):
             inherited["image_dpi"] = copy.deepcopy(fresh.data["image_dpi"])
+        # The page budget is the same kind of venue rule: a snapshot recorded
+        # before F14 carries no key, so without this a budget later added to the
+        # profile file would be ignored until `set-venue` re-recorded the root.
+        if "page_budget" in missing and isinstance(fresh.data.get("page_budget"), dict):
+            inherited["page_budget"] = copy.deepcopy(fresh.data["page_budget"])
         if "foreign_container_headings" in missing and (
                 fresh.data.get("foreign_container_headings") or ()):
             inherited["foreign_container_headings"] = copy.deepcopy(
@@ -2807,7 +2857,8 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None):
         return None
     missing = tuple(k for k in ("tables", "figures", "references", "numbering",
                                 "leftover_phrases", "counting", "figure_text",
-                                "image_dpi", "foreign_container_headings")
+                                "image_dpi", "foreign_container_headings",
+                                "page_budget")
                     if k not in snapshot)
     if missing:
         inherited = _inherited_display_rules(venue_id, root, missing)

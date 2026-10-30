@@ -655,6 +655,12 @@ def test_setup_snapshot_guard():
     old_root = tmp / "old-root"
     old_root.mkdir()
     copy_bundle(WS, old_root)
+    # A real frozen root carries EVERY PIPELINE_MODULE_FILES entry (the render/
+    # track shims included); setup now refuses to freeze a tree that lacks one
+    # (F13), so this snapshot fixture must be a complete root.
+    for _name in pp.PIPELINE_MODULE_FILES:
+        if not (old_root / _name).is_file():
+            shutil.copy2(WS / _name, old_root / _name)
     write(old_root / "state.json", json.dumps({
         "version": pp.STATE_VERSION, "runs": {}, "rounds": {}, "log": [], "pinned": [],
         "pipeline": {"path": str(WS / "paper_pipeline.py"), "sha256": "0" * 64,

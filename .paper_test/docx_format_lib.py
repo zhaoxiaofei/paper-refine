@@ -215,8 +215,13 @@ def test_layout_budget_rules():
     print()
     print("== the 2026-09-30 winner's layout defects (FMT-T8f/T8g/T8h) ==")
     tmp = scratch("paper_fmt_layout_")
+    # FMT-T8g/T8h are venue rules now: the fixture declares the one this test
+    # asserts (a policy with no page_budget deliberately files no page row).
+    pol = dict(fmt.load_policy(None), page_budget={
+        "front_page_keywords": True, "cover_letter_max_pages": 2,
+        "source": "the test's venue rule"})
     bad = make_package(tmp / "mainText.docx", doc_xml_layout())
-    rows = fmt.scan_paths([bad], fmt.load_policy(None))["rows"]
+    rows = fmt.scan_paths([bad], pol)["rows"]
     got = rules(rows)
     check("a keywords line pushed to page 2 is a front-page finding (FMT-T8g)",
           "FMT-T8g" in got
@@ -228,7 +233,7 @@ def test_layout_budget_rules():
           str([r["evidence"][:80] for r in rows if r["rule"] == "FMT-T8f"]))
     clean = make_package(tmp / "clean.docx", doc_xml_layout(split_front_page=False,
                                                             mixed_indents=False))
-    crows = fmt.scan_paths([clean], fmt.load_policy(None))["rows"]
+    crows = fmt.scan_paths([clean], pol)["rows"]
     check("a uniform layout produces neither finding",
           "FMT-T8g" not in rules(crows) and "FMT-T8f" not in rules(crows),
           str(sorted(rules(crows))))
@@ -248,7 +253,7 @@ def test_layout_budget_rules():
             z.writestr("word/styles.xml", STYLES)
             z.writestr("docProps/core.xml", CORE)
             z.writestr("docProps/app.xml", app)
-        lrows = fmt.scan_paths([p], fmt.load_policy(None))["rows"]
+        lrows = fmt.scan_paths([p], pol)["rows"]
         hit = [r for r in lrows if r["rule"] == "FMT-T8h"]
         check(f"a cover letter with a cached {pages}-page count is "
               f"{'a finding' if want else 'clean'} (FMT-T8h)",
@@ -1492,7 +1497,8 @@ def test_review_m20_seeding():
     base = sb / "base"
     rows = [{"check": c, "disposition": "clean -- basis: x"} for c in
             [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
-    rows += [{"check": "M18", "disposition": "legend counts recorded"},
+    rows += [{"check": "M18",
+              "disposition": "clean -- basis: legend counts recorded"},
              {"check": "M19", "disposition": "0 findings"}]
     fj = {"submission_dir": "./base", "findings": [{"id": "F-001", "check": "M1"}],
           "artifacts": {}, "coverage": list(rows)}
@@ -1501,7 +1507,7 @@ def test_review_m20_seeding():
     check("a review without the M20 coverage row fails the contract",
           any("M20" in e for e in errs), str(errs[:1]))
     fj2 = dict(fj, coverage=rows + [{"check": "M20",
-                                     "disposition": "formatting rows disposed"}])
+                                     "disposition": "0 findings -- formatting rows disposed"}])
     errs2, warns2 = [], []
     nb.check_review_contract(ctx, sb, fj2, errs2, warns2)
     check("a review with the M20 coverage row passes that check",

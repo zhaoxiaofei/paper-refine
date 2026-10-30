@@ -43,18 +43,27 @@ _JUDGE_CONFLICT_STOPWORDS = {
 }
 _JUDGE_CONFLICT_TOKEN_RE = re.compile(r"[a-z][a-z0-9_.\-/]{2,}")
 # The sign is part of the value: "-12" and "12" are a real contradiction.
-_JUDGE_CONFLICT_NUMBER_RE = re.compile(r"(?<![\w.])([-\u2212]?\d[\d,]*(?:\.\d+)?)")
+# A leading-dot decimal (".05") has no digit before the point; accept it as a
+# numeric token too, or `p = .05` vs `p = .50` stays invisible.
+_JUDGE_CONFLICT_NUMBER_RE = re.compile(
+    r"(?<![\w.])([-\u2212]?(?:\d[\d,]*(?:\.\d+)?|\.\d+))")
 
 
 def _conflict_numbers(text, floor: float = 10.0) -> set:
     """Quantitative numbers in a claim/message; ids and panel letters are skipped.
 
-    The floor drops the small integers that come from check ids and figure
+    The floor drops the small INTEGERS that come from check ids and figure
     letters ("M4", "Fig. 3d"), while keeping cell counts, read lengths and
-    percentages (36, 50, 152, 170, 508, 1,307, ...).
+    percentages (36, 50, 152, 170, 508, 1,307, ...). A DECIMAL or a percent
+    token is kept at any magnitude: `p = 0.021` vs `p = 0.031` and `5%` vs
+    `8%` are exactly the same-claim-different-number contradiction the scanner
+    exists to surface, and the magnitude floor used to hide both (they are
+    below 10 but are not ids). Figure/panel ids are integers, so the floor's
+    false-positive job is unchanged.
     """
+    text = str(text or "")
     out = set()
-    for m in _JUDGE_CONFLICT_NUMBER_RE.finditer(str(text or "")):
+    for m in _JUDGE_CONFLICT_NUMBER_RE.finditer(text):
         tok = m.group(1).rstrip(",").replace(",", "")
         try:
             v = float(tok)
@@ -62,7 +71,10 @@ def _conflict_numbers(text, floor: float = 10.0) -> set:
             continue
         # The floor is a MAGNITUDE floor: a negative disagreement of the same
         # size is as reportable as its positive twin.
-        if abs(v) >= float(floor):
+        is_decimal = "." in tok
+        # Allow the space some manuscripts put before the sign.
+        is_percent = bool(re.match(r"\s*%", text[m.end():]))
+        if abs(v) >= float(floor) or is_decimal or is_percent:
             out.add(v if v != int(v) else int(v))
     return out
 
@@ -5171,7 +5183,10 @@ def package_front_matter_glue_rows(root: Path, limit: int = 20) -> list:
         return rows
     _decl, _decl_is_submitted = declared_submission_filter(root)
     for p in sorted(root.rglob("*.docx")):
-        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+        # A FILE symlink is not package content (see docx_files_under /
+        # copy_into): following it read an outside document into this report.
+        if not p.is_file() or p.is_symlink() \
+                or is_non_document_name(p.name) or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel) or not _decl_is_submitted(rel):
@@ -5633,7 +5648,10 @@ def affinity_definition_rows(root: Path, limit: int = 8) -> list:
     prose = "\n".join(p for p in prose_parts if p)
     rows = []
     for p in sorted(root.rglob("*.docx")):
-        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+        # A FILE symlink is not package content (see docx_files_under /
+        # copy_into): following it read an outside document into this report.
+        if not p.is_file() or p.is_symlink() \
+                or is_non_document_name(p.name) or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel):
@@ -5898,7 +5916,10 @@ def front_matter_gap_rows(ctx: Ctx, root: Path, limit: int = 8) -> list:
         return rows
     _decl, _decl_is_submitted = declared_submission_filter(root)
     for p in sorted(root.rglob("*.docx")):
-        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+        # A FILE symlink is not package content (see docx_files_under /
+        # copy_into): following it read an outside document into this report.
+        if not p.is_file() or p.is_symlink() \
+                or is_non_document_name(p.name) or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel) or not _decl_is_submitted(rel) \
@@ -6132,7 +6153,9 @@ def package_pdf_rows(root: Path, limit: int = 40) -> list:
         return rows
     _decl, _decl_is_submitted = declared_submission_filter(root)
     for p in sorted(root.rglob("*.pdf")):
-        if not p.is_file() or _is_aux_doc(p.name):
+        # Same containment rule as the DOCX loops above: a file symlink is not
+        # package content and its target may be outside the package.
+        if not p.is_file() or p.is_symlink() or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel) or not _decl_is_submitted(rel):

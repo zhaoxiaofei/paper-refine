@@ -327,10 +327,11 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                          "disposition": "0 findings -- abstract/main text within the relaxed caps",
                          "detail": "stub"}]
                      + [{"check": "M18",
-                         "disposition": "legend lengths recorded (no cap configured in the stub)",
+                         "disposition": ("clean -- basis: legend lengths recorded (no cap "
+                                         "configured in the stub)"),
                          "detail": "stub"}]
                      + [{"check": "M20",
-                         "disposition": "code-side formatting rows disposed: 0 findings",
+                         "disposition": "0 findings -- code-side formatting rows disposed",
                          "detail": "stub: review/work/FORMAT_SCAN.json audited"}]
                      + [{"check": c,
                          "disposition": ("out of scope -- this round's review is the "
@@ -967,9 +968,17 @@ def do_judge(sb: Path, name: str, round_no: int, prompt: str) -> int:
 
 
 def _revision_audit_stub(sb: Path) -> int:
-    """Write the audit's repair plan: empty by default, one stub row on request."""
+    """Write the audit's repair plan: empty by default, one stub row on request.
+
+    The pipeline seeds revision_audit/DELETED_PARAGRAPHS.md with one EMPTY
+    disposition cell per base paragraph the revision removed. The stub must
+    dispose those rows like a real auditor (the deletion audit is a gate), or a
+    revision with a normal edited paragraph fails every time on the empty cell --
+    which is exactly how the PKG-2 end-to-end fixture broke.
+    """
     out = sb / "revision_audit"
     out.mkdir(parents=True, exist_ok=True)
+    fill_seeded_tables(out)
     rows = []
     if os.environ.get("PAPER_STUB_REVISION_AUDIT_ROWS"):
         targets = [p for p in sorted((sb / "revised").rglob("*.md"))

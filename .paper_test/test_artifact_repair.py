@@ -638,7 +638,7 @@ named = {str((row or {}).get("id")) for row in ledger if isinstance(row, dict)}
 check("F4 revise: the ledger names every frozen id again and the run is done",
       repaired(state_r, "r1_a2_revise")
       and {str(f["id"]) for f in frozen_r} <= named
-      and any(str(r.get("verdict")) == "unable" for r in ledger),
+      and any(str(r.get("verdict")) == "manual-required" for r in ledger),
       f"named={sorted(named)}")
 
 # --- integrate: the repair completes the ledger the stage wrote --------------

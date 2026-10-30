@@ -266,12 +266,14 @@ def test_docx_fix_paths():
 def test_pdftotext_timeout():
     print()
     print("== D5 a stalled pdftotext is a reported row, not a traceback ==")
-    real_run = fmt.subprocess.run
+    # The bounded runner (F38) is the seam the PDF helpers use now; patch IT,
+    # not the subprocess module, or the timeout is never raised.
+    real_run = getattr(fmt, "_run_text_tool", None)
 
     def _boom(*_a, **_k):
         raise subprocess.TimeoutExpired(cmd="pdftotext", timeout=60)
 
-    fmt.subprocess.run = _boom
+    fmt._run_text_tool = _boom
     try:
         pdf = scratch("dbg1013_pdf_") / "paper.pdf"
         pdf.write_bytes(b"%PDF-1.4\n")
@@ -294,7 +296,10 @@ def test_pdftotext_timeout():
         check("D5 pdf_artifact_rows returns instead of raising", raised2 is None,
               f"{type(raised2).__name__}: {raised2}" if raised2 else "")
     finally:
-        fmt.subprocess.run = real_run
+        if real_run is None:
+            del fmt._run_text_tool
+        else:
+            fmt._run_text_tool = real_run
 
 
 # =====================================================================

@@ -251,11 +251,13 @@ def test_report_layout():
               "error" in rep and "unreadable DOCX" in rep["error"], str(rep.get("error")))
     except UnicodeDecodeError as e:
         check("D-053 a non-UTF-8 document.xml returns an error report", False, repr(e))
-    orig = (fmt.shutil.which, fmt.subprocess.run, fmt._pdf_image_pages)
+    # The bounded runner (F38) is the seam now: patch IT, not the subprocess
+    # module the implementation used to call. The check is about the
+    # blank-page/image gap logic, not about how the child is spawned.
+    orig = (fmt.shutil.which, fmt._run_text_tool, fmt._pdf_image_pages)
     try:
         fmt.shutil.which = lambda n: "/usr/bin/pdftotext" if n == "pdftotext" else None
-        fmt.subprocess.run = lambda *a, **k: types.SimpleNamespace(
-            stdout="\f\f", stderr="", returncode=0)
+        fmt._run_text_tool = lambda argv, timeout: (0, "\f\f", "")
         fmt._pdf_image_pages = lambda p: None
         rep = fmt.check_pdf(Path("figure-only.pdf"), dict(fmt.POLICY_DEFAULTS))
         high = [r for r in rep["rows"] if r["rule"] == "FMT-S2" and r["severity"] == "high"]
@@ -263,10 +265,12 @@ def test_report_layout():
         check("G-030 missing pdfimages files a gap, not false blank pages",
               not high and bool(gap), str(rep["rows"]))
     finally:
-        fmt.shutil.which, fmt.subprocess.run, fmt._pdf_image_pages = orig
+        fmt.shutil.which, fmt._run_text_tool, fmt._pdf_image_pages = orig
     letter = tmp / "Letter.docx"
     make_docx(letter, para("Dear Editor"), app_pages=3)
-    rep = fmt.analyse_package(letter, dict(fmt.POLICY_DEFAULTS))
+    rep = fmt.analyse_package(letter, dict(fmt.POLICY_DEFAULTS, page_budget={
+        "front_page_keywords": False, "cover_letter_max_pages": 2,
+        "source": "the test's venue rule"}))
     check("G-031 a letter named Letter.docx enters the two-page budget",
           any(r["rule"] == "FMT-T8h" for r in rep["rows"]),
           str([r["rule"] for r in rep["rows"]]))

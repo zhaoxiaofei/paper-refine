@@ -991,7 +991,19 @@ def zotero_report_for_docx(path) -> dict:
                 raise KeyError("word/document.xml")
             parts = [n for n in names
                      if n in ZOTERO_FIELD_PARTS or ZOTERO_FIELD_AUX_PARTS_RE.search(n)]
-            xmls = [(n, pkg.read(n).decode("utf-8", "replace")) for n in parts]
+            # Untrusted input budget: this reader used to decompress every
+            # field-carrying part unbounded, so a small zip bomb allocated
+            # gigabytes and an XML DTD/entity was handed to the regex readers.
+            # The guarded reader (size cap + entity refusal) is the same one the
+            # scanner/validator use.
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise OSError(problem)
+            xmls = [(n, _docx_xml_part_guarded(pkg, n).decode("utf-8", "replace"))
+                    for n in parts]
+            style_parts = {n: _docx_xml_part_guarded(pkg, n).decode("utf-8", "replace")
+                           for n in ("word/settings.xml", "docProps/custom.xml")
+                           if n in pkg.namelist()}
     # RuntimeError is what `zipfile` raises for an ENCRYPTED entry and
     # NotImplementedError for an unsupported compression method (see
     # `analyse_package`): a password-protected .docx is unreadable like any
@@ -1008,13 +1020,6 @@ def zotero_report_for_docx(path) -> dict:
     # The live-field PARITY rows travel with the inventory (FMT-Z1..Z5): the
     # stage gate compares them version to version, so a Word/Zotero refresh that
     # renumbers the text is visible even though every field is still "present".
-    try:
-        with zipfile.ZipFile(path) as pkg:
-            style_parts = {n: pkg.read(n).decode("utf-8", "replace")
-                           for n in ("word/settings.xml", "docProps/custom.xml")
-                           if n in pkg.namelist()}
-    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
-        style_parts = {}
     parity = zotero_parity_rows_for_parts(xmls, zotero_style_ids(style_parts))
     if len(reports) == 1:
         merged = reports[0][1]

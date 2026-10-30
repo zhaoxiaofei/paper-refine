@@ -3657,6 +3657,26 @@ def deletion_audit_markdown(rows: list) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _deletion_disposition_ok(value) -> bool:
+    """Does a DELETED_PARAGRAPHS disposition use the seeded vocabulary?
+
+    The seed's instructions name exactly three shapes: `OK — <why no fact is
+    lost>`, `manual-required`, and `fact removed — RP-xxx`. The shared
+    `disposition_artifact_problems` only rejects empty/boilerplate cells, so a
+    single `x` used to pass the deletion-fact gate without disposing anything.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if re.match(r"(?i)^OK\s*[\u2014\u2013:-]\s*\S", text):
+        return True
+    if re.match(r"(?i)^manual-required\b", text):
+        return True
+    if re.match(r"(?i)^fact\s+removed\s*[\u2014\u2013:-]\s*RP-\d+\b", text):
+        return True
+    return False
+
+
 def deletion_audit_problems(sb: Path, expected_rows: int = None,
                             expected_paragraphs=None, plan_ids=None) -> list:
     """Problems with the revision audit's deleted-paragraph dispositions.
@@ -3695,6 +3715,17 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
             continue
         problems += disposition_artifact_problems(
             block["rows"], block.get("widths"), len(block["header"]))
+        for row in block["rows"]:
+            disposition = str(row.get("disposition") or "").strip()
+            if not disposition:
+                # Already reported as an EMPTY cell by the shared checker.
+                continue
+            if not _deletion_disposition_ok(disposition):
+                problems.append(
+                    f"{p.name} row {str(row.get('#') or '?').strip()} has a disposition "
+                    f"outside the seeded vocabulary: {disposition[:80]!r}. Dispose it as "
+                    f"`OK — <why no fact is lost>`, `manual-required`, or "
+                    f"`fact removed — RP-xxx`")
         if check_plan:
             for row in block["rows"]:
                 disposition = str(row.get("disposition") or "")

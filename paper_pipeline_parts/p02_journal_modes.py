@@ -2349,6 +2349,26 @@ def length_rule_text(profile=None) -> str:
       handed to the author as a manual item, exactly like an incompressible caption."""
 
 
+def page_budget(profile=None) -> dict:
+    """The venue's recorded page-budget block ({} when it states none)."""
+    data = getattr(_as_profile(profile), "data", {}) or {}
+    block = data.get("page_budget") if isinstance(data, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
+def _page_budget_rules(block: dict) -> list:
+    """The sentence fragments one recorded page-budget block states."""
+    rules = []
+    if block.get("front_page_keywords"):
+        rules.append("the FRONT PAGE must carry the title, the authors, the affiliations, "
+                     "the abstract AND the keywords together (and a keywords line that starts "
+                     "page 2, or an abstract that spills, is the finding)")
+    max_pages = block.get("cover_letter_max_pages")
+    if isinstance(max_pages, int) and max_pages > 0:
+        rules.append(f"the COVER LETTER must render to at most {max_pages} page(s)")
+    return rules
+
+
 def standing_exemptions_text(profile=None) -> str:
     """The standing exemptions block, with this venue's length and legend rules."""
     prof = _as_profile(profile)
@@ -2364,19 +2384,31 @@ def standing_exemptions_text(profile=None) -> str:
         f"must stay within {cover_total} words (the operator's default cap)"
         if cover_total is not None else
         "is counted and recorded with no total-word cap (this profile configures none)")
+    # AGENTS rule 3: the page budget is a VENUE rule, so it is asserted only when
+    # the venue profile records one (with its source). The old text hard-coded
+    # "at most TWO pages (a third page is a Major formatting defect)" into every
+    # prompt, including the generic profile that states no such rule.
+    _budget = page_budget(prof)
+    _max_pages = _budget.get("cover_letter_max_pages")
+    page_rule = (
+        f"must render to at most {_max_pages} page(s) (a page over that is a Major "
+        f"formatting defect; the venue profile states it: {_budget.get('source')})"
+        if isinstance(_max_pages, int) and _max_pages > 0 else
+        "is rendered and its page count recorded, but this venue profile states no page "
+        "budget: file a page-budget finding only when the target journal's own guidelines "
+        "state one, and cite the guideline")
     cover_bullet = (
         f"  * The master prompt's COVER-LETTER rule (the persuading part must be {cover_clause})\n"
         f"    stays a flaggable formatting item: report it, never gate on it. The LETTER ITSELF\n"
-        f"    must render to at most TWO pages (a third page is a Major formatting defect) AND\n"
+        f"    {page_rule} AND\n"
         f"    its TOTAL content -- salutation, body, disclosures and signature -- {total_pref}.\n"
         f"    Trim the non-persuading boilerplate first, never a claim about\n"
         f"    the work, and the page count comes from a render, never from the cached document\n"
         f"    property."
         if cover_clause else
         "  * This venue profile states no COVER-LETTER word rule: the letter's length is recorded\n"
-        f"    and reported, never gated and never cut. The LETTER itself must still render to at\n"
-        f"    most TWO pages (a third page is a Major formatting defect), measured from a render,\n"
-        f"    and its TOTAL content {total_plain}.")
+        f"    and reported, never gated and never cut. The LETTER itself {page_rule}, measured\n"
+        f"    from a render, and its TOTAL content {total_plain}.")
     caption_source = (prof.captions.get("source")
                       or "this venue profile states no figure-legend length rule")
     return f"""Standing exemptions and explicit limits (apply to every mode, always):
@@ -4879,13 +4911,7 @@ defect the same way; only the deliverable differs):
     what it displaces. A length/caption row (`M18`/`M19`) is always a @@T_FORMATTING@@ MINOR row:
     the venue's relaxed length margins mean slight over-length is intended, so length may move a
     comparison by at most one point and is NEVER a scoring tier of its own.
-  * PAGE BUDGETS ARE PART OF THE DELIVERED ARTIFACT: the front page must hold the title, the
-    authors, the affiliations, the abstract AND the keywords together, and the cover letter must
-    render to at most TWO pages AND keep its TOTAL content (salutation, body, disclosures and
-    signature) @@COVER_LETTER_TOTAL_CLAUSE@@. A keywords line that starts page 2, or a third cover-letter
-    page, is a formatting row graded MAJOR -- the reader must work around it -- and it is decided
-    by the DELIVERED layout, not by the cached page property. Never shorten a scientific claim to
-    reach a budget: cut boilerplate and redundancy, or hand the compression to the author.
+  * @@PAGE_BUDGET_RULE@@
   * An improvement claim must name the class it improves and the concrete item behind it, with a
     location: "this edit is better" without one is not an improvement claim. A difference that
     cannot be named in this vocabulary is COSMETIC and counts 0 for every session. A difference
@@ -4897,6 +4923,67 @@ defect the same way; only the deliverable differs):
     opponent and never ranks; a package-producing session resolves findings in its own copy and
     records one ledger row per finding, never a score. The same defect must keep the same class
     from the session that finds it to the session that scores the result."""
+
+
+PAGE_BUDGET_GAP_RULE = (
+    "NO PAGE BUDGET IS A RULE THIS VENUE STATED: this run's venue profile records no "
+    "front-page-keyword rule and no cover-letter page budget, and AGENTS rule 3 forbids "
+    "inventing one. If the target journal's own guidelines state such a rule, cite the "
+    "document and section that state it and apply it; otherwise record the missing rule as "
+    "a GAP in the artifact -- never as a formatting finding and never as an edit. Never "
+    "shorten a scientific claim to reach any budget: cut boilerplate and redundancy, or "
+    "hand the compression to the author.")
+
+PAGE_BUDGET_DECLARED_RULE = (
+    "PAGE BUDGETS ARE PART OF THE DELIVERED ARTIFACT (the venue profile states them; "
+    "source: {source}): {rules}. A row over a stated budget is a formatting row graded "
+    "MAJOR -- the reader must work around it -- and it is decided by the DELIVERED layout, "
+    "not by the cached page property. Never shorten a scientific claim to reach a budget: "
+    "cut boilerplate and redundancy, or hand the compression to the author.")
+
+PAGE_BUDGET_GAP_INSPECTION = (
+    "PAGE COUNTS ARE STILL RECORDED, but this venue profile states NO page budget: write the "
+    "rendered page count of EVERY top-level document you converted into the visual artifact "
+    "(`document: N page(s)`), so \"it fits\" is a measurement, not an impression. The cached "
+    "`docProps/app.xml` page count is NOT evidence: it is stale in exactly the files that were "
+    "generated programmatically, so count the pages of the render you looked at. Do NOT file a "
+    "front-page-keywords or cover-letter-length finding unless the target journal's own "
+    "guidelines state that rule, and cite the guideline if you do.")
+
+PAGE_BUDGET_DECLARED_INSPECTION = (
+    "THE PAGE BUDGETS ARE PART OF THE INSPECTION (the venue profile states them; source: "
+    "{source}), and they are recorded per document:\n"
+    "      - {rules};\n"
+    "      - write the rendered page count of EVERY top-level document you converted into the "
+    "visual artifact (`document: N page(s)`), so \"it fits\" is a measurement, not an "
+    "impression. The cached `docProps/app.xml` page count is NOT evidence: it is stale in "
+    "exactly the files that were generated programmatically, so count the pages of the render "
+    "you looked at.")
+
+
+def page_budget_rule(profile=None) -> str:
+    """The defect-class block's page-budget sentence, sourced from the profile.
+
+    A rule the venue did not state is never asserted (AGENTS rule 3); the block
+    then names the GAP instead, so a session records it rather than filing a
+    formatting row against a budget that does not exist.
+    """
+    block = page_budget(profile)
+    rules = _page_budget_rules(block)
+    if not rules:
+        return PAGE_BUDGET_GAP_RULE
+    return PAGE_BUDGET_DECLARED_RULE.format(
+        source=block.get("source") or "(source not recorded)", rules="; ".join(rules))
+
+
+def page_budget_inspection(profile=None) -> str:
+    """The visual-inspection page-budget bullet, sourced from the profile."""
+    block = page_budget(profile)
+    rules = _page_budget_rules(block)
+    if not rules:
+        return PAGE_BUDGET_GAP_INSPECTION
+    return PAGE_BUDGET_DECLARED_INSPECTION.format(
+        rules="; ".join(rules), source=block.get("source") or "")
 
 
 def defect_class_rule(profile=None) -> str:
@@ -4913,7 +5000,8 @@ def defect_class_rule(profile=None) -> str:
     out = (DEFECT_CLASS_RULE_TEMPLATE
            .replace("@@TIER_COUNT@@", str(len(BASIS_TIERS)))
            .replace("@@TIER_ORDER@@", "  >  ".join(BASIS_TIERS))
-           .replace("@@COVER_LETTER_TOTAL_CLAUSE@@", cover_clause))
+           .replace("@@COVER_LETTER_TOTAL_CLAUSE@@", cover_clause)
+           .replace("@@PAGE_BUDGET_RULE@@", page_budget_rule(profile)))
     for tier in BASIS_TIERS:
         out = out.replace(f"@@T_{tier.upper()}@@", tier)
     return out
@@ -5283,17 +5371,7 @@ VISUAL_INSPECTION_RULE = """VISUAL INSPECTION — RENDER FIRST, THEN LOOK (a DOC
     justified main text (must be left-aligned), overlapping or clipped text/figures, tables that
     overflow or break badly, figures/tables split across pages, orphaned headings, uneven
     spacing, caption placement, and anything that visually contradicts the style rules.
-  * THE PAGE BUDGETS ARE PART OF THE INSPECTION, and they are recorded per document:
-      - the FRONT PAGE must carry the title, the authors, the affiliations, the abstract AND the
-        keywords together; a keywords line that starts page 2 (or an abstract that spills) is a
-        defect -- shorten the front matter, never the science;
-      - the COVER LETTER must render to at most TWO pages; a third page is a defect (trim the
-        non-persuading boilerplate -- statement blocks, reviewer lists, restated affiliations --
-        before touching a claim about the work);
-      - write the rendered page count of EVERY top-level document you converted into the visual
-        artifact (`document: N page(s)`), so "it fits" is a measurement, not an impression.
-        The cached `docProps/app.xml` page count is NOT evidence: it is stale in exactly the files
-        that were generated programmatically, so count the pages of the render you looked at.
+  * @@PAGE_BUDGET_INSPECTION@@
   * Record the pass in @@VISUAL_ARTIFACT@@: the renderer and version used, which files/pages you
     actually looked at, what you found, and what you corrected. If no renderer works, or you
     cannot view images, say so EXPLICITLY in the same artifact, list every page as "not visually

@@ -347,8 +347,10 @@ def test_orchestrator_wiring():
     def coverage(include_m19=True):
         rows = [{"check": c, "disposition": "clean -- basis: x"} for c in
                 [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
-        rows.append({"check": "M18", "disposition": "legend lengths recorded"})
-        rows.append({"check": "M20", "disposition": "formatting rows disposed"})
+        rows.append({"check": "M18",
+                     "disposition": "clean -- basis: legend lengths recorded"})
+        rows.append({"check": "M20",
+                     "disposition": "0 findings -- formatting rows disposed"})
         for cid in ("M21", "M22", "M23", "M24",        # adopted checks (2026-09-22)
                     "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32", "M33", "M34", "M35", "M36", "J5"):   # parity + hierarchy
             rows.append({"check": cid, "disposition": f"clean -- basis: fixture {cid}"})
@@ -356,7 +358,10 @@ def test_orchestrator_wiring():
             rows.append({"check": "M19", "disposition": "0 findings"})
         return rows
 
-    fj = {"submission_dir": "./base", "findings": [{"id": "F-001", "check": "M1"}],
+    fj = {"submission_dir": "./base",
+          "findings": [{"id": "F-001", "check": "M1", "location": "base/ms.md",
+                        "category": 2, "severity": "Minor", "evidence": "x",
+                        "explanation": "fixture finding"}],
           "artifacts": {}, "coverage": coverage()}
     errs, warns = [], []
     nb.check_review_contract(ctx, sb, fj, errs, warns)

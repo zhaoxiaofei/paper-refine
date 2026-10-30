@@ -741,7 +741,12 @@ def number_ledger(paras: list) -> list:
 # Direction 1 -- UNDERCLAIM markers: the sentence weakens what the evidence
 # supports.  Deliberately conservative: each row is a QUESTION, not a verdict.
 CLAIM_HEDGE_MARKERS = (
-    r"\bmay\b", r"\bmight\b", r"\bcould\b", r"\bpossibly\b", r"\bperhaps\b",
+    # `may` is matched CASE-SENSITIVELY: the ledger compiles this alternation
+    # with re.I, and `\bmay\b` then filed the month in "In May 2020 ..." as an
+    # underclaim hedge. A capitalised "May" in a date is not a hedge; the
+    # lower-case modal verb still is, and every other marker stays
+    # case-insensitive.
+    r"(?-i:\bmay\b)", r"\bmight\b", r"\bcould\b", r"\bpossibly\b", r"\bperhaps\b",
     r"\bpotentially\b", r"\bpresumably\b", r"\bseems?\b", r"\bappear(?:s|ed)? to\b",
     r"\bsuggests?\b", r"\bsuggesting\b", r"\bsuggestive\b", r"\bwe speculate\b",
     r"\bspeculation\b", r"\bplausibl[ey]\b", r"\btends? to\b", r"\ba trend\b",

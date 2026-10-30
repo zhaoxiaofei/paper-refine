@@ -483,9 +483,12 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
 
     # ---- layout consistency and the front-page budget (FMT-T8f/T8g) ----------
     rows.extend(layout_consistency_rows(xml, paras, title_block_end, doc))
-    _fm_row = front_matter_page_break_row(xml, paras, doc)
-    if _fm_row:
-        rows.append(_fm_row)
+    # FMT-T8g is the venue's own front-page rule (AGENTS rule 3): a policy that
+    # records no page_budget states none, so the scan files no row for it.
+    if ((policy or {}).get("page_budget") or {}).get("front_page_keywords"):
+        _fm_row = front_matter_page_break_row(xml, paras, doc)
+        if _fm_row:
+            rows.append(_fm_row)
 
     # ---- the venue's DISPLAY rules (FMT-TB1..3 tables, FMT-FG1..3 figures) ---
     # The venue's rules come from `policy["tables"]`/`policy["figures"]` (the
@@ -564,6 +567,60 @@ def _docx_xml_part_guarded(pkg: zipfile.ZipFile, name: str) -> bytes:
     if problem:
         raise OSError(problem)
     return data
+
+
+# PDF-helper output budget: `subprocess.run(..., capture_output=True)` allocates
+# every byte the child prints, and a compressed PDF can expand to gigabytes of
+# text. The runner below puts stdout/stderr in temporary FILES and refuses a
+# stream over this cap (the pipeline's `run_bounded` does the same for its
+# children; the formatter cannot import it, so it carries its own copy).
+MAX_TOOL_OUTPUT_BYTES = 16 * 1024 * 1024
+
+
+class ToolOutputOverBudget(OSError):
+    """A child process printed more than MAX_TOOL_OUTPUT_BYTES on one stream."""
+
+
+def _run_text_tool(argv, timeout: int) -> tuple:
+    """Run a child with bounded FILE-backed output; return (rc, stdout, stderr).
+
+    An over-budget stream raises `ToolOutputOverBudget` (an OSError, so every
+    existing `except (OSError, subprocess.SubprocessError)` call site degrades
+    with its normal warning/row instead of allocating the output). A timeout
+    raises `subprocess.TimeoutExpired`, as `subprocess.run(timeout=...)` does.
+    """
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen([str(a) for a in argv], stdin=subprocess.DEVNULL,
+                                stdout=out_f, stderr=err_f)
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
+        out_f.seek(0, os.SEEK_END)
+        out_size = out_f.tell()
+        err_f.seek(0, os.SEEK_END)
+        err_size = err_f.tell()
+        if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
+            raise ToolOutputOverBudget(
+                f"tool output over {MAX_TOOL_OUTPUT_BYTES} bytes "
+                f"(stdout={out_size}, stderr={err_size})")
+        out_f.seek(0)
+        err_f.seek(0)
+        out = out_f.read(MAX_TOOL_OUTPUT_BYTES + 1)
+        err = err_f.read(MAX_TOOL_OUTPUT_BYTES + 1)
+    if timed_out:
+        raise subprocess.TimeoutExpired(str(argv[0]), timeout)
+    return (proc.returncode, out.decode("utf-8", "replace"),
+            err.decode("utf-8", "replace"))
 
 
 def analyse_package(path: Path, policy: dict) -> dict:
@@ -688,9 +745,10 @@ def analyse_package(path: Path, policy: dict) -> dict:
         pdf = path.with_suffix(".pdf")
         if pdf.is_file() and shutil.which("pdftotext"):
             try:
-                txt = subprocess.run(["pdftotext", "-layout", str(pdf), "-"],
-                                     capture_output=True, text=True, encoding="utf-8",
-                                     errors="replace", timeout=60).stdout
+                # Bounded FILE-backed output: a compressed PDF can expand to
+                # gigabytes of text, and capture_output allocated all of it.
+                _rc, txt, _err = _run_text_tool(
+                    ["pdftotext", "-layout", str(pdf), "-"], 60)
                 pages, src = (blank_pages_in_text(txt)["pages"],
                               "the rendered PDF beside it")
             except (OSError, subprocess.SubprocessError) as e:
@@ -701,8 +759,10 @@ def analyse_package(path: Path, policy: dict) -> dict:
                       f"using the cached page count", file=sys.stderr)
         if pages is None and app_pages is not None:
             pages, src = app_pages, "the cached docProps/app.xml value -- render to confirm"
-        if pages and pages > 2:
-            res["rows"].append(cover_letter_page_row(path, pages, src))
+        _pb = (policy or {}).get("page_budget") or {}
+        _max = _pb.get("cover_letter_max_pages") if isinstance(_pb, dict) else None
+        if pages and isinstance(_max, int) and pages > _max:
+            res["rows"].append(cover_letter_page_row(path, pages, src, _max))
     # The cover letter formatted in the MANUSCRIPT template (FMT-CL1): the venue
     # policy carries the manuscript template's own front-matter style ids and
     # header/footer part hashes, so a stamped letter is a deterministic row --
@@ -3569,7 +3629,8 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
                       if not q.name.startswith("~$") and not _is_aux_name(q.name)
                       and not any(is_evidence_part(part) for part in q.parts[:-1])]
             files += [q for q in sorted(p.rglob("*"))
-                      if q.is_file() and q.suffix.lower() in (".tex", ".ltx")
+                      if q.is_file() and not q.is_symlink()
+                      and q.suffix.lower() in (".tex", ".ltx")
                       if not any(is_evidence_part(part) for part in q.parts[:-1])
                       # A difference-tracking copy (a latexdiff file, or the
                       # commented-out logging fallback) is not a document of the
@@ -3662,10 +3723,10 @@ def _pdfinfo_form(path: Path) -> str:
     if not exe:
         return ""
     try:
-        proc = subprocess.run([exe, str(path)], capture_output=True, text=True, timeout=60)
+        _rc, out, _err = _run_text_tool([exe, str(path)], 60)
     except (OSError, subprocess.SubprocessError):
         return ""
-    for line in (proc.stdout or "").splitlines():
+    for line in (out or "").splitlines():
         if line.lower().startswith("form:"):
             value = line.split(":", 1)[1].strip()
             return value
@@ -4054,14 +4115,13 @@ def _pdf_image_pages(path: Path):
     if not exe:
         return None
     try:
-        proc = subprocess.run([exe, "-list", str(path)], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=60)
+        rc, stdout, _err = _run_text_tool([exe, "-list", str(path)], 60)
     except (OSError, subprocess.SubprocessError):
         return None
-    if proc.returncode != 0:
+    if rc != 0:
         return None
     pages = {}
-    for line in (proc.stdout or "").splitlines():
+    for line in (stdout or "").splitlines():
         parts = line.split()
         # page num type width height color comp bpc enc interp object-id x-ppi y-ppi size ratio
         if len(parts) < 6 or not (parts[0].isdigit() and parts[1].isdigit()):
@@ -4079,10 +4139,9 @@ def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
         exe = shutil.which("pdftotext")
         if exe:
             try:
-                proc = subprocess.run([exe, "-layout", str(path), "-"],
-                                      capture_output=True, text=True, encoding="utf-8",
-                                      errors="replace", timeout=60)
-                text = proc.stdout or ""
+                _rc, stdout, _err = _run_text_tool(
+                    [exe, "-layout", str(path), "-"], 60)
+                text = stdout or ""
             except (OSError, subprocess.SubprocessError) as e:
                 # The module's contract is to REPORT a row, never to raise out of
                 # a scan; a stalled/failing pdftotext degrades exactly like the
@@ -4242,9 +4301,7 @@ def check_pdf(path: Path, policy: dict) -> dict:
                           "detail": "cannot check pages for blankness", "fix": "manual",
                           "protected": False}]}
     try:
-        proc = subprocess.run(["pdftotext", "-layout", str(path), "-"],
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=60)
+        rc, stdout, stderr = _run_text_tool(["pdftotext", "-layout", str(path), "-"], 60)
     except (OSError, subprocess.SubprocessError) as e:
         # A timeout/wedged child re-raised subprocess.TimeoutExpired straight out
         # of the scan (60 s in, on exactly the large or pathological PDF this
@@ -4257,20 +4314,20 @@ def check_pdf(path: Path, policy: dict) -> dict:
                           "detail": "the PDF could not be read (pdftotext did not finish); "
                                     "no blank-page verdict is possible",
                           "fix": "manual", "protected": False}]}
-    if proc.returncode != 0:
+    if rc != 0:
         # An unreadable/missing PDF yields empty text, which parses as 0 pages
         # and 0 blank pages: reporting that as clean is a false pass on the one
         # input the check must never pass.
-        detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")[:200]
+        detail = (stderr or stdout or "").strip().replace("\n", " ")[:200]
         return {"file": str(path), "pages": 0, "blank_pages": [], "ok": False,
                 "rows": [{"rule": "FMT-S2", "severity": "high", "document": path.name,
                           "location": "-",
-                          "evidence": f"pdftotext exited {proc.returncode}"
+                          "evidence": f"pdftotext exited {rc}"
                                       + (f": {detail}" if detail else ""),
                           "detail": "the PDF could not be read; no blank-page verdict "
                                     "is possible",
                           "fix": "manual", "protected": False}]}
-    txt = proc.stdout
+    txt = stdout
     res = blank_pages_in_text(txt)
     blank = res["blank_pages"]
     image_gap = None
@@ -4747,12 +4804,11 @@ def _ocr_text(path: Path, psm: str = "3") -> str | None:
     if not shutil.which("tesseract"):
         return None
     try:
-        proc = subprocess.run(["tesseract", str(path), "-", "--psm", str(psm)],
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=120)
+        rc, out, _err = _run_text_tool(
+            ["tesseract", str(path), "-", "--psm", str(psm)], 120)
     except (OSError, subprocess.SubprocessError):
         return None
-    return proc.stdout if proc.returncode == 0 else ""
+    return out if rc == 0 else ""
 
 
 def _ocr_text_variants(path: Path) -> list | None:
@@ -4774,11 +4830,10 @@ def _ocr_text_variants(path: Path) -> list | None:
         try:
             tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
             tmp.close()
-            proc = subprocess.run(
+            rc, _out, _err = _run_text_tool(
                 ["convert", str(path), "-colorspace", "Gray", "-negate",
-                 "-threshold", "55%", tmp.name],
-                capture_output=True, timeout=120)
-            if proc.returncode == 0:
+                 "-threshold", "55%", tmp.name], 120)
+            if rc == 0:
                 # psm 6 (uniform block) reads the inset labels that the
                 # default page-segmentation pass drops; psm 3 on the normal
                 # copy keeps the top-line terms and the acronym spellings.
@@ -5605,9 +5660,17 @@ def cmd_scan_figures(args) -> int:
     for f in getattr(args, "from_docx", None) or []:
         try:
             with zipfile.ZipFile(f) as z:
-                xml = z.read("word/document.xml").decode("utf-8", "replace")
+                problem = _docx_zip_problem(z)
+                if problem:
+                    raise OSError(problem)
+                xml = _docx_xml_part_guarded(
+                    z, "word/document.xml").decode("utf-8", "replace")
+            # Validate before the regex `paragraphs` reader: it tolerates a
+            # truncated tag, so a malformed DOCX silently yielded an EMPTY term
+            # source and the scan proceeded with no vocabulary terms, exit 0.
+            ET.fromstring(xml)
             texts.append("\n".join(text_of(p[2]) for p in paragraphs(xml)))
-        except (OSError, zipfile.BadZipFile, KeyError) as e:
+        except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as e:
             log(f"error: cannot read {f}: {e}")
             return 2
     if texts:
@@ -5632,7 +5695,12 @@ def cmd_scan_figures(args) -> int:
            "by_rule": dict(Counter(r["rule"] for r in rows))}
     if args.json:
         write_json(args.json, out)
-    print(format_note({"rows": rows}))
+    # A FIGURE-LABEL summary, never `format_note`: with zero rows that helper
+    # prints "OOXML formatting: clean (no structural/typographic findings)", so a
+    # figure-label scan that found nothing claimed a formatting pass it never
+    # ran.
+    print(f"figure-label scan: {len(paths)} figure file(s); {len(rows)} row(s)"
+          + ("" if rows else " -- no label finding (a formatting pass is a different scan)"))
     for r in rows:
         print(f"  [{r['severity']:6s}] {r['rule']:9s} {r['document']}  {r['evidence'][:100]}")
     return 1 if (args.strict and rows) else 0
@@ -5810,7 +5878,14 @@ def cmd_zotero_check(args) -> int:
             # footnotes a Word/Zotero refresh would rewrite.
             part_names = [n for n in names
                           if n in ZOTERO_FIELD_PARTS or ZOTERO_FIELD_AUX_PARTS_RE.search(n)]
-            parts = [(n, pkg.read(n).decode("utf-8", "replace")) for n in part_names]
+            # Untrusted input budget (per part and archive-wide) + entity
+            # refusal: this reader used to decompress every field-carrying part
+            # without a cap.
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise OSError(problem)
+            parts = [(n, _docx_xml_part_guarded(pkg, n).decode("utf-8", "replace"))
+                     for n in part_names]
             # EVERY store the package-level scan reads, customXml payloads
             # included: the CLI printed "style store(s): ..." and CLEAN while a
             # third store in customXml/item<N>.xml was visible only to the
@@ -5818,9 +5893,16 @@ def cmd_zotero_check(args) -> int:
             style_names = [n for n in ("word/settings.xml", "docProps/custom.xml")
                            if n in names]
             style_names += [n for n in names if re.match(r"customXml/item\d*\.xml$", n)]
-            style_parts = {n: pkg.read(n).decode("utf-8", "replace")
+            style_parts = {n: _docx_xml_part_guarded(pkg, n).decode("utf-8", "replace")
                            for n in style_names}
-    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError) as e:
+            # A malformed part is UNREADABLE, not "no fields": the regex readers
+            # below tolerate a truncated tag, so a DOCX Word cannot open printed
+            # CLEAN with exit 0. Parse every field-carrying part before any
+            # verdict (the same ET parse `scan` uses, which reports FMT-X1).
+            for n, text in parts + sorted(style_parts.items()):
+                ET.fromstring(text)
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError,
+            ET.ParseError) as e:
         print(f"[FAIL] {path}: unreadable DOCX ({type(e).__name__}: {e})")
         return 1
     xml = next(x for n, x in parts if n == "word/document.xml")

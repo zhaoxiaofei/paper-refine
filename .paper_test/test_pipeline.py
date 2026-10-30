@@ -112,15 +112,23 @@ def test_prompts():
     check("`ignore-cosmetic` is restricted to differences that satisfy every rubric item",
           "`ignore-cosmetic` is legal ONLY for a difference whose two readings satisfy EVERY item"
           in " ".join(builders["integrate"].split()))
-    # The layout budgets and the paragraph-linkage rule the 2026-09-30 winner broke.
-    check("the visual rule makes the page budgets a recorded measurement",
-          "THE PAGE BUDGETS ARE PART OF THE INSPECTION" in builders["judge"]
-          and "at most TWO pages" in " ".join(builders["judge"].split())
-          and "the FRONT PAGE must carry" in " ".join(builders["judge"].split())
-          and "never from the cached document property" in " ".join(builders["judge"].split()))
-    check("the cover-letter rule carries the two-page budget",
-          "must render to at most TWO pages" in " ".join(builders["revise"].split())
-          and "Major formatting defect" in " ".join(builders["revise"].split()))
+    # The layout page budgets are VENUE rules (AGENTS rule 3): the generic
+    # profile states none, so the prompts name the GAP instead of asserting one.
+    check("the visual rule names the missing page budget as a gap, not a rule",
+          "PAGE COUNTS ARE STILL RECORDED, but this venue profile states NO page budget"
+          in " ".join(builders["judge"].split()))
+    check("the cover-letter rule does not assert a page budget the venue did not state",
+          "states no page budget" in " ".join(builders["revise"].split())
+          and "at most TWO pages" not in " ".join(builders["revise"].split()))
+    _pb = np.VenueProfile({"id": "pbtest", "label": "PB test",
+                           "page_budget": {"front_page_keywords": True,
+                                           "cover_letter_max_pages": 2,
+                                           "source": "author guidelines p.4"}})
+    _declared = " ".join(np.defect_class_rule(_pb).split())
+    check("a profile that states a page budget gets it asserted with its source",
+          "at most 2 page(s)" in _declared
+          and "the FRONT PAGE must carry" in _declared
+          and "author guidelines p.4" in _declared)
     check("the review prompt requires the paragraph-opening connection check",
           "The FIRST sentence of a paragraph must connect to the previous" in review_flat
           and "must RE-READ" in review_flat)

@@ -421,6 +421,12 @@ def parse_nums(inner):
         rm = re.match(r"(\d+)\s*[\u2013\u2014-]\s*(\d+)$", part)
         if rm:
             a, b = int(rm.group(1)), int(rm.group(2))
+            # The OOXML twin rejects a publication-YEAR range as a citation
+            # range (`_marker_range_numbers`: 1900-2099 on both sides -> []),
+            # so a bracket such as "[2019-2020]" must not become a phantom
+            # two-number call-out here either. Same window, same verdict.
+            if 1900 <= a <= 2099 and 1900 <= b <= 2099:
+                continue
             # The cap is the OOXML twin's own constant
             # (paper_docx_format._MARKER_RANGE_MAX) and the two must agree: this
             # file expanded a range of 81-200 into all 120 numbers while the

@@ -999,6 +999,8 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
     """
     if not root.is_dir():
         return []
+    if follow_dir_links and owner_root is None:
+        owner_root = _enclosing_run_root(root)   # p00 (loaded before p01's PRISTINE_DIR)
     out = []
 
     def dir_key(p: Path):
@@ -3259,9 +3261,9 @@ def _venue_display_blocks(ctx: Ctx) -> dict:
     blocks: dict = {}
     prof = venue_profile_of(ctx, required=False)
     if prof is not None:
-        for name in ("tables", "figures"):
+        for name in ("tables", "figures", "page_budget"):
             block = prof.data.get(name) or {}
-            if _declares_display_rule(block):
+            if name == "page_budget" or _declares_display_rule(block):
                 blocks[name] = copy.deepcopy(block)
         # The venue's recorded figure-type minimum (Nature 5 pt, Frontiers 8 pt)
         # is a measured rule, not a formatting preference: carry it into the
@@ -4370,7 +4372,7 @@ WRITE (only inside out/):
 @@VISUAL_INSPECTION_RULE@@
 
 @@DOCX_CLI_RULE@@
-""" .replace("@@VISUAL_INSPECTION_RULE@@", visual_inspection_block("out/VISUAL_CHECK.md")) \
+""" .replace("@@VISUAL_INSPECTION_RULE@@", visual_inspection_block("out/VISUAL_CHECK.md", prof)) \
     .replace("@@DOCX_CLI_RULE@@", docx_cli_block()))
 
 
@@ -4474,7 +4476,7 @@ WRITE (only inside out/):
 @@VISUAL_INSPECTION_RULE@@
 
 @@DOCX_CLI_RULE@@
-""" .replace("@@VISUAL_INSPECTION_RULE@@", visual_inspection_block("out/VISUAL_CHECK.md")) \
+""" .replace("@@VISUAL_INSPECTION_RULE@@", visual_inspection_block("out/VISUAL_CHECK.md", prof)) \
     .replace("@@DOCX_CLI_RULE@@", docx_cli_block()))
 
 
@@ -5709,10 +5711,11 @@ def template_package_files(src: Path) -> list:
     bibliography, the author's own notes -- is copied byte-for-byte.
     An inert `<evidence area>.disabled/` tree is left out entirely: it is not
     submission content and not readable evidence.
+    A FILE symlink is not package content: `copy_into()` refuses one.
     """
     out = []
     for p in sorted(Path(src).rglob("*")):
-        if not p.is_file() or p.name.startswith("~$"):
+        if not p.is_file() or p.is_symlink() or p.name.startswith("~$"):
             continue
         rel = p.relative_to(src)
         if "work" in rel.parts[:-1] or _is_aux_doc(p.name):
@@ -7283,7 +7286,7 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     <dir> --policy format_policy.json`) cannot know a venue's table/figure rule:
     it is profile DATA, so it travels with the sandbox. The file sits at the
     sandbox ROOT (never inside `review/`, which `leftovers_present` reads as
-    agent work), carries only venue-level data (the `tables`/`figures` blocks,
+    agent work), carries only venue-level data (the `tables`/`figures`/`page_budget` blocks,
     the template's `empty_paragraph_slots`, the image-aspect tolerance), and is
     identical for every session of a root -- it is venue-level, not derived
     from any package, so handing it to a judge blinds nothing.
@@ -7313,6 +7316,7 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
             # gate the same DPI/figure-text rules the postcheck does.
             "figure_text": copy.deepcopy(policy.get("figure_text") or {}),
             "image_dpi": copy.deepcopy(policy.get("image_dpi") or {}),
+            "page_budget": copy.deepcopy(policy.get("page_budget") or {}),
             "min_image_dpi": policy.get("min_image_dpi", 0),
             "min_figure_text_pt": policy.get("min_figure_text_pt", 0)}
     # tmp + rename, NOT write_json_atomic's extra fsync: this file is a pure
@@ -7320,8 +7324,7 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     # materialization. On this box each fsync costs ~0.08 s (measured: the
     # fsynced version added 24 fsyncs and ~4 s to one round of the scheduling
     # suite -- the same latency the seeded evidence tables avoid, see
-    # `_seed_write`). The atomic rename still guarantees a reader never sees a
-    # truncated file, and the content is reproducible from the profile.
+    # `_seed_write`). The atomic rename still guarantees a full file.
     tmp = tmp_path_for(p)
 
     def do(f) -> None:

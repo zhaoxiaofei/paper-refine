@@ -1928,13 +1928,13 @@ def front_matter_page_break_row(xml: str, paras: list, doc: str) -> dict:
             "fix": "manual", "protected": False}
 
 
-def cover_letter_page_row(path: Path, pages, source: str) -> dict:
-    """FMT-T8h: the cover letter's two-page budget."""
+def cover_letter_page_row(path: Path, pages, source: str, max_pages: int = 2) -> dict:
+    """FMT-T8h: the cover letter's venue-recalled page budget."""
     return {"rule": "FMT-T8h", "severity": "medium", "document": path.name,
             "location": "document",
-            "evidence": f"the cover letter is {pages} page(s) ({source}); the budget is 2",
-            "detail": ("a cover letter that runs past two pages is not acceptable; trim the "
-                       "non-persuading boilerplate (statement blocks, reviewer lists, "
+            "evidence": f"the cover letter is {pages} page(s) ({source}); the budget is {max_pages}",
+            "detail": (f"a cover letter that runs past {max_pages} page(s) is not acceptable; "
+                       "trim the non-persuading boilerplate (statement blocks, reviewer lists, "
                        "restated affiliations) first, never a claim about the work"),
             "fix": "manual", "protected": False}
 
@@ -5386,7 +5386,22 @@ def refresh_zotero_package(src, out=None, policy: dict = None) -> dict:
             names = [n for n in pkg.namelist() if not n.endswith("/")]
             if "word/document.xml" not in names:
                 return dict(rep, ok=False, skip="no word/document.xml")
+            # Untrusted input budget: this used to `pkg.read()` EVERY part with
+            # no per-part or total cap, so a small zip bomb allocated gigabytes.
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise OSError(problem)
             parts = {n: pkg.read(n) for n in names}
+            # Validate the part the refresh EDITS before the regex readers: a
+            # malformed main part (an unclosed tag) used to reach them, yield
+            # "no live citation fields", and print "no change" with exit 0.
+            # `scan` reports the same package as FMT-X1. A DTD/entity
+            # declaration is refused here too (never handed to the parser).
+            problem = _docx_entity_problem(parts["word/document.xml"],
+                                           "word/document.xml")
+            if problem:
+                raise OSError(problem)
+            ET.fromstring(parts["word/document.xml"])
     except (OSError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
             NotImplementedError, UnicodeDecodeError) as e:
         # An unsupported compression method or a malformed part is an unreadable

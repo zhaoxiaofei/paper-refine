@@ -412,3 +412,29 @@ def _schedule_entry(i: int) -> dict:
 
 
 ROUND_SCHEDULE = tuple(_schedule_entry(i) for i in range(1, ROUND_SCHEDULE_LEN + 1))
+
+
+# Consumed by p04's `_iter_tree_files` (defined before p01 assigns PRISTINE_DIR;
+# the name is looked up when the walker RUNS, after every part is loaded).
+def _enclosing_run_root(path: Path):
+    """The nearest ancestor of `path` that is a pipeline RUN ROOT, or None.
+
+    A run root holds its registry (`state.json`, or `pipeline_config.json` on a
+    pre-state root) beside the canonical `non_revised/<area>` evidence store.
+    Sandboxes and corpora live under `<root>/runs/...`, so walking up from the
+    tree being read finds the root that OWNS the copy. This is what lets a
+    walker prove an evidence link is canonical even when the caller did not
+    pass `owner_root`; a tree under no run root returns None and keeps the
+    documented target-shape fallback.
+    """
+    try:
+        cur = Path(path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if cur.is_file():
+        cur = cur.parent
+    for anc in (cur, *cur.parents):
+        if ((anc / "state.json").is_file() or (anc / "pipeline_config.json").is_file()) \
+                and (anc / PRISTINE_DIR).is_dir():
+            return anc
+    return None

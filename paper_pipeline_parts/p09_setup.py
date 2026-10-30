@@ -555,11 +555,20 @@ def cmd_setup(args) -> None:
     # would freeze a loader without its implementation.
     _missing_assets = [name for name in PIPELINE_ASSET_DIRS
                        if not (script.parent / name).is_dir()]
-    if _missing_assets:
-        die(f"setup: the running tree is missing {', '.join(_missing_assets)}/ beside "
-            f"{script.name}; refusing to freeze a bundle that cannot start. Run setup "
-            f"from the maintained checkout (the tree that carries the loaders AND their "
-            f"parts).")
+    # The companion MODULES are just as required: the agent commands call
+    # `python paper_docx_format.py scan ...`, the redline backend resolves the
+    # adapter beside the driver, the `qwen` preset executes its module, and the
+    # render/track shims are probed beside the driver. These used to be copied
+    # only `if is_file()`, so a trimmed checkout produced a root that looked
+    # healthy (exit 0) and then failed every later stage on a missing tool.
+    _missing_modules = [name for name in PIPELINE_MODULE_FILES
+                        if name != script.name and not (script.parent / name).is_file()]
+    if _missing_assets or _missing_modules:
+        _missing = [f"{n}/" for n in _missing_assets] + list(_missing_modules)
+        die(f"setup: the running tree is missing {', '.join(_missing)} beside "
+            f"{script.name}; refusing to freeze a bundle whose stages cannot run. Run setup "
+            f"from the maintained checkout (the tree that carries the loaders, their parts "
+            f"and the companion modules).")
     _asset_dirs = copy_asset_dirs(script.parent, root)
     if _asset_dirs:
         print(f"[setup] pipeline assets:         copied {', '.join(_asset_dirs)}/ "

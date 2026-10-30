@@ -2379,8 +2379,9 @@ found in the cover letter, the main text and the supplementary alike:
 | `FMT-T8d` | US/UK spelling variants in body text (`tumour` … `tumor`) | report; `term_spelling="dominant"` (default) normalizes the minority form outside the reference list |
 | `FMT-T8e` | an attributive compound hyphenated in one place and not in another (`copy-number profiles` … `copy number estimate`) | report; `term_hyphenation="dominant"` (default) hyphenates the minority attributive form |
 | `FMT-T8f` | sibling paragraphs or sibling captions disagree on first-line indentation (`Fig. 4` indented while `Fig. 1/2/3/5` are not) | finding: pick one convention and align the minority with the majority (front matter — title/abstract/keywords — is its own family and never counted as a body outlier) |
-| `FMT-T8g` | Word's own `w:lastRenderedPageBreak` record shows the front matter split: the keywords line starts page 2 | finding: the front page must hold title, authors, affiliations, abstract and keywords together; shorten the front matter or trim abstract lines (never the science) |
-| `FMT-T8h` | the cover letter renders to more than two pages (a PDF beside the `.docx` is authoritative; the cached `docProps/app.xml` count is the fallback and can be stale) | finding: trim the non-persuading boilerplate first (statement blocks, reviewer lists, restated affiliations), never a claim about the work |
+| `FMT-T8g` | the run's venue profile records a front-page-keywords rule, and Word's own `w:lastRenderedPageBreak` record shows the front matter split: the keywords line starts page 2 | finding: the front page must hold title, authors, affiliations, abstract and keywords together; shorten the front matter or trim abstract lines (never the science) |
+| `FMT-T8h` | the run's venue profile records a cover-letter page budget, and the letter renders past the recorded `cover_letter_max_pages` (a PDF beside the `.docx` is authoritative; the cached `docProps/app.xml` count is the fallback and can be stale) | finding: trim the non-persuading boilerplate first (statement blocks, reviewer lists, restated affiliations), never a claim about the work |
+| | **FMT-T8g/T8h are VENUE rules** (AGENTS rule 3): the formatter policy carries the profile's `page_budget` block, and a profile that states none gets no page-budget row (the prompts name the missing rule as a gap). | |
 | `FMT-CL1` | the cover letter was formatted in the venue's MANUSCRIPT template: it uses the manuscript template's Title/Author-List front-matter styles, or carries its logo header/page-number footer parts, while the venue ships **no cover-letter template** (the policy derives the styles/hashes from the journal's own `.official/` template) | finding, and the one row no stage may wave through: the review postcheck FAILS an `OK` closure that does not quote the journal's own template/guideline text REQUIRING that formatting (and FAILS a table that deleted the row); the auditor attacks such closures; revise/integrate must restyle the letter as a plain submission letter (rewrite surfaces it); a judge whose blinded target carries the row must record it in its M20 artifact and cannot close it `OK` without that quoted override. The rule stands down when the journal ships a cover-letter template |
 
 Guard rails: the reference list is never rewritten (its titles are quotations),
@@ -3214,7 +3215,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 166 suites (a few
+any failure. They are independent, so run them in parallel — 167 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

@@ -231,19 +231,30 @@ def _copy_session_tools(sb: Path, stamp: float = None) -> None:
     try:
         if src.is_file() and (not dst.is_file() or dst.read_bytes() != src.read_bytes()):
             shutil.copyfile(src, dst)
-        if stamp is not None and dst.is_file():
-            os.utime(dst, (stamp, stamp))
         # The formatter is a thin loader too: its ordered parts must sit beside
         # it, or the stage's `python paper_docx_format.py scan` call cannot run.
         parts_name = "paper_docx_format_parts"
         if (src.parent / parts_name).is_dir():
             copy_asset_dirs(src.parent, sb, names=(parts_name,))
-            if stamp is not None:
+    except OSError as e:
+        # A partial/refused copy used to be swallowed: the stage then called a
+        # missing or incomplete formatter and the agent had no scan tool, with
+        # no diagnostic naming the staging failure. Fail the stage loudly.
+        raise RuntimeError(
+            f"could not stage {DOCX_FORMAT_MODULE} and paper_docx_format_parts "
+            f"into {sb}: {type(e).__name__}: {e}") from e
+    # Stamping is cosmetic (it keeps the copy from dating the sandbox): a
+    # timestamp failure must not turn into a staging failure.
+    if stamp is not None:
+        with contextlib.suppress(OSError):
+            if dst.is_file():
+                os.utime(dst, (stamp, stamp))
+        parts_name = "paper_docx_format_parts"
+        if (sb / parts_name).is_dir():
+            with contextlib.suppress(OSError):
                 for p in (sb / parts_name).rglob("*.py"):
                     os.utime(p, (stamp, stamp))
                 os.utime(sb / parts_name, (stamp, stamp))
-    except OSError:
-        pass
 
 
 def leftovers_present(ctx: Ctx, rec: dict) -> bool:
@@ -653,7 +664,22 @@ def round_discovery_seed(ctx: Ctx, r: int) -> dict:
 
 
 def _copy_bytes_if_different(src: Path, dst: Path) -> bool:
-    """Copy one small input file byte-for-byte when it differs (idempotent)."""
+    """Copy one small input file byte-for-byte when it differs (idempotent).
+
+    The source is an agent-writable artifact path: a FILE symlink planted there
+    (`findings_extra.md -> /etc/hostname`) must not copy its target into the
+    frozen seed, and an unbounded file must not be allocated. Same rule the
+    bounded text reader applies (`read_text_bounded`): lstat first, refuse a
+    link or a non-regular file, enforce the agent-output byte budget.
+    """
+    try:
+        st = src.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        return False
+    if st.st_size > MAX_JSON_BYTES:
+        return False
     try:
         data = src.read_bytes()
     except OSError:
@@ -711,10 +737,11 @@ def seed_discovery_findings(ctx: Ctx, r: int, sb: Path) -> dict:
         md = ""
         src_md = (seed["source"] / "findings_extra.md") if seed["source"] is not None else None
         if src_md is not None and src_md.is_file():
-            try:
-                md = src_md.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                md = ""
+            # Bounded and no-follow: an agent can make this path a symlink to
+            # outside content, and the seed must never carry the target's bytes
+            # (read_text_bounded returns None for a link, a FIFO or an
+            # over-budget file).
+            md = read_text_bounded(src_md) or ""
         probe_part = seed["findings"][-int(seed["probe_findings"]):]
         probe_md = "\n".join(
             f"- {f.get('id')}: {f.get('location')} -- {f.get('explanation')}"
@@ -975,10 +1002,11 @@ def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total, rel: str
                 f"{pkg_rel} names {len(undisposed)} finding id(s) without a VERDICT: "
                 f"{', '.join(undisposed[:6])}"
                 + (" ..." if len(undisposed) > 6 else "")
-                + " -- naming an id (a bare mapping value, an id list or an id-only row) is "
-                  "not a disposal; every row must carry its verdict (`confirmed` / "
-                  "`false-positive` / `clarification` / `manual-required` / "
-                  "`not-found-in-source`) and a rationale")
+                + " -- naming an id (a bare mapping value or an id-only row) is "
+                  "not a disposal; every row must carry its documented verdict "
+                  "(`confirmed` / `false-positive` / `clarification` / `manual-required` / "
+                  "`not-found-in-source`) or final status (`fixed` / `fixed-with-caveat` / "
+                  "`placeholder-inserted` / `discarded`) and a rationale")
     return errs, warns
 
 
@@ -1036,29 +1064,55 @@ def ledger_named_ids(ledger, wanted=()) -> set:
     return named
 
 
-# The row's own verdict/final-status field. One is required; the A1 contract's
-# exact vocabulary is in paper-revise/references/ledger.md, but accepting a
-# non-empty verdict here keeps the gate about "a row, not an id" without
-# hard-coding a synonym set the sessions legitimately vary.
+# The row's own verdict/final-status field. One is required, and its value must
+# be one of the documented A1 values: the R1 VERDICT vocabulary
+# (`paper-revise/references/ledger.md`: confirmed / false-positive /
+# clarification / manual-required / not-found-in-source) or the FINAL STATUS
+# vocabulary that the same ledger records (fixed / fixed-with-caveat /
+# clarification / placeholder-inserted / discarded / manual-required). Accepting
+# ANY non-empty string let `{"id": "F-001", "verdict": "whatever"}` satisfy the
+# disposal gate without recording what happened to the finding. A trailing
+# rationale after the verdict word is allowed; the verdict itself is not.
 LEDGER_VERDICT_FIELDS = ("verdict", "final_status", "status", "disposition")
+LEDGER_VERDICT_RE = re.compile(
+    r"(?i)^(confirmed|false[\s_-]*positive|clarification|"
+    r"manual[\s_-]*required|not[\s_-]*found[\s_-]*in[\s_-]*source|"
+    r"fixed(?:[\s_-]*with[\s_-]*caveat)?|placeholder[\s_-]*inserted|discarded)\b")
+LEDGER_VERDICTS = ("confirmed", "false-positive", "clarification",
+                   "manual-required", "not-found-in-source",
+                   "fixed", "fixed-with-caveat", "placeholder-inserted", "discarded")
 
 
 def _ledger_row_verdict(row) -> str:
     for key in LEDGER_VERDICT_FIELDS:
-        val = str((row or {}).get(key) or "").strip()
-        if val:
-            return val
+        val = re.sub(r"\s+", " ", str((row or {}).get(key) or "").strip())
+        if not val:
+            continue
+        m = LEDGER_VERDICT_RE.match(val)
+        if m:
+            token = re.sub(r"[\s_]+", "-", m.group(1).lower())
+            # `false positive` / `not found in source` normalize onto the
+            # documented hyphenated spellings.
+            for allowed in LEDGER_VERDICTS:
+                if token == allowed:
+                    return allowed
+            return token
     return ""
 
 
 def ledger_disposed_ids(ledger, wanted=()) -> set:
-    """Finding ids a ledger disposes with a ROW that carries a verdict.
+    """Finding ids a ledger disposes.
 
     `ledger_named_ids()` answers "does the payload mention the id?" -- a bare
     mapping value, an id list or an id-only row all passed, so a ledger
     `{"F-001": "", "F-002": null}` satisfied the contract with no verdict at
-    all. This reader accepts only a structured row: an object whose id field
-    equals the frozen id, or a mapping entry `{"F-001": {...verdict...}}`.
+    all. This reader requires a VERDICT for every structured row: an object whose
+    id field equals the frozen id, or a mapping entry `{"F-001": {...verdict...}}`,
+    and the verdict must be a documented one (`_ledger_row_verdict`). The one
+    non-row shape it accepts is the documented plain ID LIST (`["F-001", ...]`):
+    the prompt fixes the row contract but not the container's name, and real
+    ledgers have used an id list as their container. Such a list proves no id was
+    dropped; it does not pretend to record a per-row verdict.
     """
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     out = set()
@@ -1111,6 +1165,20 @@ REQUIRED_REVIEW_CHECKS = tuple([f"M{i}" for i in range(1, 18)] + [f"J{i}" for i 
 JUDGE_COVERAGE_CHECKS = tuple(REQUIRED_REVIEW_CHECKS) + ("M18", "M19", "M20",
                                                          "M21", "M22", "M23", "M24")
 JUDGE_DISPOSITIONS = ("clean", "findings", "unable")
+
+
+# The REVIEW coverage row's documented disposition vocabulary: a finding count,
+# a clean basis, a named inability, or an explicit out-of-scope disposal (a
+# scoped round, or a check the round honestly declares outside its scope). The
+# gate used to accept any non-empty cell that did not start with "not checked",
+# so a row of filler ("x", "done") proved a sweep that never ran.
+COVERAGE_DISPOSITION_RE = re.compile(
+    r"(?i)^(?:\d+\s+finding|clean\b|unable\b|out\s+of\s+scope\b)")
+
+
+def _coverage_disposition_ok(value) -> bool:
+    """True for a REAL review-coverage disposition (see COVERAGE_DISPOSITION_RE)."""
+    return bool(COVERAGE_DISPOSITION_RE.match(str(value or "").strip()))
 
 
 def visual_tools_available() -> bool:
@@ -2901,7 +2969,8 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                     continue
                 seen_ids[cid] = disp
                 seen_rows[cid] = row
-            if cid and (not disp or disp.lower().startswith("not checked")):
+            if cid and (not disp or disp.lower().startswith("not checked")
+                        or not _coverage_disposition_ok(disp)):
                 bad.append(cid)
             if (cid and cid in wanted and (not in_scope or cid in in_scope)
                     and re.sub(r"\s+", " ", disp).lower().startswith("out of scope")):
@@ -2934,7 +3003,9 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                         f"(use 'N findings', 'clean -- basis: <artifact>' or 'unable -- <reason>')")
         if bad:
             errs.append(f"{FINDINGS_REL} coverage rows without a real disposition: {sorted(set(bad))}"
-                        f" ('not checked' is not an allowed value)")
+                        f" (each row is 'N findings', 'clean -- basis: <artifact>', "
+                        f"'unable -- <reason>' or 'out of scope -- <reason>'; an empty, "
+                        f"'not checked' or filler cell is not a disposition)")
         if bad_out_of_scope:
             errs.append(f"{FINDINGS_REL} disposes in-scope check(s) {sorted(set(bad_out_of_scope))} "
                         f"as 'out of scope', but this round's review must apply and dispose "
@@ -3076,6 +3147,40 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                         f"findings)")
         if empty:
             errs.append(f"{FINDINGS_REL} carries {empty} finding(s) without an id")
+        # The review's row shape is the SAME contract the probe's findings are
+        # held to: a finding needs location, check, evidence, explanation, a
+        # category 0-5 and one of the four severity rungs. Without this loop a
+        # malformed review row passed the review gate, was "confirmed" by the
+        # audit, and then vanished from (or corrupted) the census because the
+        # severity did not parse.
+        malformed = []
+        for f in findings:
+            if not isinstance(f, dict):
+                malformed.append("a non-object row")
+                continue
+            fid = str(f.get("id") or "").strip() or "(no id)"
+            for key in ("location", "check", "evidence", "explanation"):
+                if not str(f.get(key) or "").strip():
+                    malformed.append(f"{fid}: no {key}")
+            if not re.match(r"(?i)^(?:M\d{1,2}|J[1-5]|JF)$",
+                            str(f.get("check") or "").strip()):
+                malformed.append(f"{fid}: check {f.get('check')!r} is not an M/J check id")
+            if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
+                malformed.append(f"{fid}: severity {f.get('severity')!r} is not one of "
+                                 f"Fatal/Critical/Major/Minor")
+            try:
+                ok_cat = 0 <= int(f.get("category")) <= 5
+            except (TypeError, ValueError):
+                ok_cat = False
+            if not ok_cat:
+                malformed.append(f"{fid}: category {f.get('category')!r} is not an integer 0-5")
+        if malformed:
+            errs.append(
+                f"{FINDINGS_REL} carries malformed finding(s): "
+                + "; ".join(malformed[:6]) + (" ..." if len(malformed) > 6 else "")
+                + " (every review finding carries location, check, category 0-5, severity "
+                  "Fatal/Critical/Major/Minor, evidence and explanation, exactly like a probe "
+                  "finding)")
         j5_missing = [str(f.get("id") or "?") for f in findings
                       if isinstance(f, dict)
                       and str(f.get("check") or "").strip().upper() == "J5"
@@ -3413,7 +3518,10 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
                ("review/round2/round2_summary.md", "round2_summary.md"))
     for rel, name in mapping:
         p = _src(rel)
-        if not p.is_file():
+        # A FILE symlink is not a review deliverable: `copy2` would archive the
+        # link target's bytes (outside content) as the round's frozen finding
+        # list (F50/F51).
+        if not p.is_file() or p.is_symlink():
             continue
         try:
             dst.mkdir(parents=True, exist_ok=True)
@@ -3443,7 +3551,7 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
                           (PROBE_COVERAGE_REL, "probe_coverage.md"),
                           (PROBE_REPRO_REL, "probe_reproduction.md")):
             p = psb / rel
-            if not p.is_file():
+            if not p.is_file() or p.is_symlink():
                 continue
             try:
                 dst.mkdir(parents=True, exist_ok=True)

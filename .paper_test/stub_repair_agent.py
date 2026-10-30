@@ -399,7 +399,7 @@ def repair_revise(sb: Path) -> str:
         fid = str(f["id"])
         if fid in have:
             continue
-        rows.append({"id": fid, "verdict": "unable",
+        rows.append({"id": fid, "verdict": "manual-required",
                      "rationale": "unable — manual verification required: the repair session may "
                                   "not judge whether the package fixed this finding, and the "
                                   "revision session's own row is missing",
