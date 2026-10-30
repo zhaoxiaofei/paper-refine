@@ -361,7 +361,7 @@ def test_orchestrator_wiring():
     fj = {"submission_dir": "./base",
           "findings": [{"id": "F-001", "check": "M1", "location": "base/ms.md",
                         "category": 2, "severity": "Minor", "evidence": "x",
-                        "explanation": "fixture finding"}],
+                        "explanation": "fixture finding", "status": "resolvable"}],
           "artifacts": {}, "coverage": coverage()}
     errs, warns = [], []
     nb.check_review_contract(ctx, sb, fj, errs, warns)

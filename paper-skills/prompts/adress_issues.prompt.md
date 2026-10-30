@@ -635,10 +635,13 @@ in the package you produced:
   by default and fails the attempt under `setup --strict-artifacts`);
 * after EACH step, re-run the code-side scan of the package
   (`python paper_docx_format.py scan <package dir>`): a step that introduces a
-  finding-tier row (a long sentence at the section's bar, a new mega-paragraph, a
-  new one-sentence paragraph FMT-T9k, a nested parenthesis, a value+unit outside
-  siunitx, a caption split into paragraphs FMT-T2c) is fixed before the next step
-  runs. Each step must leave the package no worse than it found it.
+  finding-tier row (a long sentence over a bar the venue profile declares in
+  `style_limits.sentence_words`, a new paragraph over its declared
+  `style_limits.paragraph_words` cap, a new one-sentence paragraph FMT-T9k, a
+  nested parenthesis, a value+unit outside siunitx, a caption split into
+  paragraphs FMT-T2c) is fixed before the next step runs. Limits the profile
+  does not declare are advisory policy gaps, not findings. Each step must leave
+  the package no worse than it found it.
 
 The steps, in order: L1 premise/factual errors · L2 formal-logic slips ·
 L3 logic jumps · L4 coherence · L5 unexplained prerequisites · L6 redundancy ·

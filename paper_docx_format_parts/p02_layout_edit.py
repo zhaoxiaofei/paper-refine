@@ -1872,7 +1872,12 @@ def layout_consistency_rows(xml: str, paras: list, title_block_end, doc: str) ->
     for key, items in cats.items():
         if len(items) < 2:
             continue
-        indented = [x for x in items if x[2] > 0]
+        # Any NON-ZERO first-line value is an explicit indentation
+        # convention, including a negative (outdented) one. The old `> 0`
+        # bucket silently dropped a `w:firstLine="-360"` paragraph from BOTH
+        # lists, so a document mixing an outdented first line with flush body
+        # paragraphs could pass FMT-T8f with no row at all.
+        indented = [x for x in items if x[2] != 0]
         plain = [x for x in items if x[2] == 0]
         if not (indented and plain):
             continue

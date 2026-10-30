@@ -453,10 +453,17 @@ def test_quality_engines():
           "FMT-T9a" in got, f"{sorted(got)}")
     long_para = " ".join(["word"] * 50) + "."
     list_para = " ".join(["word"] * 210) + " (1) first (2) second (3) third."
-    check("a long sentence is reported (FMT-T9c)",
+    style_limits = {"sentence_words": {"front": 40, "abstract": 40, "legend": 40,
+                                       "body": 46, "methods": 61},
+                    "paragraph_words": 250}
+    check("a long sentence is reported (FMT-T9c) when the profile states the bar",
           any(r["rule"] == "FMT-T9c" and "long sentence" in r["evidence"]
-              for r in fmt.long_text_rows([long_para]))
-          and any("enumerated" in r["evidence"] for r in fmt.long_text_rows([list_para])))
+              for r in fmt.long_text_rows([long_para], style_limits=style_limits))
+          and any("enumerated" in r["evidence"]
+                  for r in fmt.long_text_rows([list_para], style_limits=style_limits)))
+    check("without a profile bar the same sentence is an advisory gap, not a finding",
+          not [r for r in fmt.long_text_rows([long_para])
+               if r["rule"] == "FMT-T9c" and r["tier"] == "finding"])
     check("confusable terms in one document are reported (FMT-T9d)", "FMT-T9d" in got)
     out = tmp / "engines.fixed.docx"
     rep = fmt.fix_package(docx, out, policy)

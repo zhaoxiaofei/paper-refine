@@ -3174,6 +3174,16 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 ok_cat = False
             if not ok_cat:
                 malformed.append(f"{fid}: category {f.get('category')!r} is not an integer 0-5")
+            # The canonical output shape (see the review prompt) requires the
+            # finding's own disposition class: the reviser/auditor must be able
+            # to tell a fixable defect from an unresolvable or
+            # guideline-dependent one. The scoped concerns path already checks
+            # this; the full review path silently accepted a missing field.
+            if str(f.get("status") or "").strip().lower() not in (
+                    "resolvable", "unresolvable", "guideline-dependent"):
+                malformed.append(
+                    f"{fid}: status {f.get('status')!r} is not one of "
+                    f"resolvable|unresolvable|guideline-dependent")
         if malformed:
             errs.append(
                 f"{FINDINGS_REL} carries malformed finding(s): "
@@ -5712,9 +5722,26 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False) -> di
             report.setdefault(rel, []).append(
                 f"{rel} carries no decision table (the seeded table was emptied)")
             continue
+        if blocks and not any(
+                any(k in block["header"] for k in DISPOSITION_COLUMNS)
+                for block in blocks):
+            # The seeded decision table's last column is the disposition cell.
+            # `disposition_artifact_problems` returned [] when the column was
+            # renamed, so a session could replace every decision table with
+            # arbitrary columns and the whole per-row disposition gate passed
+            # clean (the 2026-10-30 F11 bypass). The stronger
+            # `_disposition_table_problems` path is used for the parity and
+            # architecture artifacts only; this is the decision-artifact path.
+            report.setdefault(rel, []).append(
+                f"{rel} carries no table with a `disposition` column: every seeded "
+                f"decision row must be disposed in its own last column")
+            continue
         for block in blocks:
             rows = block["rows"]
             if not rows:
+                # A header-only seeded table is the documented "no rows" shape
+                # (the session may leave an empty table's header); the missing
+                # DISPOSITION COLUMN is the bypass this check closes.
                 continue
             problems = disposition_artifact_problems(rows, block.get("widths"),
                                                       len(block["header"]))

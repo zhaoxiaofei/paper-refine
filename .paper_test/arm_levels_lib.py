@@ -183,7 +183,10 @@ def test_scan_regression_compare():
     (after / "m.md").write_text(
         "A short clean sentence. Another one. " + ("word " * 60).strip() + ".\n",
         encoding="utf-8")
-    ctx = type("C", (), {"cfg": {}})()
+    # FMT-T9c is finding-tier only when the venue profile declares the bar;
+    # this fixture exercises the regression detector, so it states the bar.
+    ctx = type("C", (), {"cfg": {"format_policy": {
+        "style_limits": {"sentence_words": {"front": 40, "body": 46}}}}})()
     errs, warns = nb.scan_regression_problems(ctx, [(before, "", ())], [(after, "", ())],
                                               "fixture")
     check("a NEW finding-tier family (a Methods-length sentence in a body paragraph) is an ERROR",

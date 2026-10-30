@@ -373,7 +373,7 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
    turns EVERY uncovered row into a probe (P2-...) or records it as an analysis limitation, and
    every probe row carries its status; D3 probe_results.md executes every probe with a
    disposition -- a clean probe says "no anomalies -- checked: <locations>", an `unable` probe
-   says why; D4 findings_extra.{md,json} carries the standard finding shape (id X-NNN, location,
+   says why; D4 findings_extra.json and findings_extra.md carry the standard finding shape (id X-NNN, location,
    category 0-5, check = the gap-row class label, severity, evidence quote, explanation) and no
    row that merely re-reports a frozen F-* finding; D5 new_sweeps.md carries sweeps.md-shaped
    proposals (Purpose, Enumeration, Artifact, Finding rules) numbered from M37, or states
@@ -468,7 +468,10 @@ Skill discipline that the orchestrator will check for:
     Every finding id must be unique and stable (F-001, F-002, ...); Phase 2 consumes this file as
     the authoritative finding list, so ids must not be renumbered later.
   review/artifacts/     — one file per mechanical sweep.
-  review/round2/        — findings_extra.{md,json} and new_sweeps.md.
+  review/round2/        — the complete D0-D5 set: known_index.md, gap_table.md, probes.md,
+                          probe_results.md, findings_extra.json, findings_extra.md, new_sweeps.md and
+                          round2_summary.md (the D0-D5 section below and the postcheck use
+                          this same list; do not deliver only a subset).
 
 @@DEFECT_CLASS_RULE@@
 

@@ -465,7 +465,10 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     for r in text_style_rows(para_texts, para_is_ref_rows, para_is_head,
                              in_container=para_in_container,
                              in_area=para_in_area,
-                             field_spans=field_result_text):
+                             field_spans=field_result_text,
+                             # The venue's declared style limits: absent ->
+                             # an advisory policy gap, never an invented bar.
+                             policy=policy):
         fix = _fix_kind(r["rule"], policy)
         if r.get("protected") and fix == "mechanical":
             fix = "style-field"

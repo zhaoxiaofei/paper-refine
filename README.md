@@ -41,8 +41,9 @@ Rules 1A and 1B.
   census, every reported-only signal) and `decision.json` (the same, machine
   readable, with an explicit certification verdict), each round's winner, and
   `final_clean_version_<root name>/` with its sibling `final_clean_version.readme.md` (the
-  status document) — always generated, so the champion corpus can seed the next
-  run's `--source`.
+  status document) — generated whenever a champion/pin exists, so the champion corpus can
+  seed the next run's `--source`; when there is no champion the sibling readme records why
+  the directory was not built.
 * **Default plan** — three rounds, two judges per version, two round-1 rewrites
   and one reviewed-and-revised candidate per round; everything is a flag.
 
@@ -164,7 +165,7 @@ Everything lives under the root you passed to `setup`:
 | `reports/round<r>_judge_conflicts.md` (+ `.json`) | the round's cross-judge conflicts (opposite scores, a claim one judge files as `resolved` and another as `introduced`, different numbers for the same fact, clean-vs-findings check dispositions), each a REQUIRED MANUAL CHECK; the cumulative `reports/JUDGE_CONFLICTS_TODO.md` collects every round's open items |
 | `reports/round<r>_review_findings.csv` | the round's review findings (id, check, category, severity, location, evidence, explanation), one row each |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
-| `final_clean_version_<root name>/` | the champion corpus, byte-identical to the judged tree (names preserved) and ready as the next run's `--source`; ALWAYS built, certified or not |
+| `final_clean_version_<root name>/` | the champion corpus, byte-identical to the judged tree (names preserved) and ready as the next run's `--source`; built whenever a champion/pin exists, certified or not. When no winner/pin exists, the corpus is empty or the digest does not match the pin, nothing is published and `final_clean_version.readme.md` records the skip reason |
 | `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, the M19 LENGTH status against the relaxed caps (with the numbers), and the reuse hint |
 | `redlines/` | the pipeline's tracked-changes `.docx` per candidate and source pair (`from-base/`, `from-original/`, `from-setup-source/`) |
 | `tracking/` | one difference-tracking copy per baseline (`*.tracking-original.*`, `*.tracking-a1.*`, `*.tracking-w<k>.*`, `*.tracking-winner<r>.*`, or the matching `*.logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
@@ -2366,10 +2367,10 @@ found in the cover letter, the main text and the supplementary alike:
 
 | rule | finding | action |
 |---|---|---|
-| `FMT-T9c` | long sentence or long list-paragraph, **section-tiered**: 40 words in a cover letter/abstract/legend, 46 in the body, 61 in Methods; `>=3` enumerated items inside a `>200`-word paragraph | finding (finding-tier); the reviewer must dispose it against that bar |
+| `FMT-T9c` | long sentence or long list-paragraph, **section-tiered**, ONLY when the venue profile declares `style_limits.sentence_words` (the profile supplies the words per section; the pipeline's 40/46/61 values are an editorial reference, not a venue rule); `>=3` enumerated items inside a `>200`-word paragraph remains a structural finding | finding-tier when the profile states the bar; a profile that states none gets ONE advisory policy-gap row per document, never a finding (AGENTS rule 3) |
 | `FMT-T9f` | a term the manuscript glosses in place ("X (Y, which …)": `average spot length (sequencing read length, …)`) | finding: use the standard term, or keep the gloss as a recorded decision |
 | `FMT-T9g` | a LaTeX value+unit outside siunitx (`\qty{}{}` / `\SI{}{}`, `\num{}` for bare numbers; both spellings accepted) | finding; `\code{}`, verbatim, URLs, `\cite`, cross-references, inline math and generated tables are exempt |
-| `FMT-T9i` | a mega-paragraph (`>250` words, in the body narrative) | finding: split it at the natural boundary. Methods enumerations and LEGENDS are exempt — a legend is one paragraph by the caption rule (`FMT-T2c`), and its length is the venue's own word-budget question (M18) |
+| `FMT-T9i` | a mega-paragraph (a paragraph over the venue's declared `style_limits.paragraph_words`, in the body narrative) | finding only when the profile states the cap: split it at the natural boundary. With no profile cap the scan records an advisory policy gap and files no finding. Methods enumerations, tables, references and LEGENDS are exempt — a legend is one paragraph by the caption rule (`FMT-T2c`), and its length is the venue's own word-budget question (M18) |
 | `FMT-T9j` | two term families competing for one concept (CN/CNV/CNA, simulate/emulate) | finding: fix one term per concept in `GLOSSARY.md` |
 | `FMT-T9k` | a narrative paragraph built from ONE sentence (the paragraph-level "lone division"; 5–45 words, body/abstract) | finding: merge the sentence into the paragraph it belongs to, or give the claim its support — a paragraph carries a claim plus its support. Captions/legends, end-matter sections (funding, ethics, availability, acronym lists), statement shapes, keywords and table cells are exempt by construction |
 | `FMT-T10f` | a heading whose section holds exactly ONE subsection (the same "lone division" one level up) | finding: promote the lone subsection into its parent, or add the sibling the section is missing |
@@ -3215,7 +3216,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 167 suites (a few
+any failure. They are independent, so run them in parallel — 168 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

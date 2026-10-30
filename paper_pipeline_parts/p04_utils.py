@@ -3087,6 +3087,11 @@ def format_policy_of(ctx: Ctx) -> dict:
         policy["empty_paragraph_slots"] = _venue_empty_paragraph_slots(ctx)
     if "cover_letter" not in configured:
         policy["cover_letter"] = _venue_cover_letter_block(ctx)
+    if "style_limits" not in configured:
+        # The venue's own sentence/paragraph style limits. Absent from the
+        # profile -> `{}`: the formatter records the long text as an advisory
+        # policy gap and never invents a finding-tier rule (AGENTS rule 3).
+        policy["style_limits"] = _venue_style_limits(ctx)
     # The venue's own reference-entry preference (`flag_preprints`) and its
     # display-item numbering convention (`numbering`), plus the leftover-phrase
     # list another publisher's boilerplate is matched against. All three are
@@ -3439,7 +3444,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
             else:
                 paras = text_source_paragraphs(p)
             claim_docs.append((prefix + rel, "\n".join(paras)))
-            text_rows = list(mod.text_style_rows(paras))
+            text_rows = list(mod.text_style_rows(paras, policy=policy))
             if p.suffix.lower() in (".tex", ".ltx"):
                 # The siunitx rule only has meaning in a LaTeX source (a DOCX
                 # cannot carry \qty{}{}), and it is the rule the operator asked
@@ -6760,22 +6765,6 @@ def evidence_pack_summary(ev: dict) -> str:
             + f"; digest {str(ident.get('digest'))[:12]}")
 
 
-def m30_seed_disposition(row) -> str:
-    """The disposition the M30 seed already carries for one written value.
-
-    A written number the shipped tables do not prove and the scan could pair
-    with NO candidate producer is a recorded `unable` (the hierarchy has no
-    producer in this corpus), not an agent task. Pre-filling those rows is what
-    keeps a 165-row seed from being skipped wholesale: the agent disposes the
-    handful of rows that actually have a producer.
-    """
-    producer = str((row or {}).get("candidate producer") or "").strip()
-    if not producer or producer.startswith("(no shipped table column"):
-        return ("unable — no shipped producer in the corpus (M30 structural "
-                "row; not a source-hierarchy conflict)")
-    return ""
-
-
 def _evidence_artifact_table(rows: list, columns: list, empty_note: str) -> str:
     out = ["| # | " + " | ".join(columns) + " | disposition |",
            "|---|" + "---|" * (len(columns) + 1)]
@@ -7316,6 +7305,10 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
             # gate the same DPI/figure-text rules the postcheck does.
             "figure_text": copy.deepcopy(policy.get("figure_text") or {}),
             "image_dpi": copy.deepcopy(policy.get("image_dpi") or {}),
+            # The venue's own M20 sentence/paragraph limits: the session's scan
+            # must gate FMT-T9c/T9i on exactly the profile data the postcheck
+            # reads, or the two scans disagree about whether a row is a finding.
+            "style_limits": copy.deepcopy(policy.get("style_limits") or {}),
             "page_budget": copy.deepcopy(policy.get("page_budget") or {}),
             "min_image_dpi": policy.get("min_image_dpi", 0),
             "min_figure_text_pt": policy.get("min_figure_text_pt", 0)}

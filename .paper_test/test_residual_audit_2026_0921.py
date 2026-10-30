@@ -97,37 +97,64 @@ ABSTRACT_SENTENCE = (
     "karyotype-defined HG008 subpopulations.")
 
 
+STYLE_LIMITS = {"sentence_words": {"front": 40, "abstract": 40, "legend": 40,
+                                   "body": 46, "methods": 61},
+                "paragraph_words": 250}
+
+
 def test_sentence_bar_tiers():
     print()
     print("== the sentence bar is section-aware (the abstract sentence is inside it) ==")
-    rows = fmt.long_text_rows([ABSTRACT_SENTENCE], [False], ["abstract"])
+    # A PROFILE-declared block: the bars are only a finding-tier rule when the
+    # venue profile states them (AGENTS rule 3).
+    rows = fmt.long_text_rows([ABSTRACT_SENTENCE], [False], ["abstract"],
+                              style_limits=STYLE_LIMITS)
     hit = [r for r in rows if r["rule"] == "FMT-T9c" and "long sentence" in r["evidence"]]
     check("the abstract's 45-word sentence is a finding", bool(hit), str(rows)[:160])
     check("... and it is MEDIUM severity, finding tier",
           bool(hit) and hit[0]["severity"] == "medium" and hit[0]["tier"] == "finding",
           str(hit[:1]))
-    body = fmt.long_text_rows([ABSTRACT_SENTENCE], [False], ["body"])
+    body = fmt.long_text_rows([ABSTRACT_SENTENCE], [False], ["body"],
+                              style_limits=STYLE_LIMITS)
     check("the same sentence in the body is INSIDE the body bar (46, >=)",
           not [r for r in body if "long sentence" in r["evidence"]])
     body_long = " ".join(["word"] * 46) + "."
     check("a 46-word body sentence IS a row (the old >45 behaviour, kept)",
           any("long sentence" in r["evidence"]
-              for r in fmt.long_text_rows([body_long], [False], ["body"])))
+              for r in fmt.long_text_rows([body_long], [False], ["body"],
+                                          style_limits=STYLE_LIMITS)))
     short_methods = " ".join(["word"] * 50) + "."
     check("a 50-word Methods sentence is NOT a finding",
-          not [r for r in fmt.long_text_rows([short_methods], [False], ["methods"])
+          not [r for r in fmt.long_text_rows([short_methods], [False], ["methods"],
+                                             style_limits=STYLE_LIMITS)
                if "long sentence" in r["evidence"]])
     long_methods = " ".join(["word"] * 61) + "."
-    mrows = [r for r in fmt.long_text_rows([long_methods], [False], ["methods"])
+    mrows = [r for r in fmt.long_text_rows([long_methods], [False], ["methods"],
+                                           style_limits=STYLE_LIMITS)
              if "long sentence" in r["evidence"]]
     check("a 61-word Methods sentence is recorded as ADVISORY",
           bool(mrows) and mrows[0]["tier"] == "advisory", str(mrows[:1])[:160])
-    mega = fmt.long_text_rows(["word " * 260], [False], ["body"])
+    mega = fmt.long_text_rows(["word " * 260], [False], ["body"],
+                              style_limits=STYLE_LIMITS)
     check("a 260-word paragraph is a FMT-T9i structural row",
           any(r["rule"] == "FMT-T9i" and r["tier"] == "finding" for r in mega), str(mega)[:160])
-    enum = fmt.long_text_rows(["(1) a. (2) b. (3) c. (4) d. " + "word " * 210], [False], ["body"])
+    enum = fmt.long_text_rows(["(1) a. (2) b. (3) c. (4) d. " + "word " * 210], [False],
+                              ["body"], style_limits=STYLE_LIMITS)
     check("a 4-item enumeration inside one paragraph stays a finding-tier row",
           any("enumerated items" in r["evidence"] and r["tier"] == "finding" for r in enum))
+    # No profile block: the editorial reference bar is a named GAP, never a
+    # finding. This is the AGENTS rule 3 contract the old code violated.
+    bare = fmt.long_text_rows([body_long], [False], ["body"])
+    check("with no venue style limit a long sentence is an advisory gap, not a finding",
+          not [r for r in bare if r["rule"] == "FMT-T9c" and r["tier"] == "finding"]
+          and any(r["rule"] == "FMT-T9c" and r["tier"] == "advisory"
+                  and "states no sentence-length limit" in r["evidence"] for r in bare),
+          str(bare)[:240])
+    bare_mega = fmt.long_text_rows(["word " * 260], [False], ["body"])
+    check("with no venue paragraph limit a mega-paragraph is not a finding",
+          not [r for r in bare_mega if r["rule"] == "FMT-T9i" and r["tier"] == "finding"]
+          and any(r["rule"] == "FMT-T9i" and r["tier"] == "advisory" for r in bare_mega),
+          str(bare_mega)[:240])
 
 
 def test_repetition_and_gloss_and_concepts():

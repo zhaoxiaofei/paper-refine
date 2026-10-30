@@ -1742,10 +1742,10 @@ and in each case a real submission shipped the defect.
 
 | rule | meaning | tier |
 |---|---|---|
-| `FMT-T9c` | long sentence (section bar: front/abstract/legend 40, body 46, Methods 61) or a long list-paragraph (`>=3` enumerated items in `>200` words) | finding |
+| `FMT-T9c` | long sentence over the venue profile's declared `style_limits.sentence_words` section bar (finding-tier only when the profile states that bar; absent = one advisory policy-gap row, never a finding) or a long list-paragraph (`>=3` enumerated items in `>200` words, a structural finding) | finding (profile-gated sentence bar); finding (structural list-paragraph) |
 | `FMT-T9f` | a term the manuscript glosses in place ("X (Y, which …)") | finding |
 | `FMT-T9g` | a LaTeX value+unit outside siunitx (`\qty{}{}` / `\SI{}{}` / `\num{}`); `\code{}`, verbatim, URLs, citations, math and generated tables are exempt | finding |
-| `FMT-T9i` | mega-paragraph (`>250` words, non-Methods) | finding |
+| `FMT-T9i` | mega-paragraph over the venue profile's declared `style_limits.paragraph_words` cap (finding only when the profile states the cap; absent = advisory policy gap, never a finding; non-Methods body narrative) | finding (profile-gated) |
 | `FMT-T9j` | two term families competing for one concept (CN/CNV, simulate/emulate) | finding |
 | `FMT-R1` | reference entry whose journal/volume field is malformed ("Volume 11-2020") | finding |
 | `FMT-R2` | reference entry ending at a bare "(YEAR)." with no venue, locator or publisher | finding |

@@ -2455,6 +2455,33 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     for rel in sorted(allowed):
         if (cur / rel).is_symlink():
             bad.add(rel)
+    # A NEW symlink is invisible to both manifests (`hash_manifest` skips
+    # links), and the loop above only inspects the confirmed plan's paths. A
+    # repair could therefore create `revised/evil.md -> /etc/hostname` and the
+    # application audit still reported "only the planned files changed" (the
+    # 2026-10-30 F53). Walk the revised tree itself: every link must have been
+    # a link before the repair, to the same target. A link that replaced a
+    # regular file is already an allowed-path check above; this adds the
+    # unplanned link and the retargeted link.
+    try:
+        entries = sorted(cur.rglob("*"))
+    except OSError:
+        entries = []
+    for p in entries:
+        try:
+            if not p.is_symlink():
+                continue
+            rel = p.relative_to(cur).as_posix()
+        except (OSError, ValueError):
+            continue
+        pre_p = pre / rel
+        if pre_p.is_symlink():
+            try:
+                if os.readlink(pre_p) == os.readlink(p):
+                    continue
+            except OSError:
+                pass
+        bad.add(rel)
     # The file-level bound is not enough for a DESCRIBED plan row: the ledger's
     # quoted `before`/`after` text must cover the actual text change, or a
     # confirmed row still authorizes a whole-file rewrite (F14). Opaque/binary
@@ -2977,6 +3004,16 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     continue
                 if now < not_before[rid]:
                     continue
+                # Capacity is checked BEFORE prepare(): prepare() runs the
+                # run's materializer and seed_evidence_pack (a full corpus scan
+                # and the identifier lookups), and the old after-prepare check
+                # re-ran that work on every 0.5 s tick while the single job
+                # slot was held (the 2026-10-30 F02 static loop-order finding:
+                # one wasted materialization per tick for as long as the queue
+                # stayed full). A full queue means no launch is possible this
+                # tick, so nothing may be prepared.
+                if len(running) >= max(1, int(jobs)):
+                    break
                 state = prepare(e)
                 if state == "done":
                     continue
@@ -3011,8 +3048,6 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     continue
                 if state != "ready":
                     continue
-                if len(running) >= max(1, int(jobs)):
-                    break
                 rec = ctx.run(rid)
                 print(f"  [{label}] starting {rid} ({e['stage']})"
                       + (f" [attempt {rec['attempts'] + 1}/{max_attempts}]"

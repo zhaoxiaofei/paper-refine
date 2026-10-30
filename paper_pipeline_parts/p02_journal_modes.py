@@ -637,8 +637,10 @@ WINNER_DIR_FMT = "round{r}_winner"
 # corpus byte-for-byte (no process scratch, no auxiliaries, no self-written
 # reports), so `setup --source <root>/final_clean_version_<root directory
 # name>` starts from exactly the content the judges scored. It is generated on
-# EVERY decide, certified or not; the verdict and the package's provenance live
-# in the SIBLING <root>/final_clean_version.readme.md. Nothing is written
+# every decide for which a champion/pin exists, certified or not; when no
+# winner/pin exists, the corpus is empty or the digest mismatches the pin,
+# nothing is published and the SIBLING <root>/final_clean_version.readme.md
+# records the skip reason. The verdict and the package's provenance live there. Nothing is written
 # INSIDE it: an added README/manifest would become manuscript content for the
 # next round. The same tree is also compressed into the SIBLING
 # <root>/final_clean_version_<root directory name>.zip; the directory is KEPT.

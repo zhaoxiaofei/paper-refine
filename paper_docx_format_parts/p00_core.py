@@ -128,6 +128,12 @@ POLICY_DEFAULTS = {
     # Reference-entry policy (rules FMT-R1..R5). FMT-R1..R4 are objective shape
     # defects and always run; this block adds the venue's own preference.
     "references": {},                   # {"flag_preprints": true}
+    # The venue's own text-style limits (FMT-T9c/T9i). {} = the venue profile
+    # states no sentence/paragraph-length rule, so the scan records the long
+    # text as an ADVISORY policy gap, never a finding (AGENTS rule 3). A venue
+    # that DOES state a limit supplies
+    # {"sentence_words": {"body": 46, ...}, "paragraph_words": 250}.
+    "style_limits": {},
 }
 
 

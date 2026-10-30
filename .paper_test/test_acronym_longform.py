@@ -396,7 +396,8 @@ np.check_review_contract(ctx, *fake_review_sandbox(
     tmp2, M1B_MD, [{"id": "F-1", "check": "M1", "location": "ms.txt:12",
                     "category": 2, "severity": "Minor",
                     "evidence": "We analysed copy-number profiles",
-                    "explanation": "the long form is re-used after the acronym's first use"}],
+                    "explanation": "the long form is re-used after the acronym's first use",
+                    "status": "resolvable"}],
     full_coverage()), errs2, [])
 check("E8 orchestrator gate: an M1 finding clears it", not errs2, f"errs={str(errs2)[:160]}")
 

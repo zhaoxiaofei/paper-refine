@@ -518,14 +518,17 @@ def tier_of(rule: str) -> str:
     return "finding" if rule in FINDING_TIER_RULES else "advisory"
 
 
-# Section-aware sentence-length bars.  An abstract, a cover letter and a figure
-# legend are skim surfaces with their own word budgets; a Methods paragraph is
-# an enumeration and is allowed longer sentences.  Bars are inclusive lower
-# bounds (a sentence of exactly `bar` words is a row), which is what the old
-# `> 45` rule got wrong: the abstract sentence the operator flagged was exactly
-# 45 words and produced no row at all.
+# EDITORIAL REFERENCE BARS -- not venue rules.  An abstract, a cover letter and
+# a figure legend are skim surfaces; a Methods paragraph is an enumeration and
+# is allowed longer sentences.  These are the pipeline's own editorial
+# reference values, used ONLY to describe why a long sentence is not a finding
+# when the selected venue profile declares no `style_limits.sentence_words`
+# (AGENTS rule 3: a limit the venue did not state is counted and named as a
+# gap, never invented as a requirement).  A profile that DOES state a bar
+# supplies it through `style_limits`; only then is the row finding-tier.
 LONG_SENTENCE_BARS = {"front": 40, "abstract": 40, "legend": 40, "body": 46,
                       "methods": 61, "heading": 10 ** 6, "refs": 10 ** 6}
+EDITORIAL_PARAGRAPH_WORDS = 250
 STRICT_KINDS = ("front", "abstract", "legend")
 
 # One-sentence-paragraph exclusions (FMT-T9k). A paragraph in one of these
@@ -967,14 +970,16 @@ def key_term_rows(paras: list, terms=None) -> list:
 
 def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
                    headings: list = None, in_container: list = None,
-                   in_area: list = None) -> list:
+                   in_area: list = None, style_limits: dict = None) -> list:
     """FMT-T9c (long sentence), FMT-T9c/T9i (list paragraph / mega paragraph)
     and FMT-T9k (a narrative paragraph built from ONE sentence).
 
-    The sentence bar is section-aware (LONG_SENTENCE_BARS): 40 words in an
-    abstract, a cover letter or a legend; 46 in the body; 61 in Methods.  Every
-    row carries its `tier`, and the strict sections are finding-tier, so the
-    review can no longer close them with "no journal rule".
+    The sentence bar is the venue profile's declared
+    `style_limits.sentence_words` value for the paragraph's section; 40/46/61 are
+    editorial reference values (LONG_SENTENCE_BARS), never a venue rule. Only a
+    declared bar can make a row finding-tier; a section whose bar the profile does
+    not declare gets an advisory policy gap, not a finding. Every row carries its
+    `tier`.
 
     The mega-paragraph rule (FMT-T9i) skips legends: a legend is ONE paragraph
     by the caption rule (FMT-T2c), and its length is the venue's M18 word-budget
@@ -983,8 +988,23 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
     `headings`/`in_container`/`in_area` (optional) let the one-sentence rule
     read the paragraph's section (end-matter sections are statement lists, not
     narrative) and skip table-cell paragraphs and a display area's own notes.
+
+    `style_limits` is the VENUE PROFILE's declared block:
+    `{"sentence_words": {kind: words}, "paragraph_words": N}`. A bar the profile
+    does not declare is NOT applied as a finding; the long text is recorded in
+    one ADVISORY policy-gap row instead (AGENTS rule 3). Direct callers that
+    pass no block get the same gap behaviour: the editorial reference bars above
+    are never promoted to a venue requirement.
     """
     rows, is_ref = [], list(is_ref or [False] * len(paras))
+    limits = style_limits if isinstance(style_limits, dict) else {}
+    raw_bars = limits.get("sentence_words")
+    bars = raw_bars if isinstance(raw_bars, dict) else {}
+    try:
+        paragraph_cap = int(limits.get("paragraph_words") or 0)
+    except (TypeError, ValueError):
+        paragraph_cap = 0
+    gap_sentence_kinds, gap_mega = set(), 0
     kinds = list(kinds) if kinds else section_kinds(paras)
     heads = list(headings) if headings else None
     container = list(in_container) if in_container else None
@@ -1005,16 +1025,37 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
         if i < len(is_ref) and is_ref[i]:
             continue
         kind = kinds[i] if i < len(kinds) else "body"
-        bar = LONG_SENTENCE_BARS.get(kind, 46)
+        # A table cell / markdown-table row and a reference-list block are not
+        # prose PARAGRAPHS: the sentence-length, enumeration and mega-paragraph
+        # rules are prose rules, and a 300-word table row is a table. Excluding
+        # only the mega-paragraph branch still filed `FMT-T9c` against the same
+        # table row (the 2026-10-30 F09 repro produced both rows).
+        if kind in ("table", "references") \
+                or (container and i < len(container) and container[i]):
+            continue
+        bar = bars.get(kind)
+        if bar is not None:
+            try:
+                bar = int(bar)
+            except (TypeError, ValueError):
+                bar = None
+            if bar is not None and bar <= 0:
+                bar = None
         for s in re.split(r"(?<=[.!?])\s+", text):
             n = len(s.split())
+            if bar is None:
+                # No profile rule for this section: count the text only so the
+                # policy gap can be named once; never file it as a defect.
+                if n >= LONG_SENTENCE_BARS.get(kind, 46):
+                    gap_sentence_kinds.add(kind)
+                continue
             if n < bar:
                 continue
             strict = kind in STRICT_KINDS
             rows.append({"rule": "FMT-T9c",
                          "severity": "medium" if strict else "low",
                          "tier": "finding" if kind != "methods" else "advisory",
-                         "evidence": f"long sentence ({n} words; {kind} bar {bar}) in "
+                         "evidence": f"long sentence ({n} words; {kind} profile bar {bar}) in "
                                      f"para {i}: {s.strip()[:80]!r}...",
                          "detail": "split it (one idea per sentence) or move the "
                                    "qualification into a following sentence; an abstract "
@@ -1031,16 +1072,25 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
                                    "paragraph at a natural boundary; keep the treatment of "
                                    "the items identical",
                          "protected": False})
-        elif words > 250 and kind not in ("methods", "legend"):
+        elif (kind not in ("methods", "legend", "table", "references", "front")
+              and not (container and i < len(container) and container[i])
+              and words > (paragraph_cap or EDITORIAL_PARAGRAPH_WORDS)):
             # A legend is ONE paragraph by the caption rule (FMT-T2c): telling a
             # caption to "split at the natural boundary" contradicts it, and a
             # long legend's length is the venue's M18/word-budget question, not
-            # a paragraph-shape defect.
-            rows.append({"rule": "FMT-T9i", "severity": "low", "tier": "finding",
-                         "evidence": f"paragraph {i} is {words} words long ({kind})",
-                         "detail": "a paragraph this long carries several messages: split it "
-                                   "at the natural boundary so each paragraph makes one point",
-                         "protected": False})
+            # a paragraph-shape defect. A table cell / markdown table row, a
+            # reference-list block and front matter are not prose paragraphs:
+            # a 300-word table block is a table, not a mega-paragraph, and the
+            # review must never ask the reviser to split it.
+            if not paragraph_cap:
+                gap_mega += 1
+            else:
+                rows.append({"rule": "FMT-T9i", "severity": "low", "tier": "finding",
+                             "evidence": (f"paragraph {i} is {words} words long ({kind}; "
+                                          f"profile paragraph cap {paragraph_cap})"),
+                             "detail": "a paragraph this long carries several messages: split it "
+                                       "at the natural boundary so each paragraph makes one point",
+                             "protected": False})
         # FMT-T9k -- the paragraph-level "lone division": a narrative paragraph
         # built from ONE sentence. A paragraph carries a claim plus its support;
         # a short single sentence standing alone reads as an accident (the
@@ -1072,6 +1122,26 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
                                "support the claim needs -- a one-sentence paragraph reads "
                                "as a formatting accident"),
                     "protected": False})
+    if gap_sentence_kinds:
+        named = ", ".join(sorted(gap_sentence_kinds))
+        rows.append({"rule": "FMT-T9c", "severity": "low", "tier": "advisory",
+                     "evidence": (f"the venue profile states no sentence-length limit for "
+                                  f"{named}; long sentence(s) are an editorial observation, "
+                                  f"not a finding"),
+                     "detail": ("record the policy gap (add `style_limits.sentence_words` "
+                                "to the venue profile to make this a finding); do not rewrite "
+                                "prose to a limit the venue did not state"),
+                     "protected": False})
+    if gap_mega:
+        rows.append({"rule": "FMT-T9i", "severity": "low", "tier": "advisory",
+                     "evidence": (f"{gap_mega} paragraph(s) exceed the editorial "
+                                  f"{EDITORIAL_PARAGRAPH_WORDS}-word reference, but the venue "
+                                  f"profile states no paragraph-length limit"),
+                     "detail": ("record the policy gap (add `style_limits.paragraph_words` "
+                                "to the venue profile to make this a finding); split the "
+                                "paragraph only if the venue or the author's own guide asks "
+                                "for it"),
+                     "protected": False})
     return rows
 
 
@@ -2217,16 +2287,22 @@ def _num_candidates(value: float) -> set:
 ROW_COUNT_SOURCE_PREFIX = "number of data rows in "
 
 
-def table_value_index(tables: list) -> dict:
-    """{value string: 'sum of column X in file'} for tabular data files.
+def _table_value_index(tables: list, rich: bool = False) -> dict:
+    """The value -> provenance index; `rich` keeps the column/file context.
 
-    The point is provenance, not statistics: when a number in the manuscript
-    equals a column sum / min / max of a file the package ships, the code can
-    PROVE where it came from (45,365 = the sum of `n_cells_total`; 2,055 = its
-    maximum; 1.77 = the minimum sample-mean ploidy).  Numbers that no shipped
-    file proves stay for the agent/author and are reported as such.
+    The public `table_value_index` returns the sources as strings (existing
+    callers and tests read that). `reconcile_number_rows` needs the provenance
+    CONTEXT as well: an unrelated table's bare cell "1" must not prove an
+    author superscript or a citation marker, so the rich form carries the
+    column name, the file name and whether the match is a cell or an aggregate.
     """
     index = {}
+
+    def _add(cand, desc, kind, column, name):
+        index.setdefault(cand, desc if not rich else {
+            "source": desc, "kind": kind,
+            "column": str(column or ""), "file": str(name or "")})
+
     for name, text in tables or []:
         header, body = _simple_table(text)
         if header is None:
@@ -2251,9 +2327,10 @@ def table_value_index(tables: list) -> dict:
                 vals.append(fv)
                 label = r[0].strip() if r else ""
                 for cand in _num_candidates(fv):
-                    index.setdefault(
-                        cand, f"value in column {header[c]!r}, row {label!r} in {name}"
-                        if label else f"value in column {header[c]!r} in {name}")
+                    _add(cand,
+                         f"value in column {header[c]!r}, row {label!r} in {name}"
+                         if label else f"value in column {header[c]!r} in {name}",
+                         "cell", header[c], name)
             if col_has_unit or len(vals) < 3:
                 continue
             # The table's SHAPE is a reported statistic: G-041 requires the row
@@ -2262,11 +2339,24 @@ def table_value_index(tables: list) -> dict:
             # treats it as provenance: an unrelated table's height cannot prove
             # an arbitrary written small integer (the 2026-10-28 audit's F42).
             for cand in _num_candidates(float(len(body))):
-                index.setdefault(cand, f"{ROW_COUNT_SOURCE_PREFIX}{name}")
+                _add(cand, f"{ROW_COUNT_SOURCE_PREFIX}{name}", "rowcount", "", name)
             for kind, val in (("sum", sum(vals)), ("min", min(vals)), ("max", max(vals))):
                 for cand in _num_candidates(val):
-                    index.setdefault(cand, f"{kind} of column {header[c]!r} in {name}")
+                    _add(cand, f"{kind} of column {header[c]!r} in {name}",
+                         kind, header[c], name)
     return index
+
+
+def table_value_index(tables: list) -> dict:
+    """{value string: 'sum of column X in file'} for tabular data files.
+
+    The point is provenance, not statistics: when a number in the manuscript
+    equals a column sum / min / max of a file the package ships, the code can
+    PROVE where it came from (45,365 = the sum of `n_cells_total`; 2,055 = its
+    maximum; 1.77 = the minimum sample-mean ploidy).  Numbers that no shipped
+    file proves stay for the agent/author and are reported as such.
+    """
+    return _table_value_index(tables, False)
 
 
 # --------------------------------------------------------------------------
@@ -2481,8 +2571,15 @@ def code_literal_rows(sources: list, limit: int = 200, skip_name=None) -> list:
                 seen.add(key)
                 rows.append({"file": prefix + rel, "line": i, "symbol": name, "value": value,
                              "context": re.sub(r"\s+", " ", line.strip())[:100]})
-                if len(rows) >= limit:
-                    return rows
+    if limit and len(rows) > limit:
+        # The row cap is a budget, never a silent coverage cut: the M30 seed
+        # must say how many producer-side literals it did NOT compare, so the
+        # session can raise the cap or record the gap (AGENTS rule 8).
+        omitted = len(rows) - limit
+        rows = rows[:limit]
+        rows.append({"file": "(truncated)", "line": "", "symbol": "", "value": "",
+                     "context": (f"{omitted} further module-level literal(s) omitted by the "
+                                 f"{limit}-row cap; this table is INCOMPLETE")})
     return rows
 
 
@@ -2703,8 +2800,6 @@ def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> li
     stats = table_column_stats(tables)
     rows, seen = [], set()
     for r in number_rows or []:
-        if len(rows) >= limit:
-            break
         if str(r.get("source") or "").strip():
             continue
         kind = str(r.get("kind") or "body")
@@ -2789,12 +2884,109 @@ def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> li
                                      f"min {s['min'] or '-'} / max {s['max'] or '-'} / mean "
                                      f"{s['mean'] or '-'} / sum {s['sum'] or '-'}"),
                 "seed check": check}))
-    return rows[:limit]
+    if limit and len(rows) > limit:
+        # Never truncate silently: a value after the cap is uncompared, and
+        # the seed must say so rather than look like complete coverage.
+        omitted = len(rows) - limit
+        rows = rows[:limit]
+        rows.append({"document": "", "paragraph": None, "kind": "gap", "number": "",
+                     "unit": "",
+                     "sentence": (f"{omitted} further written-value row(s) omitted by the "
+                                  f"{limit}-row M30 seed cap; this table is INCOMPLETE"),
+                     "candidate producer": "(truncated — seed cap reached)",
+                     "producer summary": "",
+                     "seed check": ("the omitted written values were not compared against "
+                                    "any producer; raise the cap or add the rows manually")})
+    return rows
+
+
+# Context tokens that are too generic to tie a cell to a written value: a
+# column named `value` or `total` must not prove every sentence that happens to
+# use the word. The substantive nouns (`cells`, `ploidy`, `sample`, `year`, ...)
+# remain.
+_CONTEXT_STOPWORDS = frozenset("""
+n no value values data dataset datasets file files table tables column columns row rows
+number numbers count counts total mean median min max sum the a an of in on for and or
+with from by to at as is are was were be been this that these those we our it its
+""".split())
+
+
+def _context_stem(token: str) -> str:
+    """A cheap plural stemmer: `cells` -> `cell`, `ploidies` -> `ploidy`."""
+    t = str(token or "").lower()
+    if len(t) > 4 and t.endswith("ies"):
+        return t[:-3] + "y"
+    if len(t) > 4 and t.endswith("es") and not t.endswith(("ses", "ches", "shes", "xes")):
+        return t[:-2]
+    if len(t) > 3 and t.endswith("s") and not t.endswith("ss"):
+        return t[:-1]
+    return t
+
+
+def _context_tokens(text) -> set:
+    out = set()
+    for tok in _m30_header_tokens(text):
+        stem = _context_stem(tok)
+        if len(stem) >= 3 and stem not in _CONTEXT_STOPWORDS and not stem.isdigit():
+            out.add(stem)
+    return out
+
+
+def _citation_or_superscript_number(sentence: str, num: str) -> bool:
+    """Is `num` written as a citation marker (`[2]`) or author superscript (`^1^`)?"""
+    n = re.escape(str(num or "").strip())
+    if not n:
+        return False
+    return bool(re.search(
+        r"(?:\^\s*" + n + r"\s*\^"                     # ^1^ superscript
+        r"|\[\s*" + n + r"\s*[,\]]"                     # [2] or [2, 3]
+        r"|[\[,]\s*" + n + r"\s*\])",                   # 3] in [2, 3]
+        sentence))
+
+
+def _number_proof_context_ok(row: dict, hit: dict) -> bool:
+    """May this matched table value PROVE this written number?
+
+    Every proof -- a bare CELL value or a sum/min/max AGGREGATE -- must belong
+    to a quantitative claim: front matter/headings/references/table rows are
+    refused, as are numbers written as a citation marker or an author
+    superscript, and the sentence's own nouns must tie the match to the
+    column/file. This closes the 2026-10-30 F04 false-proof generator: a `plot`
+    column's 1 proved an author superscript `^1^`, a `part` cell a citation
+    `[2]`, and a `year` cell 2020 a publication year, because the index kept the
+    literal but threw away the column and the row's context.
+
+    An aggregate is distinctive enough that a ledger row with NO sentence at all
+    keeps it (the documented 45,365 sum, and callers that reconcile a bare value
+    list); a row that carries a sentence must pass the same context test as a
+    cell, so an unrelated column's sum cannot prove "We processed 6 of them."
+    """
+    if not isinstance(hit, dict):
+        return False
+    kind = str(hit.get("kind") or "")
+    if kind not in ("cell", "sum", "min", "max"):
+        return False
+    row_kind = str(row.get("kind") or "").strip().lower()
+    if row_kind in ("front", "heading", "refs", "references", "table"):
+        return False
+    sentence = str(row.get("sentence") or "").strip()
+    num = str(row.get("number") or "").strip()
+    if kind in ("sum", "min", "max") and not sentence:
+        return bool(num)
+    if not sentence or not num:
+        return False
+    if _citation_or_superscript_number(sentence, num):
+        return False
+    written = _context_tokens(sentence)
+    if not written:
+        return False
+    return bool(written & (_context_tokens(hit.get("column"))
+                            | _context_tokens(hit.get("file"))))
 
 
 def reconcile_number_rows(rows: list, tables: list) -> dict:
     """Fill `source` on ledger rows that a shipped DATA file proves, by code."""
-    index = table_value_index(tables)
+    index = _table_value_index(tables, True)
     filled = 0
     for r in rows:
         if (r.get("source") or "").strip():
@@ -2804,8 +2996,10 @@ def reconcile_number_rows(rows: list, tables: list) -> dict:
             continue
         key = re.sub(r"[,\u2009\u202f\u00a0\s]", "", num).rstrip(".")
         hit = index.get(num) or index.get(key)
-        if hit and not hit.startswith(ROW_COUNT_SOURCE_PREFIX):
-            r["source"] = f"recomputed: {hit}"
+        if hit and not (isinstance(hit, dict)
+                        and hit.get("kind") == "rowcount") \
+                and _number_proof_context_ok(r, hit):
+            r["source"] = f"recomputed: {hit['source']}"
             r["source_kind"] = "shipped-table"
             r["status"] = "proved"
             filled += 1
@@ -3031,7 +3225,7 @@ def variant_rows(paras: list, is_ref: list, field_spans: list = None) -> list:
 
 def text_style_rows(paras: list, is_ref: list = None, headings: list = None,
                     in_container: list = None, in_area: list = None,
-                    field_spans: list = None) -> list:
+                    field_spans: list = None, policy: dict = None) -> list:
     """All FMT-T8/T9 rows for a document's paragraphs.
 
     Every row carries `tier` (see FINDING_TIER_RULES): finding-tier rows must be
@@ -3050,9 +3244,11 @@ def text_style_rows(paras: list, is_ref: list = None, headings: list = None,
     rows += nested_parentheses_rows(paras)
     rows += term_repetition_rows(paras, is_ref)
     rows += variant_rows(paras, is_ref, field_spans=field_spans)
-    rows += long_text_rows(paras, is_ref, section_kinds(paras, headings),
-                           headings=headings, in_container=in_container,
-                           in_area=in_area)
+    rows += long_text_rows(
+        paras, is_ref, section_kinds(paras, headings),
+        headings=headings, in_container=in_container, in_area=in_area,
+        # `{}` is explicit: no profile block, so no venue style requirement.
+        style_limits=(policy or {}).get("style_limits") or {})
     rows += self_gloss_rows(paras, is_ref)
     rows += confusable_pair_rows(prose)
     rows += concept_family_rows(paras, is_ref)

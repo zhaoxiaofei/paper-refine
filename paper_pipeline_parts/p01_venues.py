@@ -818,6 +818,54 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
                     "source": str(figure_text_raw.get("source") or "").strip(),
                 }
 
+    # The venue's OWN sentence/paragraph length limits (FMT-T9c/FMT-T9i).
+    # They are profile DATA like the table/figure rules: a profile that states
+    # none gets an advisory policy gap, never an invented finding. Validate the
+    # block here so a typo cannot silently switch a declared bar off, and keep
+    # the shape `_venue_style_limits` reads.
+    style_limits_raw = out.get("style_limits") or {}
+    clean_style_limits = {}
+    if style_limits_raw:
+        if not isinstance(style_limits_raw, dict):
+            problems.append("'style_limits' must be an object")
+        else:
+            bars_raw = style_limits_raw.get("sentence_words")
+            clean_bars = {}
+            if bars_raw is not None:
+                if not isinstance(bars_raw, dict):
+                    problems.append("style_limits.sentence_words must be an object")
+                else:
+                    for kind, value in bars_raw.items():
+                        try:
+                            words = int(value)
+                        except (TypeError, ValueError):
+                            problems.append(
+                                f"style_limits.sentence_words.{kind} must be a number")
+                            continue
+                        if words <= 0:
+                            problems.append(
+                                f"style_limits.sentence_words.{kind} must be > 0")
+                            continue
+                        clean_bars[str(kind)] = words
+            cap_raw = style_limits_raw.get("paragraph_words")
+            cap = 0
+            if cap_raw is not None:
+                try:
+                    cap = int(cap_raw)
+                except (TypeError, ValueError):
+                    problems.append("style_limits.paragraph_words must be a number")
+                    cap = 0
+                else:
+                    if cap <= 0:
+                        problems.append(
+                            "style_limits.paragraph_words must be > 0 when the block "
+                            "is present")
+                        cap = 0
+            if clean_bars:
+                clean_style_limits["sentence_words"] = clean_bars
+            if cap > 0:
+                clean_style_limits["paragraph_words"] = cap
+
     # Validate the page budget BEFORE the raise: `_clean_page_budget` appends
     # its problems to the same list, so calling it inside the return expression
     # (after the check) silently accepted a malformed block.
@@ -868,6 +916,7 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "references": clean_references,
         "figure_text": clean_figure_text,
         "image_dpi": clean_image_dpi,
+        "style_limits": clean_style_limits,
         "submission": {
             "pdf_accepted": pdf_accepted,
             "formats": formats,

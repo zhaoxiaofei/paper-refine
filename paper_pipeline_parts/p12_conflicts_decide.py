@@ -9366,8 +9366,10 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     residuals = collect_residuals(ctx)
     # The two opt-out gates are collected here so the CERTIFICATION verdict (and
     # the status readme) carries them. They no longer gate the clean copy itself
-    # (2026-10-01: the directory is always generated, operator's request); the
-    # readme says NOT CERTIFIED and why.
+    # (2026-10-01: the directory is generated whenever a champion/pin exists,
+    # operator's request); the readme says NOT CERTIFIED and why. When no
+    # champion exists there is nothing to publish, and the readme records the
+    # skip reason.
     gate_problems = []
     if getattr(args, "format_gate", False) and format_problems:
         gate_problems.append(f"{len(format_problems)} HIGH-severity formatting finding(s) in the "
@@ -9398,8 +9400,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # SUBMISSION READINESS (separate from process certification): the published
     # package's own findings -- a form shell, internal working material -- are
     # recorded on every decision; `--require-ready` turns them into blockers.
-    # The copy is ALWAYS built (certified or not), so these findings are known
-    # BEFORE the verdict is stamped: the readiness blockers join `gate_problems`
+    # The copy is built whenever a champion/pin exists (certified or not), so
+    # these findings are known BEFORE the verdict is stamped: the readiness blockers join `gate_problems`
     # first, and `final_clean_version.certified` is derived from the completed
     # reason afterwards. Stamping it first wrote `final_clean_version.certified:
     # true` beside `certification.certified: false` -- exactly the split

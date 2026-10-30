@@ -648,8 +648,13 @@ def do_audit(sb: Path, name: str, round_no: int) -> int:
     write_json(out / "audit.json",
                {"round": round_no, "dispositions": disps, "adds": [],
                 "counts": {"confirmed": len(disps), "dropped": 0, "added": 0},
-                "coverage": [{"check": "M20",
-                              "disposition": "stub: the seeded formatting rows were audited"}],
+                # The audit contract requires one row per M1-M36/J1-J5 check.
+                "coverage": ([{"check": f"M{i}",
+                               "disposition": "stub: the sweep was re-derived; clean"}
+                              for i in range(1, 37)]
+                             + [{"check": f"J{i}",
+                                 "disposition": "stub: the pass was re-derived; clean"}
+                                for i in range(1, 6)]),
                 "notes": "stub auditor: every frozen finding confirmed"})
     (out / "AUDIT.md").write_text(
         "# audit (stub)\n\nEvery frozen finding was confirmed; nothing was dropped.\n",

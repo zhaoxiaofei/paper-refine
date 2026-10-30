@@ -437,6 +437,60 @@ def add_stage_quality_checks(ctx: Ctx, rec: dict, before_sources: list, after_so
     warns.extend(todo_warns)
 AUDIT_VERDICTS = ("confirm", "drop")
 AUDIT_SEVERITIES = ("critical", "major", "minor", "fatal")
+# The audit prompt's own coverage contract: every adopted check (M1-M36 and
+# J1-J5) gets a coverage row. The list is the same one the review prompt and
+# the sweep documents name (README, p03_prompts.py).
+AUDIT_COVERAGE_CHECKS = tuple([f"M{i}" for i in range(1, 37)]
+                              + [f"J{i}" for i in range(1, 6)])
+
+
+def audit_coverage_problems(audit) -> list:
+    """Problems with the auditor's own coverage table.
+
+    `audit_artifact_problems` validates dispositions and (retired) adds; it
+    never read `coverage`, although the audit prompt requires one row per
+    M1-M36 / J1-J5 check. An auditor could omit the table -- or write one
+    generic row -- and the audit still passed, so the completeness of the
+    attack on the sweeps was unverified.
+    """
+    problems = []
+    if not isinstance(audit, dict):
+        return problems                       # the disposition checker names this
+    coverage = audit.get("coverage")
+    if not isinstance(coverage, list) or not coverage:
+        return ["audit/audit.json has no 'coverage' table: the audit must state, per "
+                "M1-M36 / J1-J5 check, that it re-derived it and what it found"]
+    known = {c.upper(): c for c in AUDIT_COVERAGE_CHECKS}
+
+    def _normalise(check: str) -> str:
+        # `M01`/`J05` are the padded spellings the census documents also use;
+        # an id-spelling difference must not read as a missing check.
+        m = re.fullmatch(r"([MJ])0*(\d+)", check, re.I)
+        return f"{m.group(1).upper()}{int(m.group(2))}" if m else check.upper()
+
+    seen = set()
+    for i, row in enumerate(coverage):
+        if not isinstance(row, dict):
+            problems.append(f"coverage[{i}] is not an object")
+            continue
+        check = _normalise(str(row.get("check") or "").strip())
+        if check not in known:
+            problems.append(f"coverage[{i}] check {row.get('check')!r} is not an "
+                            f"M1-M36/J1-J5 id")
+            continue
+        if check in seen:
+            problems.append(f"coverage names {check} twice")
+        seen.add(check)
+        if not str(row.get("disposition") or "").strip():
+            problems.append(f"coverage {check} has an EMPTY disposition: every check "
+                            f"must record what the audit re-derived")
+    missing = [c for c in AUDIT_COVERAGE_CHECKS if c not in seen]
+    if missing:
+        problems.append(
+            f"{len(missing)} coverage row(s) are missing: the audit must re-derive every "
+            f"M1-M36 / J1-J5 check and record it (missing: {', '.join(missing[:8])}"
+            + (" ..." if len(missing) > 8 else "") + ")")
+    return problems
 
 
 def audit_artifact_problems(audit, frozen_ids) -> list:
@@ -459,6 +513,7 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
                         "(one row per frozen finding id: confirm or drop)")
         disp = []
     seen = {}
+    drop_evidence = {}
     for i, row in enumerate(disp):
         if not isinstance(row, dict):
             problems.append(f"dispositions[{i}] is not an object")
@@ -483,6 +538,27 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
             if len(evid) < 40:
                 problems.append(f"{fid}: a drop needs EVIDENCE (>=40 characters: the verbatim "
                                 f"text, or the file:line derivation, that refutes the finding)")
+            else:
+                drop_evidence[fid] = evid
+    # A drop's evidence must be about THAT finding. Length alone let the same
+    # sentence close the whole frozen list ("the quoted text does not appear at
+    # the cited location") without any per-row re-check; the review-side
+    # disposition checker has the same boilerplate rule (this audit side did
+    # not). Grouping identical evidence is the exact test the finding names.
+    by_evidence = {}
+    for fid, evid in drop_evidence.items():
+        key = re.sub(r"\s+", " ", evid.strip().lower())
+        by_evidence.setdefault(key, []).append(fid)
+    for text, ids in sorted(by_evidence.items()):
+        if len(ids) < 2:
+            continue
+        generic = [fid for fid in ids if fid.lower() not in text]
+        if generic:
+            problems.append(
+                f"{len(ids)} drop(s) reuse the SAME evidence ({_quote(text, 160)}) and it "
+                f"names neither the finding id nor a finding-specific location for "
+                f"{', '.join(generic[:4])}: each drop claims its own re-check, so quote that "
+                f"finding's text or the file:line that refutes it")
     missing = [i for i in frozen if i not in seen]
     if missing:
         problems.append(f"{len(missing)} frozen finding id(s) are neither confirmed nor dropped "
@@ -665,6 +741,8 @@ def postcheck_audit(ctx: Ctx, rec: dict):
     else:
         audit = read_json(aj, revive=False, lenient=True)         # agent-written
         problems = audit_artifact_problems(audit, frozen_ids)
+        coverage_problems = audit_coverage_problems(audit)
+        problems += coverage_problems
         errs.extend(problems)
         if not problems:
             split = apply_audit_to_findings(frozen, audit)
@@ -3668,8 +3746,21 @@ def _deletion_disposition_ok(value) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    if re.match(r"(?i)^OK\s*[\u2014\u2013:-]\s*\S", text):
-        return True
+    ok = re.match(r"(?i)^OK\s*[\u2014\u2013:-]\s*(.+)$", text)
+    if ok:
+        # The seeded instruction asks for `OK — <why no fact is lost>`, not
+        # merely "some character after the dash": one non-space character
+        # (`OK — x`) used to dispose a deleted fact-bearing paragraph. Require
+        # an actual reason (>= 4 words), the smallest bar that still admits the
+        # documented short closures (`OK — duplicate; no fact lost`).
+        reason = ok.group(1).strip()
+        # The seed's own empty-table row is `OK — nothing removed`: there is no
+        # deleted paragraph to explain, so it is not the one-character closure
+        # this check exists to reject.
+        if reason.lower() in ("nothing removed", "no rows removed"):
+            return True
+        words = re.findall(r"[^\s]+", reason)
+        return len(words) >= 4
     if re.match(r"(?i)^manual-required\b", text):
         return True
     if re.match(r"(?i)^fact\s+removed\s*[\u2014\u2013:-]\s*RP-\d+\b", text):

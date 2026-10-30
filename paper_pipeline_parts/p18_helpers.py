@@ -28,6 +28,66 @@ def ensure_aux_output_root(root, dirname: str) -> Path:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Venue profile + M30 seed helpers moved here to keep p04_utils.py under
+# the repository's 10,000-line cap; the loader shares one namespace.
+# ---------------------------------------------------------------------------
+
+def _venue_style_limits(ctx: Ctx) -> dict:
+    """The venue profile's `style_limits` block, validated and copied.
+
+    `{}` when the profile states none. The shape is
+    `{"sentence_words": {kind: positive int},
+      "paragraph_words": positive int}`; an invalid entry is dropped rather than
+    letting a malformed profile crash every scan, and an absent family stays
+    absent (the formatter records it as a policy gap).
+    """
+    prof = venue_profile_of(ctx, required=False)
+    data = getattr(prof, "data", {}) or {}
+    block = data.get("style_limits")
+    if not isinstance(block, dict):
+        return {}
+    out = {}
+    bars = block.get("sentence_words")
+    if isinstance(bars, dict):
+        clean = {}
+        for kind, value in bars.items():
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                continue
+            if n > 0:
+                clean[str(kind)] = n
+        if clean:
+            out["sentence_words"] = clean
+    try:
+        cap = int(block.get("paragraph_words") or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap > 0:
+        out["paragraph_words"] = cap
+    return out
+
+
+def m30_seed_disposition(row) -> str:
+    """The disposition the M30 seed already carries for one written value.
+
+    A written number the shipped tables do not prove and the scan could pair
+    with NO candidate producer is a recorded `unable` (the hierarchy has no
+    producer in this corpus), not an agent task. Pre-filling those rows is what
+    keeps a 165-row seed from being skipped wholesale: the agent disposes the
+    handful of rows that actually have a producer.
+    """
+    producer = str((row or {}).get("candidate producer") or "").strip()
+    if producer.startswith("(truncated"):
+        return ("unable — the M30 seed reached its row cap; the omitted rows were not "
+                "compared (this is a coverage gap, not a source-hierarchy conflict)")
+    if not producer or producer.startswith("(no shipped table column"):
+        return ("unable — no shipped producer in the corpus (M30 structural "
+                "row; not a source-hierarchy conflict)")
+    return ""
+
+
 MAX_TOOL_OUTPUT_BYTES = 16 * 1024 * 1024
 
 
@@ -35,43 +95,115 @@ class ToolOutputOverBudget(Exception):
     """A child process printed more than MAX_TOOL_OUTPUT_BYTES on one stream."""
 
 
+def _kill_process_group(proc):
+    """Kill a `start_new_session=True` child's whole group, not just the child.
+
+    A tool may spawn a helper (a verifier, a converter's worker) that inherits
+    the child's process group. `proc.kill()` left those grandchildren running
+    after the orchestrator had timed out and moved on (the 2026-10-30 F51).
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def run_bounded(argv, timeout, cwd=None, env=None):
-    """Run a child with stdout/stderr in temporary FILES, capped in size.
+    """Run a child with stdout/stderr bounded in size AND lifetime.
 
     `subprocess.run(..., stdout=PIPE)` accumulates every byte a verbose or
     malicious tool prints; the timeout does not bound memory (the 2026-10-28
-    audit's F61). The files are read back only up to the budget, and an
-    over-budget stream raises instead of allocating it.
+    audit's F61). Two further escapes are closed here:
+
+    * the child gets its OWN session, and a timeout kills the process GROUP,
+      so a grandchild spawning `sleep` does not survive the timeout (F51);
+    * stdout/stderr are drained through capped reader threads. The old code
+      wrote into an unbounded TemporaryFile and checked its size only after
+      `proc.wait()`, so a hostile/verbose child could fill the disk for the
+      whole timeout (F52). The reader keeps at most MAX_TOOL_OUTPUT_BYTES+1
+      bytes, kills the group the moment the cap is crossed, and continues to
+      drain (without storing) so the child cannot block on a full pipe.
+
+    The returned bytes are the first MAX_TOOL_OUTPUT_BYTES of each stream; an
+    over-budget stream raises `ToolOutputOverBudget` instead.
     """
-    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+    cap = MAX_TOOL_OUTPUT_BYTES
+    with tempfile.TemporaryFile(buffering=0) as out_f, \
+            tempfile.TemporaryFile(buffering=0) as err_f:
         proc = subprocess.Popen(
             [str(a) for a in argv], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-            stdout=out_f, stderr=err_f)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+        over_budget = threading.Event()
+
+        def _pump(pipe, sink):
+            total = 0
+            try:
+                while True:
+                    chunk = pipe.read(65536)
+                    if not chunk:
+                        break
+                    before = total
+                    total += len(chunk)
+                    if total <= cap:
+                        sink.write(chunk)
+                    else:
+                        # Crossed the cap: keep at most cap+1 bytes (so the
+                        # error reports a real size), record the overrun, kill
+                        # the whole group, and keep draining without storing.
+                        keep = cap + 1 - before
+                        if keep > 0:
+                            sink.write(chunk[:keep])
+                        over_budget.set()
+                        _kill_process_group(proc)
+            except (OSError, ValueError):
+                pass
+            finally:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+
+        readers = [threading.Thread(target=_pump, args=(proc.stdout, out_f), daemon=True),
+                   threading.Thread(target=_pump, args=(proc.stderr, err_f), daemon=True)]
+        for t in readers:
+            t.start()
         timed_out = False
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            _kill_process_group(proc)
             try:
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 pass
+        for t in readers:
+            t.join(timeout=10)
+        # A grandchild that escaped the group can keep a pipe open; closing our
+        # end forces the reader to EOF instead of leaving it blocked forever.
+        for t, pipe in zip(readers, (proc.stdout, proc.stderr)):
+            if t.is_alive():
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+                t.join(timeout=2)
         out_f.seek(0, os.SEEK_END)
         out_size = out_f.tell()
         err_f.seek(0, os.SEEK_END)
         err_size = err_f.tell()
-        if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
+        if over_budget.is_set() or out_size > cap or err_size > cap:
             raise ToolOutputOverBudget(
-                f"tool output over {MAX_TOOL_OUTPUT_BYTES} bytes "
+                f"tool output over {cap} bytes "
                 f"(stdout={out_size}, stderr={err_size})")
         out_f.seek(0)
         err_f.seek(0)
-        out = out_f.read(MAX_TOOL_OUTPUT_BYTES + 1)
-        err = err_f.read(MAX_TOOL_OUTPUT_BYTES + 1)
+        out = out_f.read(cap + 1)
+        err = err_f.read(cap + 1)
     if timed_out:
         raise subprocess.TimeoutExpired(str(argv[0]), timeout)
     return proc.returncode, out, err
