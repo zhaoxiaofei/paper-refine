@@ -1276,7 +1276,10 @@ def _rpr_splice(rpr: str, element: str, tag: str) -> str:
     want = RPR_CHILD_ORDER.index(tag) if tag in RPR_CHILD_ORDER else len(RPR_CHILD_ORDER)
     stripped = rpr.rstrip()
     if stripped.endswith("/>"):
-        return f"<w:rPr>{element}</w:rPr>"
+        # Keep the open-tag attributes: `<w:rPr w:rsidR="..."/>` is legal, and
+        # rebuilding it as a bare `<w:rPr>` discarded revision metadata the
+        # repair was not asked to touch (F24).
+        return f"{stripped[:-2].rstrip()}>{element}</w:rPr>"
     head_end = rpr.find(">") + 1
     head, inner = rpr[:head_end], rpr[head_end:]
     close = inner.rfind("</w:rPr>")

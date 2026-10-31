@@ -476,8 +476,11 @@ def main():
                 current = label
             elif current == "references":
                 current = role  # never stay stuck on the reference section
-            if raw.lstrip().startswith("### "):
-                continue  # synthetic corpus marker (sheet/header/footer)
+            if raw.lstrip().startswith("### corpus-marker:"):
+                # Only the converter's synthetic header/footer/sheet marker is
+                # skipped; a real markdown H3 can carry a definition or a claim
+                # (F47).
+                continue
             ctx = current
             for label, pat in LABEL_PATTERNS:
                 for m in pat.finditer(raw):

@@ -632,8 +632,15 @@ sweeps_text = doc_sources["sweeps.md"]
 row2 = next((l for l in sweeps_text.splitlines() if l.startswith("| 2 ")), "")
 check("E1 sweeps.md's category-2 mapping row carries `writing`",
       "`writing`" in row2, row2[:120])
-readme_row2 = next((l for l in doc_sources["README.md"].splitlines()
-                    if l.startswith("| 2 ")), "")
+readme_lines = doc_sources["README.md"].splitlines()
+# README.md carries TWO `| 2 ` rows: the exit-code table's ("| 2 | nothing to
+# decide yet ...") comes first, and the review-category mapping row is much
+# later. Select inside the category table by its header, or E1 reads the exit
+# code and fails although the mapping row is correct.
+category_table_at = next((i for i, l in enumerate(readme_lines)
+                          if "review category" in l and "scored class" in l), -1)
+readme_row2 = next((l for l in readme_lines[category_table_at + 1:]
+                    if l.startswith("| 2 ")), "") if category_table_at >= 0 else ""
 check("E1 README.md's category-2 mapping row carries `writing`",
       "`writing`" in readme_row2, readme_row2[:120])
 rule_text = np.defect_class_rule()

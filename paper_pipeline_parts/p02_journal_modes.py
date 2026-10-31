@@ -2090,6 +2090,16 @@ def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
     if article:
         clause += (f" for {_article_phrase(profile)}, "
                    f"{_main_text_counting_short(profile)}")
+    # A per-limit `note` records the rules the source states that this pipeline
+    # does NOT model (display-item caps, a reference cap). Silently dropping it
+    # let an operator pass M19 while violating an unmodelled journal rule, so
+    # the mandate names the recorded gap instead of pretending the number is the
+    # whole rule set (AGENTS.md rule 3).
+    gaps = [n for n in (_as_profile(profile).length_limit_note("abstract"),
+                        _as_profile(profile).length_limit_note("main_text")) if n]
+    if gaps:
+        clause += ("; the profile's own notes record what the number does not capture "
+                   "(including rules this pipeline does NOT model): " + " | ".join(gaps))
     return clause
 
 
@@ -3240,11 +3250,30 @@ REWRITE_PARITY_REVISE = """13. REWRITE-PARITY findings (M25-M29) - resolve them 
     loss is manual-required, with the proposed reordering written out in MANUAL_STEPS.md."""
 
 
+INTEGRATE_REWRITE_PARITY = """3e. REWRITE-PARITY (M25-M29) and the ARCHITECTURE pass J5: a port can import
+   one of these classes as a side-effect, so re-derive each on the MERGED candidate (definitions
+   in the skill's references/sweeps.md, sections M25-M29 and J5) and dispose it in the
+   integration ledger:
+   * M25 artwork/text parity: every artwork token still matches the merged main text/legend;
+   * M26 house-style conventions: the merged text uses ONE authoritative form per family -- a
+     port that brings a different spelling of the same word is a finding, not a cosmetic drop;
+   * M27 claim-to-evidence coverage: a ported claim still points at evidence the merged
+     package carries;
+   * M28 sibling-definition symmetry: a ported definition did not leave its siblings
+     expanded or ordered inconsistently;
+   * M29 caption-promise vs printed-schema parity: a ported caption and its table/figure
+     still agree;
+   * J5 architecture: the port did not leave a section's structure worse than self/'s.
+   Record one row per class (clean -- basis, or the finding) in the ledger and the V3 rescan.
+"""
+
+
 def apply_rewrite_parity(text: str, where: str) -> str:
     """Substitute the rewrite-parity block for the stage that owns it."""
     block = {"review": REWRITE_PARITY_REVIEW,
              "audit": REWRITE_PARITY_AUDIT,
-             "revise": REWRITE_PARITY_REVISE}.get(where, "")
+             "revise": REWRITE_PARITY_REVISE,
+             "integrate": INTEGRATE_REWRITE_PARITY}.get(where, "")
     return text.replace("@@REWRITE_PARITY@@", block)
 
 

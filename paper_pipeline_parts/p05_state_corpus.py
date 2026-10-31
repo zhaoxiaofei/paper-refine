@@ -111,6 +111,22 @@ def review_split_of(ctx: Ctx) -> str:
     return raw if raw in REVIEW_SPLIT_MODES else "off"
 
 
+def review_split_for_round(ctx: Ctx, r: int) -> str:
+    """The split MODE a round's review actually uses ('off' = one session).
+
+    `--review-split` is planned only for a FULL-scope round: a formatting-
+    writing round is ONE review pass, so `round_run_plan` plans no session B and
+    the prompt carries no SPLIT REVIEW block. The prompt materializer and the
+    postcheck must derive this from ONE predicate: before this helper the prompt
+    applied the scope test but `postcheck_review` re-derived the split from the
+    config alone, so the same session could pass one gate and fail the other
+    (F01).
+    """
+    if review_split_of(ctx) == "off":
+        return "off"
+    return review_split_of(ctx) if round_review_scope(ctx, int(r)) == "full" else "off"
+
+
 # --- the COLD-START REVIEW stage (`setup --cold-start-review`, default on) -------------
 # A second, INDEPENDENT discovery channel -- generic by design. It is a
 # cold-context session that is given the corpus (the submission documents AND
@@ -1321,6 +1337,7 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
     """
     overrides = corpus_source_overrides(sources)
     paths = []
+    names = []
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
@@ -1338,13 +1355,26 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
             paths.append(p)
+            names.append(prefix + rel)
     if not paths:
         # No files at all: the corpus is MISSING (a pruned or unmaterialized
         # sandbox), not empty. Returning "" lets the callers fall back to the
         # recorded integrity digest instead of treating every missing corpus as
         # the same empty-content member.
         return ""
-    digs = sha256_files(paths, on_error="<unreadable>")
+    digs = []
+    for p, name in zip(paths, names):
+        try:
+            digs.append(sha256_file(p))
+        except OSError:
+            # No content is knowable, but the marker must still distinguish
+            # DIFFERENT unreadable file sets: the old single "<unreadable>"
+            # literal made two different corrupt corpora (x.docx vs y.png)
+            # content-identical, so the field could deduplicate one away (F08).
+            # The package-relative path is stable across copies, so a copy of
+            # the same corpus still reproduces the same fingerprint; it is a
+            # path-qualified marker, never a content-independent digest.
+            digs.append("unreadable:" + name)
     return hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()
 
 
@@ -1457,7 +1487,8 @@ def revision_token_for_dir(dirp: Path) -> dict:
                 unreadable.append(f"{p.relative_to(dirp).as_posix()}: over the "
                                   f"{MAX_PAYLOAD_BYTES // (1024 * 1024)} MiB payload budget")
                 continue
-            digs.append(hashlib.sha256(_normalize_version_refs(p.read_bytes(), tokens)).hexdigest())
+            digs.append(hashlib.sha256(_normalize_version_refs(
+                read_regular_file(p), tokens)).hexdigest())
         except OSError as e:
             unreadable.append(f"{p.relative_to(dirp).as_posix()}: {e.strerror or e}")
             continue
@@ -3063,8 +3094,10 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                                # A scoped round is ONE review pass by
                                                # definition; the complementary-split
                                                # machinery would contradict its scope.
-                                               split=(part if split_mode != "off"
-                                                      and scope == "full" else None),
+                                               # The postcheck derives the same value
+                                               # from review_split_for_round().
+                                               split=(part if review_split_for_round(ctx, r)
+                                                      != "off" else None),
                                                split_mode=split_mode,
                                                scope=scope,
                                                venue=venue_profile_of(ctx),

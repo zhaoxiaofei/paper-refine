@@ -45,5 +45,8 @@ venue_profiles/*
 !venue_profiles/README.md
 !venue_profiles/*.json
 
-# Excel lock files ("~$name.xlsx") appear whenever a workbook is open.
+# Office owner/lock files ("~$name.xlsx", "~$name.docx") appear whenever a
+# workbook or document is open; is_non_shippable_name() treats both as junk.
 ~$*.xlsx
+~$*.docx
+~$*.doc

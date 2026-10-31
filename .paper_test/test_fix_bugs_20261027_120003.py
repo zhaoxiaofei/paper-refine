@@ -508,11 +508,11 @@ def _review_sandbox(tmp: Path, m1_md: str, coverage: list, parity_body: str):
     return sb, fj
 
 
-def _coverage(m1="clean -- basis: x"):
-    return ([{"check": f"M{i}", "disposition": (m1 if i == 1 else "clean -- basis: x")}
+def _coverage(m1="clean -- basis: artifacts/check.md"):
+    return ([{"check": f"M{i}", "disposition": (m1 if i == 1 else "clean -- basis: artifacts/check.md")}
              for i in range(1, 18)]
-            + [{"check": f"J{i}", "disposition": "clean -- basis: x"} for i in range(1, 5)]
-            + [{"check": c, "disposition": "clean -- basis: x"}
+            + [{"check": f"J{i}", "disposition": "clean -- basis: artifacts/check.md"} for i in range(1, 5)]
+            + [{"check": c, "disposition": "clean -- basis: artifacts/check.md"}
                for c in ("M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26",
                          "M27", "M28", "M29", "M30", "M31", "M32", "M33", "M34", "M35",
                          "M36", "J5")])

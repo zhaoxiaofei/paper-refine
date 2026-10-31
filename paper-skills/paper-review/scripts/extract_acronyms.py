@@ -992,8 +992,11 @@ def main():
                 current_section = label
             elif current_section == "references":
                 current_section = role  # never stay stuck on the reference section
-            if raw.lstrip().startswith("### "):
-                continue  # synthetic corpus marker (sheet/header/footer)
+            if raw.lstrip().startswith("### corpus-marker:"):
+                # Only the converter's synthetic header/footer/sheet marker is
+                # skipped; a real markdown H3 can carry a definition or a claim
+                # (F47).
+                continue
             line = mask_nonprose(raw)
             swept.append((fname, li, current_section, line, raw))
             # Abbreviation-key entries ("CN, copy number;") are definitions too:

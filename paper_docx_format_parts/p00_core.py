@@ -1259,7 +1259,16 @@ def docx_style_ids(path: Path) -> list:
     """
     try:
         with zipfile.ZipFile(path) as pkg:
-            xml = pkg.read("word/styles.xml").decode("utf-8", "replace")
+            # The package is UNTRUSTED (a submitted manuscript or a downloaded
+            # template). `pkg.read` alone allocates the decompressed part with
+            # no per-part/total budget or entity check, so a small zip bomb
+            # could exhaust memory here; use the same guarded readers the
+            # scanner path already uses (F75).
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise OSError(problem)
+            xml = _docx_xml_part_guarded(pkg, "word/styles.xml").decode(
+                "utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return []
     return sorted(set(re.findall(r'w:styleId="([^"]+)"', xml)))
@@ -1273,11 +1282,19 @@ def _template_uses_even_odd(template: Path) -> bool:
     """
     try:
         with zipfile.ZipFile(template) as tpkg:
+            # Same untrusted-package budget as docx_style_ids (F75). The
+            # sibling template paths use the guarded reader; these two reads
+            # bypassed it.
+            problem = _docx_zip_problem(tpkg)
+            if problem:
+                raise OSError(problem)
             names = set(tpkg.namelist())
-            settings = (tpkg.read("word/settings.xml").decode("utf-8", "replace")
-                        if "word/settings.xml" in names else "")
-            doc = tpkg.read("word/document.xml").decode("utf-8", "replace") \
-                if "word/document.xml" in names else ""
+            settings = (_docx_xml_part_guarded(tpkg, "word/settings.xml").decode(
+                "utf-8", "replace")
+                if "word/settings.xml" in names else "")
+            doc = (_docx_xml_part_guarded(tpkg, "word/document.xml").decode(
+                "utf-8", "replace")
+                if "word/document.xml" in names else "")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return False
     if is_on(settings, "evenAndOddHeaders"):

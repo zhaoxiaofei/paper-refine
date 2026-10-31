@@ -306,8 +306,11 @@ def docx_to_text(path: str) -> tuple:
             xml = raw.decode("utf-8", errors="replace")
             part_lines, part_notes = docx_part_to_lines(xml)
             if part_lines:
-                # lowercase marker: an all-caps marker would itself be inventoried as an acronym
-                out_lines.append("### %s (%s)" % (kind.lower(), name))
+                # lowercase marker: an all-caps marker would itself be inventoried as an acronym.
+                # The `corpus-marker:` prefix is deliberately NOT a plain markdown heading:
+                # the extractors skip these synthetic parts, and a real manuscript H3
+                # (a methods subsection) must stay in the corpus (F47).
+                out_lines.append("### corpus-marker: %s (%s)" % (kind.lower(), name))
                 out_lines.extend(part_lines)
                 notes.append("%s text included: %s" % (kind.lower(), name))
             notes.extend(part_notes)
@@ -454,7 +457,7 @@ def xlsx_to_text(path: str) -> tuple:
             lines = []
             for name, sf in resolved:
                 sname = name or sf
-                lines.append("### sheet: %s" % sname)
+                lines.append("### corpus-marker: sheet: %s" % sname)
                 sh = z.read(sf).decode("utf-8", errors="replace")
                 rows = []
                 max_col = 0

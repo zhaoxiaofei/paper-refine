@@ -155,7 +155,7 @@ def max_concurrency(spans: dict) -> int:
         if "start" in span and "end" in span:
             events.append((span["start"], 1))
             events.append((span["end"], -1))
-    events.sort(key=lambda e: (e[0], e[1]))       # a start before an end at the same instant
+    events.sort(key=lambda e: (e[0], -e[1]))      # a start before an end at the same instant
     cur = best = 0
     for _ts, delta in events:
         cur += delta

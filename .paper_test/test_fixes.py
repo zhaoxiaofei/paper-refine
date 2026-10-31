@@ -43,7 +43,7 @@ def make_ctx(tmp):
 
 
 def full_coverage(caption=False):
-    rows = [{"check": c, "disposition": "clean -- basis: x"} for c in
+    rows = [{"check": c, "disposition": "clean -- basis: artifacts/check.md"} for c in
             [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
     rows.append({"check": "M19", "disposition": "0 findings -- within the relaxed caps"})
     rows.append({"check": "M18", "disposition": "0 findings"})

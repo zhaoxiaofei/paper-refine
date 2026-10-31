@@ -337,8 +337,7 @@ def test_journal_emphasis():
     check("the cover-letter journal runs are pinned roman (direct override beats the style)",
           '<w:i w:val="0"/>' in fixed and 'w:rStyle w:val="Emphasis"' in fixed)
     check("the reference-list journal title was made italic",
-          re.search(r"<w:rPr><w:i/></w:rPr><w:t>Nature Methods</w:t>|<w:t>Nature Methods</w:t>",
-                    fixed) is not None and "<w:i/>" in fixed)
+          re.search(r"<w:rPr><w:i/></w:rPr><w:t>Nature Methods</w:t>", fixed) is not None)
     check("a legitimate italic (de novo) survives the journal fix",
           re.search(r"<w:rPr><w:i/></w:rPr><w:t>de novo</w:t>", fixed) is not None)
     check("the styles part is untouched (only run-level overrides were added)",
@@ -1502,7 +1501,7 @@ def test_review_m20_seeding():
           nb.leftovers_present(ctx, rec) is False)
     # the review contract now requires an M20 coverage row
     base = sb / "base"
-    rows = [{"check": c, "disposition": "clean -- basis: x"} for c in
+    rows = [{"check": c, "disposition": "clean -- basis: artifacts/check.md"} for c in
             [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
     rows += [{"check": "M18",
               "disposition": "clean -- basis: legend counts recorded"},

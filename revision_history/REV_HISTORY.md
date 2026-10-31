@@ -13,7 +13,7 @@ it are local artefacts, not committed).
 
 | path | what it is |
 |---|---|
-| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`, `conflicts`, `selfcheck`, `adopt-sweep`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `set-probe-review`, `set-submit-code`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform`. |
+| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`, `conflicts`, `selfcheck`, `adopt-sweep`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `set-cold-start-review`, `set-submit-code`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform`. |
 | `paper_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`) and the Zotero live-field parity check (`zotero-check FILE.docx`, FMT-Z1..Z5 / M36). |
 | `paper_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
 | `docxcompare.sh` + `mcp-docx-compare/` | Word's own comparison engine (`Word.Application.CompareDocuments` through PowerShell COM) -- the FIRST choice whenever two `.docx` files must be tracked (the `docx-compare` MCP tool wraps the script). |
@@ -402,58 +402,66 @@ the profiles shipped next to the script → the built-in fallback inside
     list; the pass is worded in content terms only. Pinned by
     `.paper_test/test_discovery_parity_2026_1010.py`.
 
-19. **The PROBE REVIEW is a GENERIC, independent producer in the SAME frozen
+19. **The COLD-START REVIEW is a GENERIC, independent producer in the SAME frozen
     list, and every computation it declares is RE-RUN, never trusted.**
-    `setup --probe-review` (default `on`; `--no-probe-review`, or
-    `set-probe-review off` on an existing root, is the off switch; a root without
-    the key plans none) adds `r<r>_probe` beside `r<r>_review`, depends only on
-    the base, and the auditor/revision arms wait for it (`round_run_plan`). The
-    probe is part of the review STEP for `--only`: selecting the review stage
-    (`--only review`, `2:review`) runs the probe with it, while
-    `retry --runs 1:review` stays exact (a retry resets only the runs named).
+    `setup --cold-start-review` (default `on`; `--no-cold-start-review`, or
+    `set-cold-start-review off` on an existing root, is the off switch; a root
+    without the key plans none) adds `r<r>_cold_start_review` beside
+    `r<r>_guided_review`, depends only on the base, and the audit/revision arms
+    wait for it (`round_run_plan`). It is part of the review STEP for `--only`:
+    selecting the review stage (`--only review`, `2:review`) runs it with the
+    review, while `retry --runs 1:review` stays exact (a retry resets only the
+    runs named).
     The
     session is materialized with `base/`, `non_revised/` and two seeded
-    CANDIDATE inventories (`probe_review/CLAIM_SURFACES.md`, `PRODUCERS.md`) and
-    NOTHING else: no `review/`, no `prior_round/`, no finding list, no sweep
+    CANDIDATE inventories (`cold_start_review/CLAIM_SURFACES.md`, `PRODUCERS.md`)
+    and
+    NOTHING else: no `guided_review/`, no `prior_round/`, no finding list, no
+    sweep
     table -- the whole point is a second, unanchored read in a context that has
     not already disposed the checklist's rows. It is GENERIC on purpose: any
     defect class may be filed (category 0-5, Fatal..Minor, any location in the
     submission documents or the evidence areas), in the same vocabulary every
     other session uses; wherever a defect can be SHOWN BY A COMPUTATION the
     finding declares a `verifier` (a relative script under
-    `probe_review/scripts/` plus the exact `computed` value it prints).
-    The contract is code-enforced by `postcheck_probe` +
-    `_probe_contract_problems` + `probe_reproduction`:
+    `cold_start_review/scripts/` plus the exact `computed` value it prints).
+    The contract is code-enforced by `postcheck_cold_start_review` +
+    `_cold_start_contract_problems` + `cold_start_reproduction`:
       * the report carries a `checked` inventory (every AREA examined, with
         candidate and finding counts), so a zero-finding pass is an examined
         corpus and not an unrun one;
       * every finding has the standard shape and an `X-9xx` id (the RESERVED
-        probe block; `PROBE_ID_RE`) -- a finding outside it is refused;
+        cold-start block; `COLD_START_ID_RE`) -- a finding outside it is refused;
       * EVERY declared verifier is RE-RUN (offline, cwd = the sandbox root,
         bounded) and its last stdout line compared with `computed`
-        (`probe_reproduction`): a mismatch, a missing script, a non-zero exit,
-        an empty output or a timeout FAILS the attempt -- a computation the
-        probe cannot reproduce is a correctness blocker, not a finding
-        (`probe_review/REPRODUCTION.md` is the code-written record); findings
+        (`cold_start_reproduction`): a mismatch, a missing script, a non-zero
+        exit, an empty output or a timeout FAILS the attempt -- a computation the
+        cold-start review cannot reproduce is a correctness blocker, not a
+        finding (`cold_start_review/REPRODUCTION.md` is the code-written
+        record); findings
         WITHOUT a verifier are evidence rows and are never re-run;
-      * `probe_review/coverage.md` (the areas, counts and honest limits) must
-        exist and be non-empty, and `sandbox_selfcheck --stage probe` applies
-        the same detectors before the marker.
+      * `cold_start_review/coverage.md` (the areas, counts and honest limits)
+        must
+        exist and be non-empty, and `sandbox_selfcheck --stage cold_start_review`
+        applies the same detectors before the marker.
     The findings ride the discovery namespace WITHOUT ever mutating the frozen
-    review: `merge_probe_into_review_copy()` merges them into the review COPY of
+    review: `merge_cold_start_into_review_copy()` merges them into the review
+    COPY of
     the audit and of every reviser (collision-safe remap, recorded),
     `round_discovery_seed()`/`seed_discovery_findings()` add them to the
     integration seed (`frozen_discovery/findings_extra.json`, merged in code),
     and `archive_review_outputs()` archives the MERGED discovery list (plus the
-    probe's own `findings_probe.json`/reproduction record) so a pruned root
+    cold-start review's own `findings_cold_start_review.json`/reproduction
+    record) so a pruned root
     re-seeds the same ids AND the next round's `prior_round/` carry-over gate
-    reconciles every probe finding like any other X-* row. The auditor disposes
+    reconciles every cold-start finding like any other X-* row. The auditor
+    disposes
     them like any frozen id, the reviser's ledger must name them, and the
     integration ledger must reconcile them. The JUDGE never receives the list
     (blinding): it re-derives its OWN generic discovery pass
     (`judge_discovery_block`) and files an X-class side difference as a normal
     `resolved`/`introduced` row. Do NOT narrow either pass to a fixed class
-    list. Pinned by `.paper_test/test_probe_review_2026_1012.py`.
+    list. Pinned by `.paper_test/test_cold_start_review_2026_1012.py`.
 
 ## Commands you will use
 
@@ -523,11 +531,11 @@ staged under `feedback/llm/` and its pre-filtered findings join the concern
 ledger with their origin recorded (the `feedback/concerns` stages consume both
 streams; only the human/decision-letter stream uses the name heuristic).
 Mode `llm` (option 5) is the one exception: it reads ONLY
-`llm_review_feedback/` (no journal letter, no response letter), and it is
-DIRECTORY-DRIVEN -- when no explicit `revision_mode` is recorded and the
-pristine corpus carries a non-empty `llm_review_feedback/`, `journal_mode_of`
-returns `llm` automatically (`setup` records it; run/status print the auto
-detection). An explicit recorded mode always wins, and renaming the area to
+`llm_review_feedback/` (no journal letter, no response letter), and it must be
+selected EXPLICITLY -- `journal_mode_of` returns `continue` when no
+`revision_mode` is recorded, and a non-empty `llm_review_feedback/` area does
+not opt the root into the mode by itself (`set-revision-mode llm` records it).
+An explicit recorded mode always wins, and renaming the area to
 `llm_review_feedback.disabled` (or `.off`) is the inert off-switch: the renamed
 tree is never read as feedback or evidence and never becomes submission
 content (`is_disabled_evidence_rel` keeps it out of scans, views and packages).

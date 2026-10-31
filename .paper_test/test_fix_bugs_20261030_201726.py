@@ -445,7 +445,7 @@ def test_c62_audit_coverage():
     full = ([{"check": f"M{i}", "disposition": "clean -- basis: re-derived"} for i in range(1, 37)]
             + [{"check": f"J{i}", "disposition": "clean -- basis: re-derived"} for i in range(1, 6)])
     check("a complete coverage table passes", not pp.audit_coverage_problems({"coverage": full}))
-    partial = [{"check": "M1", "disposition": "clean -- basis: x"}]
+    partial = [{"check": "M1", "disposition": "clean -- basis: artifacts/check.md"}]
     check("a partial coverage table names the missing checks",
           any("coverage row(s) are missing" in p
               for p in pp.audit_coverage_problems({"coverage": partial})))

@@ -2857,6 +2857,8 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
     def is_done(rid) -> bool:
         return (ctx.run(rid) or {}).get("status") == "done"
 
+    dirty_seen = set()
+
     def prepare(e) -> str:
         """Materialize one planned run if it is ready. Returns a state word.
 
@@ -2870,6 +2872,16 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             return "done"
         if not deps_ok(e):
             return "blocked"
+        rec = ctx.run(rid)
+        if rid in dirty_seen:
+            # A dirty run is never re-prepared: the materializer runs a full
+            # corpus scan (seed_evidence_pack) and re-copies inputs, and the
+            # automated loop calls prepare() on every 0.5 s tick. The state can
+            # change only when the agent writes its completion signal or an
+            # operator resets the sandbox with `retry` (F19).
+            if rec is not None and completion_signal_exists(ctx, rec):
+                return "signal"
+            return "dirty"
         try:
             e["materialize"](ctx)
         except DepsNotMet as exc:
@@ -2890,6 +2902,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
         if completion_signal_exists(ctx, rec):
             return "signal"
         if leftovers_present(ctx, rec):
+            dirty_seen.add(rid)
             return "dirty"
         return "ready"
 

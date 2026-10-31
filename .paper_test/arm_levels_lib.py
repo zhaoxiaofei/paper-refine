@@ -3,7 +3,8 @@
 W-12 (the language pass in every package-producing stage, the judge's writing
 rubric).
 
-Run:  python3 .paper_test/test_arm_levels_and_language_2026_0922.py
+Run:  python3 .paper_test/test_arm_levels_1_prompts.py
+      (then test_arm_levels_2_language.py and test_arm_levels_3_rubric_round.py)
 
 W-11: a round with more than one rewrite stages BOTH levels -- one structural
 (organization) arm and one sentence-level arm -- so the integration pool carries

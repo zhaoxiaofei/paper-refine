@@ -147,8 +147,12 @@ def _candidate_key(token: str) -> str:
     t = re.sub(r"ysing\b", "yzing", t)
     t = re.sub(r"yse\b", "yze", t)
     t = re.sub(r"our(s|al|able|ed|ing|ite|ism|ist)?\b", r"or\1", t)
-    t = re.sub(r"ae", "e", t)
-    t = re.sub(r"oe", "e", t)
+    # NO data-driven ae/e or oe/e collapse here. Applied to a whole token those
+    # substitutions fuse distinct proper names (Michael/Michel, Caesar/Cesar)
+    # and unrelated words (phoenix/phenix), reporting a false spelling family
+    # (F49). The licensed variants are the curated AE_PAIRS/OE_PAIRS list,
+    # enumerated separately by collect_family_rows(); an unlisted pair is not
+    # evidence of a convention.
     t = re.sub(r"logue\b", "log", t)
     t = re.sub(r"ement\b", "ment", t)
     t = re.sub(r"ll(ed|ing|er)\b", r"l\1", t)
@@ -156,6 +160,24 @@ def _candidate_key(token: str) -> str:
 
 
 EVIDENCE_DIRNAMES = ("raw_data", "human_review_feedback", "llm_review_feedback")
+# The reference list is a BIBLIOGRAPHY, not the author's prose: a UK/US or ae/e
+# variant inside a cited title or journal name is not a manuscript convention
+# family, and asking the author to harmonize it would edit a quotation (F48).
+# The region is blanked line-for-line (never deleted) so artifact line numbers
+# still point at the real file.
+_REF_HEADING_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography|"
+    r"(?:literature|works) cited)\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)
+_REF_TEX_HEADING_RE = re.compile(
+    r"^\s*\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}"
+    r"|^\s*\\begin\{thebibliography\}"
+    r"|^\s*\\(?:bibliography|printbibliography)\b", re.I)
+_REF_END_RE = re.compile(
+    r"^\s*(?:#{1,6}\s+\S|\\section\*?\s*\{|\\end\{thebibliography\}"
+    r"|(?:abstract|methods?|materials and methods|acknowledg\w*|"
+    r"author contributions?|data availability|code availability|"
+    r"competing interests?|conflicts? of interest|funding|supplementary\w*|"
+    r"figure legends?)\s*(?::|\s*$))", re.I)
 # Role words are NAME TOKENS, not substrings: a manuscript named
 # `immune_response.md` or `biofeedback_results.txt` is real prose, while a role
 # word preceded by a role qualifier (`reviewer_response`, `author_feedback`)
@@ -257,7 +279,17 @@ def read_text_files(corpus: str):
                 text = open(path, encoding="utf-8", errors="replace").read()
             except OSError:
                 continue
-            out.append((rel, text.split("\n")))
+            lines = text.split("\n")
+            in_refs = False
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if _REF_HEADING_RE.match(stripped) or _REF_TEX_HEADING_RE.match(stripped):
+                    in_refs = True
+                elif in_refs and _REF_END_RE.match(stripped):
+                    in_refs = False
+                if in_refs:
+                    lines[i] = ""
+            out.append((rel, lines))
     out.sort(key=lambda p: p[0])
     return out
 

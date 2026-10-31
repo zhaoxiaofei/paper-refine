@@ -2186,8 +2186,10 @@ def _set_para_style(para: str, style: str) -> str:
             om = re.match(r"<w:pPr(?=[\s>])[^>]*>", block)
             new = block[:om.end()] + f'<w:pStyle w:val="{style}"/>' + block[om.end():]
         return para.replace(block, new, 1)
-    om = re.match(r"<w:p(?=[\s>])[^>]*>", para)
-    return para[:om.end()] + f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' + para[om.end():]
+    # No pPr: `insert_into_ppr` owns the self-closing `<w:p .../>` expansion
+    # (an empty paragraph): the old fallback inserted the pPr AFTER the `/>`,
+    # making it a sibling of the paragraph and the part schema-invalid (F23).
+    return insert_into_ppr(para, f'<w:pStyle w:val="{style}"/>')
 
 
 def _style_index(styles_xml: str) -> tuple:
@@ -2962,24 +2964,37 @@ def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
                 break
     kw_heading = None
     kw_pending = False
+    front_style = author_id
+    if not front_style:
+        # 'AuthorList' is not a style that exists just because this code names
+        # it: when the template resolves no author style, pointing the
+        # Abstract/Keywords paragraphs at that literal id produced a package
+        # referencing an undefined style (F27). Leave their own style alone and
+        # record the named gap instead.
+        info["front_matter_gap"] = (
+            "the template defines no author/front-matter style; the Abstract and "
+            "Keywords paragraphs keep their own style (no pStyle was invented)")
     for idx, p in entries:
         t = text_of(p[2]).strip()
         low = t.lower()
         if low == "abstract":
-            style_para(idx, author_id or "AuthorList", "abstract_head")
-            info["abstract"] = True
+            if front_style:
+                style_para(idx, front_style, "abstract_head")
+                info["abstract"] = True
         elif low == "keywords":
             kw_heading = idx
-            style_para(idx, author_id or "AuthorList")
-            kw_pending = True
+            if front_style:
+                style_para(idx, front_style)
+                kw_pending = True
         elif low.startswith("keywords:") or low.startswith("keywords :"):
-            style_para(idx, author_id or "AuthorList")
-            info["keywords"] = True
+            if front_style:
+                style_para(idx, front_style)
+                info["keywords"] = True
         elif kw_pending:
             # The template uses ONE "Keywords: ..." line; styling the heading and
             # the list keeps the TEXT byte-identical (the merge itself is a
             # content edit the review/rewrite sessions are told to make).
-            style_para(idx, author_id or "AuthorList")
+            style_para(idx, front_style)
             info["keywords"] = True
             kw_pending = False
     # The FIRST page's block order and its direct spacing come from the template:
@@ -3532,6 +3547,8 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
         changes.append("front matter: Abstract -> unnumbered AuthorList")
     if front_info.get("keywords"):
         changes.append("front matter: Keywords -> the template's front-matter style")
+    if front_info.get("front_matter_gap"):
+        changes.append("front matter gap: " + str(front_info["front_matter_gap"]))
     if front_info.get("deep_headings_demoted"):
         changes.append(f"demoted {front_info['deep_headings_demoted']} heading(s) deeper than "
                        f"the template's own depth")

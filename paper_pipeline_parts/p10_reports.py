@@ -9,14 +9,11 @@ from __future__ import annotations
 # REPORTS / STATUS
 # =====================================================================
 
-def write_text_atomic(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    def do(f) -> None:
-        f.write(text)
-
-    _atomic_write_bytes(tmp_path_for(path), path, do)
-
+# `write_text_atomic` is defined ONCE, in p04_utils. The parts are executed in
+# order into one module namespace, so a second definition here (the old
+# `write_text_atomic(path, text)` with no `encoding=` argument and no Path
+# conversion) silently shadowed the tested p04 implementation for every caller
+# (F16). Do not add a duplicate in this part.
 
 def _tbl(rows: list, header: list) -> str:
     rows = [[str(c) for c in r] for r in rows]

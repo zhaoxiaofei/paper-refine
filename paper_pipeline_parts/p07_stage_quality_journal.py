@@ -809,8 +809,14 @@ def postcheck_review(ctx: Ctx, rec: dict):
             elif not fj["findings"]:
                 warns.append(f"{FINDINGS_REL} lists zero findings (valid only if the corpus is "
                             f"genuinely clean; check the coverage table)")
-            check_review_contract(ctx, sb, fj, errs, warns,
-                                  scope=round_review_scope(ctx, int(rec.get("round") or 1)))
+            _round = int(rec.get("round") or 1)
+            check_review_contract(
+                ctx, sb, fj, errs, warns,
+                scope=round_review_scope(ctx, _round),
+                # The SAME predicate the prompt used: a scoped round plans no
+                # split session, so the postcheck must not demand part A's
+                # mechanical artifacts from a review the prompt called single.
+                split=review_split_for_round(ctx, _round))
             if journal_has_feedback(ctx) and not journal_is_scoped(ctx):
                 # `llm` mode has a feedback ledger too, and the review block
                 # tells it to reconcile every concern; skipping the coverage
@@ -4161,7 +4167,12 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
                     item = change.get(name)
                     if isinstance(item, str) and item.strip():
                         authorized.add(item.strip())
-    authorized_names = {Path(p.replace("\\", "/")).name for p in authorized}
+    def _ledger_rel(value: str) -> str:
+        # A Windows-style separator and a leading "./" are spellings of the same
+        # relative path; the FILE NAME ALONE is not (F02).
+        return value.replace("\\", "/").strip().lstrip("./")
+
+    authorized_paths = {_ledger_rel(p) for p in authorized}
     added = sorted(set(got) - set(want))
     dropped = sorted(set(want) - set(got))
     # A version-token rename (`main-4f3a9c1.docx` -> `main-9b2c7e4.docx`) is
@@ -4216,10 +4227,11 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
             continue
         if rel in pipeline_changed:
             continue
-        if rel not in authorized and Path(rel).name not in authorized_names:
+        if _ledger_rel(rel) not in authorized_paths:
             errs.append(f"scoped revision changed {rel!r} but the ledger carries no structured "
-                        f"row naming the file (a `file`/`files`/`path` field): every edit must "
-                        f"trace to a reviewer concern")
+                        f"row naming THAT relative path (a `file`/`files`/`path` field): every "
+                        f"edit must trace to a reviewer concern. A bare basename does not "
+                        f"authorize a same-named document in another directory")
     return errs
 
 
@@ -4291,10 +4303,21 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     exactly what shipped, including what was dropped and why.
     """
     mode = journal_mode_of(ctx)
-    dst = ctx.root / JOURNAL_SUBMISSION_DIR
-    if dst.exists():
-        rmtree_force(dst)
-    dst.mkdir(parents=True, exist_ok=True)
+    final_dst = ctx.root / JOURNAL_SUBMISSION_DIR
+    # Build the package in a sibling staging directory and swap it in only after
+    # the copy, the strips and the manifest all succeed. The old code deleted the
+    # previous journal_submission/ BEFORE copy_into(), so a failed or interrupted
+    # publication destroyed the last good package the operator could resubmit
+    # (F03).
+    for leftover in ctx.root.glob(f".{final_dst.name}.staging-*"):
+        # A previous failure keeps its partial tree for diagnosis; a new
+        # publication reclaims it so failures cannot accumulate.
+        rmtree_force(leftover)
+    stage = final_dst.with_name(
+        f".{final_dst.name}.staging-{os.getpid()}-{time.time_ns()}")
+    if stage.exists():
+        rmtree_force(stage)
+    stage.mkdir(parents=True)
     # WHAT THE OPERATOR DECLARES AS SUBMITTED (2026-10-15): read the package's own
     # README BEFORE the copy, because that file is itself stripped as non-submitted
     # below. It may state the submitted set as a glob ("Only files whose names match
@@ -4309,19 +4332,19 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     # copies) are placed AFTER this filter and are never dropped by it.
     decl = declared_submission_set(target)
     dropped_by_declaration = []
-    copy_into(target, dst, exclude_top=("work",), skip_aux=True,
+    copy_into(target, stage, exclude_top=("work",), skip_aux=True,
               strip_bookkeeping=True, root=ctx.root)
     include_code = submit_code_of(ctx)
     non_submitted = tuple(EVIDENCE_DIRNAMES) + (() if include_code else (CODE_DIR,))
     for name in non_submitted:
-        if (dst / name).exists():
-            rmtree_force(dst / name)
+        if (stage / name).exists():
+            rmtree_force(stage / name)
     if decl.get("declared"):
         keep = set(decl.get("files") or [])
-        for q in sorted(dst.rglob("*")):
+        for q in sorted(stage.rglob("*")):
             if not q.is_file():
                 continue
-            rel = q.relative_to(dst).as_posix()
+            rel = q.relative_to(stage).as_posix()
             if rel in keep:
                 continue
             dropped_by_declaration.append(rel)
@@ -4331,12 +4354,12 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
         for rel in (JOURNAL_RESPONSE_MD_REL, JOURNAL_RESPONSE_MAP_REL):
             src = response_dir / rel
             if src.is_file():
-                out = dst / Path(rel).name
+                out = stage / Path(rel).name
                 shutil.copy2(src, out)
                 response_files.append(out.name)
     if journal_needs_response(ctx) and not response_files:
         die(f"revision mode {mode!r} requires a response to reviewers, but the response stage "
-            f"produced none: nothing was published to {dst.name}/. Run the response stage "
+            f"produced none: nothing was published to {final_dst.name}/. Run the response stage "
             f"(`run`) or retry it with `retry --run {rid_response(ctx.rounds_count())}`.")
     # Marked-up copies: a journal revision is usually submitted as the clean
     # manuscript PLUS the changes marked against what was submitted.
@@ -4346,7 +4369,7 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     if vid:
         rd = ctx.root / REDLINE_DIRNAME / vid / "from-original"
         if rd.is_dir():
-            out_dir = dst / "tracked_changes"
+            out_dir = stage / "tracked_changes"
             for p in sorted(rd.iterdir()):
                 if p.is_file():
                     # NEVER overwrite the clean document: the marked-up copies
@@ -4364,25 +4387,25 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     # (no submission pattern names one); the delivered folder carries only real
     # files, and the manifest names what was dropped.
     word_owner_dropped = []
-    for q in sorted(dst.rglob("*")):
+    for q in sorted(stage.rglob("*")):
         if not q.is_file():
             continue
         if is_word_owner_name(q.name):
-            word_owner_dropped.append(q.relative_to(dst).as_posix())
+            word_owner_dropped.append(q.relative_to(stage).as_posix())
             q.unlink()
         elif is_non_submitted_readme_name(q.name):
-            readme_dropped.append(q.relative_to(dst).as_posix())
+            readme_dropped.append(q.relative_to(stage).as_posix())
             q.unlink()
     # The generic non-shippable sweep also runs on the SUBMISSION COPY: a legacy
     # or base pin that predates the stage-side sweep must not hand a `.pyc`, a
     # `.DS_Store` or a `:Zone.Identifier` stub to the journal. This is a derived
     # copy (the pin keeps its judged bytes), so the sweep is legal here.
-    non_shippable_dropped = strip_non_shippable_files_in_dir(dst).get("removed") or []
+    non_shippable_dropped = strip_non_shippable_files_in_dir(stage).get("removed") or []
     # `name`, not `p.name`: `p` is the tracked-changes copy loop's variable
     # above, so the old generator raised UnboundLocalError whenever the guard
     # fired without any redline to copy (and otherwise named the last redline
     # file instead of the leaked area).
-    left = sorted(name for name in non_submitted if (dst / name).exists())
+    left = sorted(name for name in non_submitted if (stage / name).exists())
     if left:
         die(f"the submission package still carries a NON-SUBMITTED area ({', '.join(left)}); "
             f"this is a pipeline bug -- report it before submitting anything.")
@@ -4393,50 +4416,52 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     # touch -- a structural file, a sentence carrying a live citation field --
     # is reported as an author action; the assembly never fails on it.
     missing_areas = [name for name in EVIDENCE_DIRNAMES + (CODE_DIR,)
-                     if not (dst / name).exists()]
+                     if not (stage / name).exists()]
     try:
         reference_strip = strip_dangling_references_in_dir(
-            dst, missing_areas, "journal submission", warns=None,
+            stage, missing_areas, "journal submission", warns=None,
             artifacts_dir=ctx.reports_dir,
             artifact_name="PKG2_journal_submission.json")
         dangling = reference_strip.get("remaining") or []
     except Exception as e:                                            # noqa: BLE001
         reference_strip = {"error": f"{type(e).__name__}: {e}"}
-        dangling = non_submitted_reference_rows(dst, missing_areas)
-    manifest = hash_manifest(dst)
-    write_json_atomic(ctx.root / "journal_submission.json",
-                      {"mode": mode,
-                       "option": JOURNAL_MODES[mode]["option"],
-                       "label": JOURNAL_MODES[mode]["label"],
-                       "target": label,
-                       "source_package": (target.relative_to(ctx.root).as_posix()
-                                          if is_within(target, ctx.root) else str(target)),
-                       "response_files": response_files,
-                       "marked_changes": marked,
-                       "raw_data_included": False,
-                       "code_included": bool(include_code),
-                       "readme_files_excluded": readme_dropped,
-                       "word_owner_files_excluded": word_owner_dropped,
-                       "non_shippable_files_excluded": non_shippable_dropped,
-                       # The operator's own declaration (its README) and what it
-                       # kept out of THIS copy.
-                       "declared_submission_patterns": list(decl.get("patterns") or []),
-                       "declared_submission_readme": decl.get("readme"),
-                       "declared_submission_ignored_reason": decl.get("ignored_reason"),
-                       "not_submitted_by_declaration": dropped_by_declaration,
-                       "removed_dangling_references": [
-                           {"file": f["file"], "sentences": f["removed"]}
-                           for f in (reference_strip.get("files") or []) if f.get("removed")],
-                       "removed_local_path_links": [
-                           {"file": f["file"], "links": f["removed_links"]}
-                           for f in (reference_strip.get("files") or [])
-                           if f.get("removed_links")],
-                       "non_submitted_references": dangling,
-                       # PKG-3: names the submission carries NOWHERE. Reported,
-                       # never removed (`dangling` above is the removal set).
-                       "unresolvable_references": list(reference_strip.get("advisory") or []),
-                       "manifest": manifest,
-                       "created": utcnow()})
+        dangling = non_submitted_reference_rows(stage, missing_areas)
+    manifest = hash_manifest(stage)
+    # Build the record now, but do NOT publish it yet: a failed swap would
+    # otherwise leave a record describing a package that was never installed
+    # (R03). The write happens after os.replace(stage, final_dst) succeeds.
+    record = {"mode": mode,
+              "option": JOURNAL_MODES[mode]["option"],
+              "label": JOURNAL_MODES[mode]["label"],
+              "target": label,
+              "source_package": (target.relative_to(ctx.root).as_posix()
+                                 if is_within(target, ctx.root) else str(target)),
+              "response_files": response_files,
+              "marked_changes": marked,
+              "raw_data_included": False,
+              "code_included": bool(include_code),
+              "readme_files_excluded": readme_dropped,
+              "word_owner_files_excluded": word_owner_dropped,
+              "non_shippable_files_excluded": non_shippable_dropped,
+              # The operator's own declaration (its README) and what it
+              # kept out of THIS copy.
+              "declared_submission_patterns": list(decl.get("patterns") or []),
+              "declared_submission_readme": decl.get("readme"),
+              "declared_submission_ignored_reason": decl.get("ignored_reason"),
+              "not_submitted_by_declaration": dropped_by_declaration,
+              "removed_dangling_references": [
+                  {"file": f["file"], "sentences": f["removed"]}
+                  for f in (reference_strip.get("files") or []) if f.get("removed")],
+              "removed_local_path_links": [
+                  {"file": f["file"], "links": f["removed_links"]}
+                  for f in (reference_strip.get("files") or [])
+                  if f.get("removed_links")],
+              "non_submitted_references": dangling,
+              # PKG-3: names the submission carries NOWHERE. Reported,
+              # never removed (`dangling` above is the removal set).
+              "unresolvable_references": list(reference_strip.get("advisory") or []),
+              "manifest": manifest,
+              "created": utcnow()}
     if readme_dropped:
         print(f"[journal] {len(readme_dropped)} README*.md/README*.txt file(s) are NOT submitted "
               f"(the author's own documentation, treated like {CODE_DIR}/): "
@@ -4492,7 +4517,27 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
               f"journal_submission.json -> unresolvable_references):")
         for r in _advisory[:4]:
             print(f"  - {r.get('file')} line {r.get('line')}: `{r.get('reference')}`")
-    return dst
+    # The new package is complete: archive the previous one by an atomic
+    # rename, swap the staged tree in, and drop the archive only after the swap
+    # succeeded. Any failure restores the previous package.
+    backup = None
+    if final_dst.exists():
+        backup = final_dst.with_name(
+            f".{final_dst.name}.previous-{os.getpid()}-{time.time_ns()}")
+        os.replace(final_dst, backup)
+    try:
+        os.replace(stage, final_dst)
+    except BaseException:
+        if backup is not None and not final_dst.exists():
+            os.replace(backup, final_dst)
+        rmtree_force(stage)
+        raise
+    # Publish the record only once the new package is in place; a failed swap
+    # above leaves the previous record describing the previous package (R03).
+    write_json_atomic(ctx.root / "journal_submission.json", record)
+    if backup is not None:
+        rmtree_force(backup)
+    return final_dst
 
 
 def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: int,

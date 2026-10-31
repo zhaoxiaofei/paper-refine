@@ -217,7 +217,7 @@ def test_check_id_coverage():
     skill_ids = ([f"M{i}" for i in range(1, 18)] + ["M18", "M19", "M20"]
                  + [f"J{i}" for i in range(1, 5)])
     fj = {"submission_dir": "base",
-          "coverage": [{"check": c, "disposition": "clean -- basis: x"} for c in skill_ids]}
+          "coverage": [{"check": c, "disposition": "clean -- basis: artifacts/check.md"} for c in skill_ids]}
     errs, warns = [], []
     nb.check_review_contract(None, sb, fj, errs, warns)
     check("the review postcheck really requires M21-M24",
@@ -235,7 +235,7 @@ def test_check_id_coverage():
                 + ["M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32", "M33", "M34", "M35", "M36"]
                 + [f"J{i}" for i in range(1, 6)])
     fj2 = {"submission_dir": "base",
-           "coverage": [{"check": c, "disposition": "clean -- basis: x"} for c in full_ids]}
+           "coverage": [{"check": c, "disposition": "clean -- basis: artifacts/check.md"} for c in full_ids]}
     errs3 = []
     nb.check_review_contract(None, sb2, fj2, errs3, [])
     check("the review postcheck requires the M25-M29 artifacts",
@@ -269,7 +269,7 @@ def test_check_id_coverage():
                 "| ms | all | 1 | x | none | none | writing | Minor | OK |\n",
                 encoding="utf-8")
         fjx = {"submission_dir": "base",
-               "coverage": [{"check": c, "disposition": "clean -- basis: x"} for c in full_ids]}
+               "coverage": [{"check": c, "disposition": "clean -- basis: artifacts/check.md"} for c in full_ids]}
         errsx = []
         nb.check_review_contract(type("C", (), {"cfg": {"review_split": mode}})(),
                                  sbx, fjx, errsx, [])

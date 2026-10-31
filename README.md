@@ -852,11 +852,12 @@ with a note, when it does not).
 | article type change on a root that already has runs | refused unless `--force`, like a venue change (the recorded prompts, caps and judgments belong to the previous type). |
 
 `--strict-venue` (accepted by every subcommand that works on a root: `setup`,
-`run`, `run-decide`, `decide`, `status`, `agents`, `set-venue`, `set-journal`,
-`set-article-type`, `set-dedup-mode`, `set-revision-mode`,
-`set-tiebreak-defect-floor`, `set-dedup-mode`, `set-champion-select`, `set-submit-code`, `add-venue`,
-`build-venue-templates`, `conform`,
-`conflicts`, `retry`, `prune`, `redline`, `track`, `trend`) makes a missing
+`run`, `run-decide`, `decide`, `status`, `trend`, `agents`, `conflicts`,
+`sync-code`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`,
+`set-tiebreak-defect-floor`, `set-dedup-mode`, `set-champion-select`,
+`set-submit-code`, `set-author-to-complete`, `set-placeholder-file`,
+`set-cold-start-review`, `add-venue`, `build-venue-templates`, `conform`,
+`retry`, `prune`, `redline`, `track`) makes a missing
 journal, a journal/venue mismatch, a config/snapshot disagreement and an
 unresolvable article type fatal instead of advisory.
 
@@ -888,7 +889,7 @@ schedule: `2 3` = two rounds following the schedule's rounds 2 and 3, `3`/`-1`
 `--judges N[,N…]`, `--rewrites M[,M…]`, `--revises N[,N…]`,
 `--integrators MASK[,MASK…]`,
 `--caption-limit N` (default: the venue profile's own),
-`--jobs N`, `--agent {codex,claude,dsh,manual}`, `--agent-cmd JSON`, `--retries N`,
+`--jobs N`, `--agent {codex,claude,dsh,qwen,manual}`, `--agent-cmd JSON`, `--retries N`,
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
 2; see *Running only some of the steps*). Opt-in audits:
 `--defect-audit {codex-lite,codex,claude,dsh,manual}`, `--defect-audit-cmd JSON`,
@@ -3369,7 +3370,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 170 suites (a few
+any failure. They are independent, so run them in parallel — 171 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

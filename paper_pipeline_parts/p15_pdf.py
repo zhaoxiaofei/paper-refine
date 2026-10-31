@@ -174,7 +174,22 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         if ok:
             out_pdf.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(pdf, out_pdf)
-        errors = [ln.strip() for ln in out.splitlines() if ln.startswith("!")][:5]
+        # Keep the diagnostics the operator can act on. The old filter tested
+        # `ln.startswith("!")` on the UNSTRIPPED line (an indented TeX error was
+        # dropped) and kept only `!` lines, so a missing \input, a package error
+        # and every bibtex failure fell back to the generic exit-code sentence
+        # (F80). `!` lines stay FIRST (the `error` field's first line must name
+        # the cause); latexmk/bibtex lines follow as context. When nothing
+        # matches, keep the last non-empty context lines rather than discarding
+        # the only evidence of the cause.
+        clean = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        hard = [ln for ln in clean if ln.startswith("!")]
+        rest = [ln for ln in clean
+                if not ln.startswith("!")
+                and (ln.startswith("Latexmk:") or "error" in ln.lower())]
+        errors = (hard + rest)[:5]
+        if not errors and not ok:
+            errors = clean[-3:]
         return {"ok": ok, "tool": "latexmk", "pages": _pdf_page_count(out_pdf) if ok else 0,
                 "error": (None if ok else
                           (errors[0] if errors

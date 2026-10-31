@@ -149,13 +149,20 @@ def is_non_manuscript(name: str) -> bool:
 # The OOXML marker parser accepts an en/em dash as a range separator; an em
 # dash citation was invisible to this sweep and fabricated orphan rows.
 NUM_CIT_RE = re.compile(r"\[(\d{1,4}(?:\s*[,;–—-]\s*\d{1,4})*)\]")
+# A surname may be preceded by lowercase nobiliary particles. The old pattern
+# started every author alternative with `[A-Z]`, so `(van der Waals et al.,
+# 2019)` matched only `Waals et al., 2019`: the call-out was recorded under the
+# wrong surname and the reference entry (which starts `van der Waals ...`)
+# never matched it (F50).
+_AY_NAME = (r"(?:(?:van|von|der|den|de|del|della|di|da|la|le|du|des|dos|"
+            r"ten|ter|zu)\s+)*[A-Z][A-Za-z'\-]+")
 AY_CIT_RE = re.compile(
-    r"(?P<a1>[A-Z][A-Za-z'\-]+)\s+et al\.?\s*,?\s*\(?(?P<y1>(?:1[5-9]|20)\d{2}[a-z]?)\)?"
-    r"|(?P<a2>[A-Z][A-Za-z'\-]+)\s+(?:and|&)\s+(?P<a2b>[A-Z][A-Za-z'\-]+)\s*,?\s*"
-    r"\(?(?P<y2>(?:1[5-9]|20)\d{2}[a-z]?)\)?"
-    r"|\((?P<a3>[A-Z][A-Za-z'\-]+)(?:\s+(?:et al\.?|and|&)\s+[A-Z][A-Za-z'\-]+)?\s*,\s*"
+    r"(?P<a1>" + _AY_NAME + r")\s+et al\.?\s*,?\s*\(?(?P<y1>(?:1[5-9]|20)\d{2}[a-z]?)\)?"
+    r"|(?P<a2>" + _AY_NAME + r")\s+(?:and|&)\s+(?P<a2b>" + _AY_NAME +
+    r")\s*,?\s*\(?(?P<y2>(?:1[5-9]|20)\d{2}[a-z]?)\)?"
+    r"|\((?P<a3>" + _AY_NAME + r")(?:\s+(?:et al\.?|and|&)\s+" + _AY_NAME + r")?\s*,\s*"
     r"(?P<y3>(?:1[5-9]|20)\d{2}[a-z]?)\)"
-    r"|(?P<a4>[A-Z][A-Za-z'\-]+)\s+\((?P<y4>(?:1[5-9]|20)\d{2}[a-z]?)\)")
+    r"|(?P<a4>" + _AY_NAME + r")\s+\((?P<y4>(?:1[5-9]|20)\d{2}[a-z]?)\)")
 # a bracketed number right after these words is a measurement interval, not a citation
 SUSPECT_PRECEDERS = re.compile(
     r"(?:interval|range|between|cut-?off|threshold|score|coordinate|temperature|"

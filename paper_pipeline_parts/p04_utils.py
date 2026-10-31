@@ -926,12 +926,50 @@ def configure_hash_checks(skip: bool) -> str:
     return hash_skip_note()
 
 
+@contextlib.contextmanager
+def _open_regular_no_follow(p: Path):
+    """Open a regular single-link file by descriptor, refusing links/FIFOs.
+
+    `_iter_tree_files` rejects symlinks at WALK time, but every content hasher
+    reopens the walked path by name: an agent-writable sandbox can replace a
+    regular payload file with a symlink (feeding outside content into a pin's
+    digest) or a FIFO (blocking the orchestrator) between the walk and the
+    read. O_NOFOLLOW refuses the link at the open itself; fstat on the
+    DESCRIPTOR (never a separate lstat, which has the same TOCTOU race) proves
+    a regular single-link file; O_NONBLOCK keeps a FIFO from blocking before
+    the mode check.
+    """
+    fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_NONBLOCK", 0))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"not a regular file: {p}")
+        if st.st_nlink != 1:
+            raise OSError(f"refusing a multiply-linked file: {p} "
+                          f"({st.st_nlink} links)")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            yield f
+    finally:
+        os.close(fd)
+
+
+def read_regular_file(p: Path, max_bytes: int = None) -> bytes:
+    """Read one regular file under the `_open_regular_no_follow` guard."""
+    with _open_regular_no_follow(p) as f:
+        if max_bytes is not None and os.fstat(f.fileno()).st_size > max_bytes:
+            raise OSError(f"file over the read budget: {p}")
+        return f.read()
+
+
 def sha256_file(p: Path) -> str:
     """SHA-256 of one file, reusing this process's cached digest when the
     file's full stat identity is unchanged (see the block comment above)."""
     key = None
     try:
-        st = os.stat(p)
+        # lstat, not stat: a path that was swapped for a symlink must not inherit
+        # the cache entry computed for the regular file it replaced.
+        st = os.lstat(p)
         key = (str(p), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino, st.st_dev)
     except OSError:
         pass
@@ -941,7 +979,7 @@ def sha256_file(p: Path) -> str:
         if hit is not None:
             return hit
     h = hashlib.sha256()
-    with open(p, "rb") as f:
+    with _open_regular_no_follow(p) as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     digest = h.hexdigest()
@@ -3331,6 +3369,21 @@ def _docx_files_under(dirp: Path) -> list:
     return _files_under_ci(dirp, (".docx",))
 
 
+def _policy_flag(policy, key: str, default: bool) -> bool:
+    """A shared policy boolean, with the formatter's documented off spellings.
+
+    `format_policy.json` is read by BOTH the formatter and this scanner. The
+    formatter's `_policy_flag` treats "off"/"false"/"no"/"0" as false; reading
+    the same value with raw truthiness here made `"figure_ocr": "off"` still
+    run OCR, emit FMT-IM5/IM6 rows and skip the documented "figure_ocr is off"
+    gap row (F26).
+    """
+    value = (policy or {}).get(key, default)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("off", "false", "no", "0", "")
+    return bool(value)
+
+
 def scan_format_in_sources(sources: list, policy=None) -> dict:
     """Style/formatting findings over [(dir, prefix, excluded_top)] sources.
 
@@ -3551,7 +3604,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
         # gap by the rule itself. FMT-IM4 is NOT OCR: `figure_ocr=false` must
         # not switch off a deterministic resolution check, so the image loop
         # runs either way and only FMT-IM5/FMT-IM6 are gated below.
-        ocr_on = policy.get("figure_ocr", True)
+        ocr_on = _policy_flag(policy, "figure_ocr", True)
         images = []
         try:
             for q in _iter_tree_files(src):

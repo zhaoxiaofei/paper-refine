@@ -616,12 +616,17 @@ def run_judge_conflict_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
     except OSError:
         pass
     rec = {"id": F"conflict_round{int(r)}", "kind": "conflicts", "attempts_done": 0}
-    seconds = max(60, min(int(timeout) if timeout else 900, 1800))
+    # The CLI documents "default: 900, capped at 1800"; the old `max(60, ...)`
+    # also raised every smaller caller timeout to 60 s, so a smoke probe could
+    # not bound the session it asked for. Honour the request, keep only the
+    # documented upper cap, and record both values on the run.
+    seconds = min(int(timeout), 1800) if timeout is not None else 900
     res = _execute_attempt_in(sb, rec, [str(x) for x in cmd], seconds,
                               prompt_name="PROMPT.md", log_name="_agent.log",
                               archive_marker=False)
     info = {"used": True, "command": [str(x) for x in cmd], "rc": res.get("rc"),
             "error": res.get("error"), "duration": round(float(res.get("dur") or 0.0), 1),
+            "timeout_requested": timeout, "timeout": seconds,
             "sandbox": str(sb)}
     data = read_json(answer, revive=False, lenient=True)
     if not isinstance(data, dict):
@@ -979,6 +984,14 @@ def cmd_conflicts(args) -> None:
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
+    # `conflicts` is the one staged-audit command that accepts `--timeout`
+    # without going through `_timeout_seconds` (conform/add-venue/the template
+    # stage do). F10 now honours the requested value, so a negative one reaches
+    # `communicate(timeout=-1)` and every session dies instantly as a bogus
+    # "TIMEOUT after -1s"; refuse it here, the same usage error the `run` path
+    # and `_timeout_seconds` raise (F12's non-negative invariant).
+    if getattr(args, "timeout", None) is not None and args.timeout < 0:
+        die("--timeout must be a non-negative number of seconds")
     with ctx.lock("conflicts"):
         if getattr(args, "round", None) is not None \
                 and not (1 <= int(args.round) <= ctx.rounds_count()):
@@ -4179,7 +4192,15 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
                 text = p.read_text("utf-8", "replace")
             except OSError:
                 continue
+            seen_decision_ids = set()
             for m in PRIOR_DECISION_ID_RE.finditer(text[:200000]):
+                # EVERY decision id in the file is a disclosure candidate: the
+                # old `break` recorded only the first, so a letter carrying an
+                # older decision AND a later revision decision could disclose
+                # the first and hide the second (F18). Dedupe a repeated id.
+                if m.group(0) in seen_decision_ids:
+                    continue
+                seen_decision_ids.add(m.group(0))
                 feedback.append({
                     "file": p.relative_to(root).as_posix(),
                     "journal": m.group(1).strip(),
@@ -4187,7 +4208,6 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
                     "date": _first_date(text[m.start():m.start() + 4000]),
                     "snippet": text[max(0, m.start() - 400):m.start() + 4000],
                 })
-                break
     if not feedback:
         return []
     letters = []

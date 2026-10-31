@@ -267,8 +267,8 @@ def test_m18_coverage_contract():
     write(sb / "base" / "ms.md", "text\n")
     write(sb / "guided_review" / "artifacts" / "M1_acronyms.md", "| row |\n|---|\n")
     ctx = type("C", (), {"cfg": {}})()
-    cov = ([{"check": f"M{i}", "disposition": "clean -- basis: x"} for i in range(1, 18)]
-           + [{"check": f"J{i}", "disposition": "clean -- basis: x"} for i in range(1, 5)]
+    cov = ([{"check": f"M{i}", "disposition": "clean -- basis: artifacts/check.md"} for i in range(1, 18)]
+           + [{"check": f"J{i}", "disposition": "clean -- basis: artifacts/check.md"} for i in range(1, 5)]
            + [{"check": "M19", "disposition": "0 findings"}])
     fj = {"submission_dir": "./base", "findings": [{"id": "F-001", "check": "M1"}],
           "artifacts": {}, "coverage": cov}

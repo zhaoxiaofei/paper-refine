@@ -816,16 +816,37 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
 
 def redline_markup_weight(docx: Path) -> dict:
     """Words the tracked-changes document marks: {"ins": n, "del": n}."""
-    ins = dele = 0
     try:
         _, base_root = _docx_root(docx)
     except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError):
         return {"ins": 0, "del": 0}
-    for el in base_root.iter(_w("ins")):
-        ins += len(" ".join(t.text or "" for t in el.iter(_w("t"))).split())
-    for el in base_root.iter(_w("del")):
-        dele += len(" ".join(t.text or "" for t in el.iter(_w("delText"))).split())
-    return {"ins": ins, "del": dele}
+
+    def marked_words(root, wrapper: str, text_tag: str) -> int:
+        """Words under the OUTERMOST `wrapper` elements only.
+
+        Word writes NESTED `w:ins`/`w:del` (the judge-view sanitizer documents
+        and unwraps them). Counting every element's descendants counted an inner
+        run's text once for the inner element and again for the outer one,
+        inflating the over-marking check on a faithful redline (F79).
+        """
+        total = 0
+
+        def walk(node, inside: bool) -> None:
+            nonlocal total
+            for child in node:
+                if child.tag == _w(wrapper):
+                    if not inside:
+                        total += len(" ".join(
+                            t.text or "" for t in child.iter(_w(text_tag))).split())
+                    walk(child, True)
+                else:
+                    walk(child, inside)
+
+        walk(root, False)
+        return total
+
+    return {"ins": marked_words(base_root, "ins", "t"),
+            "del": marked_words(base_root, "del", "delText")}
 
 
 def redline_minimal_weight(base: Path, revised: Path) -> dict:

@@ -345,7 +345,7 @@ def test_orchestrator_wiring():
     ctx = type("C", (), {"cfg": {}})()
 
     def coverage(include_m19=True):
-        rows = [{"check": c, "disposition": "clean -- basis: x"} for c in
+        rows = [{"check": c, "disposition": "clean -- basis: artifacts/check.md"} for c in
                 [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
         rows.append({"check": "M18",
                      "disposition": "clean -- basis: legend lengths recorded"})

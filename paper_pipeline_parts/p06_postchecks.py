@@ -1182,11 +1182,28 @@ COVERAGE_DISPOSITION_RE = re.compile(
     r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
     r"|unable\s*(?:--|—|–)\s*\S"
     r"|out\s+of\s+scope\b)")
+_COVERAGE_NAMED_BASIS_RE = re.compile(
+    r"(?i)(?:basis\s*:|unable\s*(?:--|—|–))\s*(.*)$")
 
 
 def _coverage_disposition_ok(value) -> bool:
-    """True for a REAL review-coverage disposition (see COVERAGE_DISPOSITION_RE)."""
-    return bool(COVERAGE_DISPOSITION_RE.match(str(value or "").strip()))
+    """True for a REAL review-coverage disposition (see COVERAGE_DISPOSITION_RE).
+
+    The documented vocabulary asks for a named artifact ("clean -- basis:
+    artifacts/M1_acronyms.md") or a named reason ("unable -- no PDF renderer").
+    The old pattern required only ONE non-space character, so filler such as
+    `clean -- basis: x`, `clean -- basis: .` or `unable -- .` satisfied the
+    completeness gate and an unexamined check counted as covered (F09).
+    """
+    text = str(value or "").strip()
+    if not COVERAGE_DISPOSITION_RE.match(text):
+        return False
+    m = _COVERAGE_NAMED_BASIS_RE.search(text)
+    if m is None:
+        return True          # "N findings" or "out of scope -- ..."
+    # At least two alphanumeric characters: a one-letter token or punctuation
+    # alone cannot name an artifact or a reason.
+    return len(re.findall(r"[A-Za-z0-9]", m.group(1))) >= 2
 
 
 def visual_tools_available() -> bool:

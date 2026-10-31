@@ -1052,9 +1052,22 @@ def cmd_setup(args) -> None:
 
 
 def _timeout_seconds(args, default: int) -> int:
-    """The operator's `--timeout`, keeping an explicit 0 as "no timeout"."""
+    """The operator's `--timeout`, keeping an explicit 0 as "no timeout".
+
+    The staged commands that accept `--timeout` route it through here (conform,
+    add-venue, the template stage, the audits). `conflicts` validates the same
+    non-negative invariant at its own entry point (`cmd_conflicts`) because it
+    passes the value straight to the conflict-audit helper. Only the `run` path
+    used to validate the value, so `conform --timeout -1` handed a truthy
+    negative deadline to `communicate()` and every session died as an immediate
+    "TIMEOUT after -1s"; a negative value must be refused before it reaches
+    `communicate()`.
+    """
     value = getattr(args, "timeout", None)
-    return int(default if value is None else value)
+    seconds = int(default if value is None else value)
+    if seconds < 0:
+        die("--timeout must be a non-negative number of seconds")
+    return seconds
 
 
 def _venue_command_root(args, cmd: str) -> Path:
@@ -1163,6 +1176,10 @@ def _print_venue_show(ctx, as_json: bool, notes=()) -> None:
               f"{limits['main text'].get('cap') if limits['main text'].get('cap') is not None else 'none'}, "
               f"caption suggestion {caption_limit_of(ctx)}")
         print(f"         provenance: {prof.length_limits_source}")
+        for label, key in (("abstract", "abstract"), ("main text", "main_text")):
+            note = prof.length_limit_note(key)
+            if note:
+                print(f"         {label} note: {note}")
     if ctx.venue_problems:
         print("problems:")
         for p in ctx.venue_problems:
@@ -1693,10 +1710,12 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
     """
     staged_lines = []
     if staged is not None:
-        try:
-            staged_lines = staged.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            staged_lines = []
+        # The staging tree is agent-writable: read the staged README through the
+        # bounded, no-follow reader so a huge or special file cannot block/OOM
+        # publication (F77).
+        text = read_text_bounded(staged)
+        if text is not None:
+            staged_lines = text.splitlines()
     rows = [ln for ln in staged_lines if ln.startswith("|") and f"`{vid}`" in ln]
     synthesized = False
     if not rows:
@@ -1780,9 +1799,10 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
     staged_readme = next((r / "README.md" for r in roots if (r / "README.md").is_file()), None)
     staged_profile = None
     if profile is not None:
-        try:
-            staged_profile = json.loads(profile.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        # Bounded, no-follow JSON reader: `profile.read_text()` here had no size
+        # cap and no symlink/FIFO guard (F77).
+        staged_profile = read_json(profile, revive=False)
+        if not isinstance(staged_profile, dict):
             staged_profile = None
     out["readme"] = _merge_readme_row(staged_readme, dest / "README.md", vid, staged_profile)
     official = next((r / f"{vid}{VENUE_OFFICIAL_SUFFIX}" for r in roots

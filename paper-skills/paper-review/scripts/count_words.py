@@ -1345,6 +1345,11 @@ def main(argv=None) -> int:
             text = _tex_expand_includes(text, p.parent, source=p)
             lines, abstract_end, caption_lines = tex_lines(text)
             prepared = "\n".join(lines)
+            # The cover-letter rows must count the SAME representation as the
+            # abstract/main-text rows: the raw LaTeX source counts
+            # `\documentclass`/`\textbf{}`/comments as words and over-reports a
+            # compliant letter (F52).
+            count_text = prepared
             rows = ([("whole file", count_words(prepared),
                       "the whole file (requested with --section whole)")]
                     if args.section == "whole"
@@ -1352,15 +1357,16 @@ def main(argv=None) -> int:
                                   caption_lines=caption_lines,
                                   excludes=counting_excludes))
         else:
+            count_text = text
             rows = ([("whole file", count_words(text),
                       "the whole file (requested with --section whole)")]
                     if args.section == "whole"
                     else sections(text, excludes=counting_excludes))
         if (args.section in ("auto", "cover-letter")) and is_cover_letter(
                 text, p.name, manuscript_type_names):
-            rows = [("cover letter", cover_letter_words(text),
+            rows = [("cover letter", cover_letter_words(count_text),
                      cover_pref_note),
-                    ("cover letter total", count_words(text), cover_total_note)]
+                    ("cover letter total", count_words(count_text), cover_total_note)]
         elif args.section == "cover-letter":
             # Never answer a cover-letter request with silence: an empty rows
             # list is indistinguishable from a crashed/ignored run.

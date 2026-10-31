@@ -279,8 +279,9 @@ def test_integration_materialization():
         others = sorted(p.name for p in (sb / "others").iterdir() if p.is_dir()) \
             if (sb / "others").is_dir() else []
         check(f"CR1b i{k} takes pool member {expect_self!r} as its base",
-              rec["self_id"] == expect_self and (sb / "self" / "manuscript-p.md").is_file()
-              or (expect_self == "a1" and (sb / "self" / "manuscript-b.md").is_file()),
+              rec["self_id"] == expect_self
+              and ((sb / "self" / "manuscript-p.md").is_file()
+                   or (expect_self == "a1" and (sb / "self" / "manuscript-b.md").is_file())),
               f"self_id={rec.get('self_id')}")
         check(f"CR1b i{k} sees EVERY other pool member as a donor",
               others == sorted(expect_others), f"{others} vs {sorted(expect_others)}")

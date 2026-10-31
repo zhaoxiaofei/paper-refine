@@ -1,9 +1,10 @@
 # paper-review + paper-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
-**Package version:** 0.36 (discovery parity: the integrator reconciles the frozen X-* list, and judge contract v5 makes every judge re-derive its own discovery findings — never handed a list; see CHANGELOG.md) — distributed as the directory
-`paper-skills-v03`. The version lives here, not in the skill frontmatter. If more
+**Package version:** 0.36 (the offline Zotero refresh: the formatter repairs the fields; see CHANGELOG.md) — installed by
+`install_skill.sh` as the directory `paper-skills-<YYYY-MMDD>-<commit>` (the date and
+short commit are recorded at install time; see `install_skill.sh`). The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
-older copies (`paper-skills-v01/`, `paper-skills-v02/`): Codex registers skills by
+older copies: Codex registers skills by
 name, so duplicate `paper-review/` or `paper-revise/` directories silently compete
 with the one you edited.
 

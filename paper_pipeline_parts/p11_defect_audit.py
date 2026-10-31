@@ -141,12 +141,18 @@ def run_defect_audit_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
         pass
     rec = {"id": F"defect_audit_round{int(r)}", "kind": "defect_audit",
            "attempts_done": 0}
-    seconds = max(60, min(int(timeout) if timeout else 1800, 3600))
+    # Honour the operator's timeout: the old `max(60, ...)` silently raised a
+    # 10-30 s smoke timeout to 60 s (and a >1 h one was silently cut), so the
+    # recorded attempt did not reflect the requested limit. 0 means "no
+    # timeout" exactly as it does on the run path; only a missing value takes
+    # the documented default.
+    seconds = int(timeout) if timeout is not None else 1800
     res = _execute_attempt_in(sb, rec, [str(x) for x in cmd], seconds,
                               prompt_name="PROMPT.md", log_name="_agent.log",
                               archive_marker=False)
     info = {"used": True, "command": [str(x) for x in cmd], "rc": res.get("rc"),
             "error": res.get("error"), "duration": round(float(res.get("dur") or 0.0), 1),
+            "timeout_requested": timeout, "timeout": seconds,
             "sandbox": str(sb)}
     data = read_json(answer, revive=False, lenient=True)
     if not isinstance(data, (dict, list)):

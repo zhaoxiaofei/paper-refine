@@ -404,8 +404,17 @@ def _clean_length_limits(limits, prefix: str, problems: list):
             spec = {}
         base = spec.get("base")
         relaxation = spec.get("relaxation")
+        # The per-limit `note` is the profile's own record of the rules this
+        # pipeline does NOT model (display-item caps, a reference cap, the
+        # provenance of the relaxation). Dropping it here made the note
+        # invisible in every normalized limit, so the operator only ever saw
+        # the number and never the recorded gap (AGENTS.md rule 3).
+        note = str(spec.get("note") or "").strip()
         if base is None and relaxation is None:
-            clean[key] = {"base": None, "relaxation": None}
+            entry = {"base": None, "relaxation": None}
+            if note:
+                entry["note"] = note
+            clean[key] = entry
             continue
         pairing_error = (base is None) != (relaxation is None)
         base = _profile_int(base, f"{prefix}.{key}.base", problems, minimum=1)
@@ -423,7 +432,12 @@ def _clean_length_limits(limits, prefix: str, problems: list):
         if pairing_error:
             problems.append(f"{prefix}.{key}: 'base' and 'relaxation' must be given "
                             f"together (or both null)")
-        clean[key] = {"base": base, "relaxation": relaxation}
+        entry = {"base": base, "relaxation": relaxation}
+        # Keep the historical exact shape when there is no note; a profile that
+        # records one keeps it.
+        if note:
+            entry["note"] = note
+        clean[key] = entry
     # Distinguish "this type states no cover letter at all" (inherit the
     # default type's, handled in length_limits()) from "this type explicitly
     # states no preference" (min/max null): the README documents the latter as
@@ -1112,10 +1126,15 @@ class VenueProfile:
         raw = self._type_entry().get("length_limits") or {}
 
         def spec(key: str) -> dict:
-            base = (raw.get(key) or {}).get("base")
-            relaxation = (raw.get(key) or {}).get("relaxation")
+            block = raw.get(key) or {}
+            base = block.get("base")
+            relaxation = block.get("relaxation")
             cap = (lenient_word_limit(base, relaxation)
                    if base is not None and relaxation is not None else None)
+            # The public shape stays (base, relaxation, cap): it is asserted
+            # exactly by the length/config suites. The profile's own `note`
+            # (the rules this pipeline does NOT model) is preserved in the
+            # stored profile and read through length_limit_note().
             return {"base": base, "relaxation": relaxation, "cap": cap}
 
         # Inherit only when the type does not state a cover-letter block at
@@ -1130,6 +1149,18 @@ class VenueProfile:
                 "cover letter": {"min": cover.get("min"), "max": cover.get("max"),
                                  "total_max": cover.get("total_max"),
                                  "source": cover.get("source") or ""}}
+
+    def length_limit_note(self, key: str) -> str:
+        """The profile's own note for one LIMIT ("" when it carries none).
+
+        The note records rules the source states that this pipeline does not
+        model (display-item caps, a reference cap) and the provenance of a
+        relaxation. It is kept in the normalized profile data and rendered as a
+        recorded gap by the M19 cap clause and `status`; it is not part of the
+        numeric `length_limits()` shape.
+        """
+        block = (self._type_entry().get("length_limits") or {}).get(key) or {}
+        return str(block.get("note") or "").strip()
 
     def known_journals(self) -> list:
         return list(self.data["journals"]) + list(self.data["journal_aliases"])
@@ -2875,15 +2906,19 @@ def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
         if "counting" in missing:
             if fresh.data.get("counting"):
                 inherited["counting"] = copy.deepcopy(fresh.data["counting"])
-            # A TYPE's own block (NBT's Brief Communication counts the abstract,
-            # references and legends) must travel too: the venue-level block is
-            # the default type's, so a Brief root that inherited only that would
-            # silently count like an Article.
-            type_counting = {str(t.get("id")): copy.deepcopy(t["counting"])
-                             for t in (fresh.data.get("article_types") or [])
-                             if isinstance(t, dict) and t.get("counting")}
-            if type_counting:
-                inherited["_type_counting"] = type_counting
+        # A TYPE's own block (NBT's Brief Communication counts the abstract,
+        # references and legends) must travel too: the venue-level block is
+        # the default type's, so a Brief root that inherited only that would
+        # silently count like an Article. This is collected even when the
+        # snapshot already carries a venue-level `counting` block: a root
+        # recorded after article-type support but before per-type counting
+        # carries the Article block at the top and `counting: null` on every
+        # type, so the type's own rule could never reach it (F06).
+        type_counting = {str(t.get("id")): copy.deepcopy(t["counting"])
+                         for t in (fresh.data.get("article_types") or [])
+                         if isinstance(t, dict) and t.get("counting")}
+        if type_counting:
+            inherited["_type_counting"] = type_counting
     _DISPLAY_RULE_INHERIT_CACHE[key] = inherited
     return inherited
 
@@ -2909,20 +2944,21 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None):
                                 "image_dpi", "foreign_container_headings",
                                 "page_budget")
                     if k not in snapshot)
-    if missing:
-        inherited = _inherited_display_rules(venue_id, root, missing)
-        if inherited:
-            inherited = dict(inherited)
-            type_counting = inherited.pop("_type_counting", None)
-            snapshot = dict(snapshot)
-            snapshot.update(inherited)
-            if type_counting and isinstance(snapshot.get("article_types"), list):
-                snapshot["article_types"] = [
-                    dict(entry,
-                         counting=copy.deepcopy(type_counting[str(entry.get("id"))]))
-                    if (isinstance(entry, dict) and entry.get("counting") is None
-                        and str(entry.get("id")) in type_counting) else entry
-                    for entry in snapshot["article_types"]]
+    # The lookup runs even when no venue-level key is missing: a per-type
+    # counting block is inherited independently of the venue-level one.
+    inherited = _inherited_display_rules(venue_id, root, missing)
+    if inherited:
+        inherited = dict(inherited)
+        type_counting = inherited.pop("_type_counting", None)
+        snapshot = dict(snapshot)
+        snapshot.update(inherited)
+        if type_counting and isinstance(snapshot.get("article_types"), list):
+            snapshot["article_types"] = [
+                dict(entry,
+                     counting=copy.deepcopy(type_counting[str(entry.get("id"))]))
+                if (isinstance(entry, dict) and entry.get("counting") is None
+                    and str(entry.get("id")) in type_counting) else entry
+                for entry in snapshot["article_types"]]
     try:
         prof = VenueProfile(snapshot, origin="recorded snapshot")
     except VenueProfileError:

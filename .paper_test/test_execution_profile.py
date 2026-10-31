@@ -51,7 +51,7 @@ GOLDEN = {
     "cold_start_review": "7d168e9e6f95c876",
     "audit": "d2d4579cfd1dec78",
     "revise": "ca327b062cba7f3f",
-    "integrate": "c1597d287fd5d7bb",
+    "integrate": "1f4a80ba52b31692",
     "rewrite": "b69bbe50db71451b",
     "judge": "0031c40b30aeec88",
     "revision_audit": "074eaee68fccba2b",

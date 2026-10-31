@@ -256,7 +256,7 @@ def test_review_contract():
                                               "M24", "M25", "M26", "M27", "M28", "M29"]
            + [f"J{i}" for i in range(1, 6)])
     fj = {"submission_dir": "base",
-          "coverage": [{"check": c, "disposition": "clean -- basis: x"} for c in ids]}
+          "coverage": [{"check": c, "disposition": "clean -- basis: artifacts/check.md"} for c in ids]}
     errs = []
     nb.check_review_contract(None, sb, fj, errs, [])
     check("the missing M30 coverage row is reported",

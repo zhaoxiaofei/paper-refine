@@ -425,7 +425,14 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
     if err or status != 200 or not isinstance(body, dict):
         return "", err or f"HTTP {status}: {str(body)[:400]}"
     try:
-        message = body["choices"][0]["message"]
+        choice = body["choices"][0]
+        # A `length` finish means the server stopped at max_tokens: the answer
+        # is a PREFIX, not a deliverable. Returning it as success let a
+        # truncated stage answer pass as complete (F30).
+        if choice.get("finish_reason") == "length":
+            return "", (f"the chat completion was truncated (finish_reason='length', "
+                        f"max_tokens={cfg.get('max_tokens')}): the answer is incomplete")
+        message = choice["message"]
         content = message.get("content")
         if isinstance(content, list):
             # The chat API may return content parts; `str(list)` used to ship a

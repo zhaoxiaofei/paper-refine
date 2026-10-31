@@ -369,9 +369,9 @@ def fake_review_sandbox(tmp, m1_md, findings, coverage):
 
 def full_coverage(detail=None):
     detail = detail or {}
-    return ([{"check": c, "disposition": detail.get(c, "clean -- basis: x")}
+    return ([{"check": c, "disposition": detail.get(c, "clean -- basis: artifacts/check.md")}
              for c in [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
-            + [{"check": c, "disposition": detail.get(c, "clean -- basis: x")}
+            + [{"check": c, "disposition": detail.get(c, "clean -- basis: artifacts/check.md")}
                for c in ("M18", "M19", "M20", "M21", "M22", "M23", "M24",
                          "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32", "M33", "M34", "M35", "M36", "J5")])
 
@@ -419,7 +419,7 @@ check("E10 orchestrator gate ignores an M1 artifact without M1b rows",
       f"errs={str(errs4)[:120]}")
 
 
-def coverage_m1(disposition="clean -- basis: x", detail=""):
+def coverage_m1(disposition="clean -- basis: artifacts/check.md", detail=""):
     """The E-suite coverage table with M1's own two cells under test."""
     out = []
     for r in full_coverage():

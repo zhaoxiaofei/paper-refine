@@ -1071,6 +1071,7 @@ never by choosing the more recently read donor, and record the resolution.
 
 @@M19_INTEGRATE_RULE@@
 @@M20_INTEGRATE_RULE@@
+@@REWRITE_PARITY@@
 @@EVIDENCE_PACK_RULE@@
 
 @@PLACEHOLDER_RULE@@
@@ -1167,7 +1168,8 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
      occurrences you update first, never which value wins.
   2. V1-V5 validation: round-trip integrity, diff locality with no unmapped hunks, a full mechanical
      rescan of the integrated corpus with the pipeline's frozen integration rescan set (the
-     M1-M17 + J1-J4 sweeps of $paper-review; this stage's M18-M20 and M30-M36 blocks cover the
+     M1-M17 + J1-J4 sweeps of $paper-review; this stage's M18-M20, the rewrite-parity
+     M25-M29 and the M30-M36 blocks cover the
      rest; the revision skill's V3 covers a wider set than this stage does), checksum
      verification that self/, every others/<id>/ and non_revised/ are untouched, and the final
      reports.
@@ -3138,6 +3140,9 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
     text = apply_m20(text, prof)
+    # The integration rescan must actually cover the rewrite-parity classes it
+    # claims: a port can introduce an M25-M29 defect as a side-effect (F60).
+    text = apply_rewrite_parity(text, "integrate")
     text = text.replace("@@LANGUAGE_PASS_RULE@@",
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "integrated/work/R6_language.md"))
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
