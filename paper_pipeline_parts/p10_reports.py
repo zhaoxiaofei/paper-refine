@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 10/17 of the pipeline -- executed by the
+# Part 10/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.

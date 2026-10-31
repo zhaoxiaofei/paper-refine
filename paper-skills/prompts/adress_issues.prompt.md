@@ -1,8 +1,8 @@
-# adress_issues (guided revision) — standalone prompt fallback
+# adress_issues (targeted revision) — standalone prompt fallback
 Paste this entire file as the prompt for a revision task when you cannot install Codex skills. It consumes guided_review/findings.md + findings.json produced by the identify_issues prompt (or the paper-review skill). Replace placeholder paths (FINDINGS_MD/FINDINGS_JSON, ORIGINALS, ZOTERO_SKILL) with your own. The paper-review scripts are reused for propagation and rescans.
 ---
 ## PROMPT BODY (SKILL.md)
-# Guided Revision — adress_issues
+# Targeted Revision — adress_issues
 
 **Target venue, article type and journal (configurable).** The rule set comes from the pipeline's
 venue profile (`venue_profiles/<id>.json`, selected with `set-venue`), the venue's content type

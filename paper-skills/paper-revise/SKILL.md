@@ -1,9 +1,9 @@
 ---
 name: paper-revise
-description: Apply validated review findings to a manuscript package — guided revisions in a revised/ copy while originals stay read-only. Re-verifies every finding against the source, plans and applies precise edits with cross-document consistency propagation, validates by diff and a full mechanical rescan, and reports precise manual steps for whatever cannot be safely automated. Use this skill whenever the user asks to fix, revise, address, apply, or correct the findings/issues/problems from a review — especially after the paper-review skill (identify_issues) produced findings.md / findings.json. Also trigger on "address the issues you found", "apply the findings", "make the revisions", "adress_issues".
+description: Apply validated review findings to a manuscript package — targeted revisions in a revised/ copy while originals stay read-only. Re-verifies every finding against the source, plans and applies precise edits with cross-document consistency propagation, validates by diff and a full mechanical rescan, and reports precise manual steps for whatever cannot be safely automated. Use this skill whenever the user asks to fix, revise, address, apply, or correct the findings/issues/problems from a review — especially after the paper-review skill (identify_issues) produced findings.md / findings.json. Also trigger on "address the issues you found", "apply the findings", "make the revisions", "adress_issues".
 ---
 
-# Guided Revision — adress_issues
+# Targeted Revision — adress_issues
 
 **Target venue, article type and journal (configurable).** The rule set comes from the pipeline's
 venue profile (`venue_profiles/<id>.json`, selected with `set-venue`), the venue's content type

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/17 of the pipeline -- executed by the
+# Part 09/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -146,6 +146,12 @@ def cmd_setup(args) -> None:
         die("--tiebreak-defect-floor must be >= 0 (it is the number of defects the cleanest "
             "ranked version must reach before the adaptive severity_tier_category prefix stops; "
             "default 10)", code=2)
+    _stop_k = int(getattr(args, "stop_after_no_progress", 0) or 0)
+    if _stop_k < 0:
+        # `streak >= K` is true for every streak when K is negative, so a
+        # negative value silently stopped the run after round 1 (F26).
+        die("--stop-after-no-progress must be >= 0 (0 = off), got "
+            f"{_stop_k}", code=2)
     dedup_mode = str(getattr(args, "dedup_mode", None) or "off").strip().lower()
     if dedup_mode not in DEDUP_MODES:
         die(f"--dedup-mode must be one of {', '.join(DEDUP_MODES)} (got {dedup_mode!r}); "
@@ -199,6 +205,16 @@ def cmd_setup(args) -> None:
     if revision_mode != JOURNAL_MODE_CONTINUE:
         info = JOURNAL_MODES[revision_mode]
         if info["scoped"]:
+            # The plan the operator passed, saved BEFORE the scoped mode
+            # normalizes it: leaving the mode must restore the custom plan, not
+            # the built-in defaults (F21).
+            _saved_plan = {
+                "rounds": rounds,
+                "rewrites": list(rewrites),
+                "revises": list(revises),
+                "integrators": list(integrators),
+                "round_indices": list(round_indices) if round_indices else None,
+            }
             if round_indices:
                 die(f"--round-indices selects the pipeline's round schedule, but revision mode "
                     f"{revision_mode!r} forces its own single concern-scoped round; drop one of "
@@ -231,6 +247,7 @@ def cmd_setup(args) -> None:
                 "revision_audit": str(getattr(args, "revision_audit", "on") or "on").lower(),
                 "cold_start_review": str(getattr(args, "cold_start_review", COLD_START_REVIEW_DEFAULT)
                                     or COLD_START_REVIEW_DEFAULT).lower(),
+                **_saved_plan,
             }
             if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
                 forced.append("audit off (the guided review's audits do not run in this mode)")
@@ -305,6 +322,15 @@ def cmd_setup(args) -> None:
                 "editors'/reviewers' decision letter: the guided review is the session that "
                 "reconciles every concern, so skipping it would leave the letter unanswered",
                 code=2)
+        if any(int(n) == 0 for n in revises):
+            # All review/cold-start entries live inside `if n:` in
+            # `round_run_plan`: a round with no revision arm plans no review at
+            # all, so the flag's promise ("the cold-start review runs alone")
+            # would be false and the round would carry no finding source (F06).
+            die("--no-guided-review needs at least one revision arm in every round: with "
+                f"--revises {','.join(str(n) for n in revises)} no review session is planned, "
+                "so the cold-start review would not run either. Raise --revises, or drop "
+                "--no-guided-review", code=2)
     bad_scope = [x for x in review_scope if x not in REVIEW_SCOPE_VALUES]
     if bad_scope:
         die(f"--review-scope entries must be one of {'|'.join(REVIEW_SCOPE_VALUES)}, "
@@ -684,7 +710,7 @@ def cmd_setup(args) -> None:
                # sheet's rows; "location" merges rows across sheets on the
                # structured key (defect class + exact line + fuzzy excerpt).
                "dedup_mode": dedup_mode,
-               "stop_after_no_progress": int(getattr(args, "stop_after_no_progress", 0) or 0),
+               "stop_after_no_progress": _stop_k,
                "review_split": str(getattr(args, "review_split", "off") or "off"),
                "audit": str(getattr(args, "audit", DEFAULT_AUDIT) or DEFAULT_AUDIT),
                # The REVISION AUDIT's recorded policy: "on" (default) audits the
@@ -2473,6 +2499,13 @@ def cmd_set_cold_start_review(args) -> None:
         die("cold_start_review is fixed off in a concern-scoped revision mode "
             f"({journal_mode_of(ctx)}): the cold-start review is a general discovery pass and "
             "its findings are not reviewer concerns", code=2)
+    if mode_arg == "off" and not guided_review_enabled(ctx):
+        # `--no-guided-review` leaves the cold-start review as the round's ONLY
+        # finding source; turning it off here would leave the plan with none
+        # (setup already refuses the same combination) (F05).
+        die("cold_start_review cannot be turned off on a --no-guided-review root: the "
+            "cold-start review is the round's only finding source. Turn the guided review "
+            "back on first, or start a fresh root with both policies as intended", code=2)
     begin_run_log("set-cold-start-review", ctx.root, sys.argv)
     if ctx.state.get("runs") and not getattr(args, "force", False):
         die(f"this root already has {len(ctx.state['runs'])} run record(s): the cold-start "
@@ -2980,8 +3013,17 @@ def cmd_set_revision_mode(args) -> None:
                 ctx.cfg.setdefault("scoped_mode_restore", {
                     "audit": str(ctx.cfg.get("audit", DEFAULT_AUDIT) or DEFAULT_AUDIT),
                     "revision_audit": str(ctx.cfg.get("revision_audit", "on") or "on").lower(),
-                    "cold_start_review": str(ctx.cfg.get("cold_start_review", COLD_START_REVIEW_DEFAULT)
-                                        or COLD_START_REVIEW_DEFAULT).lower(),
+                    # Record the RAW policy (None when the root predates the key):
+                    # a legacy root must get the key back as ABSENT, not as the
+                    # current default `on` (F23).
+                    "cold_start_review": (str(ctx.cfg.get("cold_start_review")).lower()
+                                          if "cold_start_review" in ctx.cfg else None),
+                    "rounds": int(ctx.cfg.get("rounds") or DEFAULTS["rounds"]),
+                    "rewrites": list(ctx.cfg.get("rewrites") or DEFAULTS["rewrites"]),
+                    "revises": list(ctx.cfg.get("revises") or DEFAULTS["revises"]),
+                    "integrators": list(ctx.cfg.get("integrators") or DEFAULTS["integrators"]),
+                    "round_indices": (list(ctx.cfg.get("round_indices"))
+                                      if ctx.cfg.get("round_indices") else None),
                     # The scoped mode also forces champion_select=revise and may
                     # run with a scoped review_scope; leaving the mode must put
                     # the operator's own values back (F09).
@@ -3022,11 +3064,16 @@ def cmd_set_revision_mode(args) -> None:
             # `integrators=[0]`, `review_scope=[formatting-writing]` and
             # `audit=off` while `journal_is_scoped` was already false -- neither
             # the documented default three-round workflow nor a scoped revision.
-            for _key in ("rounds", "rewrites", "revises", "review_scope", "integrators"):
-                _default = DEFAULTS[_key]
-                ctx.cfg[_key] = list(_default) if isinstance(_default, list) else _default
-                forced.append(f"{_key}={ctx.cfg[_key]} (the default plan)")
             saved = ctx.cfg.pop("scoped_mode_restore", None) or {}
+            for _key in ("rounds", "rewrites", "revises", "review_scope", "integrators"):
+                _value = saved.get(_key, DEFAULTS[_key])
+                ctx.cfg[_key] = list(_value) if isinstance(_value, list) else _value
+                forced.append(f"{_key}={ctx.cfg[_key]} (restored)")
+            if saved.get("round_indices"):
+                ctx.cfg["round_indices"] = [int(x) for x in saved["round_indices"]]
+                forced.append(f"round_indices={ctx.cfg['round_indices']} (restored)")
+            else:
+                ctx.cfg.pop("round_indices", None)
             if saved.get("champion_select"):
                 ctx.cfg["champion_select"] = str(saved["champion_select"])
                 forced.append(f"champion_select={ctx.cfg['champion_select']} (restored)")
@@ -3037,9 +3084,13 @@ def cmd_set_revision_mode(args) -> None:
             forced.append(f"audit={ctx.cfg['audit']} (restored)")
             ctx.cfg["revision_audit"] = str(saved.get("revision_audit") or "on").lower()
             forced.append(f"revision_audit={ctx.cfg['revision_audit']} (restored)")
-            ctx.cfg["cold_start_review"] = str(
-                saved.get("cold_start_review") or COLD_START_REVIEW_DEFAULT).lower()
-            forced.append(f"cold_start_review={ctx.cfg['cold_start_review']} (restored)")
+            _saved_cold = saved.get("cold_start_review", COLD_START_REVIEW_DEFAULT)
+            if _saved_cold is None:
+                ctx.cfg.pop("cold_start_review", None)
+                forced.append("cold_start_review unset (this root had no policy key)")
+            else:
+                ctx.cfg["cold_start_review"] = str(_saved_cold).lower()
+                forced.append(f"cold_start_review={ctx.cfg['cold_start_review']} (restored)")
         ctx.state["config"] = ctx.cfg
         write_json_atomic(ctx.cfg_path, ctx.cfg)
         ctx.log("set-revision-mode", detail=mode_arg)

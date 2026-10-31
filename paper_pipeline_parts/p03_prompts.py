@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 03/17 of the pipeline -- executed by the
+# Part 03/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -132,7 +132,7 @@ Explicit requirements that override skill defaults where they conflict:
       fallback — when a same-named file already exists in revised/ (a re-run, or two source
       versions), give the NEW copy "_rev2", "_rev3", … before the extension.
       This overrides any different rename default in the skill.
-3. Guided revisions: each edit must be precise and localized to the exact paragraph, sentence,
+3. Targeted revisions: each edit must be precise and localized to the exact paragraph, sentence,
    or field containing the issue; preserve styles, numbering, equations, and layouts; never
    reflow or "improve" untouched text.
 4. Validation: cross-check every modified section in the revised copies to confirm the original
@@ -656,7 +656,7 @@ Explicit requirements that override skill defaults where they conflict:
      leave it out and record a precise recompile step (which file, exact command, expected output)
      in revised/MANUAL_STEPS.md. Never ship a derived file that contradicts the content you just
      revised.
-  2. Guided edits only: each edit is precise and localized to the exact paragraph, sentence, or
+  2. Targeted edits only: each edit is precise and localized to the exact paragraph, sentence, or
      field containing the issue; preserve styles, numbering, equations, tables, and figure
      placement; NEVER reflow or "improve" untouched text. Files that need no change are copied from
      base/ into revised/ unchanged.
@@ -1089,7 +1089,7 @@ never by choosing the more recently read donor, and record the resolution.
 
 @@ZOTERO_CLI_RULE@@
 
-Porting rules: every port is ONE guided edit in integrated/, following the revision edit rules
+Porting rules: every port is ONE targeted edit in integrated/, following the revision edit rules
 (precise and localized; preserve styles, numbering, equations, tables, figure placement; never
 reflow untouched text). Never invent content, citations, numbers, or accession IDs, and never
 introduce a finding, improvement or third reading that is absent from self/ and the donors. A

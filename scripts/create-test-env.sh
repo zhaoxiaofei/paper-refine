@@ -154,7 +154,14 @@ else
 fi
 
 # --- 4. prove the environment is usable ----------------------------------
+# The verification runs in a fresh process: pass the workspace and the
+# EXPECTED version through the environment. Running `paper_pipeline.py` by
+# relative name used the caller's cwd and failed when the script was invoked by
+# absolute path from elsewhere (F39); the assertion also ignored the documented
+# PAPER_REFINE_TEST_PYTHON override (F40).
+PAPER_REFINE_TEST_WS="${WS}" PAPER_REFINE_TEST_EXPECT_PYTHON="${PYTHON_VERSION}" \
 env_python - <<'PYVERIFY'
+import os
 import subprocess
 import sys
 
@@ -162,11 +169,15 @@ import docx
 import lxml
 import openpyxl
 
-assert sys.version_info[:2] == (3, 12), f"expected Python 3.12, got {sys.version.split()[0]}"
+ws = os.environ.get("PAPER_REFINE_TEST_WS") or os.getcwd()
+want = tuple(int(p) for p in
+             (os.environ.get("PAPER_REFINE_TEST_EXPECT_PYTHON") or "3.12").split(".")[:2])
+assert sys.version_info[:2] == want, (
+    f"expected Python {'.'.join(str(p) for p in want)}, got {sys.version.split()[0]}")
 print(f"python {sys.version.split()[0]}; python-docx {docx.__version__}; "
       f"openpyxl {openpyxl.__version__}; lxml {lxml.__version__}")
-out = subprocess.run([sys.executable, "paper_pipeline.py", "--version"],
-                     capture_output=True, text=True)
+out = subprocess.run([sys.executable, str(os.path.join(ws, "paper_pipeline.py")), "--version"],
+                     cwd=ws, capture_output=True, text=True)
 assert out.returncode == 0, out.stderr
 print("pipeline:", out.stdout.strip())
 PYVERIFY

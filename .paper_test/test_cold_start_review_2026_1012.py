@@ -3,7 +3,7 @@
 
 Run:  python3 .paper_test/test_cold_start_review_2026_1012.py
 
-The stage (rid `r<r>_probe`, policy `pipeline_config.json: cold_start_review`) is a
+The stage (rid `r<r>_cold_start_review`, policy `pipeline_config.json: cold_start_review`) is a
 cold-context session that is given the corpus (the submission documents and the
 evidence areas) and NOTHING else -- no review, no finding list. It is GENERIC:
 any defect class may be filed as an X-9xx finding, and wherever a defect can be

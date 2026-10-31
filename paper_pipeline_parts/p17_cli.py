@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 17/17 of the pipeline -- executed by the
+# Part 17/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -425,6 +425,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "content-addressed pinning.",
         epilog=USAGE_EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}",
+                   help="print the pipeline version and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
@@ -718,8 +720,8 @@ def build_parser() -> argparse.ArgumentParser:
                     dest="guided_review", choices=list(GUIDED_REVIEW_MODES),
                     default=GUIDED_REVIEW_DEFAULT,
                     help="run the round's GUIDED review -- the general checklist pass "
-                         "(M1-M36 / J1-J5 and its D0-D5 discovery round) -- beside the probe "
-                         "review. ON by default, which is the pipeline's documented plan. OFF "
+                         "(M1-M36 / J1-J5 and its D0-D5 discovery round) -- beside the "
+                         "COLD-START review. ON by default, which is the pipeline's documented plan. OFF "
                          "(`--no-guided-review`) runs the COLD-START REVIEW ALONE: its X-9xx rows "
                          "become the round's frozen finding list, and every class the guided "
                          "review owns is recorded as a NAMED GAP (in the frozen review view, in "
@@ -764,7 +766,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "X-* findings (the reviser must resolve them, the auditor may only drop "
                          "them with evidence, the integrator must reconcile them). ON by default "
                          "(`--no-cold-start-review` turns it off; `set-cold-start-review off` does the "
-                         "same on an existing root); it adds `r<r>_probe` beside `r<r>_review`, "
+                         "same on an existing root); it adds `r<r>_cold_start_review` beside "
+                         "`r<r>_guided_review`, "
                          "and the audit/revision sessions wait for it. Skipped in a "
                          "formatting-writing polish round")
     ps.add_argument("--no-cold-start-review",
@@ -934,7 +937,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "ONE AGENT SESSION instead of its whole stage: --only rewriter2 runs only "
                          "w2, --only integrator1 only i1, --only reviser1 only a2 (the first "
                          "revise arm), --only r1_w2 only round 1's w2, --only w2 that session in "
-                         "every round that has it, --only reviewer / --only audit the review / "
+                         "every round that has it, --only guided_review / --only audit the review / "
                          "audit session. One JUDGE session is --only r1_judge_w2_j1 (round 1's w2, "
                          "judge 1), --only w2_j1 (no round) or --only judge1 (judge 1 of every "
                          "version). "

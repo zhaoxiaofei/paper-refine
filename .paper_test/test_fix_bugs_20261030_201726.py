@@ -442,13 +442,17 @@ def test_c62_audit_coverage():
     check("a missing coverage table is a problem",
           any("no 'coverage' table" in p
               for p in pp.audit_coverage_problems({"dispositions": [], "adds": []})))
-    full = ([{"check": f"M{i}", "disposition": "clean -- re-derived"} for i in range(1, 37)]
-            + [{"check": f"J{i}", "disposition": "clean -- re-derived"} for i in range(1, 6)])
+    full = ([{"check": f"M{i}", "disposition": "clean -- basis: re-derived"} for i in range(1, 37)]
+            + [{"check": f"J{i}", "disposition": "clean -- basis: re-derived"} for i in range(1, 6)])
     check("a complete coverage table passes", not pp.audit_coverage_problems({"coverage": full}))
-    partial = [{"check": "M1", "disposition": "clean"}]
+    partial = [{"check": "M1", "disposition": "clean -- basis: x"}]
     check("a partial coverage table names the missing checks",
           any("coverage row(s) are missing" in p
               for p in pp.audit_coverage_problems({"coverage": partial})))
+    filler = [{"check": c, "disposition": "x"} for c in pp.AUDIT_COVERAGE_CHECKS]
+    check("a one-word filler disposition is refused",
+          any("not a real disposition" in p
+              for p in pp.audit_coverage_problems({"coverage": filler})))
 
 
 # ---------------------------------------------------------------------------

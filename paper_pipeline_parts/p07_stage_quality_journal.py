@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 07/17 of the pipeline -- executed by the
+# Part 07/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -102,10 +102,7 @@ def language_pass_report(pkg: Path) -> dict:
     if not path.is_file():
         return {"file": str(path), "present": False, "rows": 0, "steps_seen": [],
                 "missing": want}
-    try:
-        text = path.read_text("utf-8", "replace")
-    except OSError:
-        text = ""
+    text = read_text_bounded(path) or ""
     rows = parse_markdown_table(path)
     steps = set()
     for r in rows:
@@ -442,6 +439,17 @@ AUDIT_SEVERITIES = ("critical", "major", "minor", "fatal")
 # the sweep documents name (README, p03_prompts.py).
 AUDIT_COVERAGE_CHECKS = tuple([f"M{i}" for i in range(1, 37)]
                               + [f"J{i}" for i in range(1, 6)])
+# A coverage disposition must be a REAL disposal, not one word of filler. The
+# review side's documented vocabulary is accepted verbatim; an audit row may
+# also state the re-derivation it performed ("stub: the sweep was re-derived;
+# clean"), which is what several stages' self-reports use. Bare `x`/`done` (or
+# a bare `clean`) records no re-derivation and is refused (F30).
+AUDIT_COVERAGE_DISPOSITION_RE = re.compile(
+    r"(?i)^(?:\d+\s+finding"
+    r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
+    r"|unable\s*(?:--|—|–)\s*\S"
+    r"|out\s+of\s+scope\b"
+    r"|.+?\b(?:re-?derived|confirmed|checked|verified)\b.+$)")
 
 
 def audit_coverage_problems(audit) -> list:
@@ -481,9 +489,15 @@ def audit_coverage_problems(audit) -> list:
         if check in seen:
             problems.append(f"coverage names {check} twice")
         seen.add(check)
-        if not str(row.get("disposition") or "").strip():
+        disp = str(row.get("disposition") or "").strip()
+        if not disp:
             problems.append(f"coverage {check} has an EMPTY disposition: every check "
                             f"must record what the audit re-derived")
+        elif not AUDIT_COVERAGE_DISPOSITION_RE.match(disp):
+            problems.append(f"coverage {check} disposition {disp!r} is not a real "
+                            f"disposition: record a finding count, `clean -- basis: "
+                            f"<artifact>`, `unable -- <reason>`, or the re-derivation "
+                            f"the audit performed")
     missing = [c for c in AUDIT_COVERAGE_CHECKS if c not in seen]
     if missing:
         problems.append(
@@ -819,9 +833,19 @@ def postcheck_review(ctx: Ctx, rec: dict):
     # `--strict-artifacts off` -- and the list is recorded for
     # `decide --residual-gate`. A "formatting-writing" round never runs the
     # phase, and under a phases/aspects split only session B carries it.
+    # Session A of a split review is the non-discovery half: B carries D0-D5,
+    # so A's missing artifacts are expected too.
+    _split_a = (review_split_of(ctx) != "off"
+                and str(rec.get("id") or "") != rid_guided_review_b(
+                    int(rec.get("round") or 1)))
     if review_owes_discovery(ctx, rec):
         rec["discovery_contract"] = check_discovery_contract(ctx, sb, errs, warns)
-    elif not any((sb / rel).exists() for rel in DISCOVERY_RELS):
+    elif (round_review_scope(ctx, int(rec.get("round") or 1)) == "full"
+          and not _split_a
+          and not any((sb / rel).exists() for rel in DISCOVERY_RELS)):
+        # A formatting-writing round's prompt FORBIDS D0-D5, so warning that the
+        # phase "cannot be verified" is false; only a full-scope pass that owes
+        # the phase may be warned (F10).
         warns.append("no discovery-round artifact under guided_review/round2/ -- the D0-D5 phase cannot "
                      "be verified")
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
@@ -1414,11 +1438,9 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     level = str(rec.get("rewrite_level") or "")
     rep = out / "REWRITE_REPORT.md"
     if level and rep.is_file():
-        try:
-            declared = re.search(r"(?im)^\s*(?:[-*]\s*)?LEVEL\s*[:=]\s*(structural|sentence)\b",
-                                 rep.read_text("utf-8", "replace")[:4000])
-        except OSError:
-            declared = None
+        _rep = read_text_bounded(rep)
+        declared = (re.search(r"(?im)^\s*(?:[-*]\s*)?LEVEL\s*[:=]\s*(structural|sentence)\b",
+                              _rep[:4000]) if _rep else None)
         if declared is None:
             warns.append(f"rewrite: REWRITE_REPORT.md does not state the arm's level "
                          f"({level!r}); the integration stage weighs large and small differences "
@@ -2608,7 +2630,7 @@ def _stage_original_submission(ctx: Ctx, sb: Path) -> dict:
         "# original_submission/ -- the reviewer-visible manuscript (EVIDENCE)\n\n"
         "This directory is the manuscript version the editors/reviewers of the\n"
         "PREVIOUS journal actually saw. It is NOT the current submission: `base/`\n"
-        "is the submission under guided_review/revision, and this copy is supplied only\n"
+        "is the submission under review/revision, and this copy is supplied only\n"
         "so the raised concerns can be understood. Use it to resolve what a\n"
         "reviewer's quote refers to and to decide whether `base/` already answers\n"
         "a concern. Never edit or copy its text into a candidate package, never\n"
@@ -4683,10 +4705,10 @@ def _prompt_rewrite_level(sb: Path) -> str:
     level on its own line, literally `Level: structural`"), so the session and
     its pre-flight can read it back and check the report against it.
     """
-    try:
-        text = (sb / PROMPT_FILE).read_text("utf-8", "replace")[:20000]
-    except OSError:
+    text = read_text_bounded(sb / PROMPT_FILE)
+    if text is None:
         return ""
+    text = text[:20000]
     m = re.search(r"THIS ARM'S LEVEL:\s*(structural|sentence)", text, re.IGNORECASE)
     return m.group(1).lower() if m else ""
 
@@ -4820,16 +4842,13 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             # `scope="full"` a formatting-writing session's selfcheck demanded the
             # content rounds' parity artifacts its prompt scopes out -- the
             # pre-flight disagreeing with the verdict it previews.
-            try:
-                _prompt = (sb / PROMPT_FILE).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                _prompt = ""
+            _prompt = read_text_bounded(sb / PROMPT_FILE) or ""
             _scope = ("formatting-writing"
                       if "FORMATTING AND WRITING ONLY" in _prompt else "full")
             # A SPLIT round's two halves owe different artifacts. The postcheck
             # reads the plan; the selfcheck usually runs in its own process with no
             # ctx, so it reads the split mode its own prompt states and the half its
-            # own sandbox name states (`r<r>_review_b`), and the two verdicts agree.
+            # own sandbox name states (`r<r>_guided_review_b`), and the two verdicts agree.
             _split = "off"
             if "SPLIT REVIEW" in _prompt:
                 _split = ("aspects"
@@ -4961,13 +4980,10 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             level = _prompt_rewrite_level(sb)
             if level and (sb / REWRITE_REPORT_REL).is_file():
                 declared = None
-                try:
-                    declared = re.search(r"(?im)^\s*(?:[-*]\s*)?LEVEL\s*[:=]\s*"
-                                         r"(structural|sentence)\b",
-                                         (sb / REWRITE_REPORT_REL).read_text("utf-8",
-                                                                              "replace")[:4000])
-                except OSError:
-                    declared = None
+                _report = read_text_bounded(sb / REWRITE_REPORT_REL)
+                declared = (re.search(r"(?im)^\s*(?:[-*]\s*)?LEVEL\s*[:=]\s*"
+                                      r"(structural|sentence)\b",
+                                      _report[:4000]) if _report else None)
                 if declared is None:
                     warns.append(f"rewrite: REWRITE_REPORT.md does not state the arm's level "
                                  f"({level!r}) on its own line (`Level: {level}`)")

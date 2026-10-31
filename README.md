@@ -1153,8 +1153,8 @@ callers, while the paper's own Table S2 rank-biserial signs and donor-level medi
 did not support it — and the reviewer's own discovery probes had read that very table and reported
 "no anomalies".
 
-The **cold-start review** is one extra independent session per full-scope round (`r<r>_probe`, planned
-in parallel with `r<r>_guided_review`; the auditor and the revision arms WAIT for it). It is deliberately
+The **cold-start review** is one extra independent session per full-scope round (`r<r>_cold_start_review`,
+planned in parallel with `r<r>_guided_review`; the auditor and the revision arms WAIT for it). It is deliberately
 cold-context and GENERIC — any defect class may be reported. It belongs to the review STEP: the
 auditor and the revisers consume its findings, so `run --only review` (or `2:review`) drives the
 cold-start review with the guided review, while `retry --runs 1:review` stays exact (a retry resets
@@ -1282,8 +1282,9 @@ is written where every downstream session reads it:
 
 `setup` REFUSES the combinations that would leave the round with no finding source at all: a
 concern-scoped revision mode (which already replaces the general review with the concerns ledger),
-`--review-split` (two guided-review sessions), the cold-start review turned off, and a non-`full` review
-scope. The flag is a diagnostic mode — it answers "how well does the cold-start review do on its own?" — and
+a revision mode that consumes review feedback (`transfer`, `resubmit`, `llm` — the guided review is
+the session that reconciles every concern), `--review-split` (two guided-review sessions), the
+cold-start review turned off, and a non-`full` review scope. The flag is a diagnostic mode — it answers "how well does the cold-start review do on its own?" — and
 the round it produces is comparable only with another run of the same flag.
 
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
@@ -1753,7 +1754,7 @@ boxes.
 | `a1` | `r<r>_a1` | the round's base: round 1 is the pristine copy, later rounds the previous champion (no agent) |
 | `rewrite` | `r<r>_w1…wM` | full alternative versions with a **declared level**: odd arms are `structural` (organization-level, reported in `## ORGANIZATION MAP`), even arms are `sentence` (same organization, prose-level). With M≥2 the round therefore carries BOTH kinds of difference for the integration stage to weigh |
 | `guided_review` | `r<r>_guided_review` | ONE frozen identification pass (`$paper-review`) — the GUIDED review (M1–M36 / J1–J5 + D0–D5) that feeds every revise session. **on by default**; `setup --no-guided-review` runs the cold-start review alone and records the guided classes as a named gap (see "The GUIDED review" above). Recorded as the run kind `guided_review`, the id `r<r>_guided_review` and the area `guided_review/` |
-| `cold_start_review` | `r<r>_cold_start_review` | **on by default** (`setup --cold-start-review off` / `--no-cold-start-review` / `set-cold-start-review off` disables): an INDEPENDENT, cold-context discovery session launched IN PARALLEL with the review and given the corpus only (no review, no finding list). It is GENERIC — any defect class may be filed — and wherever a defect can be shown by a computation the finding declares a re-runnable verifier; the orchestrator re-runs every declared verifier (a non-reproducing computation FAILS the attempt) and the findings ride in the frozen discovery list as `X-9xx` rows (reviser resolves, auditor disposes, integrator reconciles) |
+| `cold_start_review` | `r<r>_cold_start_review` | **on by default** for every full-scope round **with at least one revision arm** (`--revises 0` plans no review, so no cold-start session either) (`setup --cold-start-review off` / `--no-cold-start-review` / `set-cold-start-review off` disables): an INDEPENDENT, cold-context discovery session launched IN PARALLEL with the review and given the corpus only (no review, no finding list). It is GENERIC — any defect class may be filed — and wherever a defect can be shown by a computation the finding declares a re-runnable verifier; the orchestrator re-runs every declared verifier (a non-reproducing computation FAILS the attempt) and the findings ride in the frozen discovery list as `X-9xx` rows (reviser resolves, auditor disposes, integrator reconciles) |
 | `audit` | `r<r>_audit` | **on by default** (`setup --audit off` / `--no-audit` disables): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), attacks the reviewer's boilerplate `OK` closures without filing new findings (an observation goes to `audit/UNRESOLVED.md`), and hands the AUDITED list to the revision arms |
 | `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran). **After its postcheck**, an independent REVISION AUDITOR writes `revision_audit/REPAIR_PLAN.json` (no edits), and a non-empty plan runs ONE bounded-repair session that re-validates and applies only confirmed rows, records `revised/REPAIR_LEDGER.json`, and re-passes the revise postcheck (`--revision-audit off` / `PAPER_REVISION_AUDIT=off` records the skip; it does not run in a concern-scoped major/minor revision) |
 | `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members). It reconciles every frozen X-* id in its difference ledger — a dropped id is accounted for, never applied |
@@ -3282,7 +3283,8 @@ its four integration runs never started.
 | `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
 | `mcp-docx-compare/` | the `docx-compare` MCP tool (Word's own compare engine, first choice for tracked changes) |
 | `paper-skills/` | the bundled review (`paper-review`) and revision (`paper-revise`) skills + prompts |
-| `scripts/` | operator-side helpers — the Codex→DSH MCP importer (`install-codex-mcp.mjs`/`.sh`, documented in `scripts/README-codex-mcp.md`) |
+| `scripts/` | operator-side helpers — the Codex→DSH MCP importer (`install-codex-mcp.mjs`/`.sh`, documented in `scripts/README-codex-mcp.md`), the test-environment builder/exporter (`create-test-env.sh`, `export-test-env.sh`, `env_test_closure.py`) |
+| `env/` | the exported test environment the Test section recreates (`create-test-env.sh` reads it; refresh it with `export-test-env.sh`) — see `env/README.md` |
 | `venue_profiles/` | the venue profiles (the submission rule sets) + their schema documentation |
 | `media/` | the figures the docs embed — `paper-refine-one-revision-round.png` (shown above) |
 | `.paper_test/` | the offline regression suites (stub agents; no network) |
@@ -3341,7 +3343,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 169 suites (a few
+any failure. They are independent, so run them in parallel — 170 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

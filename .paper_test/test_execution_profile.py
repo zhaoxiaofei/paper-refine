@@ -41,7 +41,7 @@ FAILS = []
 # They are the `--execution-profile high` SHELL pin: a prompt may only change by
 # a deliberate, reviewed edit, and the profile logic must not perturb `high` by
 # itself.  Regenerate with:
-#   PAPER_RENDER_SANDBOX=$PWD/tmp/render-sandbox/r1_review \
+#   PAPER_RENDER_SANDBOX=$PWD/tmp/render-sandbox/r1_guided_review \
 #     python .paper_test/render_stage_prompts.py .
 # and paste the hashes here in the SAME commit that changes the prompts.
 GOLDEN = {
@@ -50,9 +50,9 @@ GOLDEN = {
     "review_scoped": "be7f6ba4186c618c",
     "cold_start_review": "7d168e9e6f95c876",
     "audit": "d2d4579cfd1dec78",
-    "revise": "1db4da9a492b5c65",
-    "integrate": "0e2a94a006921bf9",
-    "rewrite": "a7331dbb7a9d95a4",
+    "revise": "ca327b062cba7f3f",
+    "integrate": "c1597d287fd5d7bb",
+    "rewrite": "b69bbe50db71451b",
     "judge": "0031c40b30aeec88",
     "revision_audit": "074eaee68fccba2b",
     "revision_repair": "afcc7d353ce5e7e2",

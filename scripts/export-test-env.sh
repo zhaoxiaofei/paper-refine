@@ -34,7 +34,14 @@ CONDA="${CONDA_EXE:-$(command -v conda || true)}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --out) OUT="$2"; shift 2 ;;
+    --out)
+      # `set -u` turned a missing value into an unbound-variable crash instead
+      # of the script's usage message (F53).
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "error: --out requires a directory argument" >&2
+        exit 2
+      fi
+      OUT="$2"; shift 2 ;;
     -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "error: unknown argument $1" >&2; exit 2 ;;
   esac

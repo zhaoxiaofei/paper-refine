@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 05/17 of the pipeline -- executed by the
+# Part 05/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -567,6 +567,21 @@ class Ctx:
             die(f"missing/corrupt {self.cfg_path}  (run `setup` first)")
         self.cfg = cfg or {}
         if cfg is not None:
+            # The 2026-10 review-role rename replaced these policy keys. Reading
+            # only the new names silently ignored a root that still carried one:
+            # `probe_review: off` ran the probe anyway and `targeted_review: off`
+            # ran the guided review. Refuse the ambiguity; never migrate silently
+            # (F22).
+            _legacy_policies = [k for k in ("probe_review", "targeted_review")
+                                if k in cfg]
+            if _legacy_policies:
+                _new = {"probe_review": "cold_start_review",
+                        "targeted_review": "guided_review"}
+                die("pipeline_config.json carries removed review policy key(s) "
+                    + ", ".join(f"{k!r} (now {_new[k]!r})" for k in _legacy_policies)
+                    + f".\n       {self.cfg_path}\n"
+                    "       This root predates the review-role rename; rename the key(s) "
+                    "explicitly (or re-run `setup`) rather than relying on a default.")
             # `setup` validates `--judges` (>= 1 per round), but a hand-edited
             # `pipeline_config.json` used to slip past that. With judges=[0]
             # every version's expected directed-score count is 0, so the panel
@@ -2481,7 +2496,7 @@ def stash_logs(sb: Path, logs_dir: Path, rid: str, attempt: int = None) -> list:
     Returns the archived paths, so the attempt record can POINT at the
     transcript of the attempt it belongs to: a bare `<run>._agent.log` is unique
     but does not say which attempt wrote it (the 2026-09-22 root kept attempt 1's
-    15 MB transcript as `r1_review._agent.log` with nothing referring to it).
+    15 MB transcript as `r1_guided_review._agent.log` with nothing referring to it).
     """
     moved = []
     if not _safe_state_segment(rid):
@@ -3864,7 +3879,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
 
     A4 rationale for the split: Phase 1's context (sweep artifacts, coverage
     table, discovery output) is the largest in the pipeline, while Phase 2 needs
-    bounded context for guided edits; a failure in either phase is retryable
+    bounded context for targeted edits; a failure in either phase is retryable
     without re-paying the other; and the two skills already communicate through
     findings.json, so the split exposes an interface that already exists. The
     handoff is between SESSIONS, not within one prompt -- a single prompt that
@@ -4450,6 +4465,24 @@ PRIOR_ROUND_FILES = ("findings.json", "findings.md", "findings_extra.json",
                      "findings_extra.md", "new_sweeps.md", "round2_summary.md")
 
 
+def _synthesized_review_problems(ctx: Ctx, r: int, sb: Path) -> list:
+    """Drift of a `--no-guided-review` sandbox's SYNTHESIZED frozen view.
+
+    There is no upstream review directory to hash, so compare the discovery
+    file the sandbox carries with what the current cold-start run would
+    synthesize: a probe retry that changes its findings must reset the auditor
+    and every reviser, exactly like a review retry (F01).
+    """
+    rel = f"{GUIDED_REVIEW_DIR}/round2/findings_extra.json"
+    doc = read_json(sb / rel, revive=False, lenient=True)
+    actual = doc.get("findings") if isinstance(doc, dict) else None
+    want = list(cold_start_findings_rows(ctx, r) or [])
+    if actual != want:
+        return [f"{GUIDED_REVIEW_DIR}/round2/findings_extra.json no longer matches the "
+                f"current cold-start review (the probe findings changed)"]
+    return []
+
+
 def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
     """None when the sandbox's frozen review copy is what this round must hold.
 
@@ -4592,7 +4625,7 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         # (materialize_revise copies rid_guided_review_b), so hashing session A's dir
         # made every revise arm look stale on every re-entry.
         rev_rid = (rid_concerns(r) if journal_is_scoped(ctx)
-                   else rid_guided_review_b(r) if review_split_of(ctx) != "off" else rid_guided_review(r))
+                   else review_producer_rid(ctx, r))
         rev_rec = ctx.run(rev_rid)
         if rev_rec is None or rev_rec.get("status") != "done":
             probs.append("upstream guided_review/concerns run is not done")
@@ -4602,8 +4635,15 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             # concerns review, a general revise on the review. Compare against
             # the merged copy in either case -- the old scoped-only branch left
             # the general path with no review check at all after F004.
-            probs.append(_review_copy_mismatch(ctx, r, sb,
-                                               ctx.sandbox_of(rev_rec) / GUIDED_REVIEW_DIR))
+            # `--no-guided-review`: the sandbox's guided_review/ is the
+            # SYNTHESIZED view (`synthesize_frozen_review`), not a copy of the
+            # producer's directory, so comparing the trees would mark every
+            # revise sandbox stale on re-entry (F01).
+            if frozen_review_is_synthesized(ctx):
+                probs.extend(_synthesized_review_problems(ctx, r, sb))
+            else:
+                probs.append(_review_copy_mismatch(ctx, r, sb,
+                                                   ctx.sandbox_of(rev_rec) / GUIDED_REVIEW_DIR))
     elif kind == "cold_start_review":
         # The probe reads the round base and the pristine original, like every
         # other round-family session; its own provenance record is written by
@@ -4645,10 +4685,13 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
             probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
-        merge_rid = rid_guided_review_b(r) if review_split_of(ctx) != "off" else rid_guided_review(r)
+        merge_rid = (rid_concerns(r) if journal_is_scoped(ctx)
+                     else review_producer_rid(ctx, r))
         rv = ctx.run(merge_rid)
         if rv is None or rv.get("status") != "done":
             probs.append("upstream review run is not done")
+        elif frozen_review_is_synthesized(ctx):
+            probs.extend(_synthesized_review_problems(ctx, r, sb))
         else:
             probs.append(_review_copy_mismatch(ctx, r, sb,
                                                ctx.sandbox_of(rv) / GUIDED_REVIEW_DIR))

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 08/17 of the pipeline -- executed by the
+# Part 08/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -2131,7 +2131,8 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                                 "stage": "guided_review",
                                 "materialize": (lambda c: materialize_review(c, r, "a"))})
                 review_deps = [rid_guided_review(r)]
-        if review_split_of(ctx) != "off" and not scoped and guided_review_enabled(ctx):
+        if (review_split_of(ctx) != "off" and not scoped and guided_review_enabled(ctx)
+                and round_review_scope(ctx, r) == "full"):
             entries.append({"id": rid_guided_review_b(r), "kind": "guided_review", "vid": None,
                             # Session B consumes session A's OUTPUT (`guided_review_a/`,
                             # copied by materialize_review): with the same deps as
@@ -2471,7 +2472,7 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     # 2026-10-30 F53). Walk the revised tree itself: every link must have been
     # a link before the repair, to the same target. A link that replaced a
     # regular file is already an allowed-path check above; this adds the
-    # unplanned link and the reguided link.
+    # unplanned link and the retargeted link.
     try:
         entries = sorted(cur.rglob("*"))
     except OSError:
@@ -3463,6 +3464,13 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         rrec["status"] = "done"
         rrec["finished"] = utcnow()
         ctx.save_state()
+        # A concern-scoped round has no guided review, but its concerns ledger is
+        # still the round's finding source: archive it before this early return,
+        # exactly like `finalize_round` does for a general round (F03).
+        try:
+            archive_review_outputs(ctx, r)
+        except Exception as e:                                  # noqa: BLE001
+            print(f"[run] round {r} WARNING: could not archive the review outputs: {e}")
         print(f"[run] r{r} {journal_mode_of(ctx)} revision complete: {a2} is the revised "
               f"manuscript (no judge panel: a concern-scoped revision is judged by the journal, "
               f"not by a quality panel)")

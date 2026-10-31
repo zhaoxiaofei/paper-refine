@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 18/18 of the pipeline -- executed by the loader AFTER the command
+# Part 18/20 of the pipeline -- executed by the loader AFTER the command
 # functions, in the loader's own module globals. These are pure helpers
 # (no module-level side effects): the lower-numbered parts call them at
 # runtime, so they may live after the CLI definitions. Split out of
@@ -830,7 +830,7 @@ def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
                 _add_session_token(spec, int(sel.group(1)), session, part, flag)
             continue
         # `r1_a2_revise`: the exact RUN ID `agents` prints for a revise arm (the
-        # others -- `r1_w1`, `r1_i1`, `r1_review`, `r1_audit` -- are already
+        # others -- `r1_w1`, `r1_i1`, `r1_guided_review`, `r1_audit` -- are already
         # session ids, so only the revise arm needs the suffix).
         sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(a\d+)[_:/.-]revise", token)
         if sel:
@@ -1080,7 +1080,10 @@ def _session_token(raw: str, part: str, flag: str = "--only") -> str:
     m = re.fullmatch(r"(integrator|integrate|i)(\d+)", tok)
     if m:
         return f"i{int(m.group(2))}"
-    m = re.fullmatch(r"(guided_review)(_?b)?", tok)
+    # Canonical `guided_review`/`guided_review_b`, plus the pre-rename
+    # `review`/`reviewer`/`review_b` spellings the CLI help and README still
+    # document: the parser accepts them, so this mapper must too (F12).
+    m = re.fullmatch(r"(guided_review|reviewer|review)(_?b)?", tok)
     if m:
         return "guided_review_b" if m.group(2) else "guided_review"
     if re.fullmatch(r"(?:a1|w\d+|a\d+|i\d+|orig|guided_review|guided_review_b|"
@@ -1092,7 +1095,7 @@ def _session_token(raw: str, part: str, flag: str = "--only") -> str:
             die(f"{flag}: {part!r} names the pristine original, which has no agent session")
         return tok
     die(f"{flag}: {part!r} is not a session this pipeline knows (use a stage name, or a session "
-        f"such as `rewriter1`, `reviser1`, `integrator1`, `review`, `audit`, `w2`, `w2_j1`, "
+        f"such as `rewriter1`, `reviser1`, `integrator1`, `guided_review`, `audit`, `w2`, `w2_j1`, "
         f"`r1_w2`, `r1_judge_w2_j1`)")
 
 
@@ -1101,13 +1104,13 @@ def session_id_of_entry(entry: dict) -> str:
 
     Review and audit entries carry no `vid`; their session id is the bare stage
     name, except the second review session of `--review-split`, which is
-    `review_b` (the id `--only r1_review_b` selects).
+    `guided_review_b` (the id `--only r1_guided_review_b` selects).
     """
     vid = str((entry or {}).get("vid") or "")
     if vid:
         return vid
     rid = str((entry or {}).get("id") or "")
-    return "review_b" if rid.endswith("_review_b") else plan_stage_of(entry)
+    return "guided_review_b" if rid.endswith("_guided_review_b") else plan_stage_of(entry)
 
 
 def parse_only_stages(raw) -> set:

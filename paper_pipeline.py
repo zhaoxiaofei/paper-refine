@@ -42,7 +42,7 @@ ROUND MODEL
                                    pass per round produces the frozen finding
                                    list; each of the N $paper-revise sessions then
                                    consumes its own read-only copy of that same
-                                   review/ and produces one revised candidate.
+                                   guided_review/ and produces one revised candidate.
         I1_r..IK_r
               = K = 1 + M + N INTEGRATION runs: every pool member is reworked
                                    ONCE, in its own session, with that member as
@@ -96,13 +96,13 @@ ROUND MODEL
 
 A2 PRODUCTION -- REVIEW -> REVISE AS TWO CHAINED SESSIONS (A4)
 -------------------------------------------------------------
-    Phase 1 (review): its own sandbox, runs $paper-review on base/, writes
-                      review/*, sees nothing about revision.
+    Phase 1 (guided review): its own sandbox, runs $paper-review on base/,
+                      writes guided_review/*, sees nothing about revision.
     Phase 2 (revise): a SEPARATE sandbox, materialized only once Phase 1's
-                      _pipeline_done.json (stage="review") exists. It receives
-                      a READ-ONLY copy of Phase 1's review/ directory, reads
-                      review/findings.json as the frozen authoritative finding
-                      list, starts at R0, and writes revised/.
+                      _pipeline_done.json (stage="guided_review") exists. It
+                      receives a READ-ONLY copy of Phase 1's guided_review/
+                      directory, reads guided_review/findings.json as the frozen
+                      authoritative finding list, starts at R0, and writes revised/.
     Why the split: Phase 1's context (sweep artifacts, coverage table,
     discovery output) is the largest in the pipeline; Phase 2 needs bounded
     context for targeted edits; a failure in either phase is retryable without
@@ -195,13 +195,14 @@ STAGING DEPENDENCY ORDER (a DAG: every run starts as soon as its inputs exist)
     (i)   runs/r<R>_a1/         base copy only, no agent run. Everything else
           depends on it.
     (ii)  the WRITES: runs/r<R>_w1..wM/ (M rewrites: base/ + non_revised/ +
-          rewritten/) and runs/r<R>_review/ (ONE review pass; skipped when
-          --revises is 0) both depend only on a1, so they START TOGETHER. Each
-          run's sandbox is materialized the moment its dependencies are done.
+          rewritten/) and runs/r<R>_guided_review/ (ONE guided review pass;
+          skipped when --revises is 0) both depend only on a1, so they START
+          TOGETHER. Each run's sandbox is materialized the moment its
+          dependencies are done.
     (iii) runs/r<R>_a2_revise..A(1+N)_revise/ (the N reviewed-and-then-revised
           candidates): each consumes its OWN read-only copy of the SAME frozen
-          review/, so a revise session starts as soon as the review marker
-          exists -- it does NOT wait for the rewrites (or for its sibling
+          guided_review/, so a revise session starts as soon as the review
+          marker exists -- it does NOT wait for the rewrites (or for its sibling
           revise sessions).
     (iv)  runs/r<R>_i1..iK/     the integration runs selected by the round's
           --integrators mask (default [0xFFFFFFFF, 0xFFFFFFFF, 0x0]: every pool
@@ -439,7 +440,7 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           to docx2pdf.sh, the `docx render` command, LibreOffice,
                           ... only when that tool is unavailable,
                           render pages to images (pdftoppm/gs) and inspect them;
-                          the pass must be recorded (review/artifacts/VIS_visual.md,
+                          the pass must be recorded (guided_review/artifacts/VIS_visual.md,
                           judge_review/artifacts/VIS_visual.md,
                           revised/VISUAL_CHECK.md, rewritten/VISUAL_CHECK.md,
                           integrated/VISUAL_CHECK.md) or explicitly declared
@@ -459,9 +460,9 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           caption/formatting checks, the adopted rewrite-parity
                           checks and the source-hierarchy reconciliation) must
                           carry a real coverage disposition,
-                          the M25-M30 artifacts and review/ARCHITECTURE.md must
-                          exist with a disposition column,
-                          review/artifacts/ must exist, finding ids must be
+                          the M25-M30 artifacts and guided_review/ARCHITECTURE.md
+                          must exist with a disposition column,
+                          guided_review/artifacts/ must exist, finding ids must be
                           unique, and every prior-round finding must be carried
                           forward or recorded as gone.
     * ledger contract     revised/revision_report.json is required from revise
@@ -592,7 +593,7 @@ USAGE
         --journal "Frontiers in Immunology" --revision-mode transfer \\
         --journal-feedback-from iScience [--journal-feedback FILE ...]
     python paper_pipeline.py set-revision-mode major --root ./paper_rounds
-        # none | transfer (1) | resubmit (2) | major (3) | minor (4) | llm (5)
+        # transfer (1) | resubmit (2) | major (3) | minor (4) | llm (5)
     python paper_pipeline.py run    --root ./paper_rounds --jobs 255
     python paper_pipeline.py run    --root ./paper_rounds --only 1,2      # only rounds 1 and 2
     python paper_pipeline.py run    --root ./paper_rounds --only 2:review,2:merge
@@ -601,7 +602,7 @@ USAGE
     python paper_pipeline.py redline --root ./paper_rounds [--round R] [--tool auto]
     python paper_pipeline.py track   --root ./paper_rounds [--round R] [--no-pdf]
     python paper_pipeline.py decide --root ./paper_rounds   # also writes final_clean_version_<root name>/
-    python paper_pipeline.py retry  --root ./paper_rounds --run r2_review
+    python paper_pipeline.py retry  --root ./paper_rounds --run r2_guided_review
     python paper_pipeline.py retry  --root ./paper_rounds --runs 1:judge,2:feedback,2:review
     python paper_pipeline.py prune  --root ./paper_rounds --keep-latest 1 [--yes]
     python paper_pipeline.py conflicts --root ./paper_rounds [--round R] [--no-agent]
@@ -715,17 +716,17 @@ AGENT BACKENDS
 COMPLETION CONTRACT / INTEGRITY
 -------------------------------
     * An agent run is finished only when its completion signal exists:
-      rewrite/review/revise/integrate -> _pipeline_done.json with that stage;
+      rewrite/guided_review/revise/integrate -> _pipeline_done.json with that stage;
       judge -> a parseable scores.json with matching run_id/target_id/round AND
       one comparison per issued opponent label (a sheet that omits issued labels
       FAILS the run, because a short sheet silently shrinks the panel). The
       judge's _pipeline_done.json is an auxiliary signal only: a marker with no
       scores.json is a failure, not a completion.
-      A non-empty revised/ (or rewritten/, integrated/, or review/) is NEVER
-      completion.
+      A non-empty revised/ (or rewritten/, integrated/, or guided_review/) is
+      NEVER completion.
     * Every read-only input in a sandbox is hashed before the run and
       re-hashed by the postcheck; any byte that moved fails the run. In
-      particular a Phase 2 run that edits review/ FAILS.
+      particular a Phase 2 run that edits guided_review/ FAILS.
     * The pristine original is re-hashed at the start of every `run`/`decide`;
       `run` refuses to proceed, and `decide` records the change as a blocking
       problem and exits 5 instead of certifying the decision. Pinned round
@@ -757,10 +758,10 @@ DIRECTORY LAYOUT CREATED UNDER --root
     runs/r<R>_w<k>/                 base/, non_revised/, rewritten/, PROMPT.md:
                                     the k-th rewritten candidate (k = 1..M),
                                     staged FIRST in every round
-    runs/r<R>_review/               base/, non_revised/, prior_round/ (r>1),
-                                    review/, PROMPT.md: the round's ONE review
-                                    pass (skipped when --revises is 0)
-    runs/r<R>_a<j>_revise/          base/, non_revised/, review/ (read-only),
+    runs/r<R>_guided_review/        base/, non_revised/, prior_round/ (r>1),
+                                    guided_review/, PROMPT.md: the round's ONE
+                                    guided review pass (skipped when --revises is 0)
+    runs/r<R>_a<j>_revise/          base/, non_revised/, guided_review/ (read-only),
                                     revised/, PROMPT.md: the j-th reviewed-and-
                                     revised candidate (j = 2..1+N)
     runs/r<R>_i<k>/                 self/, others/<version-id>/ (EVERY other

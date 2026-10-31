@@ -1,3 +1,5 @@
+# Part 19/20 of the pipeline -- executed by the loader, in order, in the
+# loader's own module globals.
 # This part carries NO module docstring on purpose: the loader executes every
 # part in the paper_pipeline module's own globals, and a module-level string
 # literal would REPLACE that module's `__doc__` with this file's text (the
@@ -244,7 +246,18 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
             section=title, rel=PROFILE_RULES_REL))
         sections.append((title, body))
     if sections:
-        sb.joinpath(PROFILE_INSTRUCTIONS_DIR).mkdir(parents=True, exist_ok=True)
+        instr = sb / PROFILE_INSTRUCTIONS_DIR
+        # The sandbox is agent-writable: a planted `INSTRUCTIONS -> /outside`
+        # symlink made the atomic temp and the final replace run OUTSIDE the
+        # sandbox (F32). Refuse any non-directory / link, then re-check.
+        if instr.is_symlink() or (instr.exists() and not instr.is_dir()):
+            die(f"refusing to page the profile rules: {PROFILE_INSTRUCTIONS_DIR}/ is a "
+                f"symlink or not a directory in the session sandbox ({sb}). Remove it and "
+                f"re-run.")
+        instr.mkdir(parents=True, exist_ok=True)
+        if instr.is_symlink() or not instr.is_dir():
+            die(f"refusing to page the profile rules: {PROFILE_INSTRUCTIONS_DIR}/ became a "
+                f"symlink or a non-directory while preparing ({sb}).")
         parts = [PROFILE_RULES_HEADER, f"_Stage: {stage}_\n"]
         for title, body in sections:
             parts.append(f"\n## {title}\n\n{body.rstrip()}\n")
@@ -260,9 +273,11 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
 def _frozen_review_doc(r: int) -> dict:
     """The `guided_review/findings.json` the downstream contracts read, gap declared."""
     coverage = []
-    for cid in list(REQUIRED_REVIEW_CHECKS) + ["M18", "M19", "M20",
-                                               "M21", "M22", "M23", "M24",
-                                               "M25", "M26", "M27", "M28", "M29", "J5"]:
+    # The synthesized view is what the AUDITOR reads, and `audit_coverage_problems`
+    # requires one row per M1-M36 / J1-J5 check. Deriving the table from the same
+    # constant (rather than a hand-copied prefix) keeps the two contracts from
+    # drifting apart (F02).
+    for cid in AUDIT_COVERAGE_CHECKS:
         coverage.append({"check": cid,
                          "disposition": f"unable -- {GUIDED_REVIEW_GAP}",
                          "detail": "no guided-review session ran this round"})
@@ -328,11 +343,14 @@ def frozen_review_is_synthesized(ctx) -> bool:
 def review_producer_rid(ctx, r: int):
     """The run id whose output defines the round's frozen review.
 
-    That is the guided review (session B under `--review-split`) when the policy
-    plans it, and the cold-start review when it does not -- the run whose
-    completion gates the frozen view either way. Whether that view is COPIED or
-    SYNTHESIZED is `frozen_review_is_synthesized`.
+    That is the guided review (session B under `--review-split`, but only for a
+    `full`-scope review -- `round_run_plan` plans no B for a formatting-writing
+    round) when the policy plans it, and the cold-start review when it does not
+    -- the run whose completion gates the frozen view either way. Whether that
+    view is COPIED or SYNTHESIZED is `frozen_review_is_synthesized`.
     """
     if not guided_review_enabled(ctx):
         return rid_cold_start_review(r)
-    return rid_guided_review_b(r) if review_split_of(ctx) != "off" else rid_guided_review(r)
+    if review_split_of(ctx) != "off" and round_review_scope(ctx, r) == "full":
+        return rid_guided_review_b(r)
+    return rid_guided_review(r)

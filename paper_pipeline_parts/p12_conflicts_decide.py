@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 12/17 of the pipeline -- executed by the
+# Part 12/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1517,9 +1517,11 @@ def certification_label(certification) -> str:
     """
     cert = certification or {}
     if cert.get("certified"):
-        if cert.get("submission_ready") is False:
-            return "CERTIFIED (panel) — NOT SUBMISSION-READY"
-        return "CERTIFIED"
+        label = ("CERTIFIED (panel) — NOT SUBMISSION-READY"
+                 if cert.get("submission_ready") is False else "CERTIFIED")
+        if cert.get("guided_review_gap"):
+            label += " (guided review off — named gap)"
+        return label
     if cert.get("auto_promoted") and not cert.get("blockers"):
         return "AUTO-PROMOTED — PROVISIONAL (NOT JUDGED)"
     if cert.get("provisional") and not cert.get("blockers"):
@@ -7076,7 +7078,7 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
     for name in STAGE_REPORT_NAMES:
         cand = outdir / name
         if cand.is_file():
-            report = read_json(cand)
+            report = read_json(cand, revive=False, lenient=True)
             if report:
                 break
     report = report or {}
@@ -7086,7 +7088,7 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
     coverage = {str(r.get("id")): r for r in _open_item_rows(report)}
     findings = {str(f.get("id")): f
                 for f in _open_item_rows(report.get("findings") if isinstance(report, dict) else [])}
-    audit = read_json(sb / "audit" / "audit.json") or {}
+    audit = read_json(sb / "audit" / "audit.json", revive=False, lenient=True) or {}
     verdicts = {str(r.get("id")): str(r.get("verdict") or "").lower()
                 for r in (audit.get("dispositions") or []) if isinstance(r, dict)}
     for fid, row in sorted(coverage.items()):
@@ -8319,16 +8321,32 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              f"ranked or treated as defects (a marker does not make a version worse than an "
              f"identical version without one).")
     L.append("")
-    L.append("**Review provenance (carry-over).** Each round's review must satisfy the contract "
-             "check (submission_dir resolves to base/, every check id M1-M17 and J1-J4 carries a "
-             "real coverage disposition, guided_review/artifacts/ exists, finding ids are unique), and "
-             "its deliverables are archived under `reports/round<r>_review/`. From round 2 on, "
-             "the reviewer receives the previous round's finding list as read-only `prior_round/` "
-             "and must reconcile every prior id (carried forward with a new id and a "
-             "\"carried over from <prior-id>\" note, or recorded as not reproducible): a finding "
-             "that a later pass misses now FAILS the review instead of quietly disappearing. "
-             "Residual, stated honestly: a single LLM review pass is still a sample of the defect "
-             "space, so the pipeline enforces reconciliation and coverage, not completeness.")
+    if guided_review_enabled(ctx):
+        L.append("**Review provenance (carry-over).** Each round's review must satisfy the "
+                 "contract check (submission_dir resolves to base/, every check id M1-M36 and "
+                 "J1-J5 carries a real coverage disposition, guided_review/artifacts/ exists, "
+                 "finding ids are unique), and its deliverables are archived under "
+                 "`reports/round<r>_review/`. From round 2 on, the reviewer receives the "
+                 "previous round's finding list as read-only `prior_round/` and must reconcile "
+                 "every prior id (carried forward with a new id and a \"carried over from "
+                 "<prior-id>\" note, or recorded as not reproducible): a finding that a later "
+                 "pass misses now FAILS the review instead of quietly disappearing. Residual, "
+                 "stated honestly: a single LLM review pass is still a sample of the defect "
+                 "space, so the pipeline enforces reconciliation and coverage, not completeness.")
+    else:
+        # `--no-guided-review`: the general checklist pass did not run, so the
+        # fixed "the review contract was satisfied" sentence would be false. Name
+        # the actual producer and the gap the config carries (F07).
+        L.append("**Review provenance (carry-over) — NAMED GAP.** This root ran with "
+                 "`guided_review: off`, so the general checklist pass was NOT performed: "
+                 f"{GUIDED_REVIEW_GAP} The round's only review producer is the COLD-START "
+                 "review (`r<r>_cold_start_review`); its X-9xx rows form the frozen finding "
+                 "list (synthesized into `guided_review/findings.json` for the auditor and "
+                 "the revisers), and the missing guided classes are recorded as a named gap "
+                 "in that file and in `pipeline_config.json`. The cold-start review's "
+                 "deliverables are archived under `reports/round<r>_review/`; no guided "
+                 "review coverage table exists for this round, so its review contract is "
+                 "not claimed.")
     L.append("")
     L.append(f"**Visual verification.** The prompts require a render-then-look pass for Word "
              f"documents (convert .docx/.doc to PDF with a layout-faithful converter, render the "
@@ -9462,6 +9480,14 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     certification["hash_checks"] = "skipped" if hash_checks_skipped() else "verified"
     if hash_checks_skipped():
         certification["notes"] = list(certification.get("notes") or []) + [hash_skip_note()]
+    if not guided_review_enabled(ctx):
+        # The operator chose `--no-guided-review`: the decision is honest only
+        # if the report/certification names the class that was never reviewed
+        # (F07). A note, not a blocker: the operator asked for this mode.
+        certification["guided_review_gap"] = GUIDED_REVIEW_GAP
+        certification["notes"] = list(certification.get("notes") or []) + [
+            "guided review: OFF -- the general checklist pass did not run; its classes "
+            "are a named gap, not a clean result"]
     certification["submission_ready"] = readiness["submission_ready"]
     certification["package_findings"] = readiness["findings"]
     cert_blockers = certification["blockers"]

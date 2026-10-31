@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 04/17 of the pipeline -- executed by the
+# Part 04/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -3514,7 +3514,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
             claim_docs.append((prefix + rel, text))
             pdf_paras = [" ".join(block.split())
                          for block in re.split(r"\n\s*\n", text) if block.strip()]
-            # Guided rules only: a PDF is a rendered document, not the
+            # Targeted rules only: a PDF is a rendered document, not the
             # manuscript source, and running the full text-style sweep over 52
             # pages produced 170 long-sentence rows that buried the three real
             # findings. The argument-level rules and the statistics/summary

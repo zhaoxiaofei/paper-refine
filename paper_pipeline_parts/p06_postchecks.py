@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 06/17 of the pipeline -- executed by the
+# Part 06/20 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -540,11 +540,16 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
     # decision report's remaining-work figure undercounted by every finding only
     # session B filed. Session A stays the source only when no split is
     # configured (or B never produced a list).
-    rev = ctx.run(rid_guided_review_b(r) if review_split_of(ctx) != "off" else rid_guided_review(r))
+    rev = ctx.run(review_producer_rid(ctx, r))
     if (rev is None or rev.get("status") != "done") and review_split_of(ctx) != "off":
         rev = ctx.run(rid_guided_review(r))
     if not rev or rev.get("status") != "done":
         return []
+    if frozen_review_is_synthesized(ctx):
+        # `--no-guided-review`: the producer is the cold-start review and the
+        # frozen review is synthesized in the AUDIT/REVISE sandboxes, not on the
+        # producer's disk. Return its X-9xx rows instead of [] (F04).
+        return list(cold_start_findings_rows(ctx, r) or [])
     sb = ctx.sandbox_of(rev)
     if not (sb / FINDINGS_REL).is_file():
         return []
@@ -1173,7 +1178,10 @@ JUDGE_DISPOSITIONS = ("clean", "findings", "unable")
 # gate used to accept any non-empty cell that did not start with "not checked",
 # so a row of filler ("x", "done") proved a sweep that never ran.
 COVERAGE_DISPOSITION_RE = re.compile(
-    r"(?i)^(?:\d+\s+finding|clean\b|unable\b|out\s+of\s+scope\b)")
+    r"(?i)^(?:\d+\s+finding"
+    r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
+    r"|unable\s*(?:--|—|–)\s*\S"
+    r"|out\s+of\s+scope\b)")
 
 
 def _coverage_disposition_ok(value) -> bool:
@@ -2174,11 +2182,12 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                     f"and hand the check to the author -- an unrecorded visual pass is a "
                     f"failed deliverable, because reading a .docx is not a visual inspection")
         return
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace").lower()
-    except OSError as e:                                        # noqa: BLE001
-        errs.append(f"{label} could not be read ({e})")
+    _raw = read_text_bounded(path)
+    if _raw is None:
+        errs.append(f"{label} could not be read (unreadable, non-regular, or over the "
+                    f"agent-output byte budget)")
         return
+    text = _raw.lower()
     if not visual_tools_available():
         warns.append(f"{label}: no PDF renderer was detected on this machine, so the visual "
                      f"pass can only be partial; confirm the artifact's limitation note")
@@ -2250,11 +2259,10 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
     if not want:
         return []
     path = sb / GUIDED_REVIEW_DIR / "artifacts" / "M20_formatting.md"
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return [f"{GUIDED_REVIEW_DIR}/artifacts/M20_formatting.md is missing: the code-side scan "
-                f"proves {len(want)} FMT-CL1 cover-letter row(s) "
+    text = read_text_bounded(path)
+    if text is None:
+        return [f"{GUIDED_REVIEW_DIR}/artifacts/M20_formatting.md is missing or unreadable: the "
+                f"code-side scan proves {len(want)} FMT-CL1 cover-letter row(s) "
                 f"({', '.join(sorted(want)[:3])}) the review must dispose"]
     # Rows are per DOCUMENT, not per mention: three rows about one letter do not
     # dispose the other two letters.
@@ -2375,12 +2383,19 @@ def discovery_probe_result_ids(sb: Path) -> list:
 
 
 def prior_proposal_ids(sb: Path) -> list:
-    """Sweep ids proposed by the PREVIOUS round (prior_round/new_sweeps.md)."""
-    try:
-        text = (sb / "prior_round" / "new_sweeps.md").read_text(encoding="utf-8",
-                                                                errors="replace")
-    except OSError:
+    """Sweep ids proposed by the PREVIOUS round (prior_round/new_sweeps.md).
+
+    `None` when the file EXISTS but cannot be read (permissions, a link/FIFO,
+    or over the byte budget): that is UNKNOWN, not "the prior round proposed
+    nothing", and the convergence gate must say so instead of going quiet
+    (F73).
+    """
+    path = sb / "prior_round" / "new_sweeps.md"
+    if not path.exists():
         return []
+    text = read_text_bounded(path)
+    if text is None:
+        return None
     out = []
     for m in re.finditer(r"(?m)^#{2,3}\s*(M\d+)\b", text):
         if m.group(1) not in out:
@@ -2443,7 +2458,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
     ki = r2 / "known_index.md"
     if _discovery_nonempty(ki):
         try:
-            text = ki.read_text(encoding="utf-8", errors="replace")
+            text = read_text_bounded(ki) or ""
         except OSError:
             text = ""
         # Both spellings of the range ends count: the frozen ids are unpadded
@@ -2632,7 +2647,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
     # states explicitly that there were none (and why).
     if _discovery_nonempty(r2 / "new_sweeps.md"):
         try:
-            text = (r2 / "new_sweeps.md").read_text(encoding="utf-8", errors="replace")
+            text = read_text_bounded(r2 / "new_sweeps.md") or ""
         except OSError:
             text = ""
         # `parse_sweep_proposals` is the ONE reader the `adopt-sweep` command uses
@@ -2662,7 +2677,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
     # counts and its honest limits.
     if _discovery_nonempty(r2 / "round2_summary.md"):
         try:
-            text = (r2 / "round2_summary.md").read_text(encoding="utf-8", errors="replace")
+            text = read_text_bounded(r2 / "round2_summary.md") or ""
         except OSError:
             text = ""
         low = text.lower()
@@ -2682,16 +2697,23 @@ def discovery_contract_problems(sb: Path) -> tuple:
     # operator re-reading per-run files.
     gone = []
     prior_ids = prior_proposal_ids(sb)
-    if prior_ids:
+    if prior_ids is None:
+        errors.append(
+            "prior_round/new_sweeps.md exists but cannot be read (unreadable, non-regular, "
+            "or over the byte budget): the previous round's proposals cannot be re-probed, "
+            "so the convergence gate has no evidence either way")
+    elif prior_ids:
         def _blob(rels) -> str:
             out = []
             for rel in rels:
                 p = sb / rel
-                try:
-                    if p.is_file():
-                        out.append(p.read_text(encoding="utf-8", errors="replace"))
-                except OSError:
-                    pass
+                if p.is_file():
+                    t = read_text_bounded(p)
+                    if t is None:
+                        warns.append(f"{rel} exists but cannot be read (unreadable, "
+                                     f"non-regular, or over the byte budget)")
+                        continue
+                    out.append(t)
             return "\n".join(out)
 
         probe_blob = _blob(("guided_review/round2/probes.md", "guided_review/round2/probe_results.md"))
@@ -3121,8 +3143,11 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                     f"scope-level issues a rewrite fixes have no instance-level home")
     elif want_architecture:
         try:
-            body = arch.read_text(encoding="utf-8", errors="replace")
-            if not body.strip():
+            body = read_text_bounded(arch)
+            if body is None:
+                errs.append(f"{GUIDED_REVIEW_DIR}/ARCHITECTURE.md could not be read "
+                            f"(unreadable, non-regular, or over the byte budget)")
+            elif not body.strip():
                 errs.append(f"{GUIDED_REVIEW_DIR}/ARCHITECTURE.md is EMPTY: the J5 pass must examine "
                             f"every document scope by scope")
             elif "disposition" not in body.lower():
@@ -3270,9 +3295,10 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     #    the record the prompt asks for.
     m1_art = art_dir / "M1_acronyms.md"
     if m1_art.is_file():
-        try:
-            m1_md = m1_art.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        m1_md = read_text_bounded(m1_art)
+        if m1_md is None:
+            errs.append(f"{ARTIFACTS_REL}/M1_acronyms.md could not be read (unreadable, "
+                        f"non-regular, or over the byte budget)")
             m1_md = ""
         n_m1b = m1b_row_count(m1_md)
         if n_m1b:
@@ -3503,53 +3529,66 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
     `prior_round/`, which made the convergence gate vacuous.
     """
     dst = ctx.reports_dir / f"round{int(r)}_review"
-    rec = ctx.run(rid_guided_review(r))
-    if rec is None:
-        return dst
-    sb = ctx.sandbox_of(rec)
+    rec = ctx.run(rid_guided_review(r)) if guided_review_enabled(ctx) else None
+    sb = ctx.sandbox_of(rec) if rec is not None else None
     b_sb = None
-    try:
-        if review_split_of(ctx) != "off":
-            rec_b = ctx.run(rid_guided_review_b(r))
-            b_sb = ctx.sandbox_of(rec_b) if rec_b is not None else None
-    except Exception:                                            # noqa: BLE001
-        b_sb = None
+    if rec is not None:
+        try:
+            if review_split_of(ctx) != "off":
+                rec_b = ctx.run(rid_guided_review_b(r))
+                b_sb = ctx.sandbox_of(rec_b) if rec_b is not None else None
+        except Exception:                                        # noqa: BLE001
+            b_sb = None
 
-    def _src(rel: str) -> Path:
-        if b_sb is not None and (b_sb / rel).is_file():
-            return b_sb / rel
-        return sb / rel
+        def _src(rel: str) -> Path:
+            if b_sb is not None and (b_sb / rel).is_file():
+                return b_sb / rel
+            return sb / rel
 
-    mapping = ((FINDINGS_REL, "findings.json"),
-               (FINDINGS_MD_REL, "findings.md"),
-               ("guided_review/round2/findings_extra.json", "findings_extra.json"),
-               ("guided_review/round2/findings_extra.md", "findings_extra.md"),
-               ("guided_review/round2/new_sweeps.md", "new_sweeps.md"),
-               ("guided_review/round2/round2_summary.md", "round2_summary.md"))
-    for rel, name in mapping:
-        p = _src(rel)
-        # A FILE symlink is not a review deliverable: `copy2` would archive the
-        # link target's bytes (outside content) as the round's frozen finding
-        # list (F50/F51).
-        if not p.is_file() or p.is_symlink():
-            continue
+        mapping = ((FINDINGS_REL, "findings.json"),
+                   (FINDINGS_MD_REL, "findings.md"),
+                   ("guided_review/round2/findings_extra.json", "findings_extra.json"),
+                   ("guided_review/round2/findings_extra.md", "findings_extra.md"),
+                   ("guided_review/round2/new_sweeps.md", "new_sweeps.md"),
+                   ("guided_review/round2/round2_summary.md", "round2_summary.md"))
+        for rel, name in mapping:
+            p = _src(rel)
+            # A FILE symlink is not a review deliverable: `copy2` would archive
+            # the link target's bytes (outside content) as the round's frozen
+            # finding list (F50/F51).
+            if not p.is_file() or p.is_symlink():
+                continue
+            try:
+                dst.mkdir(parents=True, exist_ok=True)
+                if name == "findings_extra.json":
+                    # Archive the MERGED list (the review's X-* rows plus the probe
+                    # session's X-9xx rows), exactly as every downstream copy holds
+                    # it. The next round's prior_round/ copy and its reconciliation
+                    # gate then cover probe findings with no extra machinery -- a
+                    # defect the probe found cannot vanish between rounds.
+                    base = read_json(p, revive=False, lenient=True)
+                    merged, _rows, _remap = cold_start_merged_review_doc(
+                        ctx, r, base if isinstance(base, dict) else {})
+                    if merged is not None:
+                        write_json_atomic(dst / name, merged)
+                        continue
+                shutil.copy2(p, dst / name)
+            except OSError:
+                continue
+    # `--no-guided-review`: there is no guided-review sandbox, but the round's
+    # frozen list is still the synthesized view the auditor/revisers read. Write
+    # it where `review_findings_rows()` looks, or the archive (and the
+    # decision report's finding list) silently loses every X-9xx row (F03).
+    if frozen_review_is_synthesized(ctx):
         try:
             dst.mkdir(parents=True, exist_ok=True)
-            if name == "findings_extra.json":
-                # Archive the MERGED list (the review's X-* rows plus the probe
-                # session's X-9xx rows), exactly as every downstream copy holds
-                # it. The next round's prior_round/ copy and its reconciliation
-                # gate then cover probe findings with no extra machinery -- a
-                # defect the probe found cannot vanish between rounds.
-                base = read_json(p, revive=False, lenient=True)
-                merged, _rows, _remap = cold_start_merged_review_doc(
-                    ctx, r, base if isinstance(base, dict) else {})
-                if merged is not None:
-                    write_json_atomic(dst / name, merged)
-                    continue
-            shutil.copy2(p, dst / name)
+            write_json_atomic(dst / "findings.json", _frozen_review_doc(r))
+            write_json_atomic(dst / "findings_extra.json",
+                              {"findings": list(cold_start_findings_rows(ctx, r) or []),
+                               "source": "cold_start_review", "guided_review": "off",
+                               "named_gap": GUIDED_REVIEW_GAP})
         except OSError:
-            continue
+            pass
     # The COLD-START REVIEW session's deliverables are archived beside the review's, so a
     # pruned root can still re-seed the same frozen list (`findings_cold_start_review.json`)
     # and the operator keeps the reproduction record with the round's review.
@@ -3568,6 +3607,22 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
                 shutil.copy2(p, dst / name)
             except OSError:
                 continue
+    # A concern-scoped round's producer is the CONCERNS run: archive the ledger
+    # and its coverage beside the review deliverables, so a pruned root keeps
+    # the round's finding source (F03).
+    if journal_is_scoped(ctx):
+        con = ctx.run(rid_concerns(r))
+        if con is not None and str(con.get("status") or "") == "done":
+            csrc = ctx.sandbox_of(con) / "concerns"
+            if csrc.is_dir():
+                for p in sorted(csrc.iterdir()):
+                    if not p.is_file() or p.is_symlink():
+                        continue
+                    try:
+                        dst.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(p, dst / p.name)
+                    except OSError:
+                        continue
     # The CSV export of the same findings rides beside the archive (one row per
     # finding, with the review's own evidence/explanation as the verbal
     # description), so an operator gets the round's defect list without parsing
@@ -3587,8 +3642,14 @@ def prior_review_dir(ctx: Ctx, r: int):
     arch = ctx.reports_dir / f"round{int(r) - 1}_review" / "findings.json"
     if arch.is_file():
         return arch.parent
-    rec = ctx.run(rid_guided_review(r - 1))
-    if rec is not None:
+    # Under --review-split the frozen list is session B's MERGED output; reading
+    # A alone handed the next review a partial list (F38). Prefer B, then A.
+    candidates = ([rid_guided_review_b(r - 1), rid_guided_review(r - 1)]
+                  if review_split_of(ctx) != "off" else [rid_guided_review(r - 1)])
+    for rid in candidates:
+        rec = ctx.run(rid)
+        if rec is None:
+            continue
         sb = ctx.sandbox_of(rec) / GUIDED_REVIEW_DIR
         if (sb / "findings.json").is_file():
             return sb
@@ -4592,7 +4653,9 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
             if not inside_squat(rel):
                 try:
                     (cand_dir / rel).unlink()
-                except OSError:
+                except OSError as e:
+                    warns.append(f"READ-ONLY raw data: could not remove added file "
+                                 f"{rel}: {e}")
                     continue
                 dropped.append(rel)
         # A directory the package had lost (or made writable) comes back with the
@@ -4734,7 +4797,9 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
                 continue
             try:
                 (cand_dir / rel).unlink()
-            except OSError:
+            except OSError as e:
+                warns.append(f"READ-ONLY {label} review feedback: could not remove added "
+                             f"file {rel}: {e}")
                 continue
             dropped.append(rel)
         for src_dir in [src, *[p for p in sorted(src.rglob("*")) if p.is_dir()]]:
@@ -5767,10 +5832,7 @@ def judge_cover_letter_artifact_problems(sb: Path, target_rows: list) -> list:
     problems = []
     rel = "judge_review/artifacts/M20_formatting.md"
     path = sb / rel
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
-    except OSError:
-        raw = ""
+    raw = read_text_bounded(path) or ""
     if "FMT-CL1" not in raw.upper():
         problems.append(
             f"{rel} does not record the target's {len(target_rows)} FMT-CL1 row(s) "
@@ -6681,10 +6743,7 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     tables, digests = {}, {}
     for rel in review_repair_table_rel_paths(sb):
         path = sb / GUIDED_REVIEW_DIR / rel
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            text = ""
+        text = read_text_bounded(path) or ""
         tables[rel] = {"rows": _repair_table_rows(text), "skeleton": _repair_table_skeleton(text)}
         try:
             digests[rel] = sha256_file(path)          # the repair's own diff, for the record
@@ -6725,7 +6784,11 @@ def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
         if not path.is_file():
             problems.append(f"it DELETED the decision artifact {REL_ARTIFACT_PREFIX}{rel}")
             continue
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = read_text_bounded(path)
+        if text is None:
+            problems.append(f"the decision artifact {REL_ARTIFACT_PREFIX}{rel} cannot be read "
+                            f"(unreadable, non-regular, or over the byte budget)")
+            continue
         now = _repair_table_rows(text)
         if now != rows:
             # Name the FIRST divergence: the operator (and the next session) can

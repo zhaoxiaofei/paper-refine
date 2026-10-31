@@ -28,7 +28,7 @@ exactly as they did in the single-file source. Every part is a real Python file
 | `p16_retry.py` | `retry` |
 | `p17_cli.py` | the argument parser and `main()` |
 | `p18_helpers.py` | the `--only`/`--runs` ROUND/STAGE/SESSION selection grammar (`OnlySpec` and its parsers) plus shared bounded-subprocess/aux-root/text helpers -- split out to keep `p04_utils.py` under 10,000 lines |
-| `p19_profiles.py` | the EXECUTION PROFILE (`high` / `medium`: `medium` pages the elaborative rule blocks out of every stage prompt into `INSTRUCTIONS/PROFILE_RULES.md`) and the TARGETED-REVIEW policy (`--no-targeted-review`: the probe alone, with the targeted classes recorded as a named gap) |
+| `p19_profiles.py` | the EXECUTION PROFILE (`high` / `medium`: `medium` pages the elaborative rule blocks out of every stage prompt into `INSTRUCTIONS/PROFILE_RULES.md`) and the GUIDED-REVIEW switch (`--no-guided-review`: the cold-start review alone, with the guided classes recorded as a named gap) |
 
 **Packaging:** `setup` and `sync-code` copy this directory together with the
 loader. A root without it cannot start, and `pipeline_identity()` records the
