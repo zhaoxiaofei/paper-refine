@@ -1,32 +1,17 @@
 # Round-based revision pipeline (any venue or journal)
 
 `paper_pipeline.py` drives a **round-based, content-addressed revision loop** for a
-manuscript package submitted to **any venue or journal**. The submission rules
-the stages enforce come from a configurable **venue profile** (`set-venue`,
-`setup --venue`), and the target journal is the free-text `set-journal` value —
-Nature Biotechnology is only the default profile (the behaviour of earlier
-versions). Each round produces several candidate versions (rewrites, a
-reviewed-and-revised version, integrations that merge the whole pool), judges
-them blindly against each other, pins the champion by content digest, and feeds
-that champion into the next round. `decide` publishes the final decision report
-and a clean, ready-to-use package.
+manuscript package submitted to **any venue or journal**. Each round builds several
+candidate versions of the submission — full rewrites, a review-and-revise arm, and
+integrations that merge the whole pool — has a blind judge panel score them against
+each other, pins the champion by content digest, and makes that champion the next
+round's base. `decide` re-derives the ranking, writes the decision report, and
+assembles a clean, ready-to-use package. The submission rules the stages enforce come
+from a configurable **venue profile** (`set-venue`, `setup --venue`); the target journal
+is the free-text `set-journal` value, and Nature Biotechnology is only the default
+profile. Running it needs Python 3.9+ and no third-party packages.
 
-**`AGENTS.md` is binding.** Every rule in [AGENTS.md](AGENTS.md) must be respected by
-the code, prompts, tests, documentation and operator-facing behavior. Any violation of any
-such rule is a **bug**, not an acceptable trade-off. In particular, `setup` freezes the
-pipeline, its parts, companion modules, venue profiles and every other relevant runtime asset
-into the `--root` tree; after that, changing the maintained checkout must not change what the
-root executes or reads.
-
-**Finding generation and repair are separate.** The guided reviewer, the cold-start reviewer, the
-review auditor,
-revision auditor, judge and journal concern sessions identify or dispose findings and do not
-edit the target; the reviser, bounded repair and integrator consume findings (and, for an
-integration, the caller-supplied read-only donor candidate source) and must re-verify every
-input item, record a `confirmed`/`rejected` verdict with its evidence, and edit only the
-confirmed items. An integration's `DIFF_LEDGER.md` carries a `revalidated` column; a
-`port`/`synthesize` row without `revalidated: confirmed` fails the stage. See AGENTS.md
-Rules 1A and 1B.
+![One revision round: review → audit → revise, rewrites, integration, then the judge panel picks the champion](media/paper-refine-one-revision-round.png)
 
 **At a glance**
 
@@ -48,75 +33,30 @@ Rules 1A and 1B.
 * **Default plan** — three rounds, two judges per version, two round-1 rewrites
   and one reviewed-and-revised candidate per round; everything is a flag.
 
-## Three ways to run it
+**Where to look**
 
-* **The agent rounds (the default, `continue`).** Point `setup` at a pristine
-  submission directory and run; the pipeline rewrites, reviews, revises,
-  integrates and judges its own candidate rounds, pinning a champion after
-  every round. No external material is required. (The mode was spelled `none`
-  before; that spelling is REMOVED and the mode is `continue`.)
-* **Start a new submission (`init`).** `setup --revision-mode init` conforms the
-  submission to the venue's rules BEFORE round 1: inside the venue's own Word
-  template when one ships, else to the journal's own author guidelines and then
-  to established academic convention. No journal feedback is read and no
-  response letter is written; the rest is the default workflow.
-* **Against a real journal decision.** Put the decision letter and the reviewer
-  reports (plus any previous response to reviewers) in the submission's
-  `human_review_feedback/` directory — and, when you have one, a
-  false-positive-filtered LLM review in `llm_review_feedback/` beside it — then
-  pick one of four workflows with
-  `setup --revision-mode …` (or `set-revision-mode …` on an existing root):
-  **1** `transfer` — revise for a NEW journal; no response to reviewers; rewrites
-  allowed. **2** `resubmit` — a new submission to the SAME journal; a
-  point-by-point response is required; rewrites allowed. **3** `major` — a major
-  revision at the same journal; concern-scoped edits ONLY, with the response;
-  no rewrites and no general review-audit-revise. **4** `minor` — the same, for
-  a minor revision.
+| if you want to… | read |
+| --- | --- |
+| run it for the first time | *Quick start*, then *Requirements* |
+| read the result of a run | *What you get* |
+| look up a command or flag | *Everyday commands*, *Exit codes*, *Operational notes* |
+| choose how to run: own rounds, new submission, or a real journal decision | *Revision modes* |
+| enforce a specific venue's rules | *Venues and journals* |
+| see how one round is built | *Round model* |
+| understand the review / audit / ranking internals | *The auditor*, *The GUIDED review*, *One defect vocabulary* |
+| change the code | *Repository layout*, *Tests*, and **[AGENTS.md](AGENTS.md)** |
 
-## Backward-compatibility removals (2026-10-25)
-
-This tree deliberately keeps **no** compatibility aliases. The breaking changes
-an older command line or root can hit:
-
-* input areas have ONE canonical name each: `non_revised/` and `raw_data/`.
-  `non-revised/` and `raw_figs/` are refused by `setup` and by every command
-  that loads a root — rename once, then re-run; there is no migration step.
-* `--author-to-complete readme|document|off` is the only hand-off spelling. The
-  `--with-author-to-complete-in-readme` / `--with-author-to-complete` /
-  `--without-author-to-complete` aliases and the legacy `on` value are removed.
-* `--non-strict-artifacts` is removed; use `--strict-artifacts off`.
-* the boolean `strict_artifacts` / `strict_dispositions` config keys are no
-  longer read; the current key is the three-valued `artifact_policy`.
-* `set-revision-mode none` is removed; the mode is `continue`.
-* a root without `judge_salt` is refused when a judge token is needed; there is
-  no unsalted fallback.
-* `paper_pipeline.py` and `paper_docx_format.py` are now thin loaders over
-  `paper_pipeline_parts/` and `paper_docx_format_parts/`. `setup` and
-  `sync-code` copy both directories; any external script that copied only the
-  loader must copy the parts directory too (the `.paper_test/bundle_source_lib.py`
-  helper is the in-repo example).
-
-## Fact-preserving repairs
-
-A finding authorizes a correction, not the removal of the fact it quotes. A wrong value,
-number, unit, definition, p-value or significance word is replaced with the correct fact; a
-sentence that is orphaned, misplaced, unused, redundant-sounding or structurally awkward is
-relocated, merged or connected. A separate "unused", length, packaging or style finding never
-turns a correction into a deletion, and an acronym definition or glossary entry that carries a
-wrong expansion is corrected rather than removed. A true duplicate may be deleted only when the
-finding names it and one copy of the same fact survives.
-
-The same rule binds the packaging repair: a dangling pointer at a non-shipped area is rewritten
-to name shipped content or to carry the fact, and the mechanical PKG-2 layer removes only a
-pointer-only sentence -- a sentence carrying a numeric fact is held and reported for a prose
-rewrite. If no honest rewrite exists, the item goes to the manual list; the pipeline does not
-trade a fact for a clean-looking package.
-
-The M4 numbers artifact also enumerates lower/upper ranges printed in descending order,
-including unit-bearing physical ranges (elevation, depth, time, concentration), so a reversed
-range is not left to a decimal-only reading of CIs.
+**Contributors: [`AGENTS.md`](AGENTS.md) is binding.** Every rule in it applies to the code,
+prompts, tests, documentation and operator-facing behaviour, and a violation is a bug, not an
+acceptable trade-off. The two invariants most often missed — the frozen root, and the
+separation of finding generation from repair — are summarized under
+*How this repository is governed* at the end.
 
 ## Quick start
+
+No install step: the pipeline is standard-library only, but it needs Python 3.9+ and an
+agent CLI for its sessions — `codex` (default), `claude`, `dsh`, `qwen`, or `manual` for a
+human-driven run; see *Requirements*. The shortest path:
 
 ```bash
 # 1. create a pipeline root from the pristine submission directory
@@ -150,6 +90,110 @@ python paper_pipeline.py run-decide --root ./paper_rounds
 
 `status --root ./paper_rounds` prints what the root is configured to do at any
 time, and `--help` lists every command and flag.
+
+A finished decision can be certified, provisional or blocked; `decide` exits 4 or 5 in the
+last two cases — see *Exit codes*.
+
+## Requirements
+
+* Python 3.9+ (the pipeline and both companion tools are standard-library only).
+* An agent CLI for the stage sessions: `codex` (default), `claude`, the
+  DeepSeek Harness (`dsh`, the CLI of the same name), Qwen3.8-27B through an
+  OpenAI-compatible vLLM endpoint (`--agent qwen`), or a custom command via
+  `--agent-cmd`; `--agent manual` stages prompts for a human.
+* Optional, probed at runtime and never required: the `docx` CLI (read/render/
+  diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
+  `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
+  `pdftoppm`, the `docx-compare` MCP tool / `docxcompare.sh` (Word's own
+  comparison engine for tracked changes), `latexdiff` (LaTeX difference
+  tracking), and the `zot` CLI for read-only Zotero reference resolution.
+* Optional: the external `zotero-use` skill (`$ZOTERO_SKILL` / `$zotero-use`)
+  that the Zotero stage prompts name for the interactive `zot` route and for
+  their `validate_zotero_docx.py` proof step. That script is NOT bundled here;
+  when the skill is not installed, the pipeline's own code-side live-field
+  inventory and continuity gate (`paper_docx_format.py`, run by every DOCX
+  stage) is the check that actually enforces field preservation, and the
+  prompts' `PROVE IT` step degrades to that gate.
+* The two DOCX MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) read the
+  optional `DOCX_MCP_ALLOWED_ROOTS` environment variable: a PATH-delimiter-
+  separated allowlist of the directories they may read/write. **Unset means no
+  containment** (the tools may touch anything the process can), so set it when
+  an LLM agent drives the servers.
+
+### `--agent dsh`: the DeepSeek Harness (`dsh`) as the session backend
+
+`dsh` is a separate install (node >= 22, `npm i -g @deepseek-ai/dsh@alpha`), and
+the pipeline drives it the way it drives the other two CLIs: one non-interactive
+session per stage, `PROMPT.md` piped on stdin, cwd = the stage's sandbox. The
+argv is `dsh --profile headless --json -`: `headless` is the harness's one-shot
+driver (one fresh persisted session, print the result, exit), and `--json`
+turns its stdout into a newline-delimited event stream whose opening `session`
+line names the session -- which is what lets a stopped session be CONTINUED with
+`--session-id <id>` exactly like a codex one (see *A STOPPED session is
+continued, not restarted*). The harness's own home (`$DSH_HOME`, default
+`~/.dsh`) owns the model, the MCP servers and the DeepSeek credential
+(`DEEPSEEK_API_KEY`), the way `~/.codex/config.toml` owns the codex CLI's -- so
+this preset carries no overrides, and a prompt that wants an MCP tool the
+harness does not have falls back to the next converter in its own list. Since
+that one-shot contract belongs to the installed BUILD rather than to a flag,
+`--agent dsh` reads the harness's own `dsh --profile headless --help` once
+per invocation and names the gap (with the upgrade) up front instead of letting
+every session of a wave fail one by one -- including the conditions that would
+otherwise only appear as a stack trace per session: a build without the one-shot
+flags, and a `node` the harness cannot run under (it needs node >= 22 AND must be
+installed for the node that runs it, so putting a v22 first on PATH does not fix
+a harness `npm i -g`-installed under v18 -- reinstall it under v22). A missing
+`dsh` gets the install line.
+Verified end to end against dsh 0.2.1-alpha.4 and 0.2.0-rc.2. Reached through a
+custom `--agent-cmd` instead (e.g. the npx form, for a machine with no global
+install), the sessions run exactly the same way but keep the custom-command
+rule: no continuation form, so a stopped session gets a fresh attempt.
+
+### `--agent qwen`: Qwen3.8-27B through an OpenAI-compatible vLLM endpoint
+
+`--agent qwen` points an existing harness at a vLLM server instead of
+reimplementing the agent loop. The adapter, `paper_qwen_agent.py`, is copied
+beside the root's driver at `setup` and travels through `sync-code`. It chooses
+the harness with `PAPER_QWEN_HARNESS`:
+
+* `codex` (default) — `codex exec` with a custom `model_provider=qwen` route.
+  The installed codex accepts only `wire_api="responses"`; vLLM exposes
+  `/v1/responses`, so the route uses it. Qwen rejects codex's `max` reasoning
+  effort; the adapter defaults to `low` (`PAPER_QWEN_REASONING_EFFORT`).
+* `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` provider patch
+  and an `agent-default-model` override for the qwen route.
+* `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
+
+The endpoint is `PAPER_QWEN_BASE_URL` (default
+`http://127.0.0.1:18000/v1`), model `PAPER_QWEN_MODEL` (default
+`qwen3.8-27b`), and key `PAPER_QWEN_API_KEY` (default `dummy`; vLLM usually
+needs none). When the endpoint is not reachable the adapter starts the SSH
+tunnel:
+
+```
+ssh -p 52080 -N -L 18000:127.0.0.1:8000 zxf@101.6.31.113
+```
+
+(`PAPER_QWEN_SSH_HOST`, `PAPER_QWEN_SSH_PORT`, `PAPER_QWEN_TUNNEL_LOCAL`,
+`PAPER_QWEN_TUNNEL_REMOTE`; `PAPER_QWEN_TUNNEL=off` forbids starting it). A
+tunnel the adapter started is stopped on exit; an operator's existing tunnel is
+left alone. Check the route without running a session:
+
+```
+python3 paper_qwen_agent.py --probe          # endpoint, model, tool support
+python3 paper_qwen_agent.py --check-tools    # exit 0/1 on tool_choice=auto
+printf 'Summarize this file: ...' | python3 paper_qwen_agent.py --chat
+```
+
+**Agentic sessions need tool calls.** vLLM accepts `tool_choice=auto` only
+when started with `--enable-auto-tool-choice --tool-call-parser <parser>` (and
+a model tool template). Without that flag, dsh fails a tool-using turn and
+codex's tools are not executed; the adapter warns on a dsh run and reports the
+gap in `--probe`. `--harness chat` is a text-only route and does not complete a
+pipeline stage that must write artifacts. Set `PAPER_QWEN_REQUIRE_TOOLS=1` to
+make the tool probe a hard preflight for a production run (the default is
+warn-and-run so the adapter can still be exercised against a text-only
+endpoint).
 
 ## What you get
 
@@ -292,395 +336,188 @@ evidence pack.
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
 | `--skip-hash` (every command except `selfcheck` and `adopt-sweep`) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
 
-## Requirements
+## Exit codes
 
-* Python 3.9+ (the pipeline and both companion tools are standard-library only).
-* An agent CLI for the stage sessions: `codex` (default), `claude`, the
-  DeepSeek Harness (`dsh`, the CLI of the same name), Qwen3.8-27B through an
-  OpenAI-compatible vLLM endpoint (`--agent qwen`), or a custom command via
-  `--agent-cmd`; `--agent manual` stages prompts for a human.
-* Optional, probed at runtime and never required: the `docx` CLI (read/render/
-  diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
-  `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
-  `pdftoppm`, the `docx-compare` MCP tool / `docxcompare.sh` (Word's own
-  comparison engine for tracked changes), `latexdiff` (LaTeX difference
-  tracking), and the `zot` CLI for read-only Zotero reference resolution.
-* Optional: the external `zotero-use` skill (`$ZOTERO_SKILL` / `$zotero-use`)
-  that the Zotero stage prompts name for the interactive `zot` route and for
-  their `validate_zotero_docx.py` proof step. That script is NOT bundled here;
-  when the skill is not installed, the pipeline's own code-side live-field
-  inventory and continuity gate (`paper_docx_format.py`, run by every DOCX
-  stage) is the check that actually enforces field preservation, and the
-  prompts' `PROVE IT` step degrades to that gate.
-* The two DOCX MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) read the
-  optional `DOCX_MCP_ALLOWED_ROOTS` environment variable: a PATH-delimiter-
-  separated allowlist of the directories they may read/write. **Unset means no
-  containment** (the tools may touch anything the process can), so set it when
-  an LLM agent drives the servers.
+| code | meaning |
+|---|---|
+| 0 | success (`decide`: certified decision; `run`: every configured round complete) |
+| 1 | a run failed / the process hit an error |
+| 2 | nothing to decide yet, or a usage error |
+| 3 | a round is incomplete (progress saved; resume with `run`) |
+| 4 | a valid stopping point that is not a certified answer: `decide --require-complete` on a provisional decision, or `redline` with failed renders (when a tool was used) |
+| 5 | `decide` found integrity problems, (with `--format-gate`) high-severity formatting problems, or (with `--require-ready`) package-level readiness findings |
 
-### `--agent dsh`: the DeepSeek Harness (`dsh`) as the session backend
+## Operational notes
 
-`dsh` is a separate install (node >= 22, `npm i -g @deepseek-ai/dsh@alpha`), and
-the pipeline drives it the way it drives the other two CLIs: one non-interactive
-session per stage, `PROMPT.md` piped on stdin, cwd = the stage's sandbox. The
-argv is `dsh --profile headless --json -`: `headless` is the harness's one-shot
-driver (one fresh persisted session, print the result, exit), and `--json`
-turns its stdout into a newline-delimited event stream whose opening `session`
-line names the session -- which is what lets a stopped session be CONTINUED with
-`--session-id <id>` exactly like a codex one (see *A STOPPED session is
-continued, not restarted*). The harness's own home (`$DSH_HOME`, default
-`~/.dsh`) owns the model, the MCP servers and the DeepSeek credential
-(`DEEPSEEK_API_KEY`), the way `~/.codex/config.toml` owns the codex CLI's -- so
-this preset carries no overrides, and a prompt that wants an MCP tool the
-harness does not have falls back to the next converter in its own list. Since
-that one-shot contract belongs to the installed BUILD rather than to a flag,
-`--agent dsh` reads the harness's own `dsh --profile headless --help` once
-per invocation and names the gap (with the upgrade) up front instead of letting
-every session of a wave fail one by one -- including the conditions that would
-otherwise only appear as a stack trace per session: a build without the one-shot
-flags, and a `node` the harness cannot run under (it needs node >= 22 AND must be
-installed for the node that runs it, so putting a v22 first on PATH does not fix
-a harness `npm i -g`-installed under v18 -- reinstall it under v22). A missing
-`dsh` gets the install line.
-Verified end to end against dsh 0.2.1-alpha.4 and 0.2.0-rc.2. Reached through a
-custom `--agent-cmd` instead (e.g. the npx form, for a machine with no global
-install), the sessions run exactly the same way but keep the custom-command
-rule: no continuation form, so a stopped session gets a fresh attempt.
+* `--root` and `--source` must not be nested; `setup` refuses a non-empty root.
+  `setup` also refuses to freeze another pipeline root's SNAPSHOT of the script
+  into the new root: running `<old-root>/paper_pipeline.py setup …` freezes THAT
+  copy, so every later `run` would execute code that may predate the fixes in the
+  tree you maintain (the 2026-10-15 neohet-12to13 root was set up that way, ran a
+  two-day-old snapshot for its whole life, and silently re-found defects the
+  origin tree had already closed). Run the origin tree's `paper_pipeline.py`, or
+  pass `--pipeline-snapshot-ok` when freezing that exact snapshot is what you
+  intend; `status` prints which code the root runs and whether the origin tree
+  has moved on since.
+* `--skip-hash` (accepted by every command except `selfcheck` and
+  `adopt-sweep`) skips the integrity VERIFICATION
+  passes for that ONE invocation — the pristine copy, the pinned champions, the
+  published winners, every completed run's frozen inputs, the judge-view digests
+  and the a1 base digest. Digests are still RECORDED (state.json, the pins, the
+  fingerprints and every run's own `corpus_digest`), so a later invocation
+  without the flag verifies the same chain; `status`, `decision.json`'s
+  `integrity`/`certification` blocks and `final_clean_version.readme.md` all say
+  the checks were SKIPPED, and `certification.hash_checks` records `verified`
+  or `skipped`. NOT skipped: the within-invocation freshness checks that decide
+  what an agent reads, and the `raw_data/`/review-feedback read-only
+  enforcement (which restores a stage's write and reports it). The flag is for
+  a big root you trust (or to get past a chain you intend to repair), not for a
+  decision you mean to sign as verified.
+* The pipeline never edits the operator's `--source`; every copy it makes
+  (`non_revised/`, `base/`, pins, winners) is digest-verified, and the
+  corpus's read-only `raw_data/` directory (see "The input and evidence areas") is
+  restored from that pristine copy whenever a stage touches it.
+* That read-only contract is taken literally: `raw_data/`,
+  `human_review_feedback/` and `llm_review_feedback/` (and everything inside them) may be
+  `chmod -R a-w`, so the pipeline never needs write permission there — `setup`,
+  publication of `final_clean_version_<root name>/`, pruning, retries and the
+  restore-from-pristine step all work on a read-only tree, and the modes the
+  author set are preserved in every copy. The restore step is the only thing
+  that writes there, and it puts the modes back exactly as it found them; the
+  generation-counter rename never reaches inside either area.
+* On WSL, `/mnt/c` occasionally returns transient `EIO` errors under a synced
+  folder; re-running the affected command is safe (the pipeline is resumable).
 
-### `--agent qwen`: Qwen3.8-27B through an OpenAI-compatible vLLM endpoint
+## Revision modes: `continue`, `init`, the journal modes (options 1–4), and `llm` (5)
 
-`--agent qwen` points an existing harness at a vLLM server instead of
-reimplementing the agent loop. The adapter, `paper_qwen_agent.py`, is copied
-beside the root's driver at `setup` and travels through `sync-code`. It chooses
-the harness with `PAPER_QWEN_HARNESS`:
+**Pick by what you have at hand.** With no external material, the default `continue`
+workflow rewrites, reviews, revises, integrates and judges its own rounds; nothing else is
+required. Starting a new submission, `init` conforms it to the venue's rules before round 1 —
+inside the venue's own Word template when one ships, else to its author guidelines and then
+to established academic convention (`--no-template-stage` opts out). Revising against a real
+journal decision, put the decision letter and the reviewer reports in the corpus's
+`human_review_feedback/` directory (plus any previous response to reviewers, as context)
+and, when you have one, a false-positive-filtered review in `llm_review_feedback/` beside
+it, then choose one of the four journal modes below. A machine-generated review on its own
+drives `llm` (option 5).
 
-* `codex` (default) — `codex exec` with a custom `model_provider=qwen` route.
-  The installed codex accepts only `wire_api="responses"`; vLLM exposes
-  `/v1/responses`, so the route uses it. Qwen rejects codex's `max` reasoning
-  effort; the adapter defaults to `low` (`PAPER_QWEN_REASONING_EFFORT`).
-* `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` provider patch
-  and an `agent-default-model` override for the qwen route.
-* `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
+A root can be driven against a REAL journal decision letter instead of the
+pipeline's own review rounds. `setup --revision-mode <mode>` (or
+`set-revision-mode <mode>` on an existing root) selects one of the workflows
+below. Two of them read no feedback at all: **`continue`** (the default; the
+pipeline's own guided-review/revise rounds — the mode was spelled `none` before, and
+that spelling is REMOVED) and **`init`** (start a NEW
+submission: the `conform` stage runs BEFORE round 1 — inside the venue's own
+Word template when one ships, else to the journal's own author guidelines and
+then to established academic convention — and everything after it is the
+`continue` workflow). `--no-template-stage` opts `init` out of the conform
+stage. In the four journal modes the feedback file(s) are named with
+`--journal-feedback FILE` (repeatable) or auto-detected in the corpus by name — typically
+`raw_data/iScience_feedback_from_reviewers_and_editors.txt`.
 
-The endpoint is `PAPER_QWEN_BASE_URL` (default
-`http://127.0.0.1:18000/v1`), model `PAPER_QWEN_MODEL` (default
-`qwen3.8-27b`), and key `PAPER_QWEN_API_KEY` (default `dummy`; vLLM usually
-needs none). When the endpoint is not reachable the adapter starts the SSH
-tunnel:
+**`llm` (option 5)** revises against the false-positive-filtered
+`llm_review_feedback/` area ONLY (no journal decision letter, no response
+letter). It is selected only by an explicit `--revision-mode llm` (or
+`set-revision-mode llm`). A non-empty `llm_review_feedback/` in `--source` does
+not change the otherwise-unconfigured `continue` workflow; `setup` prints a
+note naming the explicit mode when the area is present. Renaming the directory
+to `llm_review_feedback.disabled` (or `.off`) keeps it INERT (never read as
+feedback or evidence, never part of the submission, never shown to a judge).
+If `human_review_feedback/` is present too, mode `llm` reads ONLY the LLM
+stream; pass an explicit journal mode (transfer/resubmit/major/minor) when the
+human letter should drive the revision.
 
-```
-ssh -p 52080 -N -L 18000:127.0.0.1:8000 zxf@101.6.31.113
-```
+| option | mode | what it is | response to reviewers | rewrites | edits |
+|---|---|---|---|---|---|
+| — | `continue` | the pipeline's own guided-review/revise rounds (the default) | **not written** | allowed | the round's full review |
+| — | `init` | start a **new submission**: conform to the venue's template (or its guidelines → academic convention when no template ships) first, then the default rounds | **not written** | allowed | the round's full review |
+| option 1 | `transfer` | revise for a **new journal** (e.g. read iScience, submit to Frontiers in Immunology) | **not written** | allowed | the round's full review + the decision letter's concerns |
+| option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
+| option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review, no audit, no judge panel |
+| option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only |
+| option 5 | `llm` | revise against the pre-filtered `llm_review_feedback/` area only (explicit selection only; an unconfigured root remains on `continue`) | **not written** | allowed | the round's full review + the LLM review's concerns |
 
-(`PAPER_QWEN_SSH_HOST`, `PAPER_QWEN_SSH_PORT`, `PAPER_QWEN_TUNNEL_LOCAL`,
-`PAPER_QWEN_TUNNEL_REMOTE`; `PAPER_QWEN_TUNNEL=off` forbids starting it). A
-tunnel the adapter started is stopped on exit; an operator's existing tunnel is
-left alone. Check the route without running a session:
+**The pre-filtered `llm` area supplements the normal full review; it never replaces it.** Options 3–4 are concern-scoped major/minor modes: their edits are confined to the admitted human concerns, and their base is the previously reviewed submission — the round itself stages no general review, no audit and no judge panel. Where a mode replaces the general review, every class the external pre-filter dropped and every class the concern ledger does not cover is recorded as a named gap, never treated as clean.
 
-```
-python3 paper_qwen_agent.py --probe          # endpoint, model, tool support
-python3 paper_qwen_agent.py --check-tools    # exit 0/1 on tool_choice=auto
-printf 'Summarize this file: ...' | python3 paper_qwen_agent.py --chat
-```
+How each mode runs:
 
-**Agentic sessions need tool calls.** vLLM accepts `tool_choice=auto` only
-when started with `--enable-auto-tool-choice --tool-call-parser <parser>` (and
-a model tool template). Without that flag, dsh fails a tool-using turn and
-codex's tools are not executed; the adapter warns on a dsh run and reports the
-gap in `--probe`. `--harness chat` is a text-only route and does not complete a
-pipeline stage that must write artifacts. Set `PAPER_QWEN_REQUIRE_TOOLS=1` to
-make the tool probe a hard preflight for a production run (the default is
-warn-and-run so the adapter can still be exercised against a text-only
-endpoint).
+* **The four journal modes** enumerate the letter into a concern ledger
+  (`concerns/JF_concerns.json|md`: one row per distinct concern, verbatim
+  quote — checked against the text rendering of the feedback — plus `action`
+  and `disposition`). The feedback is EXTERNAL prose: it never becomes a
+  finding quote about the authors, and it never enters the submission package.
+  The primary source is the corpus's `human_review_feedback/` area (any file
+  name, including non-English ones; a `response_to_reviewers` file there is
+  previous-response CONTEXT, not a concern); an older shape — a
+  feedback-named file under `raw_data/` — is still detected. A child
+  `original_submission/` is never discovered as a letter: it is staged
+  READ-ONLY and separately under `feedback/original_submission/`, and every
+  journal stage may read it only as the reviewer-visible earlier manuscript.
+  A sibling `llm_review_feedback/` area is read too, when present: its
+  remaining findings were already filtered for false positives, so they are
+  enumerated with the same standing as the human points (staged under
+  `feedback/llm/`, origin kept in the ledger's `source`/`author` columns, and
+  never silently dropped).
+* **Options 1–2** feed the ledger into the normal round: the review reconciles
+  every concern (`guided_review/concerns_reconciled.json`) and files a `check: "JF"`
+  finding for each unanswered one; the rewrites carry the concern block; the
+  revise arms answer the findings; the judge panel and `decide` work as usual.
+* **Options 3–4** run a different, restricted path: `r1_concerns` produces the
+  ledger AND the only finding list (`check: "JF"`, one finding per concern);
+  the single `r1_a2_revise` session edits the manuscript ONLY for those ids
+  (every other observation goes to `MANUAL_STEPS.md`), and the code-side scope
+  guard fails the attempt for a changed file the ledger does not name or a
+  file added/removed. There is no judge panel and no champion decision —
+  `decide` reports the scoped revision instead.
+* **Option 5 (`llm`)** runs like options 1–2 (the normal round with the concern
+  ledger reconciled by the review, rewrites allowed) with two differences: only
+  `llm_review_feedback/` feeds the ledger (a human letter in the same corpus is
+  ignored as a concern source, though it stays evidence for the judges), and no
+  response letter or `journal_submission/` package is produced — there is no
+  journal to submit to. The mode is selected only with `--revision-mode llm`
+  (or `set-revision-mode llm`); the directory's presence is not a selector.
+* **Options 2–4** then run a response stage: `RESPONSE_TO_REVIEWERS.md` +
+  `response_map.json`, one block/row per concern, every cited file verified to
+  exist in the final package, `planned` rows forbidden from claiming results,
+  and a new-experiment concern required to cite its new data.
+* **The four journal modes** finish by assembling `<root>/journal_submission/`: the final
+  package minus `raw_data/` and — unless `--submit-code on` /
+  `set-submit-code on` asks for it — the analysis-code area (`code/`), minus
+  every `README*.md`/`README*.txt` file (the author's own documentation, never
+  submitted), minus the pipeline's bookkeeping and revision auxiliaries (plus
+  the response letter when the mode requires one), with
+  `<root>/journal_submission.json` recording the mode and the manifest
+  (`raw_data_included: false`, `code_included` the policy's real value, and
+  `readme_files_excluded` the files that were dropped).
+  When a
+  mode requires a letter and none exists, the package is NOT assembled. When
+  the round produced tracked changes (`redlines/<version>/from-original/`), the
+  marked-up copies ship in `journal_submission/tracked_changes/` BESIDE the
+  clean documents.
 
-## Evidence is not submission text: `raw_data/` and the review-feedback areas
-
-A submission directory may carry **read-only evidence areas** beside its
-manuscript files:
-
-* **`raw_data/`** — factual evidence (measurements, tables, figures' source
-  data, protocols, notes). The stages READ it to check facts; it is never
-  treated as the manuscript, a cover letter or supplementary information, and it
-  is never shipped in the published package.
-* **`human_review_feedback/`** — the REAL editors'/reviewers' comments (the
-  decision letter, the reviewer reports, a previous response to reviewers). The
-  four journal-feedback revision modes read it, and the blind judges may read the
-  evidence areas (`evidence/raw_data/…`, `evidence/human_review_feedback/…`)
-  because correctness and "were the humans' concerns addressed" cannot be
-  judged without them. It is never copied into the submission package either.
-  When it carries a child `original_submission/`, that child is the manuscript
-  version the previous journal's editors/reviewers actually saw — still
-  evidence, never the current submission: the journal stages read it only to
-  resolve what a raised concern refers to and whether the current `base/`
-  already answers it (a concern that no longer exists is `already-addressed` or
-  `not-applicable`, never a `to-fix` row whose location exists only there), and
-  it is never swept, counted or quoted as the authors' current prose.
-* **`llm_review_feedback/`** — an optional machine-generated review of the
-  previous submission whose false-positive findings were filtered out upstream
-  (any file types). The journal modes stage it beside the human feedback
-  (`feedback/llm/…`) and enumerate every remaining finding as a real concern
-  with the same standing as a human reviewer's point; the blind judges read it
-  under `evidence/llm_review_feedback/…` and judge how a version addresses it.
-  A finding is never dismissed merely because a model wrote it, and a row the
-  authors still believe is wrong is closed `not-applicable`/`disagree` with a
-  recorded rationale — never silently dropped. It is read-only evidence, never
-  submission text.
-
-The analysis-code area **`code/`** is not submitted by default either, and is
-handled the same way on the submission surface: it is revision content — a
-stage may revise it, the judges evaluate it and M30 reads it as a producer, so
-a corpus, a pin and a published winner carry it — but the journal submission
-copy **strips it exactly like `raw_data/`**, `journal_submission.json` records
-the actual `code_included`, and a to-be-submitted document may not refer into
-it: a response-to-reviewers letter whose `changes`/`new_data` cites a `code/`
-path fails its postcheck (`code/` is not a submission document — the fix is
-described in the response text, and the submission document that carries it is
-cited instead). `setup --submit-code on` (or `set-submit-code on` on an
-existing root) submits the area instead: the copy then carries `code/` and the
-letter may cite it like any other package file. The policy only decides what
-the next assembly of `journal_submission/` carries — it never touches a pin, a
-score or a champion. The author's own documentation is never submitted either:
-**every file whose name matches `README*.md` or `README*.txt`, at any depth, is
-dropped from the submission copy** (it stays in the corpus, the pin and the
-published winner — it is treated like `code/` for submission purposes, with no
-opt-in switch), `journal_submission.json` records `readme_files_excluded`, and a
-to-be-submitted document may not refer to one. The same rule covers every
-submitted file, not just the
-letter: **a to-be-submitted file may point only at what the submission itself
-carries**, and a pointer to anything else is a `PKG-2` defect that the pipeline
-**removes** rather than ships. Both reference shapes are found — an
-area-prefixed path (`code/…`, `raw_data/…`) and a bare file NAME the package
-holds only outside the submission (a script under `code/`, the `raw_data/`
-archive, a `README*.md`), resolved against the package's own file list — and the
-unit of removal is the SENTENCE that carries the pointer, never a splice inside
-one (a heading line is never swallowed with it, and a sentence carrying a live
-citation field, or a structural file such as `.csv`/`.json`, is left alone and
-reported for the author). The removal runs in every package-producing stage's
-postcheck (so the version that is judged and pinned is already clean) and again
-on the published package and the journal submission (so a champion that IS the
-base/original — it never passed a stage — is repaired too); the pin and the
-winner keep the bytes they were hashed with. Every removed sentence is recorded
-VERBATIM in the run record (`runs/<id>/PKG2_<id>.json`), in
-`journal_submission.json` (`removed_dangling_references`), in
-`reports/decision.json` and in `final_clean_version.readme.md`, and whatever the
-mechanical layer may not touch stays a `PKG-2` row under
-`non_submitted_references` — printed as an author action, never a silent
-deletion and never a failure.
-
-The same scan reads a document's PARTS, not only its text: a `.rels`
-relationship whose target is an absolute local path (`file:///C:\Users\<someone>
-\…\template.dotx`, which the venue's own Word template attaches to every package
-restyled with it) is a pointer nobody can open and names the machine it was
-authored on. The attached-template link is **removed** together with its own
-relationship (every other part stays byte-identical), the other kinds are
-reported, and the judge's blind view neutralizes such targets in place so the
-panel never reads a machine path.
-
-Every evidence area is hash-pinned, and any stage write into it is restored and
-reported.
-
-### Hand-off items: `--author-to-complete readme|document|off`
-
-The revision stages are forbidden to invent content, so a missing mandatory item
-(a statement, an accession, an unreadable field, a whole required file) is
-handed to the author. **Where** that note lives is the operator's choice:
+With no `--revision-mode` the default is `continue` and nothing above runs: the
+historical workflow is byte-for-byte unchanged (no journal stages in the round
+plan, no journal block in any prompt, no new files). The removed `none`
+spelling is not accepted; the mode is always `continue`.
 
 ```bash
-# default (readme): no document carries the marker. Each missing item is
-# recorded in ONE README-AUTHOR-TO-COMPLETE.md in the package root, beside the
-# cover letter and main text; the README is never submitted (README*.md is
-# dropped from journal_submission/), and a marker that still ships is a defect
-python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
-    --author-to-complete readme
+# option 1: iScience -> Frontiers in Immunology, no response letter
+# (select the TARGET journal's venue profile: the rules every stage enforces)
+python paper_pipeline.py setup --source ./submission --root ./rounds \
+    --venue frontiers-in-immunology --journal "Frontiers in Immunology" \
+    --revision-mode transfer \
+    --journal-feedback-from iScience
 
-# document: the marker convention -- a missing item is
-# scaffolded with the literal "[AUTHOR TO COMPLETE: ...]" token and listed for
-# the author; the marker itself is a legitimate hand-off
-python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
-    --author-to-complete document
+# option 3: major revision at the same journal (feedback auto-detected in
+# human_review_feedback/; an llm_review_feedback/ area is read too when present)
+python paper_pipeline.py setup --source ./submission --root ./rounds \
+    --journal iScience --revision-mode major --journal-feedback-from iScience
+python paper_pipeline.py run --root ./rounds
+python paper_pipeline.py status --root ./rounds   # shows the mode and the package
 
-# off: no file may carry the token. The item is left out of the document (a
-# whole missing file is NOT scaffolded as a document of instructions) and
-# recorded in the package's own MANUAL_STEPS.md / CHANGELOG.md; a marker that
-# still reaches a delivered package is a DEFECT, not a neutral hand-off
-python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
-    --author-to-complete off
-
-python paper_pipeline.py set-author-to-complete --root ./paper_rounds readme   # flip later
+# changing the mode on an existing (not yet run) root
+python paper_pipeline.py set-revision-mode minor --root ./rounds
 ```
-
-The switch rewrites the rule in EVERY prompt -- including the master-prompt
-excerpts and the end-of-prompt reminders that restate it -- and it reaches the
-cold-start review, the auditor and the blind judge in their own provenance-free wording.
-Under `readme` (the default) and `off`, a stage that ADDS a marker fails its
-attempt, a marker still in the delivered package is a gating residual and an
-`AUTH-1` readiness finding, and the item moves to
-`README-AUTHOR-TO-COMPLETE.md` (readme) or `MANUAL_STEPS.md` (off). The readme
-mode also moves an item a stage left in `MANUAL_STEPS.md` in marker form into
-the README mechanically, so the hand-off cannot disappear when the bookkeeping
-file is stripped from the version corpus. The README is dropped from
-`journal_submission/` exactly like every `README*.md`, is never part of a judge
-view, and no submitted document may depend on it; `AUTH-2` names it (and its
-item count) as a blocking readiness finding until the author disposes it. It is
-also excluded from the package's content-hash version token, so generating or
-updating the checklist never makes the stage's document names stale.
-
-The underlying gap counts exactly as before (AGENTS.md rule 5): the marker never
-made a package better or worse; only who carries the note -- the package README,
-the manuscript (document), or the manual-steps list (off) -- changes. The
-delivered CopyNumBench main text still carried `[AUTHOR TO COMPLETE: versions of
-bedtools, Seurat, cellsnp-lite and UCSC liftOver]`, and the NeoHeteroclitic
-Reporting Summary was six markers and no filled form; `readme` is the default
-setting for a package that is about to be uploaded, and `off` remains available
-for an operator who wants every hand-off in the internal manual-steps report.
-
-### What an evidence-area file may be referenced for (PKG-10)
-
-The operator's rule for these packages: **files in `raw_data/` (and its
-siblings) cannot be referenced by the main manuscript**, except:
-
-* **figures and tables** the submission itself carries -- a figure file whose
-  bytes are embedded in a submitted document (the CopyNumBench main text embeds
-  `raw_data/Fig3_ploidy_balloons.png` byte for byte as `word/media/image3.png`),
-  or a display table the parent `.tex` typesets; and
-* **files inputted to `.tex` files in the area's parent directory**, directly or
-  through nested inputs -- `\input`, `\include`, `\includegraphics`,
-  `\includepdf`, `\addbibresource`, `\bibliography`, `\pgfplotstableread`,
-  `\lstinputlisting`, `\subfile`, `\import` -- because those are "treated as if
-  they are in the parent" (the same package README states this positive half).
-
-`tex_input_closure` computes that set transitively; the PKG-2 report and the
-mechanical sentence removal share it, so a legitimate pointer at a supplementary
-source the parent `.tex` really compiles is never deleted, while a pointer at a
-stale table that ships nowhere is reported (and removed from prose) instead of
-handed to the journal.
-
-### Placeholder files are ignored
-
-A corpus file can stand in for data it does not contain. The operator's example:
-*"the haplotypes in Chisel ACT are actually the HG008 haplotypes
-(placeholders)"*. Such a file is never evidence:
-
-```bash
-# declare one (package-relative path or glob; matched against the path and the
-# bare file name). Repeatable at setup; add/clear later with the set- command.
-python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
-    --placeholder-file 'raw_data/**/ACT*hap*'
-python paper_pipeline.py set-placeholder-file --root ./paper_rounds 'raw_data/**/ACT*hap*'
-python paper_pipeline.py set-placeholder-file --root ./paper_rounds            # show
-```
-
-A package's own README may declare them (a line reading
-`Placeholder files: <path-or-glob>`), and
-the pipeline also DETECTS placeholder copies: two files inside the evidence
-areas with identical bytes under different sample/dataset names, where at least
-one is a haplotype/variant-style input. Every placeholder is listed in the
-evidence pack under **Placeholder files -- ignored**; no role may cite one as a
-producer, and a claim resting only on one is `unable -- placeholder input`. The
-real partner of a DECLARED placeholder stays evidence (declaring the ACT copy
-must not silence the HG008 original).
-
-### Package self-consistency: PKG-11 to PKG-24
-
-Every scan below runs on each produced package and on every published copy, and
-its rows are seeded in the guided-review/audit/revision evidence pack. The table-
-contradiction rows block the readiness verdict (one of the two statements is
-wrong, and only the author can say which); the claim-quality seeds are advisory
-because they need a judgment the code cannot make.
-
-* **PKG-11** -- sibling tables whose headers differ only by case or one
-  character. A one-letter `MixMHCPred_aff`/`MixMHCpred_aff` difference made an
-  aggregation skip a whole antigen silently.
-* **PKG-12** -- a statistics row whose p-value and its own interval give
-  opposite verdicts under the rule the table's caption states (CopyNumBench's
-  AneuFinder/Hap_1/nonintCN_PCC row: p = 0.115 beside [-0.51, -0.02]).
-* **PKG-14** -- a cover letter that says the work is not under consideration
-  elsewhere / lists no related manuscript while the package carries a dated
-  editorial decision for the same title.
-* **PKG-15** -- a `*mcb*pooled*.tsv` whose `n_units`/`mean` are computed on fewer
-  units than the sibling `*units*.tsv` carries, while its caption calls the
-  section "pooled over every donor" (CopyNumBench's pooled MCB: n = 9 germline
-  donors, caption "pools every donor of the four panels", sibling table 21
-  units, S3 n = 21). The row quotes the caption and names the complete-block
-  restriction as the legitimate explanation when that is what happened.
-* **PKG-16** (advisory) -- a required form (e.g. the Reporting Summary) whose
-  software inventory omits tools the manuscript's `Software.` paragraph names
-  (CopyNumBench: bedtools, Seurat, cellsnp-lite, Eagle, UCSC liftOver).
-* **PKG-17** -- a required form's design claim the Methods contradict: "no
-  overlap between parameter selection and evaluation"/"thresholds fixed before
-  inspection" beside "selected empirically … on the cell-line datasets" or a
-  parameter relaxed because the defaults retained no cells.
-* **PKG-18** -- a prose "X gave the highest average <metric>" recomputed from a
-  shipped per-dataset grid (`method`/`metric`/`dataset`/`mean`); advisory when
-  the sentence cites a figure whose numbers are not shipped, blocking otherwise.
-* **PKG-19** (advisory) -- a "recovered the N subpopulations" claim made with a
-  fixed `k = N` and/or a stated absence of a cluster-to-karyotype concordance
-  statistic; the caller's shipped cluster sizes are quoted.
-* **PKG-20** (advisory) -- one symbol ("SD") defined with two different
-  denominators (population over datasets vs sample over antigens) while the
-  prose uses it unqualified.
-* **PKG-21** (advisory) -- a paragraph that admits one term can distort a measure
-  ("can contribute disproportionately") and then draws a comparative inference
-  ("means … more strongly") from it.
-* **PKG-22** (advisory) -- a main-text claim citing a supplementary note whose
-  closest negated sentence says the result must not be read that way ("should
-  not be interpreted as", "not evidence"); it requires a shared non-method
-  subject, so an unrelated note limitation is not paired.
-* **PKG-23** (advisory) -- a "single-cell …" claim whose citation resolves to a
-  bulk genome assembly (the reference list is parsed; narrow by design).
-* **PKG-24** (advisory) -- a caption defining information content as a single
-  residue's log-likelihood instead of the expected log-likelihood ratio
-  (Σ p log₂(p/q), letter height = frequency × IC).
-* **PKG-25** -- a form's "cases in which a tool failed to run … are reported in
-  the deposited result tables rather than being omitted" beside a result table
-  that omits the failed tool for the named cohort (CopyNumBench's ACT panel has
-  no SCYN row) or carries its rows with `failed = False` (the 15 CHISEL ACT
-  rows). The omission row is blocking; the unmarked-rows row is medium.
-* **PKG-26** (blocking) -- the submitted set carries two files for one document
-  role. The NeoHeteroclitic `neohet-to17` package shipped both
-  `neohetero-18-2-mainText-9915d6e.docx` and the stale
-  `neohetero-18-2-mainText-FrontiersTemplate-zotero-bbb4e84.docx` (and the same
-  pair for the supplementary material), so the journal would receive two
-  different main texts. The comparison removes the version token and source
-  suffixes (`FrontiersTemplate`, `zotero`, `original`, `revised`, …), keeps the
-  extension, and is scoped to the package's own submitted set. A second,
-  distinct 7-hex token on editable documents also fails the producing stage's
-  postcheck. At publication the author checklist is rebuilt from current open
-  items in a marked block, so resolved rows cannot linger; markers outside the
-  declared submitted set do not become author work.
-
-A published package over the venue's relaxed M19 cap (or the configured
-cover-letter total cap) is also a blocking readiness finding (`FMT-M19`) even
-though the ranking never gates on a word count: the `neohet-to17` final copy was
-5,550 words against the 3,750-word relaxed Article cap. The length scan runs on
-the published files, including the pin-fallback path. Compression must remove
-redundancy only; scientific content is never deleted to meet a count.
-
-To avoid duplicating gigabytes into every sandbox, the pipeline keeps **ONE**
-read-only copy of each evidence area per root (`<root>/non_revised/<area>`,
-chmod-protected) and the stage sandboxes carry **relative symlinks** to it —
-the content is identical, a write through a link fails instead of corrupting
-the shared copy, and every identity/manifest/view walk follows directory links
-so tampering is still detected. On a filesystem without symlink support the
-pipeline falls back to real copies and says so. Judge views are the exception:
-they must anonymize and re-name every file, so they receive per-view copies
-(by design, not a space bug).
-
-[![One revision round: the read-only manuscript, the round base, the directed-evolution and large-scale-mutation arms, the cross-over integration and the blind judge panel](media/paper-refine-one-revision-round.png)](media/paper-refine-one-revision-round.png)
-
-*One revision round — the read-only manuscript, the round's base `a1`, the
-directed-evolution (guided-review/audit/revise) and large-scale-mutation (rewrite) arms,
-the cross-over integration, and the blind judge panel that pins the champion by
-digest ([PNG](media/paper-refine-one-revision-round.png)).*
-
-The repository also carries the two companion tools the pipeline uses:
-
-* **`paper_docx_format.py`** — the code-side OOXML style/formatting scanner and
-  normalizer (blank pages, running head on the title page, legend spacing,
-  heading style drift, unintended italics, URL/email treatment, quotation
-  marks, em-dash density).
-* **`paper_redlines_adapter.py`** — the tracked-changes bridge to
-  `python-redlines[docxodus]` (or `docx-trackdiff`).
 
 ## Venues and journals
 
@@ -1083,629 +920,6 @@ on it, `off` only records the report -- see *Attempt history* below);
 `decide --residual-gate` refuses to certify a champion that still carries a
 residual the pipeline can see.
 
-## The auditor (`setup --audit on`): review → **audit** → revise
-
-The review is one session that reads a whole corpus and then disposes hundreds
-of code-side rows. Its two documented failure modes are (1) closing a row with a
-reason that is not about that row's bar ("no journal rule", "editorial
-preference only") and (2) closing MANY rows with the SAME sentence. In a real
-run, 96 scan rows were closed with one identical sentence — and the sentences
-the operator later flagged were inside that pile.
-
-`--audit on` inserts one independent session between the reviewer and the
-revisers. It never edits a package; its product is the decision record
-(`audit/audit.json` + `audit/AUDIT.md`):
-
-* **every frozen finding is disposed**: `confirm`, or `drop` WITH a reason and
-  evidence (the verbatim text or the file:line derivation that refutes it).
-  Silence about an id is a failed attempt — an undecidable finding must be
-  confirmed, because dropping it would hide it from the reviser;
-* it **attacks the reviewer's dispositions**: every finding-tier row the
-  reviewer closed as `OK` is re-checked against its own bar. This build's
-  AUDIT role files no new findings: a real defect the closure hid is recorded
-  in `audit/UNRESOLVED.md` with its location and evidence, as an observation
-  for the next review (no tier until that review files it on the shared
-  scale), so the frozen list the revisers see is never silently extended;
-* the revisers consume the **audited** list (frozen − drops) and the drops stay
-  visible to the human in `audit/audit.json`, so a drop is always re-checkable
-  and reversible;
-* the auditor's own artifacts pass the same disposition-quality detectors as the
-  reviewer's (see below).
-
-The stage is **on by default** (`DEFAULT_AUDIT = "on"`): the review's disposition layer was the
-pipeline's single largest source of shipped leftovers, and one extra session per round is cheaper
-than a second round. `setup --audit off` (or `--no-audit`) restores the two-step review → revise
-plan and keeps an existing root's recorded policy; it costs one session per round, not per
-candidate.
-
-## The revision audit (`--revision-audit on`): revise → **revision audit** → bounded repair
-
-After the revise stage's own postcheck passes, one independent
-**REVISION AUDITOR** session re-reads `base/` and `revised/` against the frozen
-findings, the review audit's dispositions and the revision ledger. It edits
-nothing and writes ONE product, `revision_audit/REPAIR_PLAN.json` (plus a
-readable `REPAIR_PLAN.md`): one row per defect it confirms IN THE REVISION
-(a correction missing, a fact removed, a wrong value, a non-inferable manual
-item, a missing low-priority re-verification row, or a defect the revision
-introduced). Every row carries the location, the wrong and correct text, and a
-basis another session can re-run; an empty plan is a valid, complete audit.
-
-When the plan is non-empty, ONE **BOUNDED REPAIR** session re-validates every
-row against `revised/`, `base/` and the source hierarchy, applies only the rows
-it confirms, records its verdicts in `revised/REPAIR_LEDGER.json`, and updates
-the changelog/report/manual items. The audited bytes are preserved as
-`revised_prerepair/`, and the revise postcheck runs again on the final package;
-there is exactly one repair pass (a defect the post-repair verification still
-finds is recorded for the round's decision, never repaired in a loop). The
-chain is on by default; `--revision-audit off` (setup) or
-`PAPER_REVISION_AUDIT=off` (an existing root) records the skip and leaves that
-arm's revised version final for the arm before integration. It does not run in a
-concern-scoped major/minor revision
-(those edits are confined to the admitted concerns) or for a round that is
-already decided.
-
-## The cold-start review (`setup --cold-start-review on`): a second, independent discovery pass
-
-Every checklist pass is finite, and one review pass is a sample of the defect space. A real run
-showed what slips through: the abstract, Results, Discussion, Fig. 2 legend and cover letter said
-the tool "gives the best overall balance" and that both haplotype references agree on the leading
-callers, while the paper's own Table S2 rank-biserial signs and donor-level medians in `raw_data/`
-did not support it — and the reviewer's own discovery probes had read that very table and reported
-"no anomalies".
-
-The **cold-start review** is one extra independent session per full-scope round (`r<r>_cold_start_review`,
-planned in parallel with `r<r>_guided_review`; the auditor and the revision arms WAIT for it). It is deliberately
-cold-context and GENERIC — any defect class may be reported. It belongs to the review STEP: the
-auditor and the revisers consume its findings, so `run --only review` (or `2:review`) drives the
-cold-start review with the guided review, while `retry --runs 1:review` stays exact (a retry resets
-only the runs the
-operator names):
-
-* it is given the corpus and NOTHING else — no `guided_review/`, no finding list, no sweeps; its sandbox
-  carries only `base/`, `non_revised/` and three seeded CANDIDATE inventories
-  (`cold_start_review/CLAIM_SURFACES.md`, `cold_start_review/PRODUCERS.md` and — since 2026-10-16 —
-  `cold_start_review/OBLIGATIONS.md`, what THIS submission promises: the submitted set its own README
-  declares, the display items the documents cite, the file names they write, and where each one
-  resolves), which it is told are starting points, not a scope;
-* it surveys the submission documents, the evidence areas (`raw_data/`, `code/`), the relations
-  between them and the packaging itself (the checklist's discovery discipline: expected-but-absent,
-  present-but-unexpected, boundary, sibling asymmetry, claim/pointer mismatch, stale or unusable
-  shipped sources, …) and disposes every candidate into a finding or a recorded clean row;
-* wherever a defect can be SHOWN BY A COMPUTATION, the finding declares a small script under
-  `cold_start_review/scripts/` and the exact value it prints
-  (`"verifier": {script, computed, shows}`); findings without a computation are evidence rows like
-  any other finding;
-* **the orchestrator re-runs every declared verifier at postcheck time** and compares the last
-  stdout line with the declared `computed` value (`cold_start_review/REPRODUCTION.md`). A mismatch (or
-  a missing script / non-zero exit / empty output / timeout) FAILS the attempt — a computation the
-  cold-start review cannot reproduce is a correctness blocker, not a finding;
-* every finding is an **`X-9xx` row** (the reserved cold-start-review block) of the same standing as the
-  discovery round's `X-*` findings: it is merged into the frozen
-  `guided_review/round2/findings_extra.json` of the auditor and every reviser (the source review sandbox
-  is never mutated), into the integration seed `frozen_discovery/`, and into
-  `reports/round<r>_review/` (so a pruned root re-seeds the same ids). Colliding ids are remapped
-  deterministically and the remap is recorded;
-* its report carries a `checked` inventory (every area examined, with candidate/finding counts)
-  and `cold_start_review/coverage.md`, so a zero-finding pass is an examined corpus and not an unrun
-  one. **The completeness direction is mandatory and its rows must be disposed** (2026-10-16):
-  the declared submitted set against what the documents depend on, the venue's recorded structure
-  against the sections the manuscript carries, and the submission's own promises (sections it
-  announces, denominators its statistics name, hashes and dates its front matter pins). A short
-  report has to be JUSTIFIED with positive evidence, area by area — "the surfaces look
-  consistent" is not a disposition — and the prompt states the stage's target verbatim ("There
-  are still remaining issues in this manuscript submission. Please identify these issues.") with
-  its classes framed as ways to look, never as a fence on what may be filed.
-
-`--cold-start-review {on,off}` (default `on`; `--no-cold-start-review` or `set-cold-start-review off` on an
-existing root) is the off switch; a root created before the feature carries no key and plans no
-cold-start session until `set-cold-start-review on`. The JUDGE panel stays completely blind and is never
-handed the list — it re-derives its own generic discovery pass and scores side differences as
-normal `resolved`/`introduced` rows. A `formatting-writing` polish round plans no cold-start review (it is a
-content-level pass).
-
-## Execution profiles (`--execution-profile high|medium`)
-
-The pipeline was written for a frontier model with a very large context window. A medium model (a
-single-GPU 27B deployment, ~100k tokens or less) does not fail on the manuscript — it fails on the
-INSTRUCTION PAYLOAD. Every session is handed ~110 KB of stage prompt before it reads one word of
-the paper, and an agent loop re-sends that prompt on every step. Measured on one 18.9 KB manuscript:
-1,589 model calls and 110.8 M prompt tokens, median call ~72k prompt tokens.
-
-`--execution-profile {high,medium}` (default `high`) selects the instruction profile. It is NOT a
-reasoning-effort setting (`PAPER_QWEN_REASONING_EFFORT` is a different axis) and it changes no
-postcheck.
-
-* **`high`** is the pipeline exactly as it has always been, and it is the default. A default root
-  writes no new config key, plans the same sessions and renders the same prompts, byte for byte;
-  `--execution-profile high` is therefore identical to running without the flag.
-* **`medium`** keeps every rule but stops INLINING the elaborative ones. Each stage prompt keeps
-  the stage contract, the finding schema, the deliverable list and the completion marker, and the
-  long rule sections it used to paste are written once to `INSTRUCTIONS/PROFILE_RULES.md` in the
-  session sandbox and referenced by a pointer. The prompt opens with the medium capacity contract
-  (bounded reads, incremental writes, no re-reading, close the deliverables first). Nothing is
-  dropped, summarised or weakened: the same bytes ship in the root, the prompt states that the
-  paged sections are mandatory and authoritative, and the postchecks are unchanged — the difference
-  is WHERE the instructions live, not what they demand.
-
-Measured effect (every stage prompt, rendered from the same checkout; the split and
-formatting-writing review variants track `review`):
-
-| stage | `high` | `medium` | cut |
-|---|---|---|---|
-| review | 109 KB | 42 KB | 61% |
-| cold_start_review | 57 KB | 18 KB | 67% |
-| audit | 79 KB | 35 KB | 55% |
-| revise | 107 KB | 55 KB | 49% |
-| integrate | 105 KB | 54 KB | 49% |
-| rewrite | 99 KB | 51 KB | 49% |
-| judge | 95 KB | 65 KB | 32% |
-| revision_audit | 23 KB | 9 KB | 61% |
-| revision_repair | 19 KB | 5 KB | 73% |
-
-The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
-`pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
-those prompts is the one frozen beside it. `sync-code` and `retry` preserve the recorded policy. A
-root created before this feature carries no key and runs `high`.
-
-## The GUIDED review and `--no-guided-review`: running the cold-start review alone
-
-The round's two discovery roles are the **guided review** and the **cold-start review**. The guided
-review is the checklist pass — the M1–M36 mechanical sweeps, the J1–J5 judgment passes and the
-D0–D5 discovery round. Its recorded names are `guided_review` (the run kind),
-`r<r>_guided_review` (the run id) and `guided_review/` (its output area); they were
-`review` / `r<r>_review` / `review/` before the 2026-10 guided-review rename. The cold-start
-review is the independent, cold, unanchored pass documented above.
-
-The three recorded names were renamed together (2026-10) from `review` / `r<r>_review` / `review/`,
-so the vocabulary matches the role: a run's record now reads `kind: "guided_review"`, its sandbox
-is `runs/r<r>_guided_review/`, and its output area is `guided_review/` (with the split session's
-`guided_review_a/` and the frozen `guided_review/round2/` unchanged in shape). The CLI keeps
-`review` as the name of the review STEP, which selects BOTH discovery passes
-(`guided_review` and `cold_start_review`); each stage's own name selects only that stage.
-This applies to every selection option, including `retry --runs 1:review`, which therefore
-resets BOTH review runs of that round. Roots
-created before the rename keep their old on-disk names and are not migrated: re-create such a
-root (`setup`) to run it under the current vocabulary.
-
-`--guided-review {on,off}` / `--no-guided-review` (default `on`) turns the guided review OFF
-and runs the cold-start review alone: its `X-9xx` rows become the round's frozen finding list, and the
-whole class the guided review owns is recorded as a NAMED GAP — never as a clean result. The gap
-is written where every downstream session reads it:
-
-* `guided_review/findings.json` in each auditor/reviser sandbox carries `guided_review: off`, the
-  `named_gap` sentence, and one `unable -- <gap>` coverage row per check id the guided review
-  would have carried (the file is synthesized by `synthesize_frozen_review`);
-* the audit and revise prompts open with the "THIS ROUND HAS NO GUIDED REVIEW" block, so no
-  session mistakes the cold-start review's silence for coverage;
-* the cold-start review's prompt states that its `coverage.md` is the round's ONLY coverage record;
-* `pipeline_config.json` records `guided_review: off` together with the same gap text (rule 10).
-
-`setup` REFUSES the combinations that would leave the round with no finding source at all: a
-concern-scoped revision mode (which already replaces the general review with the concerns ledger),
-a revision mode that consumes review feedback (`transfer`, `resubmit`, `llm` — the guided review is
-the session that reconciles every concern), `--review-split` (two guided-review sessions), the
-cold-start review turned off, and a non-`full` review scope. The flag is a diagnostic mode — it answers "how well does the cold-start review do on its own?" — and
-the round it produces is comparable only with another run of the same flag.
-
-## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
-
-A from-scratch rewrite fixes a family of defects as a side-effect of rewriting:
-it re-aligns figure-artwork and SI-legend terms with the text, completes a
-US/UK spelling or hyphenation convention across the whole corpus, completes a
-claim's evidence pointers (`S12` alone for a claim about both samples), makes
-sibling definitions symmetric (`MALBAC-sequenced (multiple annealing …)` puts
-the explanation after the use), aligns a caption with what the table actually
-prints, and reorganizes at the scope level. In the 2026-09-27 root the judges
-credited the rewrites (w1/w2) with exactly these rows while the
-review→audit→revise arm had nothing to act on — the review's instance-level
-format had either closed them with the wrong bar or never enumerated them.
-
-The guided-review/audit/revise path now carries them explicitly:
-
-* **M25** figure-artwork/text parity · **M26** house-style/orthographic
-  conventions (bundled `enumerate_conventions.py`; one authoritative form per
-  family in `STYLE_CONVENTIONS.md`, one finding per deviating occurrence) ·
-  **M27** claim→evidence coverage · **M28** sibling-definition symmetry ·
-  **M29** caption-promise vs printed-schema parity — a two-sided pairing: a
-  promise the print does not deliver and a printed column/panel/encoding the
-  caption never describes are the same finding class in opposite directions.
-  Each gets its own artifact under `guided_review/artifacts/` and its own coverage row;
-* **J5** is the architecture pass: one row per scope in
-  `guided_review/ARCHITECTURE.md`, and its findings carry a `scope` key (they are the
-  one legal non-instance finding);
-* the auditor attacks the dispositions that used to close these classes
-  ("it is a proper name", "the artwork is read-only", a convention closed per
-  document, an unfilled architecture table); the attack files no new finding in
-  this build, so a real defect the closure hid is recorded in
-  `audit/UNRESOLVED.md` with its location and evidence for the next review
-  (no tier until that review files it);
-* the reviser resolves M25–M29 by aligning the EDITABLE surface corpus-wide
-  (rule E11), and J5 licenses **scoped restructuring** inside the finding's
-  declared scope under a content freeze, a numbering check and one
-  `work/RESTRUCTURE_<id>.md` artifact per finding;
-* the judge panel's frozen coverage map (M1–M24 + J1–J4) is deliberately
-  unchanged for the CHECKLIST classes: identical minimum scrutiny across
-  versions is what keeps it calibrated, and the comparison already scores those
-  differences in the consistency/completeness/correctness tiers. The classes
-  the checklist does not own are NOT added to the coverage map either: the
-  judge re-derives them in its own bounded discovery pass (contract v5) and
-  files any difference as a normal ledger row, so an X-class fix is scored
-  without handing the judge another session's findings.
-
-## M30: the source hierarchy is a detection rule too
-
-The source hierarchy (`github code > data in raw_data/ > main figures >
-supplementary figures > main tables > supplementary tables > main text >
-supplementary text`) was stated only as a **resolution** rule: it decides which
-side wins once two sources already disagree. Nothing enumerated the
-**detection** side, so a written number, sample size, parameter or label that
-the shipped code or raw data contradicted was found only when a human happened
-to compare them — even though every session's corpus already carries the
-producers (the analysis code under `code/`, the byte-identical `raw_data/`
-snapshot, the figure/table sources), and the judge's blinded view carries them
-too — under the labeled `evidence/raw_data/` directory, with anonymized file
-names (e.g. `evidence/raw_data/f0001.py`, `evidence/raw_data/f0002.csv`) — as
-it also carries the human feedback under `evidence/human_review_feedback/`.
-When the corpus carries the pre-filtered LLM review, it travels the same way
-under `evidence/llm_review_feedback/`.
-
-**M30 — source-hierarchy reconciliation** closes that gap on the
-review → audit → revise path (`sweeps.md` §M30):
-
-* the review enumerates, for every operational or quantified item on a
-  claim-bearing surface, the artifact that produced it (a `raw_data/` file, a
-  code/config constant, the figure/table source), files one finding per
-  incompatible instance with BOTH sides and the authoritative one per the
-  hierarchy, and records `unable — the producer is not in the corpus` (an
-  external GitHub repository, an image-only figure, a binary the text tools
-  cannot read) instead of a silent clean. A difference a stated unit, rounding,
-  conversion or Methods-stated run-time override reconciles is `OK` with that
-  reason;
-* the seed is code-side and bounded: `table_column_stats` (each shipped table
-  column's own row count and min/max/mean/sum), `hierarchy_seed_rows` (every
-  written number the shipped tables do NOT prove, paired with its candidate
-  producer column and the check the code can make — including a cohort-size
-  sentence against the table's own row count, the "12 samples" vs a 3-row table
-  case) and `code_literal_rows` (module-level literals such as
-  `N_SAMPLES = 15`, the producer side of a Methods parameter). They land in
-  `guided_review/artifacts/M30_hierarchy_reconciliation.md` (two disposed tables,
-  under the strict-artifact policy) and `work/M30_hierarchy_reconciliation.md`
-  in the other layouts;
-* the auditor attacks the closures that used to hide the class ("the code is
-  out of scope", "`raw_data/` is read-only", "not in the written parts"); the
-  reviser resolves an M30 finding by **rule E12** — align the WRITTEN side with
-  the authoritative producer, rule C owns a code fix (minimal edit + rerun
-  note, dependent numbers manual), and `raw_data/` is read-only so a fix that
-  lives inside it is a manual decision with the exact file/value;
-* the rewrite surfaces the conflict under `PROBLEMS SURFACED` and never edits
-  the code; the integration resolves it under the same hierarchy; and the
-  judge prompt states explicitly that a claim the package's own code/data
-  refutes is scoreable `correctness`/`completeness`, never cosmetic — while the
-  frozen coverage map stays M1–M24 + J1–J4, exactly as M25–M29 did.
-
-## The discovery round (D0–D5) is verified as a contract
-
-Phase 3 of `$paper-review` is the open-ended hunt for issue CLASSES the frozen
-checklist does not own (`paper-skills/paper-review/references/discovery.md`).
-Its deliverables used to be existence-checked at best — a session could leave a
-three-line `new_sweeps.md` (or no `guided_review/round2/` at all, which was a warning)
-and the review still passed. The pipeline now reads the whole D0–D5 deliverable
-set and, under the review's `--strict-artifacts` policy (fail by default, warn
-under `--strict-artifacts off`, and recorded for `decide --residual-gate`),
-REFUSES a review whose discovery round is not real work:
-
-* `known_index.md` names the frozen class range (M1 … J5);
-* `gap_table.md` carries ≥25 class rows, each marked COVERED (by which check)
-  or UNCOVERED, with at least one UNCOVERED row (the two-sided-defect seed
-  alone is a standing gap until both directions have been reported);
-* `probes.md` converts every UNCOVERED row into a `P2-…` probe or records it as
-  an analysis limitation, and every probe row states its status;
-* `probe_results.md` executes every probe — a clean probe reads
-  `no anomalies — checked: <locations>`, an `unable` probe says why;
-* `findings_extra.json` carries the standard finding shape for every `X-*` row,
-  and a cross-namespace check reports an X row whose line + excerpt match a
-  frozen `F-*` row (D0's "same class+location+substance is not reportable");
-* `new_sweeps.md` carries sweeps.md-shaped proposals (Purpose, Enumeration,
-  Artifact, Finding rules) numbered from M37, or an explicit statement that
-  there were no proposals and why — a bare `# none` is refused;
-* `round2_summary.md` reports the counts and the round's honest limits.
-
-Continuity is enforced: every sweep id the PREVIOUS round proposed
-(`prior_round/new_sweeps.md`) must be re-probed or explicitly dispositioned
-("prior proposal M37: no instances in base/") in the current round's round-2
-artifacts, so a discovered class cannot vanish between rounds.
-
-Adoption is a command, not a manual paste: `paper_pipeline.py adopt-sweep
---proposals guided_review/round2/new_sweeps.md` validates the proposal blocks, refuses
-non-continuing numbering or collisions with `references/sweeps.md`, appends
-them with `--yes` and re-syncs the standalone review prompt's appendix
-(`validate_skill.py`'s D10 sync check). And the auditor now attacks the
-discovery round's probe dispositions like the reviewer's other decision rows:
-when the frozen review carries probe rows, `audit/PROBE_AUDIT.md` must dispose
-each probe (`stands` / `needs-evidence`); this build's auditor files no `AU-*`
-rows, so a real anomalous value or label a probe closure hid is recorded in
-`audit/UNRESOLVED.md` (with the closure and its evidence; no tier until the
-next review files it) as an observation for the next review instead of being
-promoted into the frozen list.
-
-**The discovery class reaches its two missing consumers — the integrator by
-list, the judges by their own pass.** The X-* findings were once visible only to
-the revision arms: an integrator could drop a donor's X fix as an "unnamable"
-difference, and the judges never considered the class at all -- so a revised
-package was not ranked ahead of the version it had improved on. The two stages
-need different treatment:
-
-* the INTEGRATOR is not blind: the frozen
-  `guided_review/round2/findings_extra.{json,md}` is copied VERBATIM into a read-only
-  `frozen_discovery/` directory in its sandbox (recorded in the run's input
-  manifest, byte-verified like every other input), with the auditor's `drop`
-  dispositions honored (a dropped X id is not in force and is never scored).
-  `integrated/DIFF_LEDGER.md` must reconcile every X id (ported / kept-base / an
-  explicit no-donor-fix row) -- a revision cannot be lost in the merge.
-* the JUDGES are COMPLETELY blind to where a package came from (no other
-  session's findings, no round, no producing agent), so they are never handed
-  the list. Judge contract v5 requires each judge to RE-DERIVE the class itself:
-  a bounded discovery pass over EVERY side (target and every opponent, same
-  candidates and depth), recorded as one disposed file per side under
-  `judge_review/discovery/` (a missing or empty pass fails the run), and any
-  X-class difference is filed as a normal `resolved`/`introduced` row in the tier
-  the shared defect-class rule gives the finding's own category (an EXISTING
-  tier: correctness / preservation / completeness / consistency / writing /
-  formatting -- no new class is invented, so the issue census and the ranking
-  read it like every other defect).
-
-## Arm levels, the difference ledger, and the language pass (W-11/W-12)
-
-* **Rewrite arms carry a level.** With `--rewrites 2` the round stages one
-  `structural` arm (section/paragraph order, narrative flow, headings,
-  transitions — declared in `REWRITE_REPORT.md → ## ORGANIZATION MAP`) and one
-  `sentence` arm (same organization, sentence-level clarity/precision/terminology
-  work). The pool then holds large *and* small differences, so the integration
-  stage weighs a reorganization against a prose improvement instead of a taste
-  contest. `postcheck_rewrite` records the level and rejects a report that
-  declares the wrong one.
-* **The integration difference ledger needs an artifact and a re-validation
-  verdict per row.** `integrated/DIFF_LEDGER.md` rows carry `size` (small =
-  wording, large = organization), `artifact` (a before/after pair under
-  `integrated/work/diffs/` for a small row, the outline diff for a large row),
-  `verdict` (port / keep-self / synthesize / ignore-cosmetic), `revalidated`
-  (`confirmed` / `rejected`) and `finding effect` (`preserves F-00x` /
-  `undoes F-00x` / `none`). Only a `port`/`synthesize` row with
-  `revalidated: confirmed` may be edited; the postcheck hard-fails a port/
-  synthesize without it and a new ledger row missing the verdict. It reports
-  rows without an artifact, missing size classes when the pool
-  has both levels, donors missing from the table, and any port that would undo
-  a resolved
-  finding.
-* **No stage may introduce a NEW class of defect.** Every package-producing stage
-  is re-scanned against the package it started from, per finding-tier family: a
-  family the input had none of and the output now has (a new mega-paragraph, a
-  new nested parenthesis, a new value+unit outside siunitx, a new abstract
-  sentence past its bar) FAILS the attempt with the offending rule named; growth
-  inside a family that was already present is a warning.
-* **An e-mail address is a contact fact, never an inferable typo.** A reviewer
-  may report a domain/affiliation mismatch, but neither the review nor the
-  revision may infer a replacement domain: the observed over-correction was
-  `mart.ksk@ut.ee` → `mart.kask@helsinki.fi`, where the reviewer could not verify
-  the real address yet the reviser applied the guess. Every package-producing
-  stage now runs a code-side gate: a NEW address must either already appear
-  verbatim in the input corpus (another submission document,
-  `raw_data/`, the base's analysis code) or be verified by a row in the package's
-  `work/EMAIL_VERIFICATION.json` recording the web-search query, the http(s)
-  source URL, the checked date and a verbatim quote that contains the exact
-  corrected address; otherwise the stage FAILS. A removed non-placeholder address
-  is recorded (a contact fact is not a deletion surface), and a case-only rewrite
-  is not an address change. The same rule is in the shared decision block (D9),
-  all stage prompts, the review's M12/M14 sweeps and the revise skill.
-* **Every externally-assigned identifier follows the same evidence rule (D10).**
-  A DOI, accession (GEO/SRA/BioProject/BioSample/...), ORCID, UUID/UID, git
-  commit hash, funding/grant number, registry/protocol/version ID or a
-  reagent/cell-line/strain/domain-specific identifier is a fact, not a pattern.
-  A replacement, shortening or renumbering of an existing value FAILS unless the
-  exact value is already in the input corpus or a package record
-  (`work/FACT_VERIFICATION.json`) carries `kind`, `before`, `after`, the query, a
-  real `http(s)` source URL, the checked date and a verbatim quote containing the
-  value — a web search, Crossref/DataCite/ORCID, a public registry or a
-  repository page all qualify as independent evidence. A pure addition for new
-  content (a new reference's DOI) is not a correction and is allowed. When no
-  evidence exists the value stays byte-identical and the suggested value
-  (`suggested: <value> (unverified)`) goes in the high-priority manual TODO with
-  the location and exact check.
-* **The L1–L11 language pass runs in every package-producing stage** (rewrite,
-  revise, integrate), not only in the revision arm: one row per change plus one
-  coverage row per step in `work/R6_language.md`, and a code-side re-scan of the
-  package after each step. A missing artifact or an uncovered step is recorded
-  (and fails the attempt under `--strict-artifacts`). The substantive steps
-  L1, L2, L3, L5 and L6 are finding-gated: a write session may not use the
-  language pass to repair a claim, factual statement, logic jump, prerequisite
-  or redundancy without a frozen finding authorising that exact change; it
-  records the observation for the finding-generating role or as a manual item.
-* **The judge scores prose against a named rubric.** The `writing` tier's rows
-  cite one of twelve checks (Q1–Q12: premise, logic slip, logic jump, coherence,
-  unexplained prerequisite, redundancy, non-academic wording, register, stiff
-  phrasing, grammar, typography, segmentation) with a quote and the intended
-  reading. The tier carries the same four severity rungs as every other class
-  (Minor / Major / Critical / Fatal), and the rubric carries no provenance
-  vocabulary, so the panel stays blind.
-
-## Provenance, identifiers and the residual gate
-
-Every non-judge sandbox now also receives a code-side **provenance pack**
-(`work/` and, for the review, `guided_review/artifacts/`):
-
-| artifact | what it carries |
-|---|---|
-| `NUMBERS_LEDGER.md` | every numeric literal **and every spelled-out count** (`one` … `ninety-nine`, `one hundred and five`), with the `source` the CODE could PROVE from a shipped data table (a column sum/min/max or a single cell — e.g. `45,365` = the sum of `n_cells_total`). A word number is a count only in a count context (before a plural noun, in "four of the five", before a unit, or in "one row per sample"); pronoun and idiom uses ("one of them", "one another", "at once", "Run two") are not rows. A row whose source stays empty is the session's job |
-| `IDENTIFIERS.md` | every DOI / SRA-BioProject-GEO accession / repository URL+commit / ORCID, with the orchestrator's own public-API verdict (`found` / `absent` / `error` / `skipped`) |
-| `M2_references.md` | the reference-integrity seed: one row per reference ENTRY that carries a DOI, with the resolver's verdict for that DOI and what the code established itself — a year token inside the DOI that contradicts the entry's own year (`gb-2019` → `gb-2119`), the same DOI on two entries, and the comparison between the resolved record and the entry. A one-character DOI corruption leaves author, title, journal and year intact, so no format check and no re-reading can see it |
-| `PLACEHOLDER_LOOKUP.md` | the answers the pipeline already found for the `searchable` hand-off markers (`found` = the fact; `absent` = a VERIFIED NEGATIVE such as "not posted"). A marker this table answers may not ship |
-| `M24_concepts.md` + `GLOSSARY.md` | two term families competing for one concept (CN vs CNV vs CNA, simulate vs emulate, rank vs score), with counts per surface form, and the term decisions to conform to |
-
-The lookups run through a cached probe (`reports/LOOKUP_CACHE.json`, 14-day TTL):
-one cheap probe per process decides whether to query at all, results are reused
-across the sandboxes of a root, and `--placeholder-lookup off` records the
-questions and checks nothing (useful offline). The probe asks an API ENDPOINT,
-never a record, and any HTTP answer counts as reachable — a probe that named a
-record 404'd, and the raised error was read as "no network", which silently
-recorded `skipped` for every identifier, availability locator, gene symbol and
-reference DOI of every run. A DOI is resolved against Crossref, then against the
-second metadata agency (DataCite — a Zenodo/OSF/Dataverse/Dryad DOI 404s on
-Crossref), and finally against the handle registry, which answers for EVERY
-registration agency: `absent` means no agency returned a record and the handle
-itself is not registered, so a mEDRA/CNKI/JaLC/KISTI DOI is never called
-unregistered.
-
-The residual gate is **ON by default**: `decide` turns the recorded residuals
-into decision problems (exit 5) — a `searchable` marker the lookup engine
-answered (or could not even reach) that still sits in a delivered package, a
-review whose decision tables were boilerplate or unfilled, or an integration
-ledger row that would undo a resolved finding. `decide --non-residual-gate`
-records them as advisory only (they are always recorded in `decision.json` and
-printed either way — never silently dropped), which is the documented path for
-an offline environment where the pipeline's own identifier lookups all come
-back `skipped`: the package must still not ship the marker, so the alternative
-is to have the stage write the verified fact (or the verified negative with its
-search date) into the document. A gated residual blocks certification; the
-champion corpus is still built into `final_clean_version_<root name>/`, and
-`final_clean_version.readme.md` records the refusal — see the `certification`
-block above.
-
-## Difference tracking, and the persistent PDFs
-
-As soon as a stage is accepted -- and again at each round's close -- the
-pipeline tracks what actually changed, with **no agent session and no LLM
-call**, and renders the versions to PDF. The tracking copies are audit aids: a
-failure is a warning, never a failed stage, and every file the passes write is
-an **auxiliary** that is excluded from every judged/pinned corpus, content
-fingerprint, revision token and judge view. Pinned by
-`.paper_test/test_difference_tracking_*_*.py`: parts 1-3 and 5 pin the naming,
-the passes and the stage-time placement; part 4 runs a stub round with and
-without them and asserts the champion, the scores, the pins and every recorded
-corpus digest are identical.
-
-**Tracked differences.** The copies are written the moment a stage is accepted
--- `postcheck()` tracks every rewrite/revise/integrate arm as soon as it passes,
-and the template-first `conform` does the same for `template_rewrite/out/` -- so
-each is BESIDE the documents of the version that was just produced (and mirrored
-under `<root>/tracking/r<R>_<version>/`, with `manifest.json` + `README.md`).
-The round's close keeps every fresh entry (it never re-drives Word/latexdiff
-over unchanged content) and fills in what a stage did not write, plus each
-published winner.
-
-The file name NAMES THE BASELINE the copy was compared against -- no
-"previous", no ambiguity:
-
-| file (`.ext` = `.docx` / `.tex` / `.bib`; `.pdf` is the compiled marked-up LaTeX copy) | meaning |
-|---|---|
-| `<name>.tracking-original.ext` | vs the pre-conformed original (`non_revised/`, the copy `setup --source` made) |
-| `<name>.tracking-a1.ext` | vs the round base `a1` -- for round r > 1 that is the pinned champion of round r-1 (published as `round<r-1>_winner/`) |
-| `<name>.tracking-w<k>.ext` / `<name>.tracking-a<k>.ext` | vs the k-th rewritten / reviewed-and-revised candidate -- the base an integration run reworked (its own `self/` member) |
-| `<name>.tracking-winner<r>.ext` | vs the published winner of round r (a winner from round 2 on) |
-| `<name>.tracking-<token>.pdf` | the compiled marked-up PDF of a tracking `.tex` root, built from the rewired tracking sources (the clean PDF when the pair is byte-identical) |
-| `<name>.logging-<token>.ext` | the readable before/after log written instead when that comparison FAILED (never a file that only looks like tracked changes) |
-
-`tracking-*` and its `logging-*` fallback differ by exactly one token, and the
-baseline token is the pipeline's own version id, so `manuscript.tracking-w1.docx`
-in `runs/r2_a2_revise/revised/` says exactly which version it was revised from.
-
-A `.docx` pair is compared by **Word's own engine first**: the `docx-compare`
-MCP tool (`compare_docx`) drives `docxcompare.sh` -> PowerShell ->
-`Word.Application.CompareDocuments` (COM automation), the same redline engine
-behind Review > Compare. Only when no compare server is configured (or its call
-fails) does the chain fall back to `python-redlines[docxodus]`, `docx-trackdiff`,
-an operator-supplied `--redline-cmd`, and the built-in OOXML writer. `.tex`/
-`.bib` pairs go through `latexdiff --no-label`. A pair whose bytes are identical
-gets an unmarked copy, never a fake diff. The `redlines/` tree is still written
-(`run_redlines`: from-base / from-original / from-setup-source); the tracking
-pass REUSES the redline it already produced for the same pair instead of driving
-Word twice (the reuse is gated on the pair's two content digests, so a redline of
-the same file name but of different bytes is never presented as this pair's
-difference).
-
-**The redline is weighed, not trusted** (`redline_fidelity`). Every successful
-backend's output is measured -- the words its `w:ins`/`w:del` markup marks,
-against the least a faithful redline needs for that pair (paragraph-aligned,
-word-level). A backend that marks an order of magnitude more than the pair
-really changes is the signature of the 2026-10-14 CNB tracking copy: a Word
-paragraph carries `w:lastRenderedPageBreak` inside its one text run, and
-`docx-trackdiff` cannot diff such a run piecewise, so it deleted and re-inserted
-the WHOLE paragraph for a ten-word edit (624 marked words for 84 words of real
-change). Under `--tool auto` an over-marking backend is passed over for the next
-one and the least-marked result is kept (an explicit `--tool`/`--redline-cmd`
-choice is honoured with the caveat recorded). `manifest.json` carries the
-numbers per attempt (`fidelity`), the readme lists the over-marked files under
-Caveats, and the second backend no longer needs the adapter file: `redlines`
-runs the engine in process (and `setup` copies `paper_redlines_adapter.py` into
-the root for the CLI route).
-
-**The built-in OOXML writer is lossless for inline content.** It walks the diff
-op by op and rewrites only the changed text (everything else keeps its rPr), so
-a soft line break (SHIFT+ENTER), a tab or a Zotero field char keeps its place --
-accepting every change reproduces the revised paragraph, rejecting every change
-reproduces the base paragraph, and the 2026-10-14 NeoHetero correspondence block
-keeps both of its soft breaks (the previous writer rebuilt a changed paragraph
-from plain text and dropped them). A paragraph the walk cannot split piecewise
-falls back to whole-paragraph markup that carries the revised paragraph's own
-XML, so nothing inside it is lost either.
-
-**The tracking LaTeX copy COMPILES.** Before a tracking `.tex` root is
-compiled, its `\input{}`/`\include{}` and `\addbibresource{}`/`\bibliography{}`
-references are pointed at the tracked copies of those files when the same
-baseline produced them -- an unchanged include keeps loading the shared file,
-and a failed comparison's commented-out `logging-*` fallback is never loaded.
-Lowercase `\difdel`/`\difadd` aliases are injected because `plain`-style BibTeX
-`change.case$` lowercases the tracked bibliography fields. Every root is
-compiled -- a byte-identical pair too, whose tracking PDF is the clean version
-with its tracked includes -- while a fragment is skipped (it compiles through
-its master). The result is written BESIDE the tracking `.tex` as
-`<name>.tracking-<token>.pdf` (and mirrored under `tracking/`), so the changes
-can be read without a LaTeX toolchain. A compile failure is a warning recorded
-on the manifest row (`pdf_error`); the tracked source stays.
-
-The server is the operator's own: register it once and the pipeline probes it
-from `~/.codex/config.toml`, drives it over the same minimal stdio JSON-RPC
-client the converter uses, and pre-approves it for the non-interactive stage
-sessions.
-
-```bash
-npm ci --prefix /path/to/repo/mcp-docx-compare    # Node >= 20; node_modules/ is gitignored
-codex mcp add docx-compare -- node /path/to/repo/mcp-docx-compare/index.js
-```
-
-Both shipped MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) need that
-`npm ci` step before they can start: `node_modules/` is never vendored, so a
-fresh clone that skips it fails with `Cannot find module
-'@modelcontextprotocol/server'`. Each server also drives a companion shell
-script -- `docxcompare.sh` (`../`, `./`, then PATH) for the compare server,
-`docx2pdf.sh` for the converter -- so a copy deployed without that script
-answers `initialize()` and then fails EVERY tool call with
-`spawn docxcompare.sh ENOENT` (`install_skill.sh` installs the dependency and
-the companion with each copy). The pipeline's probe reads both:
-`mcp_server_unusable_reason(name)` is what the redlines manifest and the
-renderer list report, so a configured-but-dead server is named with the fix
-(`... its Node dependencies are not installed: run npm install in <dir>`;
-`... the docxcompare.sh script its tool drives is missing: ...`), and the MCP
-client's handshake now carries the server's own stderr tail instead of the bare
-`did not answer initialize()` the 2026-10-14 run recorded.
-
-```bash
-python paper_pipeline.py track --root ./paper_rounds            # re-run tracking + PDFs
-python paper_pipeline.py track --root ./paper_rounds --no-pdf   # tracking only
-python paper_pipeline.py run   --root ./paper_rounds --no-track  # skip both passes
-```
-
-**Persistent PDFs.** Every LaTeX root (`\documentclass`) is compiled with
-`latexmk -pdf -interaction=nonstopmode -halt-on-error` and every `.docx` is
-converted through the shared renderer chain (`docx-converter` MCP tool first,
-then `docx2pdf.sh`, then LibreOffice). The PDFs land under
-`<root>/pdfs/<round>_<version>/` (plus `pdfs/original/` and the round's
-`pdfs/r<R>_<vid>/`), with `manifest.json` + `README.md` recording the tool, the
-page count and any warning. The build runs in a disposable copy of the package,
-so no build by-product (`latexmk`'s `.aux/.log/.pdf/...`) ever lands inside a
-corpus, and `prune` never deletes the tree -- the PDFs outlive the run. An
-uncompilable source or an unrenderable document is recorded and printed as a
-WARNING; the run continues and the decision is unaffected.
-
 ## Round model
 
 For every round `r` the plan is `A1_r + M rewrites + 1 review + N revises +
@@ -1753,7 +967,7 @@ boxes.
 |---|---|---|
 | `a1` | `r<r>_a1` | the round's base: round 1 is the pristine copy, later rounds the previous champion (no agent) |
 | `rewrite` | `r<r>_w1…wM` | full alternative versions with a **declared level**: odd arms are `structural` (organization-level, reported in `## ORGANIZATION MAP`), even arms are `sentence` (same organization, prose-level). With M≥2 the round therefore carries BOTH kinds of difference for the integration stage to weigh |
-| `guided_review` | `r<r>_guided_review` | ONE frozen identification pass (`$paper-review`) — the GUIDED review (M1–M36 / J1–J5 + D0–D5) that feeds every revise session. **on by default**; `setup --no-guided-review` runs the cold-start review alone and records the guided classes as a named gap (see "The GUIDED review" above). Recorded as the run kind `guided_review`, the id `r<r>_guided_review` and the area `guided_review/` |
+| `guided_review` | `r<r>_guided_review` | ONE frozen identification pass (`$paper-review`) — the GUIDED review (M1–M36 / J1–J5 + D0–D5) that feeds every revise session. **on by default**; `setup --no-guided-review` runs the cold-start review alone and records the guided classes as a named gap (see "The GUIDED review and `--no-guided-review`"). Recorded as the run kind `guided_review`, the id `r<r>_guided_review` and the area `guided_review/` |
 | `cold_start_review` | `r<r>_cold_start_review` | **on by default** for every full-scope round **with at least one revision arm** (`--revises 0` plans no review, so no cold-start session either) (`setup --cold-start-review off` / `--no-cold-start-review` / `set-cold-start-review off` disables): an INDEPENDENT, cold-context discovery session launched IN PARALLEL with the review and given the corpus only (no review, no finding list). It is GENERIC — any defect class may be filed — and wherever a defect can be shown by a computation the finding declares a re-runnable verifier; the orchestrator re-runs every declared verifier (a non-reproducing computation FAILS the attempt) and the findings ride in the frozen discovery list as `X-9xx` rows (reviser resolves, auditor disposes, integrator reconciles) |
 | `audit` | `r<r>_audit` | **on by default** (`setup --audit off` / `--no-audit` disables): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), attacks the reviewer's boilerplate `OK` closures without filing new findings (an observation goes to `audit/UNRESOLVED.md`), and hands the AUDITED list to the revision arms |
 | `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran). **After its postcheck**, an independent REVISION AUDITOR writes `revision_audit/REPAIR_PLAN.json` (no edits), and a non-empty plan runs ONE bounded-repair session that re-validates and applies only confirmed rows, records `revised/REPAIR_LEDGER.json`, and re-passes the revise postcheck (`--revision-audit off` / `PAPER_REVISION_AUDIT=off` records the skip; it does not run in a concern-scoped major/minor revision) |
@@ -1817,126 +1031,6 @@ the fact-checking reference; the human feedback is what the concern
 reconciliation and the response letter are built from, and it is what lets a
 judge score whether a version answers the human-raised concerns (see the judge
 view: both areas appear under the labeled `evidence/` directory).
-
-## Revision modes: `continue`, `init`, the journal modes (options 1–4), and `llm` (5)
-
-A root can be driven against a REAL journal decision letter instead of the
-pipeline's own review rounds. `setup --revision-mode <mode>` (or
-`set-revision-mode <mode>` on an existing root) selects one of the workflows
-below. Two of them read no feedback at all: **`continue`** (the default; the
-pipeline's own guided-review/revise rounds — the mode was spelled `none` before, and
-that spelling is REMOVED) and **`init`** (start a NEW
-submission: the `conform` stage runs BEFORE round 1 — inside the venue's own
-Word template when one ships, else to the journal's own author guidelines and
-then to established academic convention — and everything after it is the
-`continue` workflow). `--no-template-stage` opts `init` out of the conform
-stage. In the four journal modes the feedback file(s) are named with
-`--journal-feedback FILE` (repeatable) or auto-detected in the corpus by name — typically
-`raw_data/iScience_feedback_from_reviewers_and_editors.txt`.
-
-**`llm` (option 5)** revises against the false-positive-filtered
-`llm_review_feedback/` area ONLY (no journal decision letter, no response
-letter). It is selected only by an explicit `--revision-mode llm` (or
-`set-revision-mode llm`). A non-empty `llm_review_feedback/` in `--source` does
-not change the otherwise-unconfigured `continue` workflow; `setup` prints a
-note naming the explicit mode when the area is present. Renaming the directory
-to `llm_review_feedback.disabled` (or `.off`) keeps it INERT (never read as
-feedback or evidence, never part of the submission, never shown to a judge).
-If `human_review_feedback/` is present too, mode `llm` reads ONLY the LLM
-stream; pass an explicit journal mode (transfer/resubmit/major/minor) when the
-human letter should drive the revision.
-
-| option | mode | what it is | response to reviewers | rewrites | edits |
-|---|---|---|---|---|---|
-| — | `continue` | the pipeline's own guided-review/revise rounds (the default) | **not written** | allowed | the round's full review |
-| — | `init` | start a **new submission**: conform to the venue's template (or its guidelines → academic convention when no template ships) first, then the default rounds | **not written** | allowed | the round's full review |
-| option 1 | `transfer` | revise for a **new journal** (e.g. read iScience, submit to Frontiers in Immunology) | **not written** | allowed | the round's full review + the decision letter's concerns |
-| option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
-| option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review, no audit, no judge panel |
-| option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only |
-| option 5 | `llm` | revise against the pre-filtered `llm_review_feedback/` area only (explicit selection only; an unconfigured root remains on `continue`) | **not written** | allowed | the round's full review + the LLM review's concerns |
-
-**The pre-filtered `llm` area supplements the normal full review; it never replaces it.** Options 3–4 are concern-scoped major/minor modes: their edits are confined to the admitted human concerns, and their base is the previously reviewed submission — the round itself stages no general review, no audit and no judge panel. Where a mode replaces the general review, every class the external pre-filter dropped and every class the concern ledger does not cover is recorded as a named gap, never treated as clean.
-
-How each mode runs:
-
-* **The four journal modes** enumerate the letter into a concern ledger
-  (`concerns/JF_concerns.json|md`: one row per distinct concern, verbatim
-  quote — checked against the text rendering of the feedback — plus `action`
-  and `disposition`). The feedback is EXTERNAL prose: it never becomes a
-  finding quote about the authors, and it never enters the submission package.
-  The primary source is the corpus's `human_review_feedback/` area (any file
-  name, including non-English ones; a `response_to_reviewers` file there is
-  previous-response CONTEXT, not a concern); an older shape — a
-  feedback-named file under `raw_data/` — is still detected. A child
-  `original_submission/` is never discovered as a letter: it is staged
-  READ-ONLY and separately under `feedback/original_submission/`, and every
-  journal stage may read it only as the reviewer-visible earlier manuscript.
-  A sibling `llm_review_feedback/` area is read too, when present: its
-  remaining findings were already filtered for false positives, so they are
-  enumerated with the same standing as the human points (staged under
-  `feedback/llm/`, origin kept in the ledger's `source`/`author` columns, and
-  never silently dropped).
-* **Options 1–2** feed the ledger into the normal round: the review reconciles
-  every concern (`guided_review/concerns_reconciled.json`) and files a `check: "JF"`
-  finding for each unanswered one; the rewrites carry the concern block; the
-  revise arms answer the findings; the judge panel and `decide` work as usual.
-* **Options 3–4** run a different, restricted path: `r1_concerns` produces the
-  ledger AND the only finding list (`check: "JF"`, one finding per concern);
-  the single `r1_a2_revise` session edits the manuscript ONLY for those ids
-  (every other observation goes to `MANUAL_STEPS.md`), and the code-side scope
-  guard fails the attempt for a changed file the ledger does not name or a
-  file added/removed. There is no judge panel and no champion decision —
-  `decide` reports the scoped revision instead.
-* **Option 5 (`llm`)** runs like options 1–2 (the normal round with the concern
-  ledger reconciled by the review, rewrites allowed) with two differences: only
-  `llm_review_feedback/` feeds the ledger (a human letter in the same corpus is
-  ignored as a concern source, though it stays evidence for the judges), and no
-  response letter or `journal_submission/` package is produced — there is no
-  journal to submit to. The mode is selected only with `--revision-mode llm`
-  (or `set-revision-mode llm`); the directory's presence is not a selector.
-* **Options 2–4** then run a response stage: `RESPONSE_TO_REVIEWERS.md` +
-  `response_map.json`, one block/row per concern, every cited file verified to
-  exist in the final package, `planned` rows forbidden from claiming results,
-  and a new-experiment concern required to cite its new data.
-* **The four journal modes** finish by assembling `<root>/journal_submission/`: the final
-  package minus `raw_data/` and — unless `--submit-code on` /
-  `set-submit-code on` asks for it — the analysis-code area (`code/`), minus
-  every `README*.md`/`README*.txt` file (the author's own documentation, never
-  submitted), minus the pipeline's bookkeeping and revision auxiliaries (plus
-  the response letter when the mode requires one), with
-  `<root>/journal_submission.json` recording the mode and the manifest
-  (`raw_data_included: false`, `code_included` the policy's real value, and
-  `readme_files_excluded` the files that were dropped).
-  When a
-  mode requires a letter and none exists, the package is NOT assembled. When
-  the round produced tracked changes (`redlines/<version>/from-original/`), the
-  marked-up copies ship in `journal_submission/tracked_changes/` BESIDE the
-  clean documents.
-
-With no `--revision-mode` the default is `continue` and nothing above runs: the
-historical workflow is byte-for-byte unchanged (no journal stages in the round
-plan, no journal block in any prompt, no new files). The removed `none`
-spelling is not accepted; the mode is always `continue`.
-
-```bash
-# option 1: iScience -> Frontiers in Immunology, no response letter
-# (select the TARGET journal's venue profile: the rules every stage enforces)
-python paper_pipeline.py setup --source ./submission --root ./rounds \
-    --venue frontiers-in-immunology --journal "Frontiers in Immunology" \
-    --revision-mode transfer \
-    --journal-feedback-from iScience
-
-# option 3: major revision at the same journal (feedback auto-detected in
-# human_review_feedback/; an llm_review_feedback/ area is read too when present)
-python paper_pipeline.py setup --source ./submission --root ./rounds \
-    --journal iScience --revision-mode major --journal-feedback-from iScience
-python paper_pipeline.py run --root ./rounds
-python paper_pipeline.py status --root ./rounds   # shows the mode and the package
-
-# changing the mode on an existing (not yet run) root
-python paper_pipeline.py set-revision-mode minor --root ./rounds
-```
 
 ## Running only some of the steps
 
@@ -2229,6 +1323,431 @@ digest-verified), and `final_clean_version_<root name>/` is still published — 
 the package is a provisional hand-off, never a signed panel verdict.
 `--package-winner` still works once every configured round is complete; it says
 plainly that it is packaging an unjudged champion.
+
+## Evidence is not submission text: `raw_data/` and the review-feedback areas
+
+A submission directory may carry **read-only evidence areas** beside its
+manuscript files:
+
+* **`raw_data/`** — factual evidence (measurements, tables, figures' source
+  data, protocols, notes). The stages READ it to check facts; it is never
+  treated as the manuscript, a cover letter or supplementary information, and it
+  is never shipped in the published package.
+* **`human_review_feedback/`** — the REAL editors'/reviewers' comments (the
+  decision letter, the reviewer reports, a previous response to reviewers). The
+  four journal-feedback revision modes read it, and the blind judges may read the
+  evidence areas (`evidence/raw_data/…`, `evidence/human_review_feedback/…`)
+  because correctness and "were the humans' concerns addressed" cannot be
+  judged without them. It is never copied into the submission package either.
+  When it carries a child `original_submission/`, that child is the manuscript
+  version the previous journal's editors/reviewers actually saw — still
+  evidence, never the current submission: the journal stages read it only to
+  resolve what a raised concern refers to and whether the current `base/`
+  already answers it (a concern that no longer exists is `already-addressed` or
+  `not-applicable`, never a `to-fix` row whose location exists only there), and
+  it is never swept, counted or quoted as the authors' current prose.
+* **`llm_review_feedback/`** — an optional machine-generated review of the
+  previous submission whose false-positive findings were filtered out upstream
+  (any file types). The journal modes stage it beside the human feedback
+  (`feedback/llm/…`) and enumerate every remaining finding as a real concern
+  with the same standing as a human reviewer's point; the blind judges read it
+  under `evidence/llm_review_feedback/…` and judge how a version addresses it.
+  A finding is never dismissed merely because a model wrote it, and a row the
+  authors still believe is wrong is closed `not-applicable`/`disagree` with a
+  recorded rationale — never silently dropped. It is read-only evidence, never
+  submission text.
+
+The analysis-code area **`code/`** is not submitted by default either, and is
+handled the same way on the submission surface: it is revision content — a
+stage may revise it, the judges evaluate it and M30 reads it as a producer, so
+a corpus, a pin and a published winner carry it — but the journal submission
+copy **strips it exactly like `raw_data/`**, `journal_submission.json` records
+the actual `code_included`, and a to-be-submitted document may not refer into
+it: a response-to-reviewers letter whose `changes`/`new_data` cites a `code/`
+path fails its postcheck (`code/` is not a submission document — the fix is
+described in the response text, and the submission document that carries it is
+cited instead). `setup --submit-code on` (or `set-submit-code on` on an
+existing root) submits the area instead: the copy then carries `code/` and the
+letter may cite it like any other package file. The policy only decides what
+the next assembly of `journal_submission/` carries — it never touches a pin, a
+score or a champion. The author's own documentation is never submitted either:
+**every file whose name matches `README*.md` or `README*.txt`, at any depth, is
+dropped from the submission copy** (it stays in the corpus, the pin and the
+published winner — it is treated like `code/` for submission purposes, with no
+opt-in switch), `journal_submission.json` records `readme_files_excluded`, and a
+to-be-submitted document may not refer to one. The same rule covers every
+submitted file, not just the
+letter: **a to-be-submitted file may point only at what the submission itself
+carries**, and a pointer to anything else is a `PKG-2` defect that the pipeline
+**removes** rather than ships. Both reference shapes are found — an
+area-prefixed path (`code/…`, `raw_data/…`) and a bare file NAME the package
+holds only outside the submission (a script under `code/`, the `raw_data/`
+archive, a `README*.md`), resolved against the package's own file list — and the
+unit of removal is the SENTENCE that carries the pointer, never a splice inside
+one (a heading line is never swallowed with it, and a sentence carrying a live
+citation field, or a structural file such as `.csv`/`.json`, is left alone and
+reported for the author). The removal runs in every package-producing stage's
+postcheck (so the version that is judged and pinned is already clean) and again
+on the published package and the journal submission (so a champion that IS the
+base/original — it never passed a stage — is repaired too); the pin and the
+winner keep the bytes they were hashed with. Every removed sentence is recorded
+VERBATIM in the run record (`runs/<id>/PKG2_<id>.json`), in
+`journal_submission.json` (`removed_dangling_references`), in
+`reports/decision.json` and in `final_clean_version.readme.md`, and whatever the
+mechanical layer may not touch stays a `PKG-2` row under
+`non_submitted_references` — printed as an author action, never a silent
+deletion and never a failure.
+
+The same scan reads a document's PARTS, not only its text: a `.rels`
+relationship whose target is an absolute local path (`file:///C:\Users\<someone>
+\…\template.dotx`, which the venue's own Word template attaches to every package
+restyled with it) is a pointer nobody can open and names the machine it was
+authored on. The attached-template link is **removed** together with its own
+relationship (every other part stays byte-identical), the other kinds are
+reported, and the judge's blind view neutralizes such targets in place so the
+panel never reads a machine path.
+
+Every evidence area is hash-pinned, and any stage write into it is restored and
+reported.
+
+### Hand-off items: `--author-to-complete readme|document|off`
+
+The revision stages are forbidden to invent content, so a missing mandatory item
+(a statement, an accession, an unreadable field, a whole required file) is
+handed to the author. **Where** that note lives is the operator's choice:
+
+```bash
+# default (readme): no document carries the marker. Each missing item is
+# recorded in ONE README-AUTHOR-TO-COMPLETE.md in the package root, beside the
+# cover letter and main text; the README is never submitted (README*.md is
+# dropped from journal_submission/), and a marker that still ships is a defect
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --author-to-complete readme
+
+# document: the marker convention -- a missing item is
+# scaffolded with the literal "[AUTHOR TO COMPLETE: ...]" token and listed for
+# the author; the marker itself is a legitimate hand-off
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --author-to-complete document
+
+# off: no file may carry the token. The item is left out of the document (a
+# whole missing file is NOT scaffolded as a document of instructions) and
+# recorded in the package's own MANUAL_STEPS.md / CHANGELOG.md; a marker that
+# still reaches a delivered package is a DEFECT, not a neutral hand-off
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --author-to-complete off
+
+python paper_pipeline.py set-author-to-complete --root ./paper_rounds readme   # flip later
+```
+
+The switch rewrites the rule in EVERY prompt -- including the master-prompt
+excerpts and the end-of-prompt reminders that restate it -- and it reaches the
+cold-start review, the auditor and the blind judge in their own provenance-free wording.
+Under `readme` (the default) and `off`, a stage that ADDS a marker fails its
+attempt, a marker still in the delivered package is a gating residual and an
+`AUTH-1` readiness finding, and the item moves to
+`README-AUTHOR-TO-COMPLETE.md` (readme) or `MANUAL_STEPS.md` (off). The readme
+mode also moves an item a stage left in `MANUAL_STEPS.md` in marker form into
+the README mechanically, so the hand-off cannot disappear when the bookkeeping
+file is stripped from the version corpus. The README is dropped from
+`journal_submission/` exactly like every `README*.md`, is never part of a judge
+view, and no submitted document may depend on it; `AUTH-2` names it (and its
+item count) as a blocking readiness finding until the author disposes it. It is
+also excluded from the package's content-hash version token, so generating or
+updating the checklist never makes the stage's document names stale.
+
+The underlying gap counts exactly as before (AGENTS.md rule 5): the marker never
+made a package better or worse; only who carries the note -- the package README,
+the manuscript (document), or the manual-steps list (off) -- changes. The
+delivered CopyNumBench main text still carried `[AUTHOR TO COMPLETE: versions of
+bedtools, Seurat, cellsnp-lite and UCSC liftOver]`, and the NeoHeteroclitic
+Reporting Summary was six markers and no filled form; `readme` is the default
+setting for a package that is about to be uploaded, and `off` remains available
+for an operator who wants every hand-off in the internal manual-steps report.
+
+### What an evidence-area file may be referenced for (PKG-10)
+
+The operator's rule for these packages: **files in `raw_data/` (and its
+siblings) cannot be referenced by the main manuscript**, except:
+
+* **figures and tables** the submission itself carries -- a figure file whose
+  bytes are embedded in a submitted document (the CopyNumBench main text embeds
+  `raw_data/Fig3_ploidy_balloons.png` byte for byte as `word/media/image3.png`),
+  or a display table the parent `.tex` typesets; and
+* **files inputted to `.tex` files in the area's parent directory**, directly or
+  through nested inputs -- `\input`, `\include`, `\includegraphics`,
+  `\includepdf`, `\addbibresource`, `\bibliography`, `\pgfplotstableread`,
+  `\lstinputlisting`, `\subfile`, `\import` -- because those are "treated as if
+  they are in the parent" (the same package README states this positive half).
+
+`tex_input_closure` computes that set transitively; the PKG-2 report and the
+mechanical sentence removal share it, so a legitimate pointer at a supplementary
+source the parent `.tex` really compiles is never deleted, while a pointer at a
+stale table that ships nowhere is reported (and removed from prose) instead of
+handed to the journal.
+
+### Placeholder files are ignored
+
+A corpus file can stand in for data it does not contain. The operator's example:
+*"the haplotypes in Chisel ACT are actually the HG008 haplotypes
+(placeholders)"*. Such a file is never evidence:
+
+```bash
+# declare one (package-relative path or glob; matched against the path and the
+# bare file name). Repeatable at setup; add/clear later with the set- command.
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --placeholder-file 'raw_data/**/ACT*hap*'
+python paper_pipeline.py set-placeholder-file --root ./paper_rounds 'raw_data/**/ACT*hap*'
+python paper_pipeline.py set-placeholder-file --root ./paper_rounds            # show
+```
+
+A package's own README may declare them (a line reading
+`Placeholder files: <path-or-glob>`), and
+the pipeline also DETECTS placeholder copies: two files inside the evidence
+areas with identical bytes under different sample/dataset names, where at least
+one is a haplotype/variant-style input. Every placeholder is listed in the
+evidence pack under **Placeholder files -- ignored**; no role may cite one as a
+producer, and a claim resting only on one is `unable -- placeholder input`. The
+real partner of a DECLARED placeholder stays evidence (declaring the ACT copy
+must not silence the HG008 original).
+
+### Package self-consistency: PKG-11 to PKG-24
+
+Every scan below runs on each produced package and on every published copy, and
+its rows are seeded in the guided-review/audit/revision evidence pack. The table-
+contradiction rows block the readiness verdict (one of the two statements is
+wrong, and only the author can say which); the claim-quality seeds are advisory
+because they need a judgment the code cannot make.
+
+* **PKG-11** -- sibling tables whose headers differ only by case or one
+  character. A one-letter `MixMHCPred_aff`/`MixMHCpred_aff` difference made an
+  aggregation skip a whole antigen silently.
+* **PKG-12** -- a statistics row whose p-value and its own interval give
+  opposite verdicts under the rule the table's caption states (CopyNumBench's
+  AneuFinder/Hap_1/nonintCN_PCC row: p = 0.115 beside [-0.51, -0.02]).
+* **PKG-14** -- a cover letter that says the work is not under consideration
+  elsewhere / lists no related manuscript while the package carries a dated
+  editorial decision for the same title.
+* **PKG-15** -- a `*mcb*pooled*.tsv` whose `n_units`/`mean` are computed on fewer
+  units than the sibling `*units*.tsv` carries, while its caption calls the
+  section "pooled over every donor" (CopyNumBench's pooled MCB: n = 9 germline
+  donors, caption "pools every donor of the four panels", sibling table 21
+  units, S3 n = 21). The row quotes the caption and names the complete-block
+  restriction as the legitimate explanation when that is what happened.
+* **PKG-16** (advisory) -- a required form (e.g. the Reporting Summary) whose
+  software inventory omits tools the manuscript's `Software.` paragraph names
+  (CopyNumBench: bedtools, Seurat, cellsnp-lite, Eagle, UCSC liftOver).
+* **PKG-17** -- a required form's design claim the Methods contradict: "no
+  overlap between parameter selection and evaluation"/"thresholds fixed before
+  inspection" beside "selected empirically … on the cell-line datasets" or a
+  parameter relaxed because the defaults retained no cells.
+* **PKG-18** -- a prose "X gave the highest average <metric>" recomputed from a
+  shipped per-dataset grid (`method`/`metric`/`dataset`/`mean`); advisory when
+  the sentence cites a figure whose numbers are not shipped, blocking otherwise.
+* **PKG-19** (advisory) -- a "recovered the N subpopulations" claim made with a
+  fixed `k = N` and/or a stated absence of a cluster-to-karyotype concordance
+  statistic; the caller's shipped cluster sizes are quoted.
+* **PKG-20** (advisory) -- one symbol ("SD") defined with two different
+  denominators (population over datasets vs sample over antigens) while the
+  prose uses it unqualified.
+* **PKG-21** (advisory) -- a paragraph that admits one term can distort a measure
+  ("can contribute disproportionately") and then draws a comparative inference
+  ("means … more strongly") from it.
+* **PKG-22** (advisory) -- a main-text claim citing a supplementary note whose
+  closest negated sentence says the result must not be read that way ("should
+  not be interpreted as", "not evidence"); it requires a shared non-method
+  subject, so an unrelated note limitation is not paired.
+* **PKG-23** (advisory) -- a "single-cell …" claim whose citation resolves to a
+  bulk genome assembly (the reference list is parsed; narrow by design).
+* **PKG-24** (advisory) -- a caption defining information content as a single
+  residue's log-likelihood instead of the expected log-likelihood ratio
+  (Σ p log₂(p/q), letter height = frequency × IC).
+* **PKG-25** -- a form's "cases in which a tool failed to run … are reported in
+  the deposited result tables rather than being omitted" beside a result table
+  that omits the failed tool for the named cohort (CopyNumBench's ACT panel has
+  no SCYN row) or carries its rows with `failed = False` (the 15 CHISEL ACT
+  rows). The omission row is blocking; the unmarked-rows row is medium.
+* **PKG-26** (blocking) -- the submitted set carries two files for one document
+  role. The NeoHeteroclitic `neohet-to17` package shipped both
+  `neohetero-18-2-mainText-9915d6e.docx` and the stale
+  `neohetero-18-2-mainText-FrontiersTemplate-zotero-bbb4e84.docx` (and the same
+  pair for the supplementary material), so the journal would receive two
+  different main texts. The comparison removes the version token and source
+  suffixes (`FrontiersTemplate`, `zotero`, `original`, `revised`, …), keeps the
+  extension, and is scoped to the package's own submitted set. A second,
+  distinct 7-hex token on editable documents also fails the producing stage's
+  postcheck. At publication the author checklist is rebuilt from current open
+  items in a marked block, so resolved rows cannot linger; markers outside the
+  declared submitted set do not become author work.
+
+A published package over the venue's relaxed M19 cap (or the configured
+cover-letter total cap) is also a blocking readiness finding (`FMT-M19`) even
+though the ranking never gates on a word count: the `neohet-to17` final copy was
+5,550 words against the 3,750-word relaxed Article cap. The length scan runs on
+the published files, including the pin-fallback path. Compression must remove
+redundancy only; scientific content is never deleted to meet a count.
+
+To avoid duplicating gigabytes into every sandbox, the pipeline keeps **ONE**
+read-only copy of each evidence area per root (`<root>/non_revised/<area>`,
+chmod-protected) and the stage sandboxes carry **relative symlinks** to it —
+the content is identical, a write through a link fails instead of corrupting
+the shared copy, and every identity/manifest/view walk follows directory links
+so tampering is still detected. On a filesystem without symlink support the
+pipeline falls back to real copies and says so. Judge views are the exception:
+they must anonymize and re-name every file, so they receive per-view copies
+(by design, not a space bug).
+
+[![One revision round: the read-only manuscript, the round base, the directed-evolution and large-scale-mutation arms, the cross-over integration and the blind judge panel](media/paper-refine-one-revision-round.png)](media/paper-refine-one-revision-round.png)
+
+*One revision round — the read-only manuscript, the round's base `a1`, the
+directed-evolution (guided-review/audit/revise) and large-scale-mutation (rewrite) arms,
+the cross-over integration, and the blind judge panel that pins the champion by
+digest ([PNG](media/paper-refine-one-revision-round.png)).*
+
+The repository also carries the two companion tools the pipeline uses:
+
+* **`paper_docx_format.py`** — the code-side OOXML style/formatting scanner and
+  normalizer (blank pages, running head on the title page, legend spacing,
+  heading style drift, unintended italics, URL/email treatment, quotation
+  marks, em-dash density).
+* **`paper_redlines_adapter.py`** — the tracked-changes bridge to
+  `python-redlines[docxodus]` (or `docx-trackdiff`).
+
+## Difference tracking, and the persistent PDFs
+
+As soon as a stage is accepted -- and again at each round's close -- the
+pipeline tracks what actually changed, with **no agent session and no LLM
+call**, and renders the versions to PDF. The tracking copies are audit aids: a
+failure is a warning, never a failed stage, and every file the passes write is
+an **auxiliary** that is excluded from every judged/pinned corpus, content
+fingerprint, revision token and judge view. Pinned by
+`.paper_test/test_difference_tracking_*_*.py`: parts 1-3 and 5 pin the naming,
+the passes and the stage-time placement; part 4 runs a stub round with and
+without them and asserts the champion, the scores, the pins and every recorded
+corpus digest are identical.
+
+**Tracked differences.** The copies are written the moment a stage is accepted
+-- `postcheck()` tracks every rewrite/revise/integrate arm as soon as it passes,
+and the template-first `conform` does the same for `template_rewrite/out/` -- so
+each is BESIDE the documents of the version that was just produced (and mirrored
+under `<root>/tracking/r<R>_<version>/`, with `manifest.json` + `README.md`).
+The round's close keeps every fresh entry (it never re-drives Word/latexdiff
+over unchanged content) and fills in what a stage did not write, plus each
+published winner.
+
+The file name NAMES THE BASELINE the copy was compared against -- no
+"previous", no ambiguity:
+
+| file (`.ext` = `.docx` / `.tex` / `.bib`; `.pdf` is the compiled marked-up LaTeX copy) | meaning |
+|---|---|
+| `<name>.tracking-original.ext` | vs the pre-conformed original (`non_revised/`, the copy `setup --source` made) |
+| `<name>.tracking-a1.ext` | vs the round base `a1` -- for round r > 1 that is the pinned champion of round r-1 (published as `round<r-1>_winner/`) |
+| `<name>.tracking-w<k>.ext` / `<name>.tracking-a<k>.ext` | vs the k-th rewritten / reviewed-and-revised candidate -- the base an integration run reworked (its own `self/` member) |
+| `<name>.tracking-winner<r>.ext` | vs the published winner of round r (a winner from round 2 on) |
+| `<name>.tracking-<token>.pdf` | the compiled marked-up PDF of a tracking `.tex` root, built from the rewired tracking sources (the clean PDF when the pair is byte-identical) |
+| `<name>.logging-<token>.ext` | the readable before/after log written instead when that comparison FAILED (never a file that only looks like tracked changes) |
+
+`tracking-*` and its `logging-*` fallback differ by exactly one token, and the
+baseline token is the pipeline's own version id, so `manuscript.tracking-w1.docx`
+in `runs/r2_a2_revise/revised/` says exactly which version it was revised from.
+
+A `.docx` pair is compared by **Word's own engine first**: the `docx-compare`
+MCP tool (`compare_docx`) drives `docxcompare.sh` -> PowerShell ->
+`Word.Application.CompareDocuments` (COM automation), the same redline engine
+behind Review > Compare. Only when no compare server is configured (or its call
+fails) does the chain fall back to `python-redlines[docxodus]`, `docx-trackdiff`,
+an operator-supplied `--redline-cmd`, and the built-in OOXML writer. `.tex`/
+`.bib` pairs go through `latexdiff --no-label`. A pair whose bytes are identical
+gets an unmarked copy, never a fake diff. The `redlines/` tree is still written
+(`run_redlines`: from-base / from-original / from-setup-source); the tracking
+pass REUSES the redline it already produced for the same pair instead of driving
+Word twice (the reuse is gated on the pair's two content digests, so a redline of
+the same file name but of different bytes is never presented as this pair's
+difference).
+
+**The redline is weighed, not trusted** (`redline_fidelity`). Every successful
+backend's output is measured -- the words its `w:ins`/`w:del` markup marks,
+against the least a faithful redline needs for that pair (paragraph-aligned,
+word-level). A backend that marks an order of magnitude more than the pair
+really changes is the signature of the 2026-10-14 CNB tracking copy: a Word
+paragraph carries `w:lastRenderedPageBreak` inside its one text run, and
+`docx-trackdiff` cannot diff such a run piecewise, so it deleted and re-inserted
+the WHOLE paragraph for a ten-word edit (624 marked words for 84 words of real
+change). Under `--tool auto` an over-marking backend is passed over for the next
+one and the least-marked result is kept (an explicit `--tool`/`--redline-cmd`
+choice is honoured with the caveat recorded). `manifest.json` carries the
+numbers per attempt (`fidelity`), the readme lists the over-marked files under
+Caveats, and the second backend no longer needs the adapter file: `redlines`
+runs the engine in process (and `setup` copies `paper_redlines_adapter.py` into
+the root for the CLI route).
+
+**The built-in OOXML writer is lossless for inline content.** It walks the diff
+op by op and rewrites only the changed text (everything else keeps its rPr), so
+a soft line break (SHIFT+ENTER), a tab or a Zotero field char keeps its place --
+accepting every change reproduces the revised paragraph, rejecting every change
+reproduces the base paragraph, and the 2026-10-14 NeoHetero correspondence block
+keeps both of its soft breaks (the previous writer rebuilt a changed paragraph
+from plain text and dropped them). A paragraph the walk cannot split piecewise
+falls back to whole-paragraph markup that carries the revised paragraph's own
+XML, so nothing inside it is lost either.
+
+**The tracking LaTeX copy COMPILES.** Before a tracking `.tex` root is
+compiled, its `\input{}`/`\include{}` and `\addbibresource{}`/`\bibliography{}`
+references are pointed at the tracked copies of those files when the same
+baseline produced them -- an unchanged include keeps loading the shared file,
+and a failed comparison's commented-out `logging-*` fallback is never loaded.
+Lowercase `\difdel`/`\difadd` aliases are injected because `plain`-style BibTeX
+`change.case$` lowercases the tracked bibliography fields. Every root is
+compiled -- a byte-identical pair too, whose tracking PDF is the clean version
+with its tracked includes -- while a fragment is skipped (it compiles through
+its master). The result is written BESIDE the tracking `.tex` as
+`<name>.tracking-<token>.pdf` (and mirrored under `tracking/`), so the changes
+can be read without a LaTeX toolchain. A compile failure is a warning recorded
+on the manifest row (`pdf_error`); the tracked source stays.
+
+The server is the operator's own: register it once and the pipeline probes it
+from `~/.codex/config.toml`, drives it over the same minimal stdio JSON-RPC
+client the converter uses, and pre-approves it for the non-interactive stage
+sessions.
+
+```bash
+npm ci --prefix /path/to/repo/mcp-docx-compare    # Node >= 20; node_modules/ is gitignored
+codex mcp add docx-compare -- node /path/to/repo/mcp-docx-compare/index.js
+```
+
+Both shipped MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) need that
+`npm ci` step before they can start: `node_modules/` is never vendored, so a
+fresh clone that skips it fails with `Cannot find module
+'@modelcontextprotocol/server'`. Each server also drives a companion shell
+script -- `docxcompare.sh` (`../`, `./`, then PATH) for the compare server,
+`docx2pdf.sh` for the converter -- so a copy deployed without that script
+answers `initialize()` and then fails EVERY tool call with
+`spawn docxcompare.sh ENOENT` (`install_skill.sh` installs the dependency and
+the companion with each copy). The pipeline's probe reads both:
+`mcp_server_unusable_reason(name)` is what the redlines manifest and the
+renderer list report, so a configured-but-dead server is named with the fix
+(`... its Node dependencies are not installed: run npm install in <dir>`;
+`... the docxcompare.sh script its tool drives is missing: ...`), and the MCP
+client's handshake now carries the server's own stderr tail instead of the bare
+`did not answer initialize()` the 2026-10-14 run recorded.
+
+```bash
+python paper_pipeline.py track --root ./paper_rounds            # re-run tracking + PDFs
+python paper_pipeline.py track --root ./paper_rounds --no-pdf   # tracking only
+python paper_pipeline.py run   --root ./paper_rounds --no-track  # skip both passes
+```
+
+**Persistent PDFs.** Every LaTeX root (`\documentclass`) is compiled with
+`latexmk -pdf -interaction=nonstopmode -halt-on-error` and every `.docx` is
+converted through the shared renderer chain (`docx-converter` MCP tool first,
+then `docx2pdf.sh`, then LibreOffice). The PDFs land under
+`<root>/pdfs/<round>_<version>/` (plus `pdfs/original/` and the round's
+`pdfs/r<R>_<vid>/`), with `manifest.json` + `README.md` recording the tool, the
+page count and any warning. The build runs in a disposable copy of the package,
+so no build by-product (`latexmk`'s `.aux/.log/.pdf/...`) ever lands inside a
+corpus, and `prune` never deletes the tree -- the PDFs outlive the run. An
+uncompilable source or an unrenderable document is recorded and printed as a
+WARNING; the run continues and the decision is unaffected.
 
 ## Style/formatting checks and repairs
 
@@ -2605,6 +2124,493 @@ revision-session `README*.md` note under `reports/readme_notes/<run>/`, while
 the author's own README stays. `publish_final_clean` reports any residue that a
 package from an older orchestrator still carries, and preserves the judged
 bytes instead of changing the package after the pin.
+
+## The auditor (`setup --audit on`): review → **audit** → revise
+
+The review is one session that reads a whole corpus and then disposes hundreds
+of code-side rows. Its two documented failure modes are (1) closing a row with a
+reason that is not about that row's bar ("no journal rule", "editorial
+preference only") and (2) closing MANY rows with the SAME sentence. In a real
+run, 96 scan rows were closed with one identical sentence — and the sentences
+the operator later flagged were inside that pile.
+
+`--audit on` inserts one independent session between the reviewer and the
+revisers. It never edits a package; its product is the decision record
+(`audit/audit.json` + `audit/AUDIT.md`):
+
+* **every frozen finding is disposed**: `confirm`, or `drop` WITH a reason and
+  evidence (the verbatim text or the file:line derivation that refutes it).
+  Silence about an id is a failed attempt — an undecidable finding must be
+  confirmed, because dropping it would hide it from the reviser;
+* it **attacks the reviewer's dispositions**: every finding-tier row the
+  reviewer closed as `OK` is re-checked against its own bar. This build's
+  AUDIT role files no new findings: a real defect the closure hid is recorded
+  in `audit/UNRESOLVED.md` with its location and evidence, as an observation
+  for the next review (no tier until that review files it on the shared
+  scale), so the frozen list the revisers see is never silently extended;
+* the revisers consume the **audited** list (frozen − drops) and the drops stay
+  visible to the human in `audit/audit.json`, so a drop is always re-checkable
+  and reversible;
+* the auditor's own artifacts pass the same disposition-quality detectors as the
+  reviewer's (see below).
+
+The stage is **on by default** (`DEFAULT_AUDIT = "on"`): the review's disposition layer was the
+pipeline's single largest source of shipped leftovers, and one extra session per round is cheaper
+than a second round. `setup --audit off` (or `--no-audit`) restores the two-step review → revise
+plan and keeps an existing root's recorded policy; it costs one session per round, not per
+candidate.
+
+## The revision audit (`--revision-audit on`): revise → **revision audit** → bounded repair
+
+After the revise stage's own postcheck passes, one independent
+**REVISION AUDITOR** session re-reads `base/` and `revised/` against the frozen
+findings, the review audit's dispositions and the revision ledger. It edits
+nothing and writes ONE product, `revision_audit/REPAIR_PLAN.json` (plus a
+readable `REPAIR_PLAN.md`): one row per defect it confirms IN THE REVISION
+(a correction missing, a fact removed, a wrong value, a non-inferable manual
+item, a missing low-priority re-verification row, or a defect the revision
+introduced). Every row carries the location, the wrong and correct text, and a
+basis another session can re-run; an empty plan is a valid, complete audit.
+
+When the plan is non-empty, ONE **BOUNDED REPAIR** session re-validates every
+row against `revised/`, `base/` and the source hierarchy, applies only the rows
+it confirms, records its verdicts in `revised/REPAIR_LEDGER.json`, and updates
+the changelog/report/manual items. The audited bytes are preserved as
+`revised_prerepair/`, and the revise postcheck runs again on the final package;
+there is exactly one repair pass (a defect the post-repair verification still
+finds is recorded for the round's decision, never repaired in a loop). The
+chain is on by default; `--revision-audit off` (setup) or
+`PAPER_REVISION_AUDIT=off` (an existing root) records the skip and leaves that
+arm's revised version final for the arm before integration. It does not run in a
+concern-scoped major/minor revision
+(those edits are confined to the admitted concerns) or for a round that is
+already decided.
+
+## The cold-start review (`setup --cold-start-review on`): a second, independent discovery pass
+
+Every checklist pass is finite, and one review pass is a sample of the defect space. A real run
+showed what slips through: the abstract, Results, Discussion, Fig. 2 legend and cover letter said
+the tool "gives the best overall balance" and that both haplotype references agree on the leading
+callers, while the paper's own Table S2 rank-biserial signs and donor-level medians in `raw_data/`
+did not support it — and the reviewer's own discovery probes had read that very table and reported
+"no anomalies".
+
+The **cold-start review** is one extra independent session per full-scope round (`r<r>_cold_start_review`,
+planned in parallel with `r<r>_guided_review`; the auditor and the revision arms WAIT for it). It is deliberately
+cold-context and GENERIC — any defect class may be reported. It belongs to the review STEP: the
+auditor and the revisers consume its findings, so `run --only review` (or `2:review`) drives the
+cold-start review with the guided review, while `retry --runs 1:review` stays exact (a retry resets
+only the runs the
+operator names):
+
+* it is given the corpus and NOTHING else — no `guided_review/`, no finding list, no sweeps; its sandbox
+  carries only `base/`, `non_revised/` and three seeded CANDIDATE inventories
+  (`cold_start_review/CLAIM_SURFACES.md`, `cold_start_review/PRODUCERS.md` and — since 2026-10-16 —
+  `cold_start_review/OBLIGATIONS.md`, what THIS submission promises: the submitted set its own README
+  declares, the display items the documents cite, the file names they write, and where each one
+  resolves), which it is told are starting points, not a scope;
+* it surveys the submission documents, the evidence areas (`raw_data/`, `code/`), the relations
+  between them and the packaging itself (the checklist's discovery discipline: expected-but-absent,
+  present-but-unexpected, boundary, sibling asymmetry, claim/pointer mismatch, stale or unusable
+  shipped sources, …) and disposes every candidate into a finding or a recorded clean row;
+* wherever a defect can be SHOWN BY A COMPUTATION, the finding declares a small script under
+  `cold_start_review/scripts/` and the exact value it prints
+  (`"verifier": {script, computed, shows}`); findings without a computation are evidence rows like
+  any other finding;
+* **the orchestrator re-runs every declared verifier at postcheck time** and compares the last
+  stdout line with the declared `computed` value (`cold_start_review/REPRODUCTION.md`). A mismatch (or
+  a missing script / non-zero exit / empty output / timeout) FAILS the attempt — a computation the
+  cold-start review cannot reproduce is a correctness blocker, not a finding;
+* every finding is an **`X-9xx` row** (the reserved cold-start-review block) of the same standing as the
+  discovery round's `X-*` findings: it is merged into the frozen
+  `guided_review/round2/findings_extra.json` of the auditor and every reviser (the source review sandbox
+  is never mutated), into the integration seed `frozen_discovery/`, and into
+  `reports/round<r>_review/` (so a pruned root re-seeds the same ids). Colliding ids are remapped
+  deterministically and the remap is recorded;
+* its report carries a `checked` inventory (every area examined, with candidate/finding counts)
+  and `cold_start_review/coverage.md`, so a zero-finding pass is an examined corpus and not an unrun
+  one. **The completeness direction is mandatory and its rows must be disposed** (2026-10-16):
+  the declared submitted set against what the documents depend on, the venue's recorded structure
+  against the sections the manuscript carries, and the submission's own promises (sections it
+  announces, denominators its statistics name, hashes and dates its front matter pins). A short
+  report has to be JUSTIFIED with positive evidence, area by area — "the surfaces look
+  consistent" is not a disposition — and the prompt states the stage's target verbatim ("There
+  are still remaining issues in this manuscript submission. Please identify these issues.") with
+  its classes framed as ways to look, never as a fence on what may be filed.
+
+`--cold-start-review {on,off}` (default `on`; `--no-cold-start-review` or `set-cold-start-review off` on an
+existing root) is the off switch; a root created before the feature carries no key and plans no
+cold-start session until `set-cold-start-review on`. The JUDGE panel stays completely blind and is never
+handed the list — it re-derives its own generic discovery pass and scores side differences as
+normal `resolved`/`introduced` rows. A `formatting-writing` polish round plans no cold-start review (it is a
+content-level pass).
+
+## The GUIDED review and `--no-guided-review`: running the cold-start review alone
+
+The round's two discovery roles are the **guided review** and the **cold-start review**. The guided
+review is the checklist pass — the M1–M36 mechanical sweeps, the J1–J5 judgment passes and the
+D0–D5 discovery round. Its recorded names are `guided_review` (the run kind),
+`r<r>_guided_review` (the run id) and `guided_review/` (its output area); they were
+`review` / `r<r>_review` / `review/` before the 2026-10 guided-review rename. The cold-start
+review is the independent, cold, unanchored pass documented above.
+
+The three recorded names were renamed together (2026-10) from `review` / `r<r>_review` / `review/`,
+so the vocabulary matches the role: a run's record now reads `kind: "guided_review"`, its sandbox
+is `runs/r<r>_guided_review/`, and its output area is `guided_review/` (with the split session's
+`guided_review_a/` and the frozen `guided_review/round2/` unchanged in shape). The CLI keeps
+`review` as the name of the review STEP, which selects BOTH discovery passes
+(`guided_review` and `cold_start_review`); each stage's own name selects only that stage.
+This applies to every selection option, including `retry --runs 1:review`, which therefore
+resets BOTH review runs of that round. Roots
+created before the rename keep their old on-disk names and are not migrated: re-create such a
+root (`setup`) to run it under the current vocabulary.
+
+`--guided-review {on,off}` / `--no-guided-review` (default `on`) turns the guided review OFF
+and runs the cold-start review alone: its `X-9xx` rows become the round's frozen finding list, and the
+whole class the guided review owns is recorded as a NAMED GAP — never as a clean result. The gap
+is written where every downstream session reads it:
+
+* `guided_review/findings.json` in each auditor/reviser sandbox carries `guided_review: off`, the
+  `named_gap` sentence, and one `unable -- <gap>` coverage row per check id the guided review
+  would have carried (the file is synthesized by `synthesize_frozen_review`);
+* the audit and revise prompts open with the "THIS ROUND HAS NO GUIDED REVIEW" block, so no
+  session mistakes the cold-start review's silence for coverage;
+* the cold-start review's prompt states that its `coverage.md` is the round's ONLY coverage record;
+* `pipeline_config.json` records `guided_review: off` together with the same gap text (rule 10).
+
+`setup` REFUSES the combinations that would leave the round with no finding source at all: a
+concern-scoped revision mode (which already replaces the general review with the concerns ledger),
+a revision mode that consumes review feedback (`transfer`, `resubmit`, `llm` — the guided review is
+the session that reconciles every concern), `--review-split` (two guided-review sessions), the
+cold-start review turned off, and a non-`full` review scope. The flag is a diagnostic mode — it answers "how well does the cold-start review do on its own?" — and
+the round it produces is comparable only with another run of the same flag.
+
+## Execution profiles (`--execution-profile high|medium`)
+
+The pipeline was written for a frontier model with a very large context window. A medium model (a
+single-GPU 27B deployment, ~100k tokens or less) does not fail on the manuscript — it fails on the
+INSTRUCTION PAYLOAD. Every session is handed ~110 KB of stage prompt before it reads one word of
+the paper, and an agent loop re-sends that prompt on every step. Measured on one 18.9 KB manuscript:
+1,589 model calls and 110.8 M prompt tokens, median call ~72k prompt tokens.
+
+`--execution-profile {high,medium}` (default `high`) selects the instruction profile. It is NOT a
+reasoning-effort setting (`PAPER_QWEN_REASONING_EFFORT` is a different axis) and it changes no
+postcheck.
+
+* **`high`** is the pipeline exactly as it has always been, and it is the default. A default root
+  writes no new config key, plans the same sessions and renders the same prompts, byte for byte;
+  `--execution-profile high` is therefore identical to running without the flag.
+* **`medium`** keeps every rule but stops INLINING the elaborative ones. Each stage prompt keeps
+  the stage contract, the finding schema, the deliverable list and the completion marker, and the
+  long rule sections it used to paste are written once to `INSTRUCTIONS/PROFILE_RULES.md` in the
+  session sandbox and referenced by a pointer. The prompt opens with the medium capacity contract
+  (bounded reads, incremental writes, no re-reading, close the deliverables first). Nothing is
+  dropped, summarised or weakened: the same bytes ship in the root, the prompt states that the
+  paged sections are mandatory and authoritative, and the postchecks are unchanged — the difference
+  is WHERE the instructions live, not what they demand.
+
+Measured effect (every stage prompt, rendered from the same checkout; the split and
+formatting-writing review variants track `review`):
+
+| stage | `high` | `medium` | cut |
+|---|---|---|---|
+| review | 109 KB | 42 KB | 61% |
+| cold_start_review | 57 KB | 18 KB | 67% |
+| audit | 79 KB | 35 KB | 55% |
+| revise | 107 KB | 55 KB | 49% |
+| integrate | 105 KB | 54 KB | 49% |
+| rewrite | 99 KB | 51 KB | 49% |
+| judge | 95 KB | 65 KB | 32% |
+| revision_audit | 23 KB | 9 KB | 61% |
+| revision_repair | 19 KB | 5 KB | 73% |
+
+The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
+`pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
+those prompts is the one frozen beside it. `sync-code` and `retry` preserve the recorded policy. A
+root created before this feature carries no key and runs `high`.
+
+## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
+
+A from-scratch rewrite fixes a family of defects as a side-effect of rewriting:
+it re-aligns figure-artwork and SI-legend terms with the text, completes a
+US/UK spelling or hyphenation convention across the whole corpus, completes a
+claim's evidence pointers (`S12` alone for a claim about both samples), makes
+sibling definitions symmetric (`MALBAC-sequenced (multiple annealing …)` puts
+the explanation after the use), aligns a caption with what the table actually
+prints, and reorganizes at the scope level. In the 2026-09-27 root the judges
+credited the rewrites (w1/w2) with exactly these rows while the
+review→audit→revise arm had nothing to act on — the review's instance-level
+format had either closed them with the wrong bar or never enumerated them.
+
+The guided-review/audit/revise path now carries them explicitly:
+
+* **M25** figure-artwork/text parity · **M26** house-style/orthographic
+  conventions (bundled `enumerate_conventions.py`; one authoritative form per
+  family in `STYLE_CONVENTIONS.md`, one finding per deviating occurrence) ·
+  **M27** claim→evidence coverage · **M28** sibling-definition symmetry ·
+  **M29** caption-promise vs printed-schema parity — a two-sided pairing: a
+  promise the print does not deliver and a printed column/panel/encoding the
+  caption never describes are the same finding class in opposite directions.
+  Each gets its own artifact under `guided_review/artifacts/` and its own coverage row;
+* **J5** is the architecture pass: one row per scope in
+  `guided_review/ARCHITECTURE.md`, and its findings carry a `scope` key (they are the
+  one legal non-instance finding);
+* the auditor attacks the dispositions that used to close these classes
+  ("it is a proper name", "the artwork is read-only", a convention closed per
+  document, an unfilled architecture table); the attack files no new finding in
+  this build, so a real defect the closure hid is recorded in
+  `audit/UNRESOLVED.md` with its location and evidence for the next review
+  (no tier until that review files it);
+* the reviser resolves M25–M29 by aligning the EDITABLE surface corpus-wide
+  (rule E11), and J5 licenses **scoped restructuring** inside the finding's
+  declared scope under a content freeze, a numbering check and one
+  `work/RESTRUCTURE_<id>.md` artifact per finding;
+* the judge panel's frozen coverage map (M1–M24 + J1–J4) is deliberately
+  unchanged for the CHECKLIST classes: identical minimum scrutiny across
+  versions is what keeps it calibrated, and the comparison already scores those
+  differences in the consistency/completeness/correctness tiers. The classes
+  the checklist does not own are NOT added to the coverage map either: the
+  judge re-derives them in its own bounded discovery pass (contract v5) and
+  files any difference as a normal ledger row, so an X-class fix is scored
+  without handing the judge another session's findings.
+
+## M30: the source hierarchy is a detection rule too
+
+The source hierarchy (`github code > data in raw_data/ > main figures >
+supplementary figures > main tables > supplementary tables > main text >
+supplementary text`) was stated only as a **resolution** rule: it decides which
+side wins once two sources already disagree. Nothing enumerated the
+**detection** side, so a written number, sample size, parameter or label that
+the shipped code or raw data contradicted was found only when a human happened
+to compare them — even though every session's corpus already carries the
+producers (the analysis code under `code/`, the byte-identical `raw_data/`
+snapshot, the figure/table sources), and the judge's blinded view carries them
+too — under the labeled `evidence/raw_data/` directory, with anonymized file
+names (e.g. `evidence/raw_data/f0001.py`, `evidence/raw_data/f0002.csv`) — as
+it also carries the human feedback under `evidence/human_review_feedback/`.
+When the corpus carries the pre-filtered LLM review, it travels the same way
+under `evidence/llm_review_feedback/`.
+
+**M30 — source-hierarchy reconciliation** closes that gap on the
+review → audit → revise path (`sweeps.md` §M30):
+
+* the review enumerates, for every operational or quantified item on a
+  claim-bearing surface, the artifact that produced it (a `raw_data/` file, a
+  code/config constant, the figure/table source), files one finding per
+  incompatible instance with BOTH sides and the authoritative one per the
+  hierarchy, and records `unable — the producer is not in the corpus` (an
+  external GitHub repository, an image-only figure, a binary the text tools
+  cannot read) instead of a silent clean. A difference a stated unit, rounding,
+  conversion or Methods-stated run-time override reconciles is `OK` with that
+  reason;
+* the seed is code-side and bounded: `table_column_stats` (each shipped table
+  column's own row count and min/max/mean/sum), `hierarchy_seed_rows` (every
+  written number the shipped tables do NOT prove, paired with its candidate
+  producer column and the check the code can make — including a cohort-size
+  sentence against the table's own row count, the "12 samples" vs a 3-row table
+  case) and `code_literal_rows` (module-level literals such as
+  `N_SAMPLES = 15`, the producer side of a Methods parameter). They land in
+  `guided_review/artifacts/M30_hierarchy_reconciliation.md` (two disposed tables,
+  under the strict-artifact policy) and `work/M30_hierarchy_reconciliation.md`
+  in the other layouts;
+* the auditor attacks the closures that used to hide the class ("the code is
+  out of scope", "`raw_data/` is read-only", "not in the written parts"); the
+  reviser resolves an M30 finding by **rule E12** — align the WRITTEN side with
+  the authoritative producer, rule C owns a code fix (minimal edit + rerun
+  note, dependent numbers manual), and `raw_data/` is read-only so a fix that
+  lives inside it is a manual decision with the exact file/value;
+* the rewrite surfaces the conflict under `PROBLEMS SURFACED` and never edits
+  the code; the integration resolves it under the same hierarchy; and the
+  judge prompt states explicitly that a claim the package's own code/data
+  refutes is scoreable `correctness`/`completeness`, never cosmetic — while the
+  frozen coverage map stays M1–M24 + J1–J4, exactly as M25–M29 did.
+
+## The discovery round (D0–D5) is verified as a contract
+
+Phase 3 of `$paper-review` is the open-ended hunt for issue CLASSES the frozen
+checklist does not own (`paper-skills/paper-review/references/discovery.md`).
+Its deliverables used to be existence-checked at best — a session could leave a
+three-line `new_sweeps.md` (or no `guided_review/round2/` at all, which was a warning)
+and the review still passed. The pipeline now reads the whole D0–D5 deliverable
+set and, under the review's `--strict-artifacts` policy (fail by default, warn
+under `--strict-artifacts off`, and recorded for `decide --residual-gate`),
+REFUSES a review whose discovery round is not real work:
+
+* `known_index.md` names the frozen class range (M1 … J5);
+* `gap_table.md` carries ≥25 class rows, each marked COVERED (by which check)
+  or UNCOVERED, with at least one UNCOVERED row (the two-sided-defect seed
+  alone is a standing gap until both directions have been reported);
+* `probes.md` converts every UNCOVERED row into a `P2-…` probe or records it as
+  an analysis limitation, and every probe row states its status;
+* `probe_results.md` executes every probe — a clean probe reads
+  `no anomalies — checked: <locations>`, an `unable` probe says why;
+* `findings_extra.json` carries the standard finding shape for every `X-*` row,
+  and a cross-namespace check reports an X row whose line + excerpt match a
+  frozen `F-*` row (D0's "same class+location+substance is not reportable");
+* `new_sweeps.md` carries sweeps.md-shaped proposals (Purpose, Enumeration,
+  Artifact, Finding rules) numbered from M37, or an explicit statement that
+  there were no proposals and why — a bare `# none` is refused;
+* `round2_summary.md` reports the counts and the round's honest limits.
+
+Continuity is enforced: every sweep id the PREVIOUS round proposed
+(`prior_round/new_sweeps.md`) must be re-probed or explicitly dispositioned
+("prior proposal M37: no instances in base/") in the current round's round-2
+artifacts, so a discovered class cannot vanish between rounds.
+
+Adoption is a command, not a manual paste: `paper_pipeline.py adopt-sweep
+--proposals guided_review/round2/new_sweeps.md` validates the proposal blocks, refuses
+non-continuing numbering or collisions with `references/sweeps.md`, appends
+them with `--yes` and re-syncs the standalone review prompt's appendix
+(`validate_skill.py`'s D10 sync check). And the auditor now attacks the
+discovery round's probe dispositions like the reviewer's other decision rows:
+when the frozen review carries probe rows, `audit/PROBE_AUDIT.md` must dispose
+each probe (`stands` / `needs-evidence`); this build's auditor files no `AU-*`
+rows, so a real anomalous value or label a probe closure hid is recorded in
+`audit/UNRESOLVED.md` (with the closure and its evidence; no tier until the
+next review files it) as an observation for the next review instead of being
+promoted into the frozen list.
+
+**The discovery class reaches its two missing consumers — the integrator by
+list, the judges by their own pass.** The X-* findings were once visible only to
+the revision arms: an integrator could drop a donor's X fix as an "unnamable"
+difference, and the judges never considered the class at all -- so a revised
+package was not ranked ahead of the version it had improved on. The two stages
+need different treatment:
+
+* the INTEGRATOR is not blind: the frozen
+  `guided_review/round2/findings_extra.{json,md}` is copied VERBATIM into a read-only
+  `frozen_discovery/` directory in its sandbox (recorded in the run's input
+  manifest, byte-verified like every other input), with the auditor's `drop`
+  dispositions honored (a dropped X id is not in force and is never scored).
+  `integrated/DIFF_LEDGER.md` must reconcile every X id (ported / kept-base / an
+  explicit no-donor-fix row) -- a revision cannot be lost in the merge.
+* the JUDGES are COMPLETELY blind to where a package came from (no other
+  session's findings, no round, no producing agent), so they are never handed
+  the list. Judge contract v5 requires each judge to RE-DERIVE the class itself:
+  a bounded discovery pass over EVERY side (target and every opponent, same
+  candidates and depth), recorded as one disposed file per side under
+  `judge_review/discovery/` (a missing or empty pass fails the run), and any
+  X-class difference is filed as a normal `resolved`/`introduced` row in the tier
+  the shared defect-class rule gives the finding's own category (an EXISTING
+  tier: correctness / preservation / completeness / consistency / writing /
+  formatting -- no new class is invented, so the issue census and the ranking
+  read it like every other defect).
+
+## Arm levels, the difference ledger, and the language pass (W-11/W-12)
+
+* **Rewrite arms carry a level.** With `--rewrites 2` the round stages one
+  `structural` arm (section/paragraph order, narrative flow, headings,
+  transitions — declared in `REWRITE_REPORT.md → ## ORGANIZATION MAP`) and one
+  `sentence` arm (same organization, sentence-level clarity/precision/terminology
+  work). The pool then holds large *and* small differences, so the integration
+  stage weighs a reorganization against a prose improvement instead of a taste
+  contest. `postcheck_rewrite` records the level and rejects a report that
+  declares the wrong one.
+* **The integration difference ledger needs an artifact and a re-validation
+  verdict per row.** `integrated/DIFF_LEDGER.md` rows carry `size` (small =
+  wording, large = organization), `artifact` (a before/after pair under
+  `integrated/work/diffs/` for a small row, the outline diff for a large row),
+  `verdict` (port / keep-self / synthesize / ignore-cosmetic), `revalidated`
+  (`confirmed` / `rejected`) and `finding effect` (`preserves F-00x` /
+  `undoes F-00x` / `none`). Only a `port`/`synthesize` row with
+  `revalidated: confirmed` may be edited; the postcheck hard-fails a port/
+  synthesize without it and a new ledger row missing the verdict. It reports
+  rows without an artifact, missing size classes when the pool
+  has both levels, donors missing from the table, and any port that would undo
+  a resolved
+  finding.
+* **No stage may introduce a NEW class of defect.** Every package-producing stage
+  is re-scanned against the package it started from, per finding-tier family: a
+  family the input had none of and the output now has (a new mega-paragraph, a
+  new nested parenthesis, a new value+unit outside siunitx, a new abstract
+  sentence past its bar) FAILS the attempt with the offending rule named; growth
+  inside a family that was already present is a warning.
+* **An e-mail address is a contact fact, never an inferable typo.** A reviewer
+  may report a domain/affiliation mismatch, but neither the review nor the
+  revision may infer a replacement domain: the observed over-correction was
+  `mart.ksk@ut.ee` → `mart.kask@helsinki.fi`, where the reviewer could not verify
+  the real address yet the reviser applied the guess. Every package-producing
+  stage now runs a code-side gate: a NEW address must either already appear
+  verbatim in the input corpus (another submission document,
+  `raw_data/`, the base's analysis code) or be verified by a row in the package's
+  `work/EMAIL_VERIFICATION.json` recording the web-search query, the http(s)
+  source URL, the checked date and a verbatim quote that contains the exact
+  corrected address; otherwise the stage FAILS. A removed non-placeholder address
+  is recorded (a contact fact is not a deletion surface), and a case-only rewrite
+  is not an address change. The same rule is in the shared decision block (D9),
+  all stage prompts, the review's M12/M14 sweeps and the revise skill.
+* **Every externally-assigned identifier follows the same evidence rule (D10).**
+  A DOI, accession (GEO/SRA/BioProject/BioSample/...), ORCID, UUID/UID, git
+  commit hash, funding/grant number, registry/protocol/version ID or a
+  reagent/cell-line/strain/domain-specific identifier is a fact, not a pattern.
+  A replacement, shortening or renumbering of an existing value FAILS unless the
+  exact value is already in the input corpus or a package record
+  (`work/FACT_VERIFICATION.json`) carries `kind`, `before`, `after`, the query, a
+  real `http(s)` source URL, the checked date and a verbatim quote containing the
+  value — a web search, Crossref/DataCite/ORCID, a public registry or a
+  repository page all qualify as independent evidence. A pure addition for new
+  content (a new reference's DOI) is not a correction and is allowed. When no
+  evidence exists the value stays byte-identical and the suggested value
+  (`suggested: <value> (unverified)`) goes in the high-priority manual TODO with
+  the location and exact check.
+* **The L1–L11 language pass runs in every package-producing stage** (rewrite,
+  revise, integrate), not only in the revision arm: one row per change plus one
+  coverage row per step in `work/R6_language.md`, and a code-side re-scan of the
+  package after each step. A missing artifact or an uncovered step is recorded
+  (and fails the attempt under `--strict-artifacts`). The substantive steps
+  L1, L2, L3, L5 and L6 are finding-gated: a write session may not use the
+  language pass to repair a claim, factual statement, logic jump, prerequisite
+  or redundancy without a frozen finding authorising that exact change; it
+  records the observation for the finding-generating role or as a manual item.
+* **The judge scores prose against a named rubric.** The `writing` tier's rows
+  cite one of twelve checks (Q1–Q12: premise, logic slip, logic jump, coherence,
+  unexplained prerequisite, redundancy, non-academic wording, register, stiff
+  phrasing, grammar, typography, segmentation) with a quote and the intended
+  reading. The tier carries the same four severity rungs as every other class
+  (Minor / Major / Critical / Fatal), and the rubric carries no provenance
+  vocabulary, so the panel stays blind.
+
+## Provenance, identifiers and the residual gate
+
+Every non-judge sandbox now also receives a code-side **provenance pack**
+(`work/` and, for the review, `guided_review/artifacts/`):
+
+| artifact | what it carries |
+|---|---|
+| `NUMBERS_LEDGER.md` | every numeric literal **and every spelled-out count** (`one` … `ninety-nine`, `one hundred and five`), with the `source` the CODE could PROVE from a shipped data table (a column sum/min/max or a single cell — e.g. `45,365` = the sum of `n_cells_total`). A word number is a count only in a count context (before a plural noun, in "four of the five", before a unit, or in "one row per sample"); pronoun and idiom uses ("one of them", "one another", "at once", "Run two") are not rows. A row whose source stays empty is the session's job |
+| `IDENTIFIERS.md` | every DOI / SRA-BioProject-GEO accession / repository URL+commit / ORCID, with the orchestrator's own public-API verdict (`found` / `absent` / `error` / `skipped`) |
+| `M2_references.md` | the reference-integrity seed: one row per reference ENTRY that carries a DOI, with the resolver's verdict for that DOI and what the code established itself — a year token inside the DOI that contradicts the entry's own year (`gb-2019` → `gb-2119`), the same DOI on two entries, and the comparison between the resolved record and the entry. A one-character DOI corruption leaves author, title, journal and year intact, so no format check and no re-reading can see it |
+| `PLACEHOLDER_LOOKUP.md` | the answers the pipeline already found for the `searchable` hand-off markers (`found` = the fact; `absent` = a VERIFIED NEGATIVE such as "not posted"). A marker this table answers may not ship |
+| `M24_concepts.md` + `GLOSSARY.md` | two term families competing for one concept (CN vs CNV vs CNA, simulate vs emulate, rank vs score), with counts per surface form, and the term decisions to conform to |
+
+The lookups run through a cached probe (`reports/LOOKUP_CACHE.json`, 14-day TTL):
+one cheap probe per process decides whether to query at all, results are reused
+across the sandboxes of a root, and `--placeholder-lookup off` records the
+questions and checks nothing (useful offline). The probe asks an API ENDPOINT,
+never a record, and any HTTP answer counts as reachable — a probe that named a
+record 404'd, and the raised error was read as "no network", which silently
+recorded `skipped` for every identifier, availability locator, gene symbol and
+reference DOI of every run. A DOI is resolved against Crossref, then against the
+second metadata agency (DataCite — a Zenodo/OSF/Dataverse/Dryad DOI 404s on
+Crossref), and finally against the handle registry, which answers for EVERY
+registration agency: `absent` means no agency returned a record and the handle
+itself is not registered, so a mEDRA/CNKI/JaLC/KISTI DOI is never called
+unregistered.
+
+The residual gate is **ON by default**: `decide` turns the recorded residuals
+into decision problems (exit 5) — a `searchable` marker the lookup engine
+answered (or could not even reach) that still sits in a delivered package, a
+review whose decision tables were boilerplate or unfilled, or an integration
+ledger row that would undo a resolved finding. `decide --non-residual-gate`
+records them as advisory only (they are always recorded in `decision.json` and
+printed either way — never silently dropped), which is the documented path for
+an offline environment where the pipeline's own identifier lookups all come
+back `skipped`: the package must still not ship the marker, so the alternative
+is to have the stage write the verified fact (or the verified negative with its
+search date) into the document. A gated residual blocks certification; the
+champion corpus is still built into `final_clean_version_<root name>/`, and
+`final_clean_version.readme.md` records the refusal — see the `certification`
+block above.
 
 ## The code-side evidence pack (identical numbers in every session)
 
@@ -3003,6 +3009,26 @@ whose sandboxes were pruned. A shrinking census with a stable margin is progress
 a stable census with a stable margin is noise-limited repetition -- and the
 deterministic counters can disagree with the panel, which is exactly the kind of
 divergence worth seeing.
+
+## Fact-preserving repairs
+
+A finding authorizes a correction, not the removal of the fact it quotes. A wrong value,
+number, unit, definition, p-value or significance word is replaced with the correct fact; a
+sentence that is orphaned, misplaced, unused, redundant-sounding or structurally awkward is
+relocated, merged or connected. A separate "unused", length, packaging or style finding never
+turns a correction into a deletion, and an acronym definition or glossary entry that carries a
+wrong expansion is corrected rather than removed. A true duplicate may be deleted only when the
+finding names it and one copy of the same fact survives.
+
+The same rule binds the packaging repair: a dangling pointer at a non-shipped area is rewritten
+to name shipped content or to carry the fact, and the mechanical PKG-2 layer removes only a
+pointer-only sentence -- a sentence carrying a numeric fact is held and reported for a prose
+rewrite. If no honest rewrite exists, the item goes to the manual list; the pipeline does not
+trade a fact for a clean-looking package.
+
+The M4 numbers artifact also enumerates lower/upper ranges printed in descending order,
+including unit-bearing physical ranges (elevation, depth, time, concentration), so a reversed
+range is not left to a decimal-only reading of CIs.
 
 ## Attempt history: every attempt is kept, not just the last one
 
@@ -3425,54 +3451,47 @@ venue, the article-type table (`set-article-type`, per-type caps, a type the
 profile carries no numbers for, unknown/mid-flight changes), and backward
 compatibility for a root with no `venue`/`article_type` key.
 
-## Exit codes
+## Backward-compatibility removals (2026-10-25)
 
-| code | meaning |
-|---|---|
-| 0 | success (`decide`: certified decision; `run`: every configured round complete) |
-| 1 | a run failed / the process hit an error |
-| 2 | nothing to decide yet, or a usage error |
-| 3 | a round is incomplete (progress saved; resume with `run`) |
-| 4 | a valid stopping point that is not a certified answer: `decide --require-complete` on a provisional decision, or `redline` with failed renders (when a tool was used) |
-| 5 | `decide` found integrity problems, (with `--format-gate`) high-severity formatting problems, or (with `--require-ready`) package-level readiness findings |
+This tree deliberately keeps **no** compatibility aliases. The breaking changes
+an older command line or root can hit:
 
-## Notes
+* input areas have ONE canonical name each: `non_revised/` and `raw_data/`.
+  `non-revised/` and `raw_figs/` are refused by `setup` and by every command
+  that loads a root — rename once, then re-run; there is no migration step.
+* `--author-to-complete readme|document|off` is the only hand-off spelling. The
+  `--with-author-to-complete-in-readme` / `--with-author-to-complete` /
+  `--without-author-to-complete` aliases and the legacy `on` value are removed.
+* `--non-strict-artifacts` is removed; use `--strict-artifacts off`.
+* the boolean `strict_artifacts` / `strict_dispositions` config keys are no
+  longer read; the current key is the three-valued `artifact_policy`.
+* `set-revision-mode none` is removed; the mode is `continue`.
+* a root without `judge_salt` is refused when a judge token is needed; there is
+  no unsalted fallback.
+* `paper_pipeline.py` and `paper_docx_format.py` are now thin loaders over
+  `paper_pipeline_parts/` and `paper_docx_format_parts/`. `setup` and
+  `sync-code` copy both directories; any external script that copied only the
+  loader must copy the parts directory too (the `.paper_test/bundle_source_lib.py`
+  helper is the in-repo example).
 
-* `--root` and `--source` must not be nested; `setup` refuses a non-empty root.
-  `setup` also refuses to freeze another pipeline root's SNAPSHOT of the script
-  into the new root: running `<old-root>/paper_pipeline.py setup …` freezes THAT
-  copy, so every later `run` would execute code that may predate the fixes in the
-  tree you maintain (the 2026-10-15 neohet-12to13 root was set up that way, ran a
-  two-day-old snapshot for its whole life, and silently re-found defects the
-  origin tree had already closed). Run the origin tree's `paper_pipeline.py`, or
-  pass `--pipeline-snapshot-ok` when freezing that exact snapshot is what you
-  intend; `status` prints which code the root runs and whether the origin tree
-  has moved on since.
-* `--skip-hash` (accepted by every command except `selfcheck` and
-  `adopt-sweep`) skips the integrity VERIFICATION
-  passes for that ONE invocation — the pristine copy, the pinned champions, the
-  published winners, every completed run's frozen inputs, the judge-view digests
-  and the a1 base digest. Digests are still RECORDED (state.json, the pins, the
-  fingerprints and every run's own `corpus_digest`), so a later invocation
-  without the flag verifies the same chain; `status`, `decision.json`'s
-  `integrity`/`certification` blocks and `final_clean_version.readme.md` all say
-  the checks were SKIPPED, and `certification.hash_checks` records `verified`
-  or `skipped`. NOT skipped: the within-invocation freshness checks that decide
-  what an agent reads, and the `raw_data/`/review-feedback read-only
-  enforcement (which restores a stage's write and reports it). The flag is for
-  a big root you trust (or to get past a chain you intend to repair), not for a
-  decision you mean to sign as verified.
-* The pipeline never edits the operator's `--source`; every copy it makes
-  (`non_revised/`, `base/`, pins, winners) is digest-verified, and the
-  corpus's read-only `raw_data/` directory (see "The input and evidence areas") is
-  restored from that pristine copy whenever a stage touches it.
-* That read-only contract is taken literally: `raw_data/`,
-  `human_review_feedback/` and `llm_review_feedback/` (and everything inside them) may be
-  `chmod -R a-w`, so the pipeline never needs write permission there — `setup`,
-  publication of `final_clean_version_<root name>/`, pruning, retries and the
-  restore-from-pristine step all work on a read-only tree, and the modes the
-  author set are preserved in every copy. The restore step is the only thing
-  that writes there, and it puts the modes back exactly as it found them; the
-  generation-counter rename never reaches inside either area.
-* On WSL, `/mnt/c` occasionally returns transient `EIO` errors under a synced
-  folder; re-running the affected command is safe (the pipeline is resumable).
+## How this repository is governed
+
+**`AGENTS.md` is binding.** Every rule in [AGENTS.md](AGENTS.md) must be respected by
+the code, prompts, tests, documentation and operator-facing behavior. Any violation of any
+such rule is a **bug**, not an acceptable trade-off. In particular, `setup` freezes the
+pipeline, its parts, companion modules, venue profiles and every other relevant runtime asset
+into the `--root` tree; after that, changing the maintained checkout must not change what the
+root executes or reads.
+
+**Finding generation and repair are separate.** The guided reviewer, the cold-start reviewer, the
+review auditor,
+revision auditor, judge and journal concern sessions identify or dispose findings and do not
+edit the target; the reviser, bounded repair and integrator consume findings (and, for an
+integration, the caller-supplied read-only donor candidate source) and must re-verify every
+input item, record a `confirmed`/`rejected` verdict with its evidence, and edit only the
+confirmed items. An integration's `DIFF_LEDGER.md` carries a `revalidated` column; a
+`port`/`synthesize` row without `revalidated: confirmed` fails the stage. See AGENTS.md
+Rules 1A and 1B.
+
+The full rule set is [AGENTS.md](AGENTS.md); it binds every code, prompt, test and
+documentation change in this tree.
