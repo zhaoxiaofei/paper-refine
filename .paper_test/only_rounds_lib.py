@@ -472,7 +472,7 @@ def test_only_agent_sessions():
             check(f"A5 `--only {bad}` is refused (it names no agent session)", False,
                   "no SystemExit")
         except SystemExit as e:
-            check(f"A5 `--only {bad}` is refused (it names no agent session)", e.code == 1,
+            check(f"A5 `--only {bad}` is refused (it names no agent session)", e.code == 2,
                   str(e.code))
     tmp0 = scratch("paper_only_agent_gate_")
     root0 = make_root(tmp0, rounds=1, rewrites=2, revises=1, integrators="0xFFFFFFFF", judges=1)

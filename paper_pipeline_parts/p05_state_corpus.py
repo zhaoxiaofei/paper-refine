@@ -551,6 +551,10 @@ class Ctx:
 
     def __init__(self, root: Path, strict_venue: bool = False):
         self.root = root
+        # The atomic writers refuse a symlinked directory chain below a trusted
+        # root (F07/R01); this root is that boundary. Registration is
+        # best-effort: a writer called without a Ctx checks the whole chain.
+        register_write_anchor(root)
         # `--strict-venue`: refuse to run on a missing/inconsistent
         # venue-journal configuration instead of only reporting it (see load).
         self.strict_venue = bool(strict_venue)
@@ -579,6 +583,14 @@ class Ctx:
                 + "\n       Rename the directory once and re-run; the pipeline does not "
                   "resolve legacy aliases.")
         cfg = read_json(self.cfg_path)
+        if cfg is not None and not isinstance(cfg, dict):
+            # A hand-edited/truncated config can be valid JSON and not an
+            # object. `self.cfg = cfg or {}` then reached `cfg.get(...)` and
+            # died with an AttributeError traceback instead of the clean
+            # damaged-config refusal this loader's other checks use.
+            die(f"pipeline_config.json does not carry a JSON object: {self.cfg_path}\n"
+                f"       (got {type(cfg).__name__}; restore it from a backup or re-run "
+                f"`setup` with a fresh --root)")
         if cfg is None and need_cfg:
             die(f"missing/corrupt {self.cfg_path}  (run `setup` first)")
         self.cfg = cfg or {}

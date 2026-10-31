@@ -424,7 +424,14 @@ def _clean_length_limits(limits, prefix: str, problems: list):
             problems.append(f"{prefix}.{key}.relaxation must be a number >= 1.0 "
                             f"(got {relaxation!r})")
             relaxation = None
-        if relaxation is not None and relaxation < 1.0:
+        if relaxation is not None and not math.isfinite(relaxation):
+            # JSON's NaN/Infinity are accepted by json.loads and compare as
+            # neither < 1.0 nor > 0, so they slipped through every range check
+            # and made length_limits() raise ValueError/OverflowError later.
+            problems.append(f"{prefix}.{key}.relaxation must be a finite number >= 1.0 "
+                            f"(got {relaxation!r})")
+            relaxation = None
+        elif relaxation is not None and relaxation < 1.0:
             problems.append(f"{prefix}.{key}.relaxation must be >= 1.0 (got "
                             f"{relaxation:g}); the pipeline only relaxes a limit, never "
                             f"tightens it")
@@ -805,8 +812,9 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
             except (TypeError, ValueError):
                 problems.append("image_dpi.min_dpi must be a number")
                 min_dpi = 0
-            if min_dpi <= 0:
-                problems.append("image_dpi.min_dpi must be > 0 when the block is present")
+            if not math.isfinite(min_dpi) or min_dpi <= 0:
+                problems.append("image_dpi.min_dpi must be a finite number > 0 when the "
+                                "block is present")
             else:
                 clean_image_dpi = {"min_dpi": min_dpi,
                                    "source": str(image_dpi_raw.get("source") or "").strip()}
@@ -824,8 +832,9 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
             except (TypeError, ValueError):
                 problems.append("figure_text.min_pt must be a number")
                 min_pt = 0
-            if min_pt <= 0:
-                problems.append("figure_text.min_pt must be > 0 when the block is present")
+            if not math.isfinite(min_pt) or min_pt <= 0:
+                problems.append("figure_text.min_pt must be a finite number > 0 when the "
+                                "block is present")
             else:
                 clean_figure_text = {
                     "min_pt": min_pt,

@@ -292,6 +292,7 @@ def asset_dir_digest(base_dir: Path, name: str):
         paths = sorted(p for p in dirp.rglob("*")
                        if p.is_file()
                        and "__pycache__" not in p.parts
+                       and ".add-venue" not in p.parts
                        and p.suffix.lower() not in (".pyc", ".pyo"))
         digest = hashlib.sha256()
         for p in paths:
@@ -339,8 +340,14 @@ def copy_asset_dirs(src_dir, dst_dir, names=None) -> list:
         tmp = dst.with_name(f"{dst.name}.copy-tmp-{os.getpid()}-{time.time_ns()}")
         backup = None
         try:
+            # `.add-venue/` is the add-venue stage's own hidden scratch tree
+            # (prompts, transcript, logs, completion marker). It lives beside
+            # the shared profiles in the maintained checkout, but it is never a
+            # runtime asset: freezing it into every root leaked agent scratch
+            # and made the asset digest depend on a previous operator run.
             shutil.copytree(src, tmp,
-                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo",
+                                                          ".add-venue"))
             if dst.exists() or dst.is_symlink():
                 # Move the live bundle aside instead of deleting it: a failed
                 # replace can then put the old tree back, so an interrupted
@@ -1272,6 +1279,89 @@ def _json_revive(obj):
 _TMP_SEQ = itertools.count(1)
 
 
+def strip_leading_dot_slash(value: str) -> str:
+    """Normalize a relative-path spelling without eating meaningful dots.
+
+    A ledger row and a manifest entry may spell the same relative path with a
+    Windows separator or an exact leading "./". `str.lstrip("./")` is a
+    CHARACTER strip, not a prefix strip: it turned "../outside/doc.docx" into
+    "outside/doc.docx" (authorizing a different file) and ".hidden/x" into
+    "hidden/x". Only exact leading "./" segments are removed here.
+    """
+    text = str(value).replace("\\", "/").strip()
+    while text.startswith("./"):
+        text = text[2:]
+    return text
+
+
+# Atomic writers take no root argument: `write_text_atomic(sb/"PROMPT.md")`
+# cannot know whether `sb` is the operator's trusted tree or an agent-writable
+# sandbox inside it. `Ctx` registers the root it is about to drive, so the
+# writers can stop their ancestor walk at that boundary: a symlink ABOVE the
+# root (a checkout reached through a link, a mounted home) is operator plumbing
+# and stays legal, while a link the pipeline traverses BELOW the root is
+# refused. Calls made outside any registered root are conservative and check
+# every ancestor.
+_WRITE_ANCHORS: list = []
+
+
+def register_write_anchor(root) -> None:
+    """Record a trusted write root for `_refuse_symlinked_parent` (see there)."""
+    try:
+        anchors = (Path(root).absolute(), Path(root).resolve())
+    except (OSError, RuntimeError):
+        return
+    for anchor in anchors:
+        if anchor not in _WRITE_ANCHORS:
+            _WRITE_ANCHORS.append(anchor)
+    del _WRITE_ANCHORS[:-64]       # roots are few; keep the registry bounded
+
+
+def _write_anchor_for(parent: Path):
+    """The most specific registered root containing `parent` (or None)."""
+    anchor = None
+    for candidate in _WRITE_ANCHORS:
+        try:
+            parent.relative_to(candidate)
+        except ValueError:
+            continue
+        if anchor is None or len(candidate.parts) > len(anchor.parts):
+            anchor = candidate
+    return anchor
+
+
+def _refuse_symlinked_parent(path: Path) -> Path:
+    """Refuse a write that traverses a symlinked directory.
+
+    `tmp_path_for` makes the parent and reserves the temporary inside it, and
+    the final `os.replace` follows the same parent. A staged agent can replace
+    an agent-writable subdirectory with a link to an arbitrary outside
+    directory, so the reserved temp -- and then the destination -- would be
+    created outside the tree the caller believes it is writing. The final
+    component is already protected (O_NOFOLLOW/O_EXCL, write-through fd); the
+    parent chain was the remaining link in that path.
+
+    EVERY existing ancestor is checked, not only the immediate parent: a link
+    one level up (`sb/link -> outside`, destination `sb/link/sub/x`) redirects
+    the parent `mkdir` and the `os.replace` just as effectively, so checking
+    `path.parent` alone left the confirmed defect live one level up. The walk
+    stops at the most specific registered write anchor, because legitimate
+    operator roots can themselves live under symlinked ancestors; a writer
+    called outside every anchor checks the whole chain.
+    """
+    path = Path(path)
+    parent = Path(os.path.abspath(str(path))).parent
+    anchor = _write_anchor_for(parent)
+    probe = parent
+    while True:
+        if probe != anchor and probe.is_symlink():
+            raise OSError(f"refusing to write through symlinked directory {probe}")
+        if probe == anchor or probe.parent == probe:
+            break
+        probe = probe.parent
+    return path
+
+
 def tmp_path_for(path: Path) -> Path:
     """A UNIQUE, exclusively-created temporary sibling for `path`.
 
@@ -1284,9 +1374,11 @@ def tmp_path_for(path: Path) -> Path:
     `PROMPT.md.<pid>.<n>.tmp` symlinks to an outside file, and the writer
     followed them. The name now carries random bits and the file is created
     here with O_CREAT|O_EXCL|O_NOFOLLOW, so a link at that path can neither be
-    predicted nor followed.
+    predicted nor followed. A symlinked PARENT chain is refused before the
+    mkdir, so the reserved temp cannot land outside the caller's tree.
     """
     path = Path(path)
+    _refuse_symlinked_parent(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     for _ in range(100):
         tmp = path.with_name(
@@ -1325,22 +1417,28 @@ def _open_reserved_tmp(tmp: Path, mode: str = "wb", encoding: str = "utf-8",
 
 def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
                         encoding: str = "utf-8", newline=None,
-                        fsync: bool = True) -> None:
+                        fsync: bool = True, mode: int = None) -> None:
     """write(open tmp) -> fsync -> os.replace(tmp, dst); drop tmp on failure.
 
     `write` gets the OPEN file object, never the path: reopening is the TOCTOU
-    this helper exists to close.
+    this helper exists to close. `mode` (when given) is applied to the reserved
+    temp BEFORE the replace, so a copy that must stay executable is never
+    observable with the 0o666-minus-umask default mode.
     """
+    _refuse_symlinked_parent(dst)
     try:
         with _open_reserved_tmp(tmp, "wb" if binary else "w",
                                 encoding=encoding, newline=newline) as f:
             write(f)
             f.flush()
+            if mode is not None:
+                os.fchmod(f.fileno(), int(mode))
             if fsync:
                 try:
                     os.fsync(f.fileno())
                 except OSError:
                     pass             # fsync is best-effort (some mounts refuse it)
+        _refuse_symlinked_parent(dst)
         os.replace(tmp, dst)
     except BaseException:
         try:
@@ -1352,6 +1450,7 @@ def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
 
 def write_json_atomic(path: Path, obj) -> None:
     """Write strict JSON atomically: unique .tmp, fsync, then os.replace."""
+    _refuse_symlinked_parent(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path_for(path)
 
@@ -1366,6 +1465,7 @@ def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
     replaced, never written through. Prompt files live in agent-writable
     sandboxes, so a planted link must not receive the orchestrator's bytes."""
     path = Path(path)
+    _refuse_symlinked_parent(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path_for(path)
 
@@ -1410,6 +1510,7 @@ def write_csv_atomic(path, fields, rows) -> Path:
     crash-safe rename.
     """
     path = Path(path)
+    _refuse_symlinked_parent(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path_for(path)
 
@@ -3376,9 +3477,13 @@ def _policy_flag(policy, key: str, default: bool) -> bool:
     formatter's `_policy_flag` treats "off"/"false"/"no"/"0" as false; reading
     the same value with raw truthiness here made `"figure_ocr": "off"` still
     run OCR, emit FMT-IM5/IM6 rows and skip the documented "figure_ocr is off"
-    gap row (F26).
+    gap row (F26). An explicit null means "not stated" in both readers: the
+    formatter falls back to the default, so this scanner must too (`bool(None)`
+    used to make null mean false here and default there).
     """
     value = (policy or {}).get(key, default)
+    if value is None:
+        return default
     if isinstance(value, str):
         return value.strip().lower() not in ("off", "false", "no", "0", "")
     return bool(value)
@@ -9364,9 +9469,9 @@ def parse_only_rounds(text: str, item: str, flag: str = "--only") -> set:
         if m:
             lo, hi = int(m.group(1)), int(m.group(2))
             if lo < 1 or hi < 1:
-                die(f"{flag}: round ordinals are 1-based, got {item!r}")
+                die(f"{flag}: round ordinals are 1-based, got {item!r}", code=2)
             if hi < lo:
-                die(f"{flag}: empty round range {chunk!r} in {item!r}")
+                die(f"{flag}: empty round range {chunk!r} in {item!r}", code=2)
             # Refuse an implausible span HERE: `1-999999999` used to expand
             # into a billion-element set -- the process died (MemoryError, no
             # message) long before `validate` could range-check it against the
@@ -9374,17 +9479,17 @@ def parse_only_rounds(text: str, item: str, flag: str = "--only") -> set:
             if hi - lo + 1 > ONLY_ROUND_RANGE_CAP:
                 die(f"{flag}: round range {chunk!r} in {item!r} names "
                     f"{hi - lo + 1} rounds; the pipeline's round count is a handful "
-                    f"(rounds are 1-based)")
+                    f"(rounds are 1-based)", code=2)
             rounds.update(range(lo, hi + 1))
             continue
         if not chunk.isdigit():
             die(f"{flag}: {chunk!r} in {item!r} is not a round ordinal (1, 2, ... "
-                f"or a range like 1-3)")
+                f"or a range like 1-3)", code=2)
         if int(chunk) < 1:
-            die(f"{flag}: round ordinals are 1-based, got {item!r}")
+            die(f"{flag}: round ordinals are 1-based, got {item!r}", code=2)
         rounds.add(int(chunk))
     if not rounds:
-        die(f"{flag}: {item!r} names no round")
+        die(f"{flag}: {item!r} names no round", code=2)
     return rounds
 
 
@@ -9401,7 +9506,7 @@ def parse_only_stages_for(token: str, item: str, flag: str = "--only") -> tuple:
     if name not in ONLY_STAGES:
         die(f"{flag}: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
             f"(aliases: review=guided_review+cold_start_review, merge=integrate, "
-            f"w=rewrite, a/a2=revise, j=judge, fb=feedback, resp=response)")
+            f"w=rewrite, a/a2=revise, j=judge, fb=feedback, resp=response)", code=2)
     return (name,)
 
 

@@ -1189,11 +1189,11 @@ def parse_round_counts(values, rounds: int, flag: str) -> list:
             counts.append(int(str(v).strip()))
         except (TypeError, ValueError):
             die(f"{flag} takes an integer or a comma-separated list of integers "
-                f"(e.g. '{flag} 3' or '{flag} 2,1'), got {v!r}")
+                f"(e.g. '{flag} 3' or '{flag} 2,1'), got {v!r}", code=2)
     if not counts:
-        die(f"{flag} needs at least one integer")
+        die(f"{flag} needs at least one integer", code=2)
     if any(c < 0 for c in counts):
-        die(f"{flag} values must be >= 0, got {counts}")
+        die(f"{flag} values must be >= 0, got {counts}", code=2)
     rounds = max(1, int(rounds))
     if len(counts) < rounds:
         counts = counts + [counts[-1]] * (rounds - len(counts))
@@ -1211,26 +1211,28 @@ def normalize_round_indices(values, schedule_len: int = ROUND_SCHEDULE_LEN) -> l
     adopts.
     """
     if not values:
-        die("--round-indices needs at least one round index")
+        die("--round-indices needs at least one round index", code=2)
     out = []
     for v in values:
         try:
             i = int(v)
         except (TypeError, ValueError):
-            die(f"--round-indices takes integers (1-based, or negative from the end), got {v!r}")
+            die(f"--round-indices takes integers (1-based, or negative from the end), "
+                f"got {v!r}", code=2)
         if i == 0:
-            die("--round-indices is 1-based (or negative from the end); 0 is not a round")
+            die("--round-indices is 1-based (or negative from the end); 0 is not a round",
+                code=2)
         pos = i if i > 0 else schedule_len + 1 + i
         if pos < 1 or pos > schedule_len:
             die(f"--round-indices {i} is outside the built-in schedule 1..{schedule_len} "
-                f"(negative values count from the end, -1 = {schedule_len})")
+                f"(negative values count from the end, -1 = {schedule_len})", code=2)
         out.append(pos)
     if len(set(out)) != len(out):
         die(f"--round-indices carries a repeated round: {out} "
-            f"(one selected round runs once)")
+            f"(one selected round runs once)", code=2)
     if out != sorted(out):
         die(f"--round-indices must be listed in ascending run order, got {values} -- "
-            f"the FIRST index maps to the pipeline's round 1")
+            f"the FIRST index maps to the pipeline's round 1", code=2)
     return out
 
 
@@ -1259,13 +1261,13 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
             mask = int(str(v).strip(), 0)
         except (TypeError, ValueError):
             die(f"{flag} takes an integer bitmask or a comma-separated list of them "
-                f"(e.g. '{flag} 0xFFFFFFFF' or '{flag} 0x5,3'), got {v!r}")
+                f"(e.g. '{flag} 0xFFFFFFFF' or '{flag} 0x5,3'), got {v!r}", code=2)
         if mask < 0 or mask > INTEGRATOR_ALL:
             die(f"{flag} values must be unsigned {INTEGRATOR_BITS}-bit masks in "
-                f"0..0x{INTEGRATOR_ALL:X}, got {v!r}")
+                f"0..0x{INTEGRATOR_ALL:X}, got {v!r}", code=2)
         masks.append(mask)
     if not masks:
-        die(f"{flag} needs at least one bitmask")
+        die(f"{flag} needs at least one bitmask", code=2)
     rounds = max(1, int(rounds))
     if len(masks) < rounds:
         masks = masks + [masks[-1]] * (rounds - len(masks))

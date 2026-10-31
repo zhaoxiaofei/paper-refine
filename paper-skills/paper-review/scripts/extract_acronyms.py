@@ -995,7 +995,14 @@ def main():
             if raw.lstrip().startswith("### corpus-marker:"):
                 # Only the converter's synthetic header/footer/sheet marker is
                 # skipped; a real markdown H3 can carry a definition or a claim
-                # (F47).
+                # (F47). The payload names the context its following lines
+                # belong to: `section_label(raw)` cannot see it (the line starts
+                # with the marker prefix), so header text used to inherit the
+                # preceding figure-legend context (R10).
+                payload = raw.split("corpus-marker:", 1)[1].strip().split(" (", 1)[0]
+                marker_label = section_label(payload)
+                if marker_label:
+                    current_section = marker_label
                 continue
             line = mask_nonprose(raw)
             swept.append((fname, li, current_section, line, raw))

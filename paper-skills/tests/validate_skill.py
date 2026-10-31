@@ -339,7 +339,10 @@ def main():
     wide = corpus_text.get("wide11.xlsx.txt", "")
     ok20 = True
     for i in range(1, 12):
-        m = re.search(r"### sheet: S%d\s*\n(.{0,40})" % i, wide, re.S)
+        # The converter writes the `corpus-marker:` prefixed spelling now; the
+        # old `### sheet:` expectation made this shipped check red even though
+        # the converter and probe R14 had moved.
+        m = re.search(r"### corpus-marker: sheet: S%d\s*\n(.{0,40})" % i, wide, re.S)
         if not m or ("M%d" % i) not in m.group(1):
             ok20 = False
     check("C20 11-sheet xlsx keeps sheet names aligned", ok20, wide.splitlines()[:4])

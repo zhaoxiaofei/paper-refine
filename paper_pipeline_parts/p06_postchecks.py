@@ -1176,14 +1176,16 @@ JUDGE_DISPOSITIONS = ("clean", "findings", "unable")
 # a clean basis, a named inability, or an explicit out-of-scope disposal (a
 # scoped round, or a check the round honestly declares outside its scope). The
 # gate used to accept any non-empty cell that did not start with "not checked",
-# so a row of filler ("x", "done") proved a sweep that never ran.
+# so a row of filler ("x", "done") proved a sweep that never ran. Every form
+# that can carry a reason must name one: bare `unable`/`out of scope` is filler.
 COVERAGE_DISPOSITION_RE = re.compile(
     r"(?i)^(?:\d+\s+finding"
     r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
     r"|unable\s*(?:--|—|–)\s*\S"
-    r"|out\s+of\s+scope\b)")
+    r"|out\s+of\s+scope\s*(?:--|—|–)\s*\S)")
 _COVERAGE_NAMED_BASIS_RE = re.compile(
-    r"(?i)(?:basis\s*:|unable\s*(?:--|—|–))\s*(.*)$")
+    r"(?i)(?:basis\s*:|unable\s*(?:--|—|–)"
+    r"|out\s+of\s+scope\s*(?:--|—|–))\s*(.*)$")
 
 
 def _coverage_disposition_ok(value) -> bool:
@@ -1200,10 +1202,15 @@ def _coverage_disposition_ok(value) -> bool:
         return False
     m = _COVERAGE_NAMED_BASIS_RE.search(text)
     if m is None:
-        return True          # "N findings" or "out of scope -- ..."
+        return True          # "N findings"
+    reason = m.group(1).strip(" \t.;:,—-–")
+    # A reason must say SOMETHING. "unable -- no"/"none"/"n/a" is filler, not a
+    # named reason; the old length-only test counted its two letters and passed.
+    if not reason or re.fullmatch(r"(?i)no|none|n/?a|tbd|todo|unknown", reason):
+        return False
     # At least two alphanumeric characters: a one-letter token or punctuation
     # alone cannot name an artifact or a reason.
-    return len(re.findall(r"[A-Za-z0-9]", m.group(1))) >= 2
+    return len(re.findall(r"[A-Za-z0-9]", reason)) >= 2
 
 
 def visual_tools_available() -> bool:

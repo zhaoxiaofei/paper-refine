@@ -354,7 +354,7 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
         if has_revalidated_column and edits and reval != "confirmed":
             invalid_ports.append(f"{donor or '?'}: verdict={verdict or '?'}, "
                                  f"revalidated={reval or 'missing'}")
-    absent = [d for d in donors if d and not any(d in s for s in seen_donors)]
+    absent = [d for d in donors if d and d not in seen_donors]
     legacy = bool(rows) and not has_revalidated_column
     return {"rows": len(rows), "sizes": dict(sizes), "missing_artifact": missing_artifact,
             "missing_finding": missing_finding, "undoes": undoes, "donors_absent": absent,
@@ -443,13 +443,36 @@ AUDIT_COVERAGE_CHECKS = tuple([f"M{i}" for i in range(1, 37)]
 # review side's documented vocabulary is accepted verbatim; an audit row may
 # also state the re-derivation it performed ("stub: the sweep was re-derived;
 # clean"), which is what several stages' self-reports use. Bare `x`/`done` (or
-# a bare `clean`) records no re-derivation and is refused (F30).
+# a bare `clean`) records no re-derivation and is refused (F30). The verb match
+# used to be enough on its own, so "never verified at all" passed: a NEGATED
+# re-derivation is the absence of the check, not a disposition. The shared
+# reason-bearing forms require their reason here too: a bare `out of scope` is
+# the same filler as `unable -- no` and used to skip the reason check entirely.
 AUDIT_COVERAGE_DISPOSITION_RE = re.compile(
     r"(?i)^(?:\d+\s+finding"
     r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
     r"|unable\s*(?:--|—|–)\s*\S"
-    r"|out\s+of\s+scope\b"
-    r"|.+?\b(?:re-?derived|confirmed|checked|verified)\b.+$)")
+    r"|out\s+of\s+scope\s*(?:--|—|–)\s*\S"
+    r"|(?!(?:.*\b(?:not|never|cannot|unable\s+to)\b))"
+    r".*?\b(?:re-?derived|confirmed|checked|verified)\b.*$)")
+
+
+def _audit_disposition_ok(value) -> bool:
+    """A real audit coverage disposition (negation- and filler-proof).
+
+    The regex alone accepts `unable -- no`, `clean -- basis: x` and a bare
+    `out of scope`; those are the review gate's documented FILLER shapes, so
+    route every reason-bearing form through the shared
+    `_coverage_disposition_ok` (it knows the difference between a named
+    artifact/reason and a one-letter or filler token).
+    """
+    text = str(value or "").strip()
+    if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
+        return False
+    if re.match(r"(?i)^(?:clean\s*(?:--|—|–)\s*basis\s*:|unable\s*(?:--|—|–)"
+                r"|out\s+of\s+scope\s*(?:--|—|–))", text):
+        return _coverage_disposition_ok(text)
+    return True
 
 
 def audit_coverage_problems(audit) -> list:
@@ -493,7 +516,7 @@ def audit_coverage_problems(audit) -> list:
         if not disp:
             problems.append(f"coverage {check} has an EMPTY disposition: every check "
                             f"must record what the audit re-derived")
-        elif not AUDIT_COVERAGE_DISPOSITION_RE.match(disp):
+        elif not _audit_disposition_ok(disp):
             problems.append(f"coverage {check} disposition {disp!r} is not a real "
                             f"disposition: record a finding count, `clean -- basis: "
                             f"<artifact>`, `unable -- <reason>`, or the re-derivation "
@@ -4168,9 +4191,10 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
                     if isinstance(item, str) and item.strip():
                         authorized.add(item.strip())
     def _ledger_rel(value: str) -> str:
-        # A Windows-style separator and a leading "./" are spellings of the same
-        # relative path; the FILE NAME ALONE is not (F02).
-        return value.replace("\\", "/").strip().lstrip("./")
+        # A Windows-style separator and an EXACT leading "./" are spellings of
+        # the same relative path; the FILE NAME ALONE is not (F02), and neither
+        # is "../outside/x" (the old lstrip("./") made it "outside/x").
+        return strip_leading_dot_slash(value)
 
     authorized_paths = {_ledger_rel(p) for p in authorized}
     added = sorted(set(got) - set(want))

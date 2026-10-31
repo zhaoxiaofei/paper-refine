@@ -2440,7 +2440,7 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     allowed = set()
     for row in rows:
         if row["id"] in confirmed_ids:
-            rel = str(row.get("file") or "").replace("\\", "/").lstrip("./")
+            rel = strip_leading_dot_slash(str(row.get("file") or ""))
             if rel:
                 allowed.add(rel)
     before = (hash_manifest(pre, on_error="<unreadable>") or {}).get("files") or {}
@@ -2505,7 +2505,7 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
         row = plan_by_id.get(rid) or {}
         if not all(key in row for key in _REPAIR_DESCRIBED_KEYS):
             continue
-        rel = str(row.get("file") or "").replace("\\", "/").lstrip("./")
+        rel = strip_leading_dot_slash(str(row.get("file") or ""))
         if not rel or rel in bad:
             continue
         entry = ledger.get(rid) or {}

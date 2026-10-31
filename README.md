@@ -556,7 +556,7 @@ main-text number is not one universal span: Nature Biotechnology's Article count
 the abstract, Methods, references and figure legends excluded, its Brief Communication
 counts 1,000–1,500 words INCLUDING abstract, references and figure legends, and
 Frontiers counts the main body WITH Methods and the in-text citations. A profile states
-its own rule in `counting.main_text.excludes`, and both `scripts/count_words.py` and the
+its own rule in `counting.main_text.excludes`, and both `paper-skills/paper-review/scripts/count_words.py` and the
 pipeline's code-side M19 scan follow it (the `--venue-profile`/`--article-type` pair
 counts the same span the orchestrator does); with no block anywhere the historical
 Nature Biotechnology Article convention applies.
@@ -1074,8 +1074,8 @@ The selection items are comma-separated and combine as a **union**:
 * **one agent SESSION** — the session, not its whole stage: `rewriter2` (only
   `w2`), `integrator1` (only `i1`), `reviser1` (only `a2`, the first revise arm
   — the pipeline numbers its revise arms from `a2`, because `a1` is the round's
-  base copy), `reviewer` (review session A; `review_b` is session B under
-  `--review-split`) and `audit`. A round-qualified `r1_w2` / `2:w2` (also
+  base copy), `reviewer` (guided-review session A; `guided_review_b` is session B
+  under `--review-split`) and `audit`. A round-qualified `r1_w2` / `2:w2` (also
   `2:rewriter2`) restricts it to that round; a bare `w2` applies to every round
   that has it. A round-qualified arm is read as the pipeline's OWN id, so
   `r1_a2` and the printed run id `r1_a2_revise` both mean the a2 arm (`r1_reviser2`
@@ -1146,8 +1146,9 @@ python paper_pipeline.py agents --root ./paper_rounds --only rewriter2    # prev
 python paper_pipeline.py agents --root ./paper_rounds --json          # machine-readable
 ```
 
-Per round it lists the base copy `a1` (no agent), each `w<k>`, the review
-(`review`, plus `review_b` with `--review-split`), the `audit`, each revise arm
+Per round it lists the base copy `a1` (no agent), each `w<k>`, the guided review
+(`r1_guided_review`, plus `r1_guided_review_b` with `--review-split`), the
+`audit`, each revise arm
 `a<k>` and each integration arm `i<k>` the round's mask selected, then every
 judge session `judge_<token>_j<k>` with the version it judges. The producing
 names are exact; for round 2 and later the base candidate is the earlier round's
@@ -3370,7 +3371,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 171 suites (a few
+any failure. They are independent, so run them in parallel — 172 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

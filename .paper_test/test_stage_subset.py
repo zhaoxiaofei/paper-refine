@@ -118,7 +118,7 @@ def test_parser():
         nb.parse_only_stages("rewrite,bogus")
         check("an unknown stage is rejected", False, "no SystemExit")
     except SystemExit as e:
-        check("an unknown stage is rejected with a helpful message", e.code == 1, str(e.code))
+        check("an unknown stage is rejected with a helpful message", e.code == 2, str(e.code))
     # Round ordinals are part of the same selection language (`--only 1,2`).
     spec = nb.parse_only_spec("1,2")
     check("--only 1,2 selects rounds 1 and 2 in full",
@@ -138,7 +138,7 @@ def test_parser():
             nb.parse_only_spec(bad)
             check(f"--only {bad!r} is rejected", False, "no SystemExit")
         except SystemExit as e:
-            check(f"--only {bad!r} is rejected", e.code == 1, str(e.code))
+            check(f"--only {bad!r} is rejected", e.code == 2, str(e.code))
     spec = nb.parse_only_spec("3")
     try:
         spec.validate(2)
@@ -330,7 +330,7 @@ def test_retry_runs_selection():
           (both.stdout + both.stderr)[-200:])
     bad = retry_runs(root, "--runs", "1:bogus")
     check("an unknown stage fails with the same message as `run --only`",
-          bad.returncode == 1 and "unknown stage" in (bad.stdout + bad.stderr)
+          bad.returncode == 2 and "unknown stage" in (bad.stdout + bad.stderr)
           and "integrate" in (bad.stdout + bad.stderr),
           (bad.stdout + bad.stderr)[-200:])
     empty = retry_runs(root, "--runs", "")

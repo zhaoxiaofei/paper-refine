@@ -991,7 +991,7 @@ def cmd_conflicts(args) -> None:
     # "TIMEOUT after -1s"; refuse it here, the same usage error the `run` path
     # and `_timeout_seconds` raise (F12's non-negative invariant).
     if getattr(args, "timeout", None) is not None and args.timeout < 0:
-        die("--timeout must be a non-negative number of seconds")
+        die("--timeout must be a non-negative number of seconds", code=2)
     with ctx.lock("conflicts"):
         if getattr(args, "round", None) is not None \
                 and not (1 <= int(args.round) <= ctx.rounds_count()):
@@ -6974,6 +6974,26 @@ def write_final_clean_readme(ctx: Ctx, certification: dict, final: dict,
     return p
 
 
+def final_clean_publication_problems(final_clean: dict) -> list:
+    """Blockers for a package or archive the decision promised but did not produce.
+
+    `publish_final_clean` reports both failures as data (`skipped`, and
+    `zip.ok == False` with an error) instead of aborting. The certification gate
+    used to read only `skipped`, so a decision could stay CERTIFIED while the
+    promised `final_clean_version_<root>.zip` was never written.
+    """
+    fc = final_clean or {}
+    problems = []
+    if fc.get("skipped"):
+        problems.append("the final_clean_version package was not published: "
+                        + str(fc.get("skipped")))
+    archive = fc.get("zip") or {}
+    if isinstance(archive, dict) and archive.get("ok") is False:
+        problems.append("the final_clean_version archive was not written: "
+                        + str(archive.get("error") or "unknown archive error"))
+    return problems
+
+
 # ---- the champion's OWN open items (2026-10-15) -----------------------------
 # The revision stages hand their unfinishable work to the author in
 # `MANUAL_STEPS.md`, and the machine-readable ledger records one disposition per
@@ -8439,9 +8459,10 @@ def cmd_sync_code(args) -> None:
     the maintained tree gains a rule (the 2026-10-19 layout scans), an existing
     root keeps running the old bundle until the operator deliberately replaces
     it. This command is that deliberate replacement: it copies the maintained
-    `paper_pipeline.py`, `paper_docx_format.py`, `paper_redlines_adapter.py` and
-    `paper_qwen_agent.py` into the root, records their new digests (so
-    `refuse_foreign_pipeline` can
+    `paper_pipeline.py`, `paper_docx_format.py`, `paper_redlines_adapter.py`,
+    `paper_qwen_agent.py`, `docx2pdf.sh` and `docxcompare.sh` into the root
+    (preserving each source file's mode, so the shell shims stay executable),
+    records their new digests (so `refuse_foreign_pipeline` can
     tell a synced root from a drifted one) and prints what changed. It never
     touches the package, the pinned bytes, the review or any manuscript file.
     """
@@ -8475,7 +8496,17 @@ def cmd_sync_code(args) -> None:
             if not s.is_file():
                 die(f"sync-code: the maintained tree has no {name}; refusing a partial bundle")
             try:
+                s_mode = stat.S_IMODE(s.stat().st_mode)
+            except OSError:
+                s_mode = None
+            try:
+                # The digest comparison used to look at CONTENT only, so a root
+                # whose shim had already lost its executable bit was reported
+                # unchanged forever. Mode is part of the frozen bundle for the
+                # shell shims; compare it too, and repair it below.
                 same = d.is_file() and sha256_file(s) == sha256_file(d)
+                if same:
+                    same = stat.S_IMODE(d.stat().st_mode) == s_mode
             except OSError:
                 same = False
             if same:
@@ -8491,7 +8522,7 @@ def cmd_sync_code(args) -> None:
                 with open(_src, "rb") as src_file:
                     shutil.copyfileobj(src_file, dst_file)
 
-            _atomic_write_bytes(tmp_path_for(d), d, _copy_sync, binary=True)
+            _atomic_write_bytes(tmp_path_for(d), d, _copy_sync, binary=True, mode=s_mode)
             changed.append(name)
         # The loaders are thin: sync the ordered implementation parts too, again
         # atomically, and record their directory digests in the manifest.
@@ -8918,6 +8949,10 @@ def agent_session_plan(ctx: Ctx, only=None) -> list:
     arms exist: it is deduplicated by CONTENT (a member whose documents are
     content-identical to another member's is dropped), so a pending round lists
     the candidate judge sessions and says `field_exact: false`.
+
+    `--champion-select revise`/`integrate` runs NO judge panel (see
+    round_champion_select), so those rounds list no judge session -- the same
+    rule drive_round applies at run time.
     """
     rows = []
     for r in range(1, ctx.rounds_count() + 1):
@@ -8947,7 +8982,9 @@ def agent_session_plan(ctx: Ctx, only=None) -> list:
         # A pending round's candidates are the judgeable ids (see judgeable_ids):
         # the original, the earlier rounds' pins and the fresh arms.
         candidates = field or judgeable_ids(ctx, r)
-        judge_selected = only is None or only.stage_selected(r, "judge")
+        csel = round_champion_select(ctx, r)
+        judge_selected = (only is None or only.stage_selected(r, "judge")) \
+            and csel == "judge"
         # WHICH judge sessions of the round run: the selector the `--only` items
         # give (a preview of `run --only`), else the panel recorded by an earlier
         # invocation on the pending round (see judges_enabled_spec).
@@ -8980,6 +9017,8 @@ def agent_session_plan(ctx: Ctx, only=None) -> list:
             "round": int(r),
             "status": rec.get("status") or "pending",
             "champion": rec.get("champion"),
+            "champion_select": csel,
+            "judge_panel": csel == "judge",
             "judges_per_version": int(round_judges(ctx, r)),
             "judges_enabled": spec or JUDGES_ENABLED_ALL,
             "integrators": f"0x{round_integrators(ctx, r):X}",
@@ -9052,6 +9091,9 @@ def cmd_agents(args) -> None:
                 print(f"  {s['id']:<26} {label:<22} {s['status']}")
             if not row["field_exact"]:
                 candidates.append(row["round"])
+        elif not row.get("judge_panel", True):
+            print(f"  judge sessions: none -- --champion-select {row.get('champion_select')} "
+                  f"runs NO judge panel (the decision is PROVISIONAL)")
         elif not row["judges_selected"]:
             print("  judge sessions: NOT selected by this invocation's --only")
     if candidates:
@@ -9299,6 +9341,23 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         print("No completed rounds yet; nothing to decide.")
         for p in problems:
             print(f"  - {p}")
+        # The sibling status readme is documented in README.md as the record
+        # of the skip when no winner/pin exists, and write_final_clean_readme()
+        # says decide always writes it. This branch used to exit before the
+        # publication/readme, so a caller waiting for the promised file saw a
+        # bare exit 2 (and could not tell whether the readme was skipped or
+        # forgotten).
+        try:
+            _readme = write_final_clean_readme(
+                ctx,
+                {"certified": False, "submission_ready": False,
+                 "blockers": list(problems) or ["no round has completed"],
+                 "exit_code": 2},
+                {},
+                {"skipped": "there is no completed round yet, so no champion/pin exists"})
+            print(f"[decide] status readme -> {_readme.relative_to(ctx.root).as_posix()}")
+        except OSError as e:
+            print(f"[decide] WARNING: could not write the status readme: {e}")
         sys.exit(2)
     final = rounds_data[-1]
     # The anti-regression gate exempts the round's own base (select_champion: the
@@ -9462,12 +9521,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         gate_problems.append(
             "round(s) " + ", ".join(str(r) for r in incomplete_rounds)
             + " are not complete")
-    if final_clean.get("skipped"):
-        # The published package is part of the answer (AGENTS.md rule 10): a
-        # decision that could not build `final_clean_version/` is not certified,
-        # and its readme must say the directory does not exist.
-        gate_problems.append("the final_clean_version package was not published: "
-                             + str(final_clean.get("skipped")))
+    # The published package AND its promised archive are part of the answer
+    # (AGENTS.md rule 10): a decision that could not build either is not
+    # certified, and its readme must say what is missing. The zip's `ok:false`
+    # used to be recorded in `final_clean` and then ignored here.
+    gate_problems.extend(final_clean_publication_problems(final_clean))
     _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
                                        provisional, panel_gaps, gate_problems,
                                        auto_promoted=auto_rounds,

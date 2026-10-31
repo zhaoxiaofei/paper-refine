@@ -208,12 +208,21 @@ def cmd_setup(args) -> None:
             # The plan the operator passed, saved BEFORE the scoped mode
             # normalizes it: leaving the mode must restore the custom plan, not
             # the built-in defaults (F21).
+            # The operator's review_scope list is saved here, BEFORE the mode
+            # truncates it to its single round. Capturing it after the
+            # truncation restored only ['full'] instead of the requested
+            # three-round scope (F21).
+            _saved_scope = getattr(args, "review_scope", None) or DEFAULTS["review_scope"]
+            if not isinstance(_saved_scope, (list, tuple)):
+                _saved_scope = [x.strip() for x in str(_saved_scope).split(",") if x.strip()]
+            _saved_scope = [str(x).strip().lower() for x in _saved_scope if str(x).strip()]
             _saved_plan = {
                 "rounds": rounds,
                 "rewrites": list(rewrites),
                 "revises": list(revises),
                 "integrators": list(integrators),
                 "round_indices": list(round_indices) if round_indices else None,
+                "review_scope": _saved_scope or ["full"],
             }
             if round_indices:
                 die(f"--round-indices selects the pipeline's round schedule, but revision mode "
@@ -291,7 +300,8 @@ def cmd_setup(args) -> None:
         # restores them instead of silently falling back to the defaults (F09).
         scoped_mode_restore["champion_select"] = str(
             getattr(args, "champion_select", None) or DEFAULT_CHAMPION_SELECT)
-        scoped_mode_restore["review_scope"] = list(review_scope)
+        scoped_mode_restore["review_scope"] = list(
+            scoped_mode_restore.get("review_scope") or review_scope)
     # THE GUIDED REVIEW'S POLICY (`--no-guided-review`). The flag removes the
     # round's general checklist pass and leaves the COLD-START review alone as the finding
     # source, so the combinations that would leave the round with no source at
@@ -857,11 +867,20 @@ def cmd_setup(args) -> None:
     # previous pin (or the original), so an upper bound on the field size is
     # 1 + (r-1) + (1+M+N) + <selected integrations>. Judge sessions are the
     # round's own `--judges` count per member.
-    round_arms = [integrator_arms(rewrites[r - 1], revises[r - 1], integrators[r - 1])
+    #
+    # `--champion-select` is part of the RUNTIME plan: `revise` runs NO
+    # integration arm (round_integrators() returns 0 for an undecided round) and
+    # both no-judge modes run NO judge session. This estimate/print must use the
+    # same rule as drive_round, or the operator is told to budget for sessions
+    # the run will never start (F20).
+    _csel_plan = str(getattr(args, "champion_select", None) or DEFAULT_CHAMPION_SELECT)
+    _planned_masks = [0] * rounds if _csel_plan == "revise" else list(integrators[:rounds])
+    round_arms = [integrator_arms(rewrites[r - 1], revises[r - 1], _planned_masks[r - 1])
                   for r in range(1, rounds + 1)]
     field_bound = [r + len(round_pool_ids(rewrites[r - 1], revises[r - 1]))
                    + len(round_arms[r - 1]) for r in range(1, rounds + 1)]
-    est_sessions = sum(judges_list[r - 1] * field_bound[r - 1] for r in range(1, rounds + 1))
+    est_sessions = (sum(judges_list[r - 1] * field_bound[r - 1] for r in range(1, rounds + 1))
+                    if _csel_plan == "judge" else 0)
     print()
     print(f"[setup] pipeline root:          {root}")
     print(f"[setup] venue:                  {venue_profile.id} (\"{venue_profile.label}\"; "
@@ -915,16 +934,22 @@ def cmd_setup(args) -> None:
     else:
         _jm_skip = False
     if not _jm_skip:
-        print(f"[setup] judges per round:       {judges_list}  (independent judge sessions PER "
-              f"VERSION per round)")
+        if _csel_plan == "judge":
+            print(f"[setup] judges per round:       {judges_list}  (independent judge sessions "
+                  f"PER VERSION per round)")
+        else:
+            print(f"[setup] judges per round:       none -- --champion-select {_csel_plan} "
+                  f"runs NO judge panel (the decision is PROVISIONAL)")
         print(f"[setup] rewrites per round (M): {rewrites}  (rewritten candidates w1..wM per "
               f"round)")
         print(f"[setup] revises per round (N):  {revises}  (reviewed-and-then-revised candidates "
               f"a2..a{{1+N}} per round; ONE $paper-review pass per round feeds all of them)")
-        print(f"[setup] integrators per round:  {[hex(x) for x in integrators]}  (bit k-1 selects "
+        print(f"[setup] integrators per round:  {[hex(x) for x in _planned_masks]}  (bit k-1 selects "
               f"the k-th pool member's integration arm; 0x{INTEGRATOR_ALL:X} = every applicable "
-              f"agent)")
-        _csel = str(getattr(args, "champion_select", None) or DEFAULT_CHAMPION_SELECT)
+              f"agent"
+              + ("; --champion-select revise runs no integration arm"
+                 if _csel_plan == "revise" else "") + ")")
+        _csel = _csel_plan
         print(f"[setup] champion selection:     {_csel}  ("
               + ("the relative-judgment panel ranks the field and code selects the winner"
                  if _csel == "judge" else
@@ -937,16 +962,27 @@ def cmd_setup(args) -> None:
             m, n_ = rewrites[r - 1], revises[r - 1]
             pool = round_pool_ids(m, n_)
             arms = set(round_arms[r - 1])
+            if _csel_plan == "revise":
+                # round_integrators() is 0 for an undecided round in this mode:
+                # no i<k> session is planned, so do not print one.
+                print(f"[setup]   round {r}: pool = {', '.join(pool)}  ->  "
+                      f"NO integration arm (--champion-select revise)")
+                continue
             plan = "; ".join(
                 f"{integrate_vid(k + 1)} = {src} <- ({', '.join(v for v in pool if v != src)})"
                 + ("" if k + 1 in arms else "  [SKIPPED: integrators bit clear]")
                 for k, src in enumerate(pool))
             print(f"[setup]   round {r}: pool = {', '.join(pool)}  ->  {plan}")
-        print(f"[setup] directed scores/version: 2*judges*(|field|-1) per round "
-              f"({2 * judges_list[0] * (field_bound[0] - 1)} in round 1 at its upper-bound field "
-              f"of {field_bound[0]}, {judges_list[0]} judges; 6*(|field|-1) when judges=3)")
-        print(f"[setup] expected judge sessions: ~{est_sessions} over {rounds} round(s) "
-              f"(upper bounds {field_bound}; content-identical field members dedup away)")
+        if _csel_plan == "judge":
+            print(f"[setup] directed scores/version: 2*judges*(|field|-1) per round "
+                  f"({2 * judges_list[0] * (field_bound[0] - 1)} in round 1 at its upper-bound "
+                  f"field of {field_bound[0]}, {judges_list[0]} judges; 6*(|field|-1) when "
+                  f"judges=3)")
+            print(f"[setup] expected judge sessions: ~{est_sessions} over {rounds} round(s) "
+                  f"(upper bounds {field_bound}; content-identical field members dedup away)")
+        else:
+            print(f"[setup] judge sessions:         none -- --champion-select {_csel_plan} "
+                  f"promotes a named version without a panel (PROVISIONAL, not certified)")
     if caption_limit:
         _cap_origin = ("the venue's own published legend limit, carried by its profile"
                        if venue_profile.captions.get("published_limit")
@@ -1066,7 +1102,7 @@ def _timeout_seconds(args, default: int) -> int:
     value = getattr(args, "timeout", None)
     seconds = int(default if value is None else value)
     if seconds < 0:
-        die("--timeout must be a non-negative number of seconds")
+        die("--timeout must be a non-negative number of seconds", code=2)
     return seconds
 
 
@@ -1660,12 +1696,19 @@ def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
 def _merge_tree(src: Path, dst: Path) -> int:
     """Copy every file under `src` into `dst` (creating paths); count writes.
 
-    Every symlink -- a source entry the staged agent planted, or a destination
-    already carrying one -- is refused/replaced instead of followed: `rglob` +
-    `is_file()` followed a source link (copying a host file into the shared
-    venue store) and `copy2` followed a destination link (overwriting its
+    Every symlink -- a source entry the staged agent planted, a symlinked source
+    ROOT, or a destination already carrying one -- is refused/replaced instead
+    of followed: `rglob` + `is_file()` followed a source link (copying a host
+    file into the shared venue store), a symlinked `src` made `rglob` enumerate
+    the link's target, and `copy2` followed a destination link (overwriting its
     external target).
     """
+    src = Path(src)
+    if src.is_symlink():
+        # The loop below refuses links INSIDE src, but `Path.rglob` on a
+        # symlinked src enumerates the TARGET's files as ordinary regular
+        # files, so every one of them was published.
+        raise OSError(f"refusing to publish from symlinked directory {src}")
     written = 0
     for p in sorted(src.rglob("*")):
         if p.is_symlink() or not p.is_file():
@@ -1807,11 +1850,19 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
     out["readme"] = _merge_readme_row(staged_readme, dest / "README.md", vid, staged_profile)
     official = next((r / f"{vid}{VENUE_OFFICIAL_SUFFIX}" for r in roots
                      if (r / f"{vid}{VENUE_OFFICIAL_SUFFIX}").is_dir()), None)
-    if official is not None:
+    if official is not None and official.is_symlink():
+        # The staged agent controls `store/`; a link here would publish the
+        # target's whole tree into the shared venue store (the profile branch
+        # above refuses the same shape). Do not raise in the caller: the
+        # operator gets a note and the rest of the staging still publishes.
+        out["notes"].append(f"{official.name}: refused a symlinked staged directory")
+    elif official is not None:
         out["official_files"] = _merge_tree(official, dest / f"{vid}{VENUE_OFFICIAL_SUFFIX}")
     manuscripts = next((r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}" for r in roots
                         if (r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}").is_dir()), None)
-    if manuscripts is not None:
+    if manuscripts is not None and manuscripts.is_symlink():
+        out["notes"].append(f"{manuscripts.name}: refused a symlinked staged directory")
+    elif manuscripts is not None:
         out["manuscript_files"] = _merge_tree(manuscripts,
                                               dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}")
     for rel, why in (("PUBLISH.md", "the agent explained a publish blocker"),
@@ -3435,7 +3486,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if args.timeout is not None and args.timeout < 0:
         # A negative value is truthy, so the subprocess deadline was computed
         # in the past and every attempt died as an immediate "timeout".
-        die("--timeout must be a non-negative number of seconds")
+        die("--timeout must be a non-negative number of seconds", code=2)
     timeout = args.timeout if args.timeout is not None else (0 if manual else DEFAULTS["timeout"])
     # ADOPTION comes after the command/timeout are known: an adopted run whose
     # postcheck fails on repairable bookkeeping gets its scoped repair session

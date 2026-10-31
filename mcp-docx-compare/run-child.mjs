@@ -19,21 +19,43 @@ export function runFile(file, args, options = {}) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
-    const take = (buffered, chunk) => (
-      buffered.length >= maxBuffer ? buffered : buffered + String(chunk)
-    );
-    child.stdout.on('data', (chunk) => { stdout = take(stdout, chunk); });
-    child.stderr.on('data', (chunk) => { stderr = take(stderr, chunk); });
+    let overflow = '';
+    const killGroup = () => {
+      try {
+        if (detached && child.pid) process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    };
+    // `maxBuffer` is an ERROR budget, not a silent truncation point. The old
+    // `take()` stopped appending but let the child finish and resolved with the
+    // cut text as success, so a comparer flood lost its diagnostics and the
+    // caller could not tell its output was incomplete. This logic is kept
+    // identical to mcp-docx-converter/run-child.mjs: the two servers ship the
+    // same runner.
+    const budget = { stdout: 0, stderr: 0 };
+    const append = (stream, chunk) => {
+      if (overflow) return;
+      const text = String(chunk);
+      const bytes = Buffer.byteLength(text, 'utf8');
+      if (budget[stream] + bytes > maxBuffer) {
+        overflow = `Command output exceeded the ${maxBuffer}-byte buffer and its process `
+                 + `group was killed: ${file}`;
+        killGroup();
+        return;
+      }
+      budget[stream] += bytes;
+      if (stream === 'stdout') stdout += text;
+      else stderr += text;
+    };
+    child.stdout.on('data', (chunk) => append('stdout', chunk));
+    child.stderr.on('data', (chunk) => append('stderr', chunk));
     let timer = null;
     if (timeout > 0) {
       timer = setTimeout(() => {
         timedOut = true;
-        try {
-          if (detached && child.pid) process.kill(-child.pid, 'SIGKILL');
-          else child.kill('SIGKILL');
-        } catch {
-          // already gone
-        }
+        killGroup();
       }, timeout);
     }
     const finish = (error, result) => {
@@ -43,16 +65,19 @@ export function runFile(file, args, options = {}) {
     };
     child.on('error', (error) => finish(error));
     child.on('close', (code, signal) => {
-      const detail = timedOut
-        ? `Command timed out after ${timeout}ms and its process group was killed: ${file}`
-        : `Command failed (code ${code}, signal ${signal || 'none'}): ${file} ${args.join(' ')}`;
+      const detail = overflow
+        ? overflow
+        : timedOut
+          ? `Command timed out after ${timeout}ms and its process group was killed: ${file}`
+          : `Command failed (code ${code}, signal ${signal || 'none'}): ${file} ${args.join(' ')}`;
       const error = new Error(detail);
       error.code = code;
       error.signal = signal;
       error.stdout = stdout;
       error.stderr = stderr;
-      error.killed = timedOut;
-      if (timedOut || code !== 0) finish(error);
+      error.killed = timedOut || Boolean(overflow);
+      error.overBudget = Boolean(overflow);
+      if (overflow || timedOut || code !== 0) finish(error);
       else finish(null, { stdout, stderr });
     });
   });

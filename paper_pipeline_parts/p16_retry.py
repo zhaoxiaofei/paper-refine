@@ -88,8 +88,15 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
                 archives.append((rec["id"], r, arch, dir_size(arch)))
     total = sum(t[3] for t in targets) + sum(t[3] for t in archives)
     print(f"[prune] root: {ctx.root}")
-    print(f"[prune] keeping sandboxes of the last {args.keep_latest} round(s) "
-          f"(rounds {keep_from}..{R}); pins, published winners, reports, state.json, the "
+    if keep_from > R:
+        # `--keep-latest 0` is legal ("keep no completed round"), but
+        # `max(1, R - 0 + 1)` is R+1, and the old unconditional message printed
+        # the impossible range "(rounds 4..3)".
+        _keep = (f"keeping NO completed round's sandbox (--keep-latest {args.keep_latest})")
+    else:
+        _keep = (f"keeping sandboxes of the last {args.keep_latest} round(s) "
+                 f"(rounds {keep_from}..{R})")
+    print(f"[prune] {_keep}; pins, published winners, reports, state.json, the "
           f"redlines/ and tracking/ copies and the persistent pdfs/ tree are never touched")
     if keep_ids:
         print(f"[prune] {len(keep_ids)} journal-stage sandbox(es) are kept: a completed root "
