@@ -460,8 +460,10 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           caption/formatting checks, the adopted rewrite-parity
                           checks and the source-hierarchy reconciliation) must
                           carry a real coverage disposition,
-                          the M25-M30 artifacts and guided_review/ARCHITECTURE.md
-                          must exist with a disposition column,
+                          the M25-M36 artifacts (rewrite parity plus the
+                          evidence-integrity sweeps) and
+                          guided_review/ARCHITECTURE.md must exist with a
+                          disposition column,
                           guided_review/artifacts/ must exist, finding ids must be
                           unique, and every prior-round finding must be carried
                           forward or recorded as gone.

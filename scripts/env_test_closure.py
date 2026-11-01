@@ -43,6 +43,14 @@ def main(argv: list) -> int:
     if not argv:
         print(__doc__, file=sys.stderr)
         return 2
+    if argv[0] in ("-h", "--help"):
+        print(__doc__, file=sys.stdout)
+        return 0
+    if argv[0].startswith("-"):
+        # Without this branch the first argument was always the output path, so
+        # `--help` created a file literally named `--help` in the cwd.
+        print(f"error: unknown option {argv[0]!r}\n\n{__doc__}", file=sys.stderr)
+        return 2
     out = Path(argv[0])
     roots = tuple(argv[1:]) or DEFAULT_ROOTS
     seen = closure(roots)

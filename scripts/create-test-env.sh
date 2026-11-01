@@ -70,6 +70,17 @@ env_exists() {
   fi
 }
 
+# EXISTENCE, not runnability: a half-created environment has no working Python,
+# so `env_exists` reports it absent and `--recreate` used to skip the removal,
+# leaving `conda env create` to fail on the registered prefix.
+env_registered() {
+  if [[ -n "${ENV_PREFIX}" ]]; then
+    [[ -e "${ENV_PREFIX}" ]]
+  else
+    "${CONDA}" env list --json 2>/dev/null | grep -Fq "\"/${ENV_NAME}\""
+  fi
+}
+
 env_python() {
   if [[ -n "${ENV_PREFIX}" ]]; then
     "${CONDA}" run -p "${ENV_PREFIX}" python "$@"
@@ -106,7 +117,11 @@ fi
 
 # --- 1. delete the previous environment (only with --recreate) -------------
 if [[ "${RECREATE}" -eq 1 ]]; then
-  if env_exists; then
+  if env_exists || env_registered; then
+    if ! env_exists; then
+      echo "removing existing-but-broken environment (its Python does not run):" \
+           "${ENV_PREFIX:-${ENV_NAME}}"
+    fi
     if [[ -n "${ENV_PREFIX}" ]]; then
       echo "removing conda prefix environment ${ENV_PREFIX}"
       "${CONDA}" env remove -y -p "${ENV_PREFIX}"
@@ -122,6 +137,12 @@ fi
 # --- 2. create it (from the export when there is one) ---------------------
 if env_exists; then
   echo "conda environment already exists: ${ENV_PREFIX:-${ENV_NAME}}"
+elif env_registered; then
+  # A prefix that exists but whose Python cannot start: `conda env create`
+  # would collide with the registered environment instead of repairing it.
+  echo "error: ${ENV_PREFIX:-${ENV_NAME}} exists but its Python does not run;" >&2
+  echo "       rerun with --recreate to remove and rebuild it." >&2
+  exit 1
 elif [[ -f "${FROM_HISTORY}" ]]; then
   echo "creating ${ENV_PREFIX:-${ENV_NAME}} from ${FROM_HISTORY##*/}"
   if [[ -n "${ENV_PREFIX}" ]]; then

@@ -228,8 +228,20 @@ def _copy_session_tools(sb: Path, stamp: float = None) -> None:
     """
     src = Path(__file__).resolve().with_name(DOCX_FORMAT_MODULE)
     dst = sb / DOCX_FORMAT_MODULE
+
+    def _same_bytes(a: Path, b: Path) -> bool:
+        # `dst` lives in the agent-writable sandbox: comparing it with an
+        # unbounded read let a planted huge file exhaust memory. Size first,
+        # then a streaming digest over regular files only.
+        try:
+            if a.stat().st_size != b.stat().st_size:
+                return False
+            return sha256_file(a) == sha256_file(b)
+        except OSError:
+            return False
+
     try:
-        if src.is_file() and (not dst.is_file() or dst.read_bytes() != src.read_bytes()):
+        if src.is_file() and (not dst.is_file() or not _same_bytes(dst, src)):
             shutil.copyfile(src, dst)
         # The formatter is a thin loader too: its ordered parts must sit beside
         # it, or the stage's `python paper_docx_format.py scan` call cannot run.

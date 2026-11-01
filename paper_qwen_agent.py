@@ -205,6 +205,12 @@ def ensure_tunnel(cfg: dict, log=None) -> str:
     global _TUNNEL, _TUNNEL_STDERR
     ok, ids, err = probe_endpoint(cfg)
     mode = str(cfg.get("tunnel") or "auto").strip().lower()
+    if mode not in ("auto", "off", "0", "false", "no", "require"):
+        # The CLI restricts --tunnel, but PAPER_QWEN_TUNNEL is not validated:
+        # `PAPER_QWEN_TUNNEL=banana` used to fall through and start an ssh
+        # tunnel. An operator typo must fail, not silently pick a mode.
+        return (f"invalid PAPER_QWEN_TUNNEL value {cfg.get('tunnel')!r}: use "
+                f"auto, off or require")
     if ok:
         # "Already reachable" is success in EVERY mode: `require` means do not
         # silently fall back to a direct connection when no tunnel exists, not
@@ -217,7 +223,7 @@ def ensure_tunnel(cfg: dict, log=None) -> str:
             log("[qwen] --tunnel require: the endpoint is already reachable, so no "
                 "ssh tunnel is started (nothing to require)")
         return ""
-    if cfg["tunnel"] in ("off", "0", "false", "no"):
+    if mode in ("off", "0", "false", "no"):
         return (f"qwen endpoint {cfg['base_url']} is not reachable and "
                 f"PAPER_QWEN_TUNNEL=off: {err}")
     if not shutil.which("ssh"):

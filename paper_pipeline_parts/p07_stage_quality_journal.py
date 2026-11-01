@@ -1061,11 +1061,15 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # drop is reported instead of costing another agent session.
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "base", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
+    # A restored base file may reintroduce the dangling reference the earlier
+    # PKG-2 strip removed; re-scan before the content policy compares the pack.
+    restrip_after_backfill(ctx, rec, rev, warns)
     # The benchmark-only strict policy (no-op unless the operator disabled one):
     # the delivered sentences must still correspond to the base's.
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "base", rev, "revise",
-                                      exempt_removed=pipeline_removed_sentences(rec),
+                                      exempt_removed=pipeline_removed_sentences(
+                                          rec, with_document=True),
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del))
     # AFTER the recovery, so the READ-ONLY raw-data directory ends up exactly as
@@ -1309,9 +1313,11 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     # Same recovery as the revise stage, measured against this run's SELF copy.
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "self", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
+    restrip_after_backfill(ctx, rec, out, warns)
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "self", out, "integrate",
-                                      exempt_removed=pipeline_removed_sentences(rec),
+                                      exempt_removed=pipeline_removed_sentences(
+                                          rec, with_document=True),
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del))
     rec["raw_data"] = verify_readonly_raw_data(ctx, out, warns)
@@ -1463,9 +1469,11 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     # The rewrite must not lose base content: same recovery as revise/integration.
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "base", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
+    restrip_after_backfill(ctx, rec, sb / REWRITTEN_DIR, warns)
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "base", sb / REWRITTEN_DIR, "rewrite",
-                                      exempt_removed=pipeline_removed_sentences(rec),
+                                      exempt_removed=pipeline_removed_sentences(
+                                          rec, with_document=True),
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del))
     rec["raw_data"] = verify_readonly_raw_data(ctx, sb / REWRITTEN_DIR, warns)
@@ -3678,15 +3686,79 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
 
 
 _DELETED_PARA_MIN = 30
+# The uppercase-sensitive reference alternatives must NOT be case-insensitive:
+# with a global `(?i)`, `- Results, however, ...` matched as a reference entry.
 _DELETED_PARA_SKIP_RE = re.compile(
-    r"(?i)^(?:#{1,6}\s|\\(?:sub)*section\*?\s*\{|\\(?:sub)*paragraph\s*\{|"
+    r"^(?:(?i:#{1,6}\s|\\(?:sub)*section\*?\s*\{|\\(?:sub)*paragraph\s*\{|"
     r"\[(?:insert|ref|cite)\b|todo\b|tbd\b|lorem ipsum|"
-    r"\\bibitem\b|\[\d+\]\s|"
-    r"[A-Z][A-Za-z'’.-]+,\s+[A-Z]\.)\s*")
+    r"\\bibitem\b|%\s)|"
+    r"\[\d+\]\s|"
+    # A Markdown bullet reference (`- Smith J, Jones K. ...` or `- Smith, J.`)
+    # is a reference entry, like the `[1]` form already skipped; treating it as
+    # prose made a legitimate bibliography edit look like deleted content.
+    r"(?:[-*+]\s+)?[A-Z][A-Za-z'’.-]+(?:\s+[A-Z]\.?)?,\s+(?:[A-Z]\.|[A-Z])|"
+    # YAML front matter and HTML comments are not prose.
+    r"-{3,}\s|<!--)\s*")
+_HEADING_BLOCK_SKIP_RE = re.compile(
+    r"(?i)^(?:#{1,6}\s|\\(?:sub)*section\*?\s*\{|\\(?:sub)*paragraph\s*\{)")
 
 
 def _deleted_para_norm(text) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _strip_nonprose_block(raw: str) -> tuple:
+    """(leading lines dropped, remaining prose) of one blank-line block.
+
+    A block can start with non-prose marker lines and still carry prose after
+    them: a LaTeX comment (`% note`), an HTML comment (`<!-- ... -->`), YAML
+    front matter (`---` ... `---`) or a reference entry. Skipping the whole
+    block hid that prose from the content policy and the deletion audit, so only
+    the leading marker lines are removed and the remainder is returned. A block
+    is skipped only when no prose remains.
+    """
+    lines = list(raw.splitlines())
+    dropped = 0
+    while lines:
+        line = lines[0].strip()
+        if not line:
+            lines.pop(0)
+            dropped += 1
+            continue
+        if line == "---":
+            # YAML front matter: drop the opening rule through its closing rule.
+            close = next((i for i in range(1, len(lines))
+                          if lines[i].strip() == "---"), None)
+            if close is None:
+                lines.pop(0)
+                dropped += 1
+            else:
+                del lines[:close + 1]
+                dropped += close + 1
+            continue
+        if line.startswith("<!--"):
+            # An HTML comment may span lines; drop it through the closing `-->`,
+            # keeping any prose that follows on the closing line.
+            close = next((i for i, cand in enumerate(lines) if "-->" in cand), None)
+            if close is None:
+                dropped += len(lines)
+                lines = []
+            else:
+                after = lines[close].split("-->", 1)[1]
+                del lines[:close]
+                if after.strip():
+                    lines[0] = after
+                else:
+                    lines.pop(0)
+                    dropped += 1
+                dropped += close
+            continue
+        if _DELETED_PARA_SKIP_RE.match(line):
+            lines.pop(0)
+            dropped += 1
+            continue
+        break
+    return dropped, _deleted_para_norm("\n".join(lines))
 
 
 def _deleted_para_candidate(text) -> str:
@@ -3698,9 +3770,12 @@ def _deleted_para_candidate(text) -> str:
     re-reading a huge document for every row.
     """
     s = _deleted_para_norm(text)
-    if len(s) < _DELETED_PARA_MIN or _DELETED_PARA_SKIP_RE.match(s):
+    if len(s) < _DELETED_PARA_MIN or _HEADING_BLOCK_SKIP_RE.match(s):
         return ""
-    return s
+    _dropped, prose = _strip_nonprose_block(text)
+    if len(prose) < _DELETED_PARA_MIN or _DELETED_PARA_SKIP_RE.match(prose):
+        return ""
+    return prose
 
 
 def _text_paragraphs_with_lines(text: str):
@@ -3742,34 +3817,66 @@ def deletion_audit_paragraphs(root: Path) -> list:
         if ext == ".docx":
             paras = _docx_paragraphs(p) or []
             for index, text in enumerate(paras, 1):
-                if _deleted_para_candidate(text):
-                    rows.append((rel, index, text))
+                prose = _deleted_para_candidate(text)
+                if prose:
+                    rows.append((rel, index, prose))
         elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx"):
             text = read_text_bounded(p)
             if text is None:
                 continue
             for start, para in _text_paragraphs_with_lines(text):
-                if _deleted_para_candidate(para):
-                    rows.append((rel, text[:start].count("\n") + 1, para))
+                prose = _deleted_para_candidate(para)
+                if prose:
+                    dropped, _rest = _strip_nonprose_block(para)
+                    rows.append((rel, text[:start].count("\n") + 1 + dropped, prose))
     return rows
 
 
-def deletion_audit_rows(base: Path, revised: Path) -> list:
+def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None) -> list:
     """Base prose paragraphs whose normalised text is absent from `revised`.
 
     A paragraph that was moved, merged or lightly reworded appears here too:
     the audit row asks the auditor to decide whether every fact survived, not
     merely whether the bytes moved. That is the point -- a silent deletion is
     exactly the failure the revision audit exists to catch.
+
+    `exempt_removed` is the pipeline's own PKG-2 removal list, as
+    `(document, sentence)` pairs. A row is dropped when the ONLY reason its
+    paragraph is absent is one of those removals: the auditor must not dispose
+    (or worse, plan to restore) a dangling reference the orchestrator was
+    required to delete. A paragraph that also lost session-written content keeps
+    its row.
     """
-    revised_norm = {_deleted_para_norm(text)
-                    for _rel, _line, text in deletion_audit_paragraphs(revised)}
+    revised_paras = {}
+    for rel, _line, text in deletion_audit_paragraphs(revised):
+        revised_paras.setdefault(rel, []).append(_deleted_para_norm(text).lower())
+    revised_norm = {para for parts in revised_paras.values() for para in parts}
+    revised_join = {rel: " ".join(parts) for rel, parts in revised_paras.items()}
+    exempt = {}
+    for document, sentence in exempt_removed or ():
+        norm = _deleted_para_norm(sentence).lower()
+        if norm:
+            exempt.setdefault(str(document), []).append(norm)
     rows, seen = [], set()
     for rel, line, text in deletion_audit_paragraphs(base):
         norm = _deleted_para_norm(text)
-        if norm in revised_norm or norm in seen:
+        low = norm.lower()
+        removed_here = exempt.get(rel, [])
+        if any(low == sentence for sentence in removed_here):
             continue
-        seen.add(norm)
+        if removed_here:
+            remaining = low
+            for sentence in removed_here:
+                remaining = remaining.replace(sentence, " ")
+            remaining = _deleted_para_norm(remaining)
+            if remaining != low and (
+                    not remaining or remaining in revised_join.get(rel, "")):
+                # The rest of the paragraph survives: the only deleted text was
+                # the pipeline's own dangling-reference sentence.
+                continue
+        if low in revised_norm or low in seen:
+            continue
+        seen.add(low)
         rows.append({"document": rel, "line": line, "paragraph": norm})
     return rows
 
@@ -3821,28 +3928,84 @@ def deletion_audit_markdown(rows: list) -> str:
 # deletions happen INSIDE a surviving paragraph, so a paragraph-level audit
 # cannot see them.
 # ---------------------------------------------------------------------
-_CONTENT_UNIT_MIN_WORDS = 4
-_CONTENT_UNIT_MIN_CHARS = 18
+_CONTENT_UNIT_MIN_WORDS = 2
+_CONTENT_UNIT_MIN_CHARS = 8
 _CONTENT_UNIT_MATCH = 0.55
+# Sentence boundary: the terminal mark, then an optional closing quote/bracket,
+# citation marker or trailing \cite{...}, then whitespace. The old
+# `(?<=[.!?])\s+` split failed on `."`, `.)`, `.[1]` and `.\cite{x}`, merging
+# the following sentence into the unit and masking a deletion.
+_CONTENT_SENTENCE_END_RE = re.compile(
+    r"(?<=[.!?])(?:[\"\'”’\)\]\}]+|\[\d+\]|\\cite[a-zA-Z]*\{[^{}]*\})?\s+")
+# A fragment ending in one of these is not a sentence boundary: `Smith et al.`
+# and `e.g.` used to become fake units the one-to-one matcher reported missing.
+_CONTENT_ABBREV_END_RE = re.compile(
+    r"(?:\b(?:et al|e\.g|i\.e|etc|vs|cf|approx|ca|fig|figs|eq|eqs|no|dr|mr|"
+    r"mrs|ms|prof|al|ref|refs?)\.)$", re.I)
+_CONTENT_INITIAL_END_RE = re.compile(r"(?:^|\s)[A-Z]\.$")
 
 
-def _content_unit_paragraphs(package: Path) -> list:
+def _content_sentence_parts(text) -> list:
+    """Split one paragraph into sentence units without false boundaries."""
+    parts = [p.strip() for p in _CONTENT_SENTENCE_END_RE.split(
+        _deleted_para_norm(text)) if p.strip()]
+    merged = []
+    for part in parts:
+        if merged and (_CONTENT_ABBREV_END_RE.search(merged[-1])
+                       or _CONTENT_INITIAL_END_RE.search(merged[-1])
+                       or re.match(r"[a-z]", part)):
+            merged[-1] = merged[-1] + " " + part
+        else:
+            merged.append(part)
+    return merged
+
+
+def _content_paragraph_rows(raw: str, first_line: int) -> list:
+    """[(line, text)] for one blank-line block, with its marker lines removed.
+
+    A Markdown `# Methods` or LaTeX `\\section{Methods}` line and its prose are
+    one blank-line block. Skipping the block because its FIRST line is a heading
+    hid the prose from the policy (a whole paragraph could be deleted without a
+    missing unit), so the heading line(s) are dropped and the remainder is
+    scanned. The same applies to a leading LaTeX/HTML comment, YAML front matter
+    or reference entry. Only a block with no prose left is skipped entirely.
+    """
+    norm = _deleted_para_norm(raw)
+    if len(norm) < _CONTENT_UNIT_MIN_CHARS:
+        return []
+    if not _DELETED_PARA_SKIP_RE.match(norm):
+        return [(first_line, norm)]
+    dropped, rest = _strip_nonprose_block(raw)
+    if len(rest) < _CONTENT_UNIT_MIN_CHARS or _DELETED_PARA_SKIP_RE.match(rest):
+        return []
+    return [(first_line + dropped, rest)]
+
+
+def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
     """[(document, line, paragraph)] for the strict policy's sentence scan.
 
     The same submission-surface rule as `deletion_audit_paragraphs`, but every
     prose paragraph counts, not only the >=30-character ones the deletion audit
-    seeds: a short defective sentence ("The analysis is described in Section 3")
-    is still a content unit, and the policy must see it. Headings, reference
-    entries, evidence areas, workflow scratch and bookkeeping files stay out.
+    seeds: a short defective sentence ("This is false.") is still a content
+    unit, and the policy must see it. Headings, reference entries, evidence
+    areas, workflow scratch, bookkeeping files and files the package's own
+    README declares not submitted stay out.
+
+    `skipped` (when a list is passed) collects the submitted files the scan
+    could NOT read (corrupt/oversized). Silently ignoring them made the policy
+    unenforced on that file with no warning.
     """
     rows = []
     package = Path(package)
     if not package.is_dir():
         return rows
+    _decl, _is_submitted = declared_submission_filter(package)
     for p in _iter_tree_files(package):
         try:
             rel = p.relative_to(package).as_posix()
         except ValueError:
+            continue
+        if not _is_submitted(rel):
             continue
         top = rel.split("/", 1)[0].lower()
         if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
@@ -3853,32 +4016,42 @@ def _content_unit_paragraphs(package: Path) -> list:
             continue
         ext = p.suffix.lower()
         if ext == ".docx":
-            for index, text in enumerate(_docx_paragraphs(p) or [], 1):
+            paras = _docx_paragraphs(p)
+            if paras is None:
+                if skipped is not None:
+                    skipped.append(rel)
+                continue
+            for index, text in enumerate(paras, 1):
                 para = _deleted_para_norm(text)
-                if len(para) >= 8 and not _DELETED_PARA_SKIP_RE.match(para):
+                if len(para) >= _CONTENT_UNIT_MIN_CHARS \
+                        and not _DELETED_PARA_SKIP_RE.match(para):
                     rows.append((rel, index, para))
         elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx"):
             text = read_text_bounded(p)
             if text is None:
+                if skipped is not None:
+                    skipped.append(rel)
                 continue
             for start, para in _text_paragraphs_with_lines(text):
-                para = _deleted_para_norm(para)
-                if len(para) >= 8 and not _DELETED_PARA_SKIP_RE.match(para):
-                    rows.append((rel, text[:start].count("\n") + 1, para))
+                line = text[:start].count("\n") + 1
+                rows.extend((rel, ln, body)
+                            for ln, body in _content_paragraph_rows(para, line))
     return rows
 
 
-def _content_unit_sentences(package: Path) -> list:
+def _content_unit_sentences(package: Path, skipped: list = None) -> list:
     """[{document,line,text,norm,tokens}] for a package's submitted prose.
 
     Reads the same prose surfaces as the deletion audit (DOCX through the shared
     visible-paragraph reader). Splitting the paragraph into sentences is what
     catches the benchmark's sentence-level deletion inside a surviving
-    paragraph.
+    paragraph. The old 4-word/18-character floors let a short claim be deleted
+    or inserted invisibly; a two-word/8-character floor keeps real short claims
+    ("This is false.") while dropping bare fragments.
     """
     units = []
-    for rel, line, paragraph in _content_unit_paragraphs(package):
-        for sentence in re.split(r"(?<=[.!?])\s+", _deleted_para_norm(paragraph)):
+    for rel, line, paragraph in _content_unit_paragraphs(package, skipped=skipped):
+        for sentence in _content_sentence_parts(paragraph):
             text = re.sub(r"\s+", " ", str(sentence or "")).strip()
             if len(text) < _CONTENT_UNIT_MIN_CHARS:
                 continue
@@ -3917,24 +4090,32 @@ def _content_unit_similarity(base: dict, cand: dict) -> float:
 def _match_content_units(base_units: list, cand_units: list) -> tuple:
     """(unmatched base units, unmatched candidate units) of one package pair.
 
-    Greedy longest-first one-to-one matching: each base sentence can claim at
-    most one candidate sentence, so duplicating a sentence does not hide a
-    deletion and splitting one sentence into two leaves the second part as an
-    insertion. Exact matches are consumed first, which keeps a repeated phrase
-    from stealing another sentence's counterpart.
+    One-to-one matching: each base sentence can claim at most one candidate
+    sentence, so duplicating a sentence does not hide a deletion and splitting
+    one sentence into two leaves the second part as an insertion.
+
+    A GLOBAL exact-match pass runs before any fuzzy matching. The old
+    per-base loop sorted by token count, so a longer base sentence could claim a
+    shorter base sentence's exact copy by similarity and leave the shorter one
+    reported missing; the docstring's exact-first guarantee was false. After
+    the exact pass, fuzzy matching is greedy longest-first over what remains.
     """
     unmatched = set(range(len(cand_units)))
     base_left = []
     exact = {}
     for j, cand in enumerate(cand_units):
         exact.setdefault(cand["norm"], []).append(j)
-    for base in sorted(base_units, key=lambda u: -len(u["tokens"])):
-        # Exact copy first: a repeated sentence stays a unit, and consuming one
-        # occurrence is enough.
+    # 1. Global exact pass: every verbatim copy is consumed before any fuzzy
+    # claim can steal it.
+    for base in base_units:
         hit = next((j for j in exact.get(base["norm"], []) if j in unmatched), None)
         if hit is not None:
             unmatched.discard(hit)
-            continue
+        else:
+            base_left.append(base)
+    # 2. Greedy longest-first fuzzy pass over the leftovers.
+    fuzzy_left = []
+    for base in sorted(base_left, key=lambda u: -len(u["tokens"])):
         best_j, best_score = None, 0.0
         for j in list(unmatched):
             score = _content_unit_similarity(base, cand_units[j])
@@ -3943,8 +4124,8 @@ def _match_content_units(base_units: list, cand_units: list) -> tuple:
         if best_j is not None and best_score >= _CONTENT_UNIT_MATCH:
             unmatched.discard(best_j)
         else:
-            base_left.append(base)
-    return base_left, [cand_units[j] for j in sorted(unmatched)]
+            fuzzy_left.append(base)
+    return fuzzy_left, [cand_units[j] for j in sorted(unmatched)]
 
 
 def _content_unit_example(unit: dict) -> str:
@@ -3954,7 +4135,84 @@ def _content_unit_example(unit: dict) -> str:
     return f"{unit.get('document')}:{unit.get('line')} {text!r}"
 
 
-def pipeline_removed_sentences(rec: dict) -> list:
+_CONTENT_HANDOFF_MARKER_RE = re.compile(
+    r"(?is)^\s*\[AUTHOR TO COMPLETE:[^\]]*\]\s*$")
+_CITATION_RE = re.compile(
+    r"\\[a-zA-Z]*cite[a-zA-Z]*\s*(?:\[[^\]]*\]\s*)*\{([^{}]*)\}")
+_BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,\s]+)\s*,")
+
+
+def _is_handoff_marker(text) -> bool:
+    """True when a content unit is exactly an author hand-off marker."""
+    return bool(_CONTENT_HANDOFF_MARKER_RE.match(str(text or "")))
+
+
+def _citation_keys(package: Path) -> set:
+    """Citation keys the package's submitted prose and .bib/.bbl entries name.
+
+    The same submission surface as the prose scan: a citation in `code/`, an
+    evidence area, a scratch file or a file the package's README declares not
+    submitted is not a manuscript insertion.
+    """
+    keys = set()
+    package = Path(package)
+    _decl, _is_submitted = declared_submission_filter(package)
+    for p in _iter_tree_files(package):
+        try:
+            rel = p.relative_to(package).as_posix()
+        except ValueError:
+            continue
+        if not _is_submitted(rel):
+            continue
+        top = rel.split("/", 1)[0].lower()
+        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
+            continue
+        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
+                or is_non_submitted_readme_name(p.name)
+                or is_non_shippable_name(p.name)):
+            continue
+        ext = p.suffix.lower()
+        if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".bib", ".bbl"):
+            text = read_text_bounded(p)
+        elif ext == ".docx":
+            text = "\n".join(_docx_paragraphs(p) or [])
+        else:
+            continue
+        if not text:
+            continue
+        for m in _CITATION_RE.finditer(text):
+            keys.update(k.strip() for k in m.group(1).split(",") if k.strip())
+        if ext in (".bib", ".bbl"):
+            keys.update(m.group(1).strip() for m in _BIB_ENTRY_RE.finditer(text))
+    return keys
+
+
+def restrip_after_backfill(ctx, rec: dict, package: Path, warns: list = None) -> None:
+    """Re-run the PKG-2 strip when BACKFILL restored a dropped base file.
+
+    `_format_fix_stage_package` strips before `backfill_missing_files` runs. A
+    restored base file can carry the very dangling reference the strip already
+    removed from the rest of the package, and nothing re-scanned it: the final
+    package could ship a pointer at an area the submission does not carry. Only
+    a backfill that actually restored a file needs the second pass; its removals
+    are merged into the same history, never overwriting the first pass's.
+    """
+    if not isinstance(rec, dict) or not ((rec.get("backfill") or {}).get("restored")):
+        return
+    try:
+        _new = strip_dangling_references_in_dir(
+            Path(package), submission_not_carried_areas(ctx), rec.get("id") or "stage",
+            warns=warns)
+        rec["reference_strip"] = merge_reference_strips(
+            rec.get("reference_strip"), _new)
+    except Exception as e:                                            # noqa: BLE001
+        if warns is not None:
+            warns.append(f"PKG-2: the post-backfill dangling-reference re-scan could not "
+                         f"run ({type(e).__name__}: {e}); the restored file is reported, "
+                         f"not repaired")
+
+
+def pipeline_removed_sentences(rec: dict, with_document: bool = False) -> list:
     """Sentences THIS orchestrator removed for packaging (PKG-2), verbatim.
 
     The dangling-reference pass is a required submission-surface repair (AGENTS
@@ -3964,6 +4222,10 @@ def pipeline_removed_sentences(rec: dict) -> list:
     still dangle. The policy comparison therefore exempts exactly the sentences
     the pipeline recorded as removed, so the run fails only for edits the
     session made.
+
+    With `with_document=True` each item is `(document, sentence)`: an exemption
+    is then keyed to the file it was removed from, so the same sentence elsewhere
+    is not whitelisted.
     """
     out = []
     strip = rec.get("reference_strip") if isinstance(rec, dict) else None
@@ -3971,7 +4233,10 @@ def pipeline_removed_sentences(rec: dict) -> list:
         return out
     for entry in strip.get("files") or []:
         if isinstance(entry, dict):
-            out.extend(str(s) for s in (entry.get("removed") or []) if str(s).strip())
+            document = str(entry.get("file") or "")
+            for s in (entry.get("removed") or []):
+                if str(s).strip():
+                    out.append((document, str(s)) if with_document else str(s))
     return out
 
 
@@ -3988,7 +4253,15 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
     `exempt_removed` is a list of sentences the orchestrator itself removed
     before this check (the PKG-2 dangling-reference repair). They are excluded
     from the deleted set: the policy constrains the session, not the pipeline's
-    own required packaging pass.
+    own required packaging pass. An item may also be a `(document, sentence)`
+    pair, which exempts only that file's copy (a pipeline removal in one file
+    must not whitelist the same sentence deleted from another).
+
+    The prompt's author hand-off exception and its readme/off cleanup rule are
+    honoured mechanically: a marker inserted under `author_to_complete:
+    document` is allowed, and a marker the base carries is exempt from the
+    deletion comparison under `readme`/`off` (the placeholder rule requires its
+    removal there).
     """
     insert = (insertions_enabled(ctx) if insertions_allowed is None
               else bool(insertions_allowed))
@@ -4000,13 +4273,37 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
     if not base_package.is_dir() or not candidate_package.is_dir():
         return []
     label = f"{stage}: " if stage else ""
-    exempt = {_deleted_para_norm(s).lower() for s in (exempt_removed or ())
-              if str(s or "").strip()}
-    base_units = [u for u in _content_unit_sentences(base_package)
-                  if u["norm"] not in exempt]
-    cand_units = _content_unit_sentences(candidate_package)
+    exempt_text = set()
+    exempt_document = set()
+    for s in (exempt_removed or ()):
+        if isinstance(s, (tuple, list)) and len(s) == 2:
+            doc, sentence = s
+            if str(sentence or "").strip():
+                exempt_document.add((str(doc), _deleted_para_norm(sentence).lower()))
+        elif str(s or "").strip():
+            exempt_text.add(_deleted_para_norm(s).lower())
+    mode = author_to_complete_mode_of(ctx)
+    allow_marker_insert = mode == "document"
+    allow_marker_delete = mode in ("readme", "off")
+    skipped = []
+    base_units = []
+    for u in _content_unit_sentences(base_package, skipped=skipped):
+        if u["norm"] in exempt_text or (u["document"], u["norm"]) in exempt_document:
+            continue
+        if allow_marker_delete and _is_handoff_marker(u["text"]):
+            continue
+        base_units.append(u)
+    cand_units = [u for u in _content_unit_sentences(candidate_package, skipped=skipped)
+                  if not (allow_marker_insert and _is_handoff_marker(u["text"]))]
     missing, added = _match_content_units(base_units, cand_units)
     problems = []
+    if skipped:
+        names = ", ".join(sorted(set(skipped))[:6])
+        problems.append(
+            f"{label}{len(set(skipped))} submitted file(s) could not be scanned for the "
+            f"content-edit policy (corrupt, oversized or unreadable): {names}"
+            + (" ..." if len(set(skipped)) > 6 else "")
+            + ". The policy is UNENFORCED on those files; repair or remove them before retrying.")
     if not delete and missing:
         problems.append(
             f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
@@ -4022,6 +4319,14 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
             + ". Correct the existing unit in place instead of adding prose; if a finding can "
               "only be resolved by new text, record it as manual-required/unable and leave the "
               "unit unchanged.")
+    if not insert:
+        new_keys = _citation_keys(candidate_package) - _citation_keys(base_package)
+        if new_keys:
+            problems.append(
+                f"{label}{len(new_keys)} new citation key(s) are in the delivered package "
+                f"although --disable-insertions is in force (a new citation is an insertion): "
+                + ", ".join(sorted(new_keys)[:8])
+                + (" ..." if len(new_keys) > 8 else ""))
     return problems
 
 

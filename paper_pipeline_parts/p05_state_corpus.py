@@ -2988,9 +2988,12 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
+    # Bind the sandbox to the policy its OWN prompt states: a resumed/retried
+    # package is judged under the policy it was produced under, never under a
+    # different invocation's override.
+    _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     if (not prompt.is_file()
-            or not prompt_content_edit_policy_matches(
-                prompt, insertions_enabled(ctx), deletions_enabled(ctx))):
+            or not prompt_content_edit_policy_matches(prompt, _ins_ok, _del_ok)):
         _copy_session_tools(sb)
         # write_text_atomic: a crash mid-write must never leave a truncated
         # PROMPT.md behind for a later invocation to trust.
@@ -3007,15 +3010,18 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                                                else ""),
                                                 venue_norm=venue_norm_for(ctx),
                                                 execution_profile=execution_profile_of(ctx),
-                                                insertions_allowed=insertions_enabled(ctx),
-                                                deletions_allowed=deletions_enabled(ctx)))
+                                                insertions_allowed=_ins_ok,
+                                                deletions_allowed=_del_ok))
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
-    _content_policy = content_edit_policy_of(ctx)
-    if _content_policy:
-        rec["content_edit_policy"] = _content_policy
-    else:
+    _current_policy = (insertions_enabled(ctx), deletions_enabled(ctx))
+    if (_ins_ok, _del_ok) == _current_policy and _ins_ok and _del_ok:
         rec.pop("content_edit_policy", None)
+    else:
+        # Record an explicitly DEFAULT policy too when it differs from this
+        # invocation: the postcheck must judge the package under the policy its
+        # prompt stated, not under a later override.
+        rec["content_edit_policy"] = {"insertions": _ins_ok, "deletions": _del_ok}
     rec["rewrite_level"] = rewrite_level_of(k, m)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
@@ -4016,9 +4022,9 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
+    _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     if (not prompt.is_file()
-            or not prompt_content_edit_policy_matches(
-                prompt, insertions_enabled(ctx), deletions_enabled(ctx))):
+            or not prompt_content_edit_policy_matches(prompt, _ins_ok, _del_ok)):
         _copy_session_tools(sb)
         write_text_atomic(prompt, revise_prompt(sb, rid, r, index=int(str(vid)[1:]) - 1,
                                                total=n,
@@ -4034,15 +4040,18 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                venue_norm=venue_norm_for(ctx),
                                                execution_profile=execution_profile_of(ctx),
                                                guided_review_off=not guided_review_enabled(ctx),
-                                               insertions_allowed=insertions_enabled(ctx),
-                                               deletions_allowed=deletions_enabled(ctx)))
+                                               insertions_allowed=_ins_ok,
+                                               deletions_allowed=_del_ok))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
-    _content_policy = content_edit_policy_of(ctx)
-    if _content_policy:
-        rec["content_edit_policy"] = _content_policy
-    else:
+    _current_policy = (insertions_enabled(ctx), deletions_enabled(ctx))
+    if (_ins_ok, _del_ok) == _current_policy and _ins_ok and _del_ok:
         rec.pop("content_edit_policy", None)
+    else:
+        # Record an explicitly DEFAULT policy too when it differs from this
+        # invocation: the postcheck must judge the package under the policy its
+        # prompt stated, not under a later override.
+        rec["content_edit_policy"] = {"insertions": _ins_ok, "deletions": _del_ok}
     rec["cold_start_merge"] = cold_start_merge
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
@@ -4109,9 +4118,9 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     disc = seed_discovery_findings(ctx, r, sb)
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
+    _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     if (not prompt.is_file()
-            or not prompt_content_edit_policy_matches(
-                prompt, insertions_enabled(ctx), deletions_enabled(ctx))):
+            or not prompt_content_edit_policy_matches(prompt, _ins_ok, _del_ok)):
         _copy_session_tools(sb)
         write_text_atomic(prompt, integrate_prompt(sb, rid, r, self_id, other_ids,
                                                   caption_limit=caption_limit_of(ctx),
@@ -4123,16 +4132,19 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                                                   discovery_ids=disc["ids"],
                                                   discovery_dropped=disc["dropped"],
                                                   execution_profile=execution_profile_of(ctx),
-                                                  insertions_allowed=insertions_enabled(ctx),
-                                                  deletions_allowed=deletions_enabled(ctx)))
+                                                  insertions_allowed=_ins_ok,
+                                                  deletions_allowed=_del_ok))
     rec = ctx.register(rid, "integrate", r, f"runs/{rid}", self_id=self_id,
                        other_ids=other_ids, pool_ids=pool, produces=vid,
                        field_ids=other_ids, discovery_ids=list(disc["ids"]))
-    _content_policy = content_edit_policy_of(ctx)
-    if _content_policy:
-        rec["content_edit_policy"] = _content_policy
-    else:
+    _current_policy = (insertions_enabled(ctx), deletions_enabled(ctx))
+    if (_ins_ok, _del_ok) == _current_policy and _ins_ok and _del_ok:
         rec.pop("content_edit_policy", None)
+    else:
+        # Record an explicitly DEFAULT policy too when it differs from this
+        # invocation: the postcheck must judge the package under the policy its
+        # prompt stated, not under a later override.
+        rec["content_edit_policy"] = {"insertions": _ins_ok, "deletions": _del_ok}
     rec["inputs_manifest"] = {"self": hash_manifest(sb / "self"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
                               "others": hash_manifest(sb / "others")}

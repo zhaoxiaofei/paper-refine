@@ -42,8 +42,9 @@ from pathlib import Path
 # INTEGRATION run that takes it as the base and ALL the other pool members as
 # donors (i1..iK) -- there are no pairwise "cross-pollination" arms any more.
 # M and N are command-line parameters (`setup --rewrites`, `setup --revises`),
-# each either a single integer or a per-round list; they default to [2, 1] and
-# [1, 1]. Every prompt also documents the optional `docx` CLI (including
+# each either a single integer or a per-round list; the DEFAULTS schedule below
+# is rewrites [2, 0, 0] and revises [1, 1, 1]. Every prompt also documents the
+# optional `docx` CLI (including
 # `docx diff`), which the visual-tool probe includes; the cmd-line defaults are
 # --rounds 3 and --jobs 255. state.json is version 3 (the arm set changed).
 # Carried over from 2.1.0: the figure-caption rule is an opt-in SUGGESTION

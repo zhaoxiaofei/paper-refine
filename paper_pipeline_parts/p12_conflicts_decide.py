@@ -5060,11 +5060,15 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
                                 f"link target), not prose: the author repoints it at shipped "
                                 f"content or drops the include deliberately")
             elif ext in PACKAGE_TEXT_EXTS:
-                try:
-                    text = p.read_text("utf-8", "replace")
-                except OSError:
-                    text = ""
-                if pkg2_reference_spans(text, patterns, index, exempt=_exempt_ref):
+                # Structural text is also agent-writable and was read with an
+                # unbounded `read_text`: a huge file could exhaust memory on
+                # every package-producing stage and at publication.
+                text = read_text_bounded(p)
+                if text is None:
+                    entry["skipped"].append(
+                        "the structural file is over the byte budget, a symlink or "
+                        "unreadable; the author repairs it")
+                elif pkg2_reference_spans(text, patterns, index, exempt=_exempt_ref):
                     entry["skipped"].append(
                         "a structural file (deleting a row/key would break it); the author "
                         "repairs it")
@@ -5122,6 +5126,49 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
         except OSError:
             pass
     return report
+
+
+def merge_reference_strips(*reports) -> dict:
+    """Merge PKG-2 reports of the SAME attempt into one removal history.
+
+    A second postcheck used to overwrite `rec['reference_strip']`: the first
+    pass's removed sentence then looked like a session deletion and the same
+    package passed once and failed the next time. Every prior removal is carried
+    forward (deduplicated per file), while `remaining`/`ok` describe the LATEST
+    scan.
+    """
+    current = None
+    for report in reports:
+        if isinstance(report, dict) and report:
+            current = report
+    if current is None:
+        return {}
+    files = {}
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        for entry in report.get("files") or []:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("file") or "")
+            merged = files.setdefault(
+                key, {"file": key, "removed": [], "skipped": []})
+            for sentence in entry.get("removed") or []:
+                if sentence not in merged["removed"]:
+                    merged["removed"].append(sentence)
+            for reason in entry.get("skipped") or []:
+                if reason not in merged["skipped"]:
+                    merged["skipped"].append(reason)
+            for link in entry.get("removed_links") or []:
+                merged.setdefault("removed_links", [])
+                if link not in merged["removed_links"]:
+                    merged["removed_links"].append(link)
+    out = dict(current)
+    out["files"] = [files[k] for k in files]
+    out["removed"] = sum(len(e.get("removed") or []) for e in files.values())
+    out["removed_links"] = sum(len(e.get("removed_links") or []) for e in files.values())
+    out["skipped"] = sum(len(e.get("skipped") or []) for e in files.values())
+    return out
 
 
 def internal_artifact_rows(root: Path, limit: int = 40) -> list:

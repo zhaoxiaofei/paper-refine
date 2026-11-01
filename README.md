@@ -2361,7 +2361,9 @@ restore the historical behaviour. The same switches are stated in the revise, re
 and bounded-repair prompts, and the postcheck enforces them mechanically: it compares the delivered
 package's prose sentences with the base's; an in-place corrected sentence matches, a missing one is
 a deletion, and a sentence with no base counterpart is an insertion. A violating attempt fails and
-is retried with that message. The mode is for benchmarking only; ordinary editorial use should
+is retried with that message. The mechanical comparison is sentence-level: the paragraph, heading,
+caption, table/figure-row and document list above is the policy a session follows, not a claim that
+each class is mechanically counted. The mode is for benchmarking only; ordinary editorial use should
 leave both kinds enabled.
 
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
@@ -3404,7 +3406,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 172 suites (a few
+any failure. They are independent, so run them in parallel — 173 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

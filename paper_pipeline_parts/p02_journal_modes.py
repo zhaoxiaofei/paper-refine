@@ -2008,6 +2008,14 @@ def _content_edit_enabled(ctx, kind: str, default: bool = True) -> bool:
         value = cfg.get(key)
         if isinstance(value, bool):
             truthy = value
+            text = "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            # A JSON number is a legitimate spelling of the same switch: 0 is
+            # the OFF value `_CONTENT_EDIT_OFF` names, so it must not collapse
+            # to the empty string (which used to fall through to the permissive
+            # default and turn `insertions: 0` into insertions ON).
+            truthy = bool(value)
+            text = "1" if value else "0"
         else:
             text = str(value or "").strip().lower()
             if not text:
@@ -2017,7 +2025,7 @@ def _content_edit_enabled(ctx, kind: str, default: bool = True) -> bool:
             return not truthy
         if truthy:
             return True
-        return str(value).strip().lower() not in _CONTENT_EDIT_OFF
+        return text not in _CONTENT_EDIT_OFF
     return bool(default)
 
 

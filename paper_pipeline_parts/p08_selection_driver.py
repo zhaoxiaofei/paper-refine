@@ -2680,12 +2680,22 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     # every row: a deleted paragraph that carried a fact is exactly the
     # "FACT REMOVED" class this stage exists to catch, and leaving the seed
     # blank fails the attempt instead of silently certifying the deletion.
-    _deleted_rows = deletion_audit_rows(sb / "base", sb / REVISED_DIR)
+    # A deletion the PIPELINE made (the PKG-2 dangling-reference strip) is not a
+    # revision defect: the auditor must not be asked to dispose it, and a repair
+    # row that restored it would reintroduce the dangling reference. Exempt
+    # exactly the recorded (document, sentence) removals, including the rest of
+    # a paragraph that also survives.
+    _deleted_rows = deletion_audit_rows(
+        sb / "base", sb / REVISED_DIR,
+        exempt_removed=pipeline_removed_sentences(rec, with_document=True))
     write_text_atomic(sb / "revision_audit" / "DELETED_PARAGRAPHS.md",
                       deletion_audit_markdown(_deleted_rows))
+    _audit_ins, _audit_del = content_edit_policy_allowed(ctx, rec)
     write_text_atomic(sb / REVISION_AUDIT_PROMPT_FILE,
                       revision_audit_prompt(sb, rec["id"], r,
-                                            execution_profile=execution_profile_of(ctx)))
+                                            execution_profile=execution_profile_of(ctx),
+                                            insertions_allowed=_audit_ins,
+                                            deletions_allowed=_audit_del))
     # The revision audit is documented READ-ONLY on every input its prompt
     # names -- base/, revised/, guided_review/, audit/, raw_data/ and code/ -- and may
     # write only revision_audit/REPAIR_PLAN.json. Snapshot each area so a

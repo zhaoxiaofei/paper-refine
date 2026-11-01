@@ -1888,6 +1888,32 @@ def count_caption_words(text: str) -> int:
     return count_words(_strip_latex(text or ""))
 
 
+def _docx_onoff(rpr, tag: str) -> bool:
+    """An OOXML on/off run property, honouring an explicit `w:val="0"`.
+
+    `python-docx` writes `<w:vanish w:val="0"/>` for a NON-hidden run, so mere
+    element presence is not hiddenness.
+    """
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    node = rpr.find(w + tag) if rpr is not None else None
+    if node is None:
+        return False
+    val = str(node.get(w + "val") or "true").strip().lower()
+    return val not in ("0", "false", "off", "none")
+
+
+def _docx_run_hidden(run) -> bool:
+    """True when a `w:r` is marked hidden (`w:vanish`/`w:specVanish`).
+
+    Hidden text is not text a reader sees, so it must not count as present in
+    the delivered package: counting it let a sentence `--disable-deletions`
+    forbids removing be merely hidden instead of removed.
+    """
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    rpr = run.find(w + "rPr")
+    return _docx_onoff(rpr, "vanish") or _docx_onoff(rpr, "specVanish")
+
+
 def _docx_visible_nodes(el):
     """Descendants of `el` as Word renders them: ONE AlternateContent branch.
 
@@ -1895,6 +1921,7 @@ def _docx_visible_nodes(el):
     Walking every descendant read both, doubling the paragraph text and every
     count derived from it. A nested `w:p` (a text box's own paragraph) is a
     separate entry of the paragraph walk, so it is not folded into this one.
+    A hidden run (`w:vanish`) is not rendered, so it contributes nothing.
     """
     mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -1908,6 +1935,8 @@ def _docx_visible_nodes(el):
             continue
         if child.tag == w + "p":
             continue
+        if child.tag == w + "r" and _docx_run_hidden(child):
+            continue
         yield child
         yield from _docx_visible_nodes(child)
 
@@ -1918,6 +1947,8 @@ def _docx_visible_paragraphs(el, ns: str, mc: str):
     Only ONE AlternateContent branch is walked, so the paragraphs inside an
     `mc:Fallback` are never returned. Nested paragraphs (a text box's content)
     are yielded after their containing paragraph, so each is its own entry.
+    A hidden paragraph MARK is not the paragraph's text: `w:pPr/w:rPr/w:vanish`
+    hides the mark glyph only, so the paragraph is still yielded.
     """
     for child in list(el):
         if child.tag == mc + "AlternateContent":
@@ -6308,10 +6339,15 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
                 warns.append(f"PKG-1: the internal-note README pass could not run "
                              f"({type(e).__name__}: {e}); the package is reported")
         try:
-            rec["reference_strip"] = strip_dangling_references_in_dir(
+            _new_strip = strip_dangling_references_in_dir(
                 pkg_dir, submission_not_carried_areas(ctx), rec["id"], warns=warns,
                 artifacts_dir=ctx.sandbox_of(rec),
                 artifact_name=f"PKG2_{rec['id']}.json")
+            # A second postcheck must not erase the first pass's removals: they
+            # are the pipeline's own edit and stay exempt from the content
+            # policy (otherwise the same package passes and then fails).
+            rec["reference_strip"] = merge_reference_strips(
+                rec.get("reference_strip"), _new_strip)
         except Exception as e:                                        # noqa: BLE001
             rec["reference_strip"] = {"label": rec["id"], "error": f"{type(e).__name__}: {e}"}
             warns.append(f"PKG-2: the dangling-reference removal could not run "

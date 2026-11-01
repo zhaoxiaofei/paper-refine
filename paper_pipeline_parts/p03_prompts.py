@@ -583,7 +583,17 @@ def content_edit_policy_block(insertions_allowed: bool = True,
         "THE ORCHESTRATOR ENFORCES THIS MECHANICALLY. Its postcheck compares the",
         "delivered package with the base and fails the attempt for every sentence it",
         "finds violating this policy. A failed attempt is retried with that message;",
-        "make the repair in place rather than removing or adding text.",
+        "make the repair in place rather than removing or adding text. The mechanical",
+        "comparison is sentence-level: the paragraph/heading/caption/row/document",
+        "classes above are policy guidance, so a heading- or row-only change may not",
+        "be caught by the postcheck. Keep them anyway; the policy still applies.",
+        "",
+        "PRECEDENCE: this block overrides every later instruction that would add or",
+        "remove a unit, including the language pass's split/merge/add-sibling repairs,",
+        "a rewrite's requested transitions, and an integration port that would replace",
+        "a unit. Where a later mandate can be met without adding or removing a unit,",
+        "make that in-place edit; otherwise record the item as manual-required/unable",
+        "and leave the unit unchanged.",
         "",
     ]
     return "\n".join(lines) + "\n"
@@ -613,6 +623,43 @@ def prompt_content_edit_policy_matches(prompt: Path, insertions_allowed: bool = 
     # `NO INSERTIONS:` / `NO DELETIONS:` paragraph.
     return (("NO INSERTIONS:" in text) == (not insertions_allowed)
             and ("NO DELETIONS:" in text) == (not deletions_allowed))
+
+
+def content_edit_policy_from_prompt(prompt: Path):
+    """(insertions, deletions) an existing PROMPT.md states, or None.
+
+    The prompt is the binding artifact for a materialized sandbox: a prompt
+    without the block is the default (both allowed), and a prompt with the block
+    names exactly the forbidden directions. A missing/unreadable prompt returns
+    None so the caller can fall back to the invocation.
+    """
+    text = read_text_bounded(prompt)
+    if text is None:
+        return None
+    if "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===" not in text:
+        return (True, True)
+    return ("NO INSERTIONS:" not in text, "NO DELETIONS:" not in text)
+
+
+def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
+    """The policy an already-materialized sandbox was prompted under.
+
+    A run record's `content_edit_policy` is authoritative. A record without the
+    key (the default policy, or a legacy record) is bound by the prompt it
+    already has: a prompt with no block stated the default, so a later strict
+    invocation must NOT rewrite it under a package that may already exist. Only
+    a sandbox with no prompt yet takes the current invocation's policy.
+    """
+    policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
+    if isinstance(policy, dict):
+        return (bool(policy.get("insertions", True)),
+                bool(policy.get("deletions", True)))
+    prompt = Path(prompt)
+    if prompt.is_file():
+        from_prompt = content_edit_policy_from_prompt(prompt)
+        if from_prompt is not None:
+            return from_prompt
+    return insertions_enabled(ctx), deletions_enabled(ctx)
 
 
 def apply_content_edit_policy(text: str, insertions_allowed: bool = True,
@@ -3417,6 +3464,7 @@ REVISION_AUDIT_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these ov
 You are the REVISION AUDITOR — run @@RUN_ID@@, round @@ROUND@@ — inside an orchestrated
 manuscript-revision pipeline. Your sandbox is:
   @@SANDBOX@@
+@@CONTENT_EDIT_POLICY@@
 Write ONLY inside this sandbox, and only under `revision_audit/`. Keep your working directory at
 the sandbox root. Nothing else is required: what follows is the whole task.
 
@@ -3512,12 +3560,21 @@ or `code/`.
 
 
 def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
-                          execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
-    """The REVISION AUDITOR prompt: audit the revision, write the repair plan only."""
+                          execution_profile: str = EXECUTION_PROFILE_DEFAULT,
+                          insertions_allowed: bool = True,
+                          deletions_allowed: bool = True) -> str:
+    """The REVISION AUDITOR prompt: audit the revision, write the repair plan only.
+
+    The audit's REPAIR_PLAN drives the bounded repair, and the repair prompt
+    carries the content-edit policy; the auditor must therefore see the SAME
+    policy, or it can plan an addition/deletion the executor is then told is
+    forbidden (and must reject).
+    """
     text = (REVISION_AUDIT_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r))))
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
     # The audit is a full session like the guided-review/revise ones: it gets the
     # shared decision rules, the source hierarchy and the context-budget rule.
     shared = shared_blocks()
