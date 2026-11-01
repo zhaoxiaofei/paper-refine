@@ -15,6 +15,8 @@ USAGE_EXAMPLES = """usage:
           [--caption-limit N] [--venue ID] [--journal NAME] [--article-type ID]
           [--strict-venue]
           [--zotero off|read|edit|apply]
+          [--enable-insertions] [--disable-insertions]
+          [--enable-deletions] [--disable-deletions]   (default: both enabled)
           copy the pristine corpus read-only, record its SHA-256 manifest, and
           create pipeline_config.json + state.json (no sandboxes are built yet).
           --venue selects the VENUE PROFILE whose submission rules every stage
@@ -102,6 +104,9 @@ USAGE_EXAMPLES = """usage:
           only): declaring the type never borrows another type's caps.
   run     --root <dir> [--jobs N] [--timeout S] [--retries 2]
           [--champion-select judge|revise|integrate]
+          [--enable-insertions] [--disable-insertions]
+          [--enable-deletions] [--disable-deletions]
+          (default: the root's recorded policy; both enabled unless `setup` disabled one)
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent codex|claude|dsh|qwen|manual] [--agent-cmd '<json argv>']
           [--judge-agent codex|claude|dsh|qwen|manual] [--judge-agent-cmd '<json argv>']
@@ -395,6 +400,28 @@ completion signals (never a bare non-empty output directory):
            the judge marker alone is not a completion)
 """
 
+
+def add_content_edit_policy_opts(parser: argparse.ArgumentParser,
+                                 *, default: bool = None) -> None:
+    """Add the ENABLE/DISABLE pairs for insertions and deletions.
+
+    One destination each (`insertions`, `deletions`), True = allowed, False =
+    forbidden. The default is `default` (None on `run` so the root's recorded
+    policy decides, True on `setup` so a default root behaves exactly as before).
+    The spellings are NOT mutually exclusive: the LAST one on the command line
+    wins, so a harness that always passes the two default `--enable-…` options
+    can still append one `--disable-…` without a usage error.
+    """
+    for noun, dest in (("insertions", "insertions"), ("deletions", "deletions")):
+        parser.add_argument(f"--enable-{noun}", dest=dest, action="store_const",
+                            const=True, default=default,
+                            help=f"allow {noun} (the default; the historical behaviour)")
+        parser.add_argument(f"--disable-{noun}", dest=dest, action="store_const",
+                            const=False, default=default,
+                            help=f"forbid {noun}; an in-place rewrite is still allowed "
+                                 f"(benchmark-only strict mode)")
+
+
 CHAMPION_SELECT_HELP = (
     "how a round's champion is chosen. judge (default): the relative-judgment panel "
     "scores the field and the deterministic ranking selects the winner. revise: NO "
@@ -451,6 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps = sub.add_parser("setup", parents=[common], help="initialize the pipeline root")
     ps.add_argument("--source", required=True,
                     help="path to your pristine 'non_revised' manuscript directory")
+    add_content_edit_policy_opts(ps, default=True)
     ps.add_argument("--champion-select", choices=list(CHAMPION_SELECT_MODES),
                     default=None, metavar="MODE", help=CHAMPION_SELECT_HELP)
     ps.add_argument("--venue", default=None, metavar="ID",
@@ -884,6 +912,7 @@ def build_parser() -> argparse.ArgumentParser:
                                    help="skip the LLM defect audit (no auditedTP_* files are "
                                         "written; the non-audited reports are unchanged)")
     run_opts = argparse.ArgumentParser(add_help=False)   # shared by run / run-decide
+    add_content_edit_policy_opts(run_opts, default=None)   # None = use the root's policy
     run_opts.add_argument("--champion-select", choices=list(CHAMPION_SELECT_MODES),
                           default=None, metavar="MODE", help=CHAMPION_SELECT_HELP)
     run_opts.add_argument("--jobs", type=int, default=DEFAULTS["jobs"],

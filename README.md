@@ -906,6 +906,10 @@ as a named
 gap, see "The GUIDED review" below), `--execution-profile {high,medium}` (the instruction
 profile: `high` is the pipeline unchanged, `medium` pages the elaborative rule sections out of each
 stage prompt into `INSTRUCTIONS/PROFILE_RULES.md` — see "Execution profiles" below),
+`--enable-insertions|--disable-insertions` and
+`--enable-deletions|--disable-deletions` (`setup` records the policy; `run`/`run-decide`
+may override it for one invocation; both are ENABLED by default, the historical
+behaviour — see "Content-edit policy" below),
 `--cold-start-review {on,off}`
 (the independent discovery session; ON by default, `--no-cold-start-review` turns it off,
 `set-cold-start-review off` flips an existing root), `--submit-code {off,on}`
@@ -2330,6 +2334,35 @@ The profile is recorded at `setup` and frozen into the root (rule 11): a `medium
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
 those prompts is the one frozen beside it. `sync-code` and `retry` preserve the recorded policy. A
 root created before this feature carries no key and runs `high`.
+
+## Content-edit policy (`--disable-insertions`, `--disable-deletions`)
+
+By default the pipeline behaves exactly as it always has: a revision may add prose, remove prose,
+or rewrite a sentence in place. A defect is normally repaired inside its existing unit, but the
+prompts also permit an editorial decision to drop duplicate, obsolete or unsupported text.
+
+Some evaluation harnesses score a DELETED claim as no repair at all, even when the error is gone
+(their definition of "repair" is "the original claim is back", not "the package no longer contains
+the error"). For those runs the pipeline carries a benchmark-only strict mode:
+
+* `--disable-insertions` forbids adding a sentence, paragraph, heading, caption, table/figure row
+  or document that the base does not carry.
+* `--disable-deletions` forbids removing any such content unit. A finding that can only be resolved
+  by removal is recorded as `manual-required` (or `unable — <reason>`) and the text stays in the
+  package.
+* Rewriting the words INSIDE an existing unit remains allowed, including replacing a defective
+  statement with its corrected form. The policy forbids creating or removing a unit, not correcting
+  one.
+
+The flags can be set at `setup` (recorded in `pipeline_config.json` only when a non-default strict
+mode is chosen, so a default root keeps its byte-identical config) and overridden for one
+`run`/`run-decide` invocation. `--enable-insertions` / `--enable-deletions` are the defaults and
+restore the historical behaviour. The same switches are stated in the revise, rewrite, integrate
+and bounded-repair prompts, and the postcheck enforces them mechanically: it compares the delivered
+package's prose sentences with the base's; an in-place corrected sentence matches, a missing one is
+a deletion, and a sentence with no base counterpart is an insertion. A violating attempt fails and
+is retried with that message. The mode is for benchmarking only; ordinary editorial use should
+leave both kinds enabled.
 
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
 

@@ -8631,6 +8631,10 @@ def cmd_status(args) -> None:
     print(f"champion:      {champion_select_of(ctx)} "
           f"(`set-champion-select judge|revise|integrate`; the no-judge modes are "
           f"PROVISIONAL and need N=1)")
+    _edit_note = content_edit_policy_note(ctx)
+    if _edit_note:
+        print(f"content edits: {_edit_note} (one invocation can override with `run "
+              f"--enable-insertions --enable-deletions`; `setup` records a new default)")
     _dj = trend_read_decision(ctx.root)
     _cert = (_dj or {}).get("certification")
     if isinstance(_cert, dict):

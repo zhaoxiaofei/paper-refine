@@ -2755,9 +2755,12 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     pre = sb / "revised_prerepair"
     if not pre.exists():
         shutil.copytree(sb / REVISED_DIR, pre)
+    _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     write_text_atomic(sb / REVISION_REPAIR_PROMPT_FILE,
                       revision_repair_prompt(sb, rec["id"], r, len(rows),
-                                             execution_profile=execution_profile_of(ctx)))
+                                             execution_profile=execution_profile_of(ctx),
+                                             insertions_allowed=_edit_ins,
+                                             deletions_allowed=_edit_del))
     print(f"  [revision-repair] {rec['id']}: one bounded repair pass")
     res2 = _run_aux_session(sb, rec, cmd, timeout, REVISION_REPAIR_PROMPT_FILE,
                             "_revision_repair.log")

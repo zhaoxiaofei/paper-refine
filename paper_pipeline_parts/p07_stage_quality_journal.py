@@ -1061,6 +1061,13 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # drop is reported instead of costing another agent session.
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "base", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
+    # The benchmark-only strict policy (no-op unless the operator disabled one):
+    # the delivered sentences must still correspond to the base's.
+    _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
+    errs.extend(content_edit_problems(ctx, sb / "base", rev, "revise",
+                                      exempt_removed=pipeline_removed_sentences(rec),
+                                      insertions_allowed=_edit_ins,
+                                      deletions_allowed=_edit_del))
     # AFTER the recovery, so the READ-ONLY raw-data directory ends up exactly as
     # the untouched original has it -- never as the base (or a donor) left it.
     rec["raw_data"] = verify_readonly_raw_data(ctx, rev, warns)
@@ -1302,6 +1309,11 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     # Same recovery as the revise stage, measured against this run's SELF copy.
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "self", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
+    _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
+    errs.extend(content_edit_problems(ctx, sb / "self", out, "integrate",
+                                      exempt_removed=pipeline_removed_sentences(rec),
+                                      insertions_allowed=_edit_ins,
+                                      deletions_allowed=_edit_del))
     rec["raw_data"] = verify_readonly_raw_data(ctx, out, warns)
     errs.extend(rec["raw_data"].get("legacy_input_areas") or [])
     _record_revision_token(rec, out, warns, errs=errs)
@@ -1451,6 +1463,11 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     # The rewrite must not lose base content: same recovery as revise/integration.
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "base", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
+    _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
+    errs.extend(content_edit_problems(ctx, sb / "base", sb / REWRITTEN_DIR, "rewrite",
+                                      exempt_removed=pipeline_removed_sentences(rec),
+                                      insertions_allowed=_edit_ins,
+                                      deletions_allowed=_edit_del))
     rec["raw_data"] = verify_readonly_raw_data(ctx, sb / REWRITTEN_DIR, warns)
     errs.extend(rec["raw_data"].get("legacy_input_areas") or [])
     _record_revision_token(rec, sb / REWRITTEN_DIR, warns, errs=errs)
@@ -3785,6 +3802,227 @@ def deletion_audit_markdown(rows: list) -> str:
         "not `OK`. A paragraph carrying a fact may not be removed to resolve a finding._",
     ]
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------
+# THE BENCHMARK-ONLY CONTENT-EDIT POLICY (--disable-insertions / --disable-deletions)
+#
+# The scorer in the operator's benchmark treats a DELETED claim as a partial,
+# not a repair: a revision that removes the defective sentence instead of
+# rewriting it scores no credit even though the error is gone. The prompts state
+# the policy, and this layer makes it mechanical when the operator asked for it.
+#
+# The DEFAULT (both allowed) returns immediately, so a root created before the
+# feature - and every ordinary run - executes exactly the same checks as before.
+# Only the strict mode compares the delivered package's prose sentences with the
+# base's. An in-place corrected sentence is a MATCH (the unit survived); a
+# sentence that is gone is a deletion, and one with no base counterpart is an
+# insertion. The comparison is sentence-level on purpose: the benchmark's
+# deletions happen INSIDE a surviving paragraph, so a paragraph-level audit
+# cannot see them.
+# ---------------------------------------------------------------------
+_CONTENT_UNIT_MIN_WORDS = 4
+_CONTENT_UNIT_MIN_CHARS = 18
+_CONTENT_UNIT_MATCH = 0.55
+
+
+def _content_unit_paragraphs(package: Path) -> list:
+    """[(document, line, paragraph)] for the strict policy's sentence scan.
+
+    The same submission-surface rule as `deletion_audit_paragraphs`, but every
+    prose paragraph counts, not only the >=30-character ones the deletion audit
+    seeds: a short defective sentence ("The analysis is described in Section 3")
+    is still a content unit, and the policy must see it. Headings, reference
+    entries, evidence areas, workflow scratch and bookkeeping files stay out.
+    """
+    rows = []
+    package = Path(package)
+    if not package.is_dir():
+        return rows
+    for p in _iter_tree_files(package):
+        try:
+            rel = p.relative_to(package).as_posix()
+        except ValueError:
+            continue
+        top = rel.split("/", 1)[0].lower()
+        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
+            continue
+        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
+                or is_non_submitted_readme_name(p.name)
+                or is_non_shippable_name(p.name)):
+            continue
+        ext = p.suffix.lower()
+        if ext == ".docx":
+            for index, text in enumerate(_docx_paragraphs(p) or [], 1):
+                para = _deleted_para_norm(text)
+                if len(para) >= 8 and not _DELETED_PARA_SKIP_RE.match(para):
+                    rows.append((rel, index, para))
+        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx"):
+            text = read_text_bounded(p)
+            if text is None:
+                continue
+            for start, para in _text_paragraphs_with_lines(text):
+                para = _deleted_para_norm(para)
+                if len(para) >= 8 and not _DELETED_PARA_SKIP_RE.match(para):
+                    rows.append((rel, text[:start].count("\n") + 1, para))
+    return rows
+
+
+def _content_unit_sentences(package: Path) -> list:
+    """[{document,line,text,norm,tokens}] for a package's submitted prose.
+
+    Reads the same prose surfaces as the deletion audit (DOCX through the shared
+    visible-paragraph reader). Splitting the paragraph into sentences is what
+    catches the benchmark's sentence-level deletion inside a surviving
+    paragraph.
+    """
+    units = []
+    for rel, line, paragraph in _content_unit_paragraphs(package):
+        for sentence in re.split(r"(?<=[.!?])\s+", _deleted_para_norm(paragraph)):
+            text = re.sub(r"\s+", " ", str(sentence or "")).strip()
+            if len(text) < _CONTENT_UNIT_MIN_CHARS:
+                continue
+            tokens = re.findall(r"[^\W_]+", text.lower(), flags=re.UNICODE)
+            if len(tokens) < _CONTENT_UNIT_MIN_WORDS:
+                continue
+            units.append({"document": rel, "line": int(line or 0), "text": text,
+                          "norm": text.lower().strip(),
+                          "tokens": set(tokens)})
+    return units
+
+
+def _content_unit_similarity(base: dict, cand: dict) -> float:
+    """How strongly two units are the same statement (1.0 = identical).
+
+    An in-place correction keeps most of the sentence and scores high; a deleted
+    sentence has no counterpart at all. The token Jaccard is the cheap term that
+    survives reordering; SequenceMatcher covers a heavy but meaning-preserving
+    in-place rewrite. Both are normalized, so case/whitespace are not changes.
+    """
+    if base["norm"] == cand["norm"]:
+        return 1.0
+    if not base["tokens"] or not cand["tokens"]:
+        return 0.0
+    inter = len(base["tokens"] & cand["tokens"])
+    union = len(base["tokens"] | cand["tokens"])
+    jac = (inter / union) if union else 0.0
+    # A four-word unit can hit a spurious 0.3 Jaccard on function words alone;
+    # only spend the character-level matcher when there is real token overlap.
+    ratio = 0.0
+    if jac >= 0.25 or base["norm"] in cand["norm"] or cand["norm"] in base["norm"]:
+        ratio = difflib.SequenceMatcher(None, base["norm"], cand["norm"]).ratio()
+    return max(jac, ratio)
+
+
+def _match_content_units(base_units: list, cand_units: list) -> tuple:
+    """(unmatched base units, unmatched candidate units) of one package pair.
+
+    Greedy longest-first one-to-one matching: each base sentence can claim at
+    most one candidate sentence, so duplicating a sentence does not hide a
+    deletion and splitting one sentence into two leaves the second part as an
+    insertion. Exact matches are consumed first, which keeps a repeated phrase
+    from stealing another sentence's counterpart.
+    """
+    unmatched = set(range(len(cand_units)))
+    base_left = []
+    exact = {}
+    for j, cand in enumerate(cand_units):
+        exact.setdefault(cand["norm"], []).append(j)
+    for base in sorted(base_units, key=lambda u: -len(u["tokens"])):
+        # Exact copy first: a repeated sentence stays a unit, and consuming one
+        # occurrence is enough.
+        hit = next((j for j in exact.get(base["norm"], []) if j in unmatched), None)
+        if hit is not None:
+            unmatched.discard(hit)
+            continue
+        best_j, best_score = None, 0.0
+        for j in list(unmatched):
+            score = _content_unit_similarity(base, cand_units[j])
+            if score > best_score:
+                best_j, best_score = j, score
+        if best_j is not None and best_score >= _CONTENT_UNIT_MATCH:
+            unmatched.discard(best_j)
+        else:
+            base_left.append(base)
+    return base_left, [cand_units[j] for j in sorted(unmatched)]
+
+
+def _content_unit_example(unit: dict) -> str:
+    text = str(unit.get("text") or "")
+    if len(text) > 160:
+        text = text[:157] + "..."
+    return f"{unit.get('document')}:{unit.get('line')} {text!r}"
+
+
+def pipeline_removed_sentences(rec: dict) -> list:
+    """Sentences THIS orchestrator removed for packaging (PKG-2), verbatim.
+
+    The dangling-reference pass is a required submission-surface repair (AGENTS
+    rule 9): it deletes the sentence that points at an area the package does not
+    ship. Under the strict content-edit policy that deletion is NOT the
+    session's action, and a retry could never restore it -- the reference would
+    still dangle. The policy comparison therefore exempts exactly the sentences
+    the pipeline recorded as removed, so the run fails only for edits the
+    session made.
+    """
+    out = []
+    strip = rec.get("reference_strip") if isinstance(rec, dict) else None
+    if not isinstance(strip, dict):
+        return out
+    for entry in strip.get("files") or []:
+        if isinstance(entry, dict):
+            out.extend(str(s) for s in (entry.get("removed") or []) if str(s).strip())
+    return out
+
+
+def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
+                          stage: str = "", exempt_removed=None,
+                          insertions_allowed=None, deletions_allowed=None) -> list:
+    """Fail a package that inserts/deletes content under the strict policy.
+
+    Returns [] immediately when both kinds are enabled: the default pipeline
+    does no extra work and behaves exactly as before. The check is only about
+    the delivered PACKAGE (a sentence's presence), never about how the agent
+    described the edit, so a correct in-place repair passes.
+
+    `exempt_removed` is a list of sentences the orchestrator itself removed
+    before this check (the PKG-2 dangling-reference repair). They are excluded
+    from the deleted set: the policy constrains the session, not the pipeline's
+    own required packaging pass.
+    """
+    insert = (insertions_enabled(ctx) if insertions_allowed is None
+              else bool(insertions_allowed))
+    delete = (deletions_enabled(ctx) if deletions_allowed is None
+              else bool(deletions_allowed))
+    if insert and delete:
+        return []
+    base_package, candidate_package = Path(base_package), Path(candidate_package)
+    if not base_package.is_dir() or not candidate_package.is_dir():
+        return []
+    label = f"{stage}: " if stage else ""
+    exempt = {_deleted_para_norm(s).lower() for s in (exempt_removed or ())
+              if str(s or "").strip()}
+    base_units = [u for u in _content_unit_sentences(base_package)
+                  if u["norm"] not in exempt]
+    cand_units = _content_unit_sentences(candidate_package)
+    missing, added = _match_content_units(base_units, cand_units)
+    problems = []
+    if not delete and missing:
+        problems.append(
+            f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
+            f"delivered package although --disable-deletions is in force (a deletion is not a "
+            f"repair): " + "; ".join(_content_unit_example(u) for u in missing[:5])
+            + (" ..." if len(missing) > 5 else ""))
+    if not insert and added:
+        problems.append(
+            f"{label}{len(added)} content unit(s) in the delivered package have NO counterpart "
+            f"in the base although --disable-insertions is in force: "
+            + "; ".join(_content_unit_example(u) for u in added[:5])
+            + (" ..." if len(added) > 5 else "")
+            + ". Correct the existing unit in place instead of adding prose; if a finding can "
+              "only be resolved by new text, record it as manual-required/unable and leave the "
+              "unit unchanged.")
+    return problems
 
 
 def _deletion_disposition_ok(value) -> bool:

@@ -520,6 +520,116 @@ not create revised/, do not edit base/ or non_revised/, and do not ask the user 
 """
 
 
+def content_edit_policy_block(insertions_allowed: bool = True,
+                              deletions_allowed: bool = True) -> str:
+    """The benchmark-only strict content-edit policy, or "" for the default.
+
+    The DEFAULT is both allowed, exactly the historical behaviour, so the block
+    is EMPTY and every prompt is byte-identical to the pre-feature pipeline.
+    When a flag disables one kind, the block says what a content UNIT is, what is
+    still allowed (an in-place edit/replacement), and what to do when a finding
+    seems to require the forbidden change.
+    """
+    if insertions_allowed and deletions_allowed:
+        return ""
+    forbidden = []
+    if not insertions_allowed:
+        forbidden.append("INSERTIONS")
+    if not deletions_allowed:
+        forbidden.append("DELETIONS")
+    lines = [
+        "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===",
+        "",
+        "THIS RUN FORBIDS " + " AND ".join(forbidden) + ".",
+        "",
+        "A content UNIT is a sentence, a paragraph, a heading, a caption, or one",
+        "table/figure row. The base package (`base/`, or `self/` for an integration)",
+        "is the reference set.",
+        "",
+    ]
+    if not deletions_allowed:
+        lines += ["Every unit the base carries must stay present."]
+    if not insertions_allowed:
+        lines += ["No unit may be created that the base does not carry."]
+    if not deletions_allowed or not insertions_allowed:
+        lines += [""]
+    if not deletions_allowed:
+        lines += [
+            "NO DELETIONS: do not remove, drop, merge away or replace-by-omission any",
+            "content unit. If the only way to resolve a finding is to remove text, record",
+            "the finding as `manual-required` (or `unable — <reason>` where the ledger",
+            "uses that vocabulary) and LEAVE the text in the package. A true duplicate is",
+            "still a unit: keep it and record the recommendation for the author.",
+            "",
+        ]
+    if not insertions_allowed:
+        lines += [
+            "NO INSERTIONS: do not add a sentence, paragraph, heading, caption or row",
+            "the base does not carry. Do not add transitional or explanatory prose,",
+            "a new citation, a new table/figure row, or a new document. Correct the",
+            "existing unit in place. EXCEPTION: an author hand-off marker",
+            "(`[AUTHOR TO COMPLETE: ...]`) that the pipeline's own placeholder rule",
+            "requires is a scaffold, not manuscript content; add it only where that",
+            "rule says and record it in the hand-off list.",
+            "",
+        ]
+    lines += [
+        "WHAT IS STILL ALLOWED: rewriting the words INSIDE an existing unit, and",
+        "replacing an existing statement with a corrected statement of the same unit",
+        "(the defect is repaired in place, not deleted and re-created). Number and",
+        "identifier corrections, terminology changes and style fixes are all in-place",
+        "edits when the unit survives.",
+        "",
+        "THE ORCHESTRATOR ENFORCES THIS MECHANICALLY. Its postcheck compares the",
+        "delivered package with the base and fails the attempt for every sentence it",
+        "finds violating this policy. A failed attempt is retried with that message;",
+        "make the repair in place rather than removing or adding text.",
+        "",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def prompt_content_edit_policy_matches(prompt: Path, insertions_allowed: bool = True,
+                                        deletions_allowed: bool = True) -> bool:
+    """Does an already-materialized PROMPT.md state the CURRENT policy?
+
+    Prompt files are written once, when a sandbox is materialized. If the
+    operator changes the policy on a later invocation (a `run --disable-…`
+    override, or `--enable-…` relaxing a strict root), an existing prompt would
+    otherwise keep the old rule while the postcheck judges under the new one.
+    The materializers rewrite the prompt only when this test says it disagrees;
+    a default prompt (no policy block) and a matching strict prompt are left
+    untouched, so the historical prompt bytes never change.
+    """
+    text = read_text_bounded(prompt)
+    if text is None:
+        return False
+    has_block = "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===" in text
+    if insertions_allowed and deletions_allowed:
+        return not has_block
+    if not has_block:
+        return False
+    # The block names each forbidden direction exactly once, in its own
+    # `NO INSERTIONS:` / `NO DELETIONS:` paragraph.
+    return (("NO INSERTIONS:" in text) == (not insertions_allowed)
+            and ("NO DELETIONS:" in text) == (not deletions_allowed))
+
+
+def apply_content_edit_policy(text: str, insertions_allowed: bool = True,
+                              deletions_allowed: bool = True) -> str:
+    """Fill the policy placeholder WITHOUT perturbing a default prompt.
+
+    The placeholder sits on its own line after the prior-attempt block. When
+    both kinds are allowed the block is empty and the whole placeholder LINE is
+    removed, so the default prompt is byte-identical to the pre-feature one
+    (the hard constraint: defaults must not change behaviour or output).
+    """
+    block = content_edit_policy_block(insertions_allowed, deletions_allowed)
+    if block:
+        return text.replace("@@CONTENT_EDIT_POLICY@@", block)
+    return text.replace("@@CONTENT_EDIT_POLICY@@\n", "")
+
+
 REVISE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are REVISE run @@RUN_ID@@ — round @@ROUND@@, PHASE 2 OF 2, revision @@REVISE_INDEX@@ of
@@ -530,6 +640,7 @@ that all consume the SAME frozen guided_review/ copy (one review pass per round)
 same base/; you cannot see the other revise sessions and must not try to guess or duplicate what
 they did. Your own package is judged on its merits.
 @@PRIOR_FAILURE@@
+@@CONTENT_EDIT_POLICY@@
 Write ONLY inside this sandbox and never touch sibling sandboxes or parent directories. Reading is
 also confined to this sandbox, with exactly two exceptions: (1) when the failure block above names
 ./previous_attempt/, you MAY read (never write) that directory -- the rejected package copied into
@@ -998,6 +1109,7 @@ You are INTEGRATION run @@RUN_ID@@ — round @@ROUND@@ — inside an isolated or
 Your sandbox is:
   @@SANDBOX@@
 @@PRIOR_FAILURE@@
+@@CONTENT_EDIT_POLICY@@
 Write ONLY inside this sandbox and never touch sibling sandboxes or parent directories. Reading is
 also confined to this sandbox, with exactly one exception: you MAY read (never write) the skill
 documents and scripts you are instructed to use ($paper-review and $paper-revise, their references and
@@ -1252,6 +1364,7 @@ duplicate what they did — produce the alternative organization YOU judge best.
 judged on its merits against the base, the other rewrites, the revised candidates and the
 integrated candidates of the round.
 @@PRIOR_FAILURE@@
+@@CONTENT_EDIT_POLICY@@
 Write ONLY inside this sandbox and never touch sibling sandboxes or parent directories. Reading is
 also confined to this sandbox, with exactly one exception: you MAY read (never write) the skill
 documents you need for the style rules ($paper-review and $paper-revise, their SKILL.md and references,
@@ -2722,7 +2835,9 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                   journal_block: str = "", venue_norm: str = "",
                   author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
                   execution_profile: str = EXECUTION_PROFILE_DEFAULT,
-                  guided_review_off: bool = False) -> str:
+                  guided_review_off: bool = False,
+                  insertions_allowed: bool = True,
+                  deletions_allowed: bool = True) -> str:
     """Phase 2 prompt: $paper-revise, consuming the round's frozen guided_review/ copy."""
     prof = _as_profile(venue)
     audit_block = ("""
@@ -2752,6 +2867,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_REVISED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
     text = apply_rewrite_parity(text, "revise")
     text = apply_hierarchy_reconcile(text, "revise")
     text = apply_evidence_integrity(text, "revise")
@@ -3109,7 +3225,9 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      prior_failure: str = "", venue=None, venue_norm: str = "",
                      discovery_ids: list = None, discovery_dropped: list = None,
                      author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
-                     execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
+                     execution_profile: str = EXECUTION_PROFILE_DEFAULT,
+                     insertions_allowed: bool = True,
+                     deletions_allowed: bool = True) -> str:
     """Integration prompt: self/ reworked with ALL the other pool members.
 
     One run per pool member (there are no pairwise arms): the base stays the
@@ -3135,6 +3253,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_INTEGRATED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
     text = text.replace("@@DISCOVERY_PARITY@@",
                         discovery_parity_integrate_block(discovery_ids, discovery_dropped))
     text = render_venue_tokens(text, prof)
@@ -3167,7 +3286,9 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                    prior_failure: str = "", level: str = "", venue=None,
                    journal_block: str = "", venue_norm: str = "",
                    author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
-                   execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
+                   execution_profile: str = EXECUTION_PROFILE_DEFAULT,
+                   insertions_allowed: bool = True,
+                   deletions_allowed: bool = True) -> str:
     """The rewrite prompt: one of the round's M rewritten candidates.
 
     Staged FIRST in the round (before the review), and it is a CANDIDATE like
@@ -3195,6 +3316,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("rewrite", zotero))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
     text = apply_m20(text, prof)
@@ -3418,6 +3540,7 @@ WHAT THIS STAGE IS. The revision auditor wrote `revision_audit/REPAIR_PLAN.json`
 confirmed row(s). You apply that plan to `revised/` and produce the arm's revised version, final
 for the arm before integration. You do not re-review the submission, do not run a discovery hunt,
 and do not re-audit.
+@@CONTENT_EDIT_POLICY@@
 
 RE-VALIDATE EVERY PLANNED REPAIR BEFORE YOU APPLY IT. The plan is a set of CLAIMS, not instructions.
 For each row: re-read the cited location in `revised/`, compare it with `base/` and the source
@@ -3455,13 +3578,16 @@ files changed.
 
 
 def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int,
-                           execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
+                           execution_profile: str = EXECUTION_PROFILE_DEFAULT,
+                           insertions_allowed: bool = True,
+                           deletions_allowed: bool = True) -> str:
     """The BOUNDED REPAIR prompt: re-validate the plan, apply only confirmed rows."""
     text = (REVISION_REPAIR_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@ROWS@@", str(int(rows))))
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
     shared = shared_blocks()
     text = apply_hierarchy_reconcile(text + shared, "revise")
     text = with_context_budget(text)

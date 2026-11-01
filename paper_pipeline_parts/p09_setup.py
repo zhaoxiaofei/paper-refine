@@ -778,6 +778,14 @@ def cmd_setup(args) -> None:
     if _guided != GUIDED_REVIEW_DEFAULT:
         ctx.cfg["guided_review"] = _guided
         ctx.cfg["guided_review_gap"] = GUIDED_REVIEW_GAP
+    # THE BENCHMARK-ONLY CONTENT-EDIT POLICY. Both defaults are "allowed", the
+    # historical behaviour, so a default root writes NO new key and keeps a
+    # byte-identical pipeline_config.json. A root that opted into strict mode
+    # carries the policy that produced its artifacts; absence reads as allowed.
+    if getattr(args, "insertions", True) is False:
+        ctx.cfg["insertions"] = "off"
+    if getattr(args, "deletions", True) is False:
+        ctx.cfg["deletions"] = "off"
     if round_indices:
         # Traceability: pipeline round k follows built-in schedule round
         # round_indices[k-1]. The recorded per-round lists below already carry
@@ -1082,6 +1090,11 @@ def cmd_setup(args) -> None:
         print("[setup] guided review: OFF -- the cold-start review runs alone; the guided "
               "classes (M1-M36/J1-J5, D0-D5) are recorded as a NAMED GAP in every downstream "
               "sandbox and in pipeline_config.json")
+    _edit_note = content_edit_policy_note(ctx)
+    if _edit_note:
+        print(f"[setup] content edits: {_edit_note}; the revise/rewrite/integrate prompts "
+              f"forbid the disabled change and the postcheck rejects a package that "
+              f"inserts/deletes a content unit")
     print(f"[setup] next: python {root / script.name} run --root {root}")
     print(f"[setup] manual mode: add --agent manual (staging is respected; each round's revise "
           f"prompt appears only after its review marker)")
@@ -3297,6 +3310,14 @@ def cmd_run(args) -> None:
 
 
 def _cmd_run_locked(ctx: Ctx, args) -> None:
+    # The benchmark-only content-edit policy: a per-INVOCATION override of the
+    # policy `setup` recorded. None means "use the root's config", so a plain
+    # `run` cannot perturb a root it did not need to describe.
+    ctx._insertions_override = getattr(args, "insertions", None)
+    ctx._deletions_override = getattr(args, "deletions", None)
+    _edit_note = content_edit_policy_note(ctx)
+    if _edit_note:
+        print(f"[run] content-edit policy: {_edit_note}")
     # `--no-track` covers BOTH the per-stage hook (postcheck -> track_after_stage)
     # and the round-close pass: the choice is recorded on the context BEFORE any
     # stage starts, so every accepted version is treated the same way.

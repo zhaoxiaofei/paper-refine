@@ -1978,6 +1978,102 @@ def zotero_mode_of(ctx) -> str:
     return v if v in ZOTERO_MODES else DEFAULT_ZOTERO_MODE
 
 
+CONTENT_EDIT_KEYS = {
+    "insertions": ("insertions", "allow_insertions", "insertions_enabled",
+                   "disable_insertions"),
+    "deletions": ("deletions", "allow_deletions", "deletions_enabled",
+                  "disable_deletions"),
+}
+_CONTENT_EDIT_OFF = ("off", "disabled", "disable", "false", "no", "0", "forbidden")
+
+
+def _content_edit_enabled(ctx, kind: str, default: bool = True) -> bool:
+    """Is `kind` ('insertions'|'deletions') allowed for this invocation?
+
+    Precedence: the invocation override set by `run`/`run-decide`
+    (`ctx._insertions_override` / `ctx._deletions_override`) wins; otherwise the
+    root's `pipeline_config.json`; otherwise the HISTORICAL default (allowed).
+    A root created before this feature carries no key, so it keeps the exact
+    behaviour it had. A hand-edited value that cannot be parsed falls back to the
+    permissive default only when it is absent; an unrecognised value is read as
+    "not off" (still enabled), never as a silent switch to strict mode.
+    """
+    override = getattr(ctx, f"_{kind}_override", None) if ctx is not None else None
+    if override is not None:
+        return bool(override)
+    cfg = (getattr(ctx, "cfg", None) or {}) if ctx is not None else {}
+    for key in CONTENT_EDIT_KEYS[kind]:
+        if key not in cfg:
+            continue
+        value = cfg.get(key)
+        if isinstance(value, bool):
+            truthy = value
+        else:
+            text = str(value or "").strip().lower()
+            if not text:
+                continue
+            truthy = text in ("on", "true", "yes", "1", "enabled")
+        if key.startswith("disable_"):
+            return not truthy
+        if truthy:
+            return True
+        return str(value).strip().lower() not in _CONTENT_EDIT_OFF
+    return bool(default)
+
+
+def insertions_enabled(ctx=None) -> bool:
+    """May a session add content units? Default True (historical behaviour)."""
+    return _content_edit_enabled(ctx, "insertions", True)
+
+
+def deletions_enabled(ctx=None) -> bool:
+    """May a session remove content units? Default True (historical behaviour)."""
+    return _content_edit_enabled(ctx, "deletions", True)
+
+
+def content_edit_policy_of(ctx=None):
+    """The non-default effective policy as a run-record dict, else None.
+
+    Recorded only when a kind is disabled, so a default root's run records stay
+    byte-identical. `run --disable-…` overrides the root's policy for that
+    invocation and is captured here, making a later resume enforce the policy
+    the session's prompt actually stated.
+    """
+    ins, dele = insertions_enabled(ctx), deletions_enabled(ctx)
+    if ins and dele:
+        return None
+    return {"insertions": ins, "deletions": dele}
+
+
+def content_edit_policy_allowed(ctx=None, rec=None) -> tuple:
+    """(insertions, deletions) for a run, preferring the policy IT started under.
+
+    A stage record that carries `content_edit_policy` was prompted under that
+    policy. The postcheck must judge it under the same policy even when the
+    root's config changed (or a `run` override was not repeated on a resume);
+    otherwise the prompt and the enforcement disagree. A default/legacy record
+    has no key and falls back to the context.
+    """
+    policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
+    if isinstance(policy, dict):
+        return (bool(policy.get("insertions", True)),
+                bool(policy.get("deletions", True)))
+    return insertions_enabled(ctx), deletions_enabled(ctx)
+
+
+def content_edit_policy_note(ctx=None) -> str:
+    """A short operator-facing description, or "" for the default policy."""
+    ins, dele = insertions_enabled(ctx), deletions_enabled(ctx)
+    if ins and dele:
+        return ""
+    parts = []
+    if not ins:
+        parts.append("insertions OFF")
+    if not dele:
+        parts.append("deletions OFF")
+    return ", ".join(parts) + " (benchmark-only content-edit policy)"
+
+
 def placeholder_lookup_of(ctx) -> str:
     """`off` | `online`: may the orchestrator resolve searchable markers itself?"""
     v = str((getattr(ctx, "cfg", None) or {}).get("placeholder_lookup",
