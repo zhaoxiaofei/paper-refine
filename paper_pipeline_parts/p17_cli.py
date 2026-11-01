@@ -401,22 +401,40 @@ completion signals (never a bare non-empty output directory):
 """
 
 
+class ContentEditPolicyAction(argparse.Action):
+    """A store-const flag that also records that the operator SAID it.
+
+    `run` must distinguish "not passed" (use the root's recorded policy) from
+    an explicit `--enable-…` (relax a strict root for this invocation), while
+    the parser-level default still reads as ENABLED, as the CLI contract says.
+    The marker attribute is private and only `_cmd_run_locked` reads it.
+    """
+
+    def __init__(self, option_strings, dest, const=None, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, const=const, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, self.const)
+        setattr(namespace, f"_{self.dest}_explicit", True)
+
+
 def add_content_edit_policy_opts(parser: argparse.ArgumentParser,
-                                 *, default: bool = None) -> None:
+                                 *, default: bool = True) -> None:
     """Add the ENABLE/DISABLE pairs for insertions and deletions.
 
     One destination each (`insertions`, `deletions`), True = allowed, False =
-    forbidden. The default is `default` (None on `run` so the root's recorded
-    policy decides, True on `setup` so a default root behaves exactly as before).
-    The spellings are NOT mutually exclusive: the LAST one on the command line
-    wins, so a harness that always passes the two default `--enable-…` options
-    can still append one `--disable-…` without a usage error.
+    forbidden. Both parser defaults are True, the historical behaviour. The
+    spellings are NOT mutually exclusive: the LAST one on the command line wins,
+    so a harness that always passes the two default `--enable-…` options can
+    still append one `--disable-…` without a usage error. A marker records an
+    explicit flag; `run` uses it to override the root's recorded policy only
+    when the operator actually asked.
     """
     for noun, dest in (("insertions", "insertions"), ("deletions", "deletions")):
-        parser.add_argument(f"--enable-{noun}", dest=dest, action="store_const",
+        parser.add_argument(f"--enable-{noun}", dest=dest, action=ContentEditPolicyAction,
                             const=True, default=default,
                             help=f"allow {noun} (the default; the historical behaviour)")
-        parser.add_argument(f"--disable-{noun}", dest=dest, action="store_const",
+        parser.add_argument(f"--disable-{noun}", dest=dest, action=ContentEditPolicyAction,
                             const=False, default=default,
                             help=f"forbid {noun}; an in-place rewrite is still allowed "
                                  f"(benchmark-only strict mode)")
@@ -912,7 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
                                    help="skip the LLM defect audit (no auditedTP_* files are "
                                         "written; the non-audited reports are unchanged)")
     run_opts = argparse.ArgumentParser(add_help=False)   # shared by run / run-decide
-    add_content_edit_policy_opts(run_opts, default=None)   # None = use the root's policy
+    add_content_edit_policy_opts(run_opts, default=True)   # config unless explicitly passed
     run_opts.add_argument("--champion-select", choices=list(CHAMPION_SELECT_MODES),
                           default=None, metavar="MODE", help=CHAMPION_SELECT_HELP)
     run_opts.add_argument("--jobs", type=int, default=DEFAULTS["jobs"],

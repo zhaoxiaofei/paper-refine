@@ -3313,8 +3313,13 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # The benchmark-only content-edit policy: a per-INVOCATION override of the
     # policy `setup` recorded. None means "use the root's config", so a plain
     # `run` cannot perturb a root it did not need to describe.
-    ctx._insertions_override = getattr(args, "insertions", None)
-    ctx._deletions_override = getattr(args, "deletions", None)
+    # A parser default is True (the historical behaviour), so an override is
+    # applied ONLY when the operator explicitly passed one of the pair. Without
+    # this marker a plain `run` would re-enable a root `setup` made strict.
+    ctx._insertions_override = (getattr(args, "insertions", True)
+                                if getattr(args, "_insertions_explicit", False) else None)
+    ctx._deletions_override = (getattr(args, "deletions", True)
+                               if getattr(args, "_deletions_explicit", False) else None)
     _edit_note = content_edit_policy_note(ctx)
     if _edit_note:
         print(f"[run] content-edit policy: {_edit_note}")
