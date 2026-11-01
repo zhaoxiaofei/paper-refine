@@ -32,7 +32,7 @@ The review's **rewrite-parity findings (M25–M29)**, **source-hierarchy finding
 ## Hard rules
 
 1. **Originals read-only.** Record sha256 of EVERY original file BEFORE any edit (`WORK/checksums_before.txt`); never modify anything outside `REVISED/` and `code/`; re-verify byte-identity at the end (V4) and confirm it in the final report.
-2. **Never invent, and never repair by deletion.** No fabricated content, citations, data, results, or accession numbers. Missing mandatory items are scaffolded only with clearly marked `[AUTHOR TO COMPLETE: ...]` placeholders, every one listed in the final report. Scientific claims, interpretations, and the strength of conclusions are never altered on your own initiative (rule E6). An error is corrected, not removed: a wrong value, number, unit, definition, p-value or significance word gets the correct fact; a sentence called orphaned, misplaced, unused, redundant or structurally awkward is relocated, merged or connected. A structural/packaging/style/length finding never authorizes deleting the fact it quotes, and a true duplicate may go only when the finding names it and one copy survives. If no non-destructive repair exists, use `manual-required` and leave the fact in the package.
+2. **Never invent, and never repair by deletion.** No fabricated content, citations, data, results, or accession numbers. Missing mandatory items are scaffolded only with clearly marked `[AUTHOR TO COMPLETE: ...]` placeholders, every one listed in the final report -- UNLESS the run's hand-off policy (`author_to_complete`) says otherwise: under `readme` the marker must NOT appear in a document and the item goes to `README-AUTHOR-TO-COMPLETE.md` instead, and under `off` it goes to `MANUAL_STEPS.md`. The run's policy outranks this default. Scientific claims, interpretations, and the strength of conclusions are never altered on your own initiative (rule E6). An error is corrected, not removed: a wrong value, number, unit, definition, p-value or significance word gets the correct fact; a sentence called orphaned, misplaced, unused, redundant or structurally awkward is relocated, merged or connected. A structural/packaging/style/length finding never authorizes deleting the fact it quotes, and a true duplicate may go only when the finding names it and one copy survives. If no non-destructive repair exists, use `manual-required` and leave the fact in the package.
 3. **No silent skip.** EVERY finding ID — `F-*` from findings.json and `X-*` from findings_extra.json (kept as separate ID namespaces) — appears exactly once in the REVISION LEDGER with a final status. "Not addressed" is not an allowed status. Every mechanical step must produce its artifact in `WORK/`; a step without its artifact is not done.
 4. **One edit per finding instance.** Never aggregate edits. Every edit maps to a finding ID, or to a rescan ID `R-xxx` for issues introduced or discovered during revision.
 5. **ENUMERATE → ARTIFACT → APPLY → VERIFY for every mechanical step.** Script-enumerate all affected occurrences (the review skill's `extract_occurrences.py` is bundled for this — copy it into `WORK/`), record every occurrence as a row (including rows later judged OK), act row by row, then verify row by row. Propagation by attention alone is forbidden.
@@ -350,7 +350,10 @@ Never fabricate content. Where a skeleton can legitimately be scaffolded
 (cover letter structure, data availability statement frame, author
 contributions list), create the file in REVISED/ with clearly marked
 `[AUTHOR TO COMPLETE: ...]` placeholders and list every placeholder in the
-final report. Otherwise just report the gap. A data-availability statement
+final report. The run's hand-off policy outranks this default: under
+`author_to_complete: readme` the marker must NOT appear in a document and the
+item is recorded in `README-AUTHOR-TO-COMPLETE.md` instead; under `off` it
+goes to `MANUAL_STEPS.md`. Otherwise just report the gap. A data-availability statement
 is not something to invent — it is something to scaffold.
 
 A data/code-availability statement is corrected in BOTH directions, and

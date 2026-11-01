@@ -35,7 +35,7 @@ DEFECT_AUDIT_FIELDS = tuple(DEFECT_LIST_FIELDS) + ("audit_label", "audit_reason"
 
 
 def _defect_audit_prompt(r: int, n_rows: int) -> str:
-    return with_context_budget(F"""You are the pipeline's DEFECT AUDITOR for round {int(r)}.
+    return with_context_budget(CONTRADICTION_RULE + F"""You are the pipeline's DEFECT AUDITOR for round {int(r)}.
 
 The round's judge panel filed {int(n_rows)} defect rows. They are in
 `defects.json` in this directory: one object per row of

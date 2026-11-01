@@ -6381,7 +6381,7 @@ def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
 def resume_prompt(rec: dict, problems: list, reason: str, used: int) -> str:
     """The CONTINUATION prompt: finish the stage's own work, marker last."""
     listed = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(problems)) or "  (none recorded)"
-    return with_context_budget((
+    return with_context_budget((CONTRADICTION_RULE +
         "CONTINUATION - YOUR OWN SESSION STOPPED BEFORE IT FINISHED.\n\n"
         f"Run: {rec['id']}   stage: {rec.get('kind')}   round: {rec.get('round')}\n"
         f"This is continuation {used + 1} of at most {RESUME_ATTEMPT_LIMIT} for this session.\n"
@@ -7100,7 +7100,7 @@ Everything else must stay BYTE-IDENTICAL, above all:
 
 def repair_prompt(ctx: Ctx, rec: dict, problems: list) -> str:
     """The scoped repair prompt, with the shared context-budget rule."""
-    return with_context_budget(_repair_prompt_body(ctx, rec, problems))
+    return with_context_budget(CONTRADICTION_RULE + _repair_prompt_body(ctx, rec, problems))
 
 
 REPAIR_TAIL = """

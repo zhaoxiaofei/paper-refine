@@ -1277,12 +1277,16 @@ a different order. A scope whose only "fix" would invent or delete content is
 
 | check | disposition | basis |
 |---|---|---|
-| M1 | N findings / clean / unable — reason | artifact M1_acronyms.md, N rows |
+| M1 | N findings / clean — basis: <what you re-derived> / unable — <reason> | artifact M1_acronyms.md, N rows |
 | ... | ... | ... |
 | J4 | ... | locations examined |
 
-"Not checked" is not an allowed value. "Unable — <reason>" rows repeat in the
-summary note with their reasons.
+The `disposition` cell is a VERDICT, and the pipeline's gate accepts only four
+shapes: `N findings` (write `0 findings`, not a bare `clean`), `clean — basis:
+<artifact or locations>`, `unable — <reason>`, and `out of scope — <reason>`
+(when the round's own review scope excludes the check). A bare `clean` records
+no basis and is REJECTED. "Not checked" is not an allowed value. "Unable —
+<reason>" rows repeat in the summary note with their reasons.
 
 The coverage table carries every check ID this skill defines: M1–M36 and
 J1–J5 (M18, M19 and M20 are always active). J5's row names

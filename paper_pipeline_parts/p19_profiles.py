@@ -226,11 +226,13 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     `INSTRUCTIONS/PROFILE_RULES.md`, and every such block is written to that
     file under its own `## <section>` heading.
 
-    `high` returns the text UNCHANGED (a rule of this module: the profile must
-    not perturb the pipeline's original prompts by a single byte).
+    `high` pages nothing: the prompt is the pipeline's original text plus the
+    contradiction rule, which every stage prompt carries under every profile
+    (the rule names no stage, mode, round or bookkeeping file, so it cannot
+    break a judge's blinding).
     """
     if profile != PROFILE_MEDIUM:
-        return text
+        return CONTRADICTION_RULE + text
     from pathlib import Path
 
     sb = Path(sandbox)
@@ -262,7 +264,9 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
         for title, body in sections:
             parts.append(f"\n## {title}\n\n{body.rstrip()}\n")
         write_text_atomic(sb / PROFILE_RULES_REL, "".join(parts))
-    return _stage_contract_header(profile) + text
+    # The contradiction rule leads every stage prompt (it names no stage, mode
+    # or bookkeeping file, so a judge's blinding is unaffected).
+    return _stage_contract_header(profile) + CONTRADICTION_RULE + text
 
 
 # ---------------------------------------------------------------------------

@@ -4401,7 +4401,7 @@ def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str
                  "the source letter, a plain submission letter: recipient block, date, salutation,\n"
                  "         body, closing and signature -- the letter's own convention (never the\n"
                  "         manuscript's Title/Author List/Abstract styles)")
-    return with_context_budget(f"""TEMPLATE-FIRST REWRITE -- fill {label}'s own Word templates with this submission's content
+    return with_context_budget(CONTRADICTION_RULE + f"""TEMPLATE-FIRST REWRITE -- fill {label}'s own Word templates with this submission's content
 
 The deliverable of THIS session is the ENTIRE submission package authored INSIDE
 the journal's official Word templates. The files you hand back ARE copies of the
@@ -4594,7 +4594,7 @@ def apply_guideline_conform_prompt(ctx: Ctx, src: Path) -> str:
     guidelines = ("\n".join(guideline_lines) if guideline_lines
                   else "  * (this profile records no guideline text: use established academic "
                        "convention)")
-    return with_context_budget(f"""SUBMISSION CONFORM -- author this submission to {label}'s own rules
+    return with_context_budget(CONTRADICTION_RULE + f"""SUBMISSION CONFORM -- author this submission to {label}'s own rules
 
 This venue ships NO official Word template (`venue_template/` is empty), so
 there is no template layout to copy. The deliverable is the WHOLE submission

@@ -289,6 +289,35 @@ def marker_root_rule(out_dir: str = "") -> str:
             f"one){inside}.")
 
 
+# The contradiction rule EVERY agent prompt carries. Prompts restate rules (the
+# prompt itself, the attached skill documents, the paged rule sections, the
+# master-prompt excerpts); a restated rule can contradict the one the run
+# actually enforces, and a session that has to guess wastes an attempt or
+# satisfies both readings at once (the 2026-11-01 revise arm wrote the same
+# table into two files). The rule gives an explicit precedence order and makes
+# the conflict REPORTABLE instead of silent. It is deliberately generic: it
+# names no stage, no mode and no bookkeeping file, so the judges' blinding rule
+# (test_judge_blinding.py) still holds.
+CONTRADICTION_RULE = """=== BEFORE YOU READ THE INSTRUCTIONS BELOW: WHEN TWO OF THEM DISAGREE ===
+Rules are repeated across this prompt, the skill documents it points at and the rule sections it
+attaches. When two statements conflict, do not guess and do not satisfy both readings at once.
+Resolve the conflict in this order and keep working:
+  1. A PROHIBITION binds first. "Never", "must not" and "do not" outrank an instruction to do more:
+     carry out the rest of that instruction only where it does not require the forbidden act.
+  2. A statement about THIS RUN binds next. The mode, profile, policy and file names this prompt
+     gives for this run outrank a general default quoted from a skill, an example or a template.
+  3. The more SPECIFIC rule binds next. A rule that names the file, the check id, the column set,
+     the id shape or the placement outranks the general rule it specializes.
+  4. Only if the conflict survives all three, the requirement the ORCHESTRATOR CHECKS binds -- the
+     pre-flight command below applies those checks. Then NAME the conflict in your final report,
+     quoting both statements.
+Never resolve a conflict by doing both at once (writing the same table into two files, a marker in a
+document as well as its checklist) and never leave one silent: the report is where a surviving
+conflict belongs.
+
+"""
+
+
 def selfcheck_block(kind: str, run_id: str, r: int) -> str:
     """The pre-marker pre-flight command for one stage's prompt.
 

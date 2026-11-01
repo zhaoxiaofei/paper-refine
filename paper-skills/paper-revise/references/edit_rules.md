@@ -136,7 +136,10 @@ Never fabricate content. Where a skeleton can legitimately be scaffolded
 (cover letter structure, data availability statement frame, author
 contributions list), create the file in REVISED/ with clearly marked
 `[AUTHOR TO COMPLETE: ...]` placeholders and list every placeholder in the
-final report. Otherwise just report the gap. A data-availability statement
+final report. The run's hand-off policy outranks this default: under
+`author_to_complete: readme` the marker must NOT appear in a document and the
+item is recorded in `README-AUTHOR-TO-COMPLETE.md` instead; under `off` it
+goes to `MANUAL_STEPS.md`. Otherwise just report the gap. A data-availability statement
 is not something to invent — it is something to scaffold.
 
 A data/code-availability statement is corrected in BOTH directions, and

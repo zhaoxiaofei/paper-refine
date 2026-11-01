@@ -1703,7 +1703,7 @@ def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
                     "@@VENUE@@", venue_id)
     if journal:
         text += f"\n\nTarget journal (for `journals` and the prompts): {journal}.\n"
-    return with_context_budget(text)
+    return with_context_budget(CONTRADICTION_RULE + text)
 
 
 def _merge_tree(src: Path, dst: Path) -> int:

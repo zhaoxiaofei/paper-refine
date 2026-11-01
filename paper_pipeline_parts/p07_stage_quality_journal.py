@@ -3154,7 +3154,7 @@ def feedback_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
     labels = _journal_feedback_labels(ctx)
     llm_labels = _journal_llm_feedback_labels(ctx)
     from_j = journal_feedback_origin(ctx)
-    return f"""JOURNAL FEEDBACK — CONCERN ENUMERATION (one session; you do NOT edit any manuscript)
+    return CONTRADICTION_RULE + f"""JOURNAL FEEDBACK — CONCERN ENUMERATION (one session; you do NOT edit any manuscript)
 
 This run is "{mode}" (option {info['option']}: {info['label']}). The review
 feedback from {from_j} — the human editors'/reviewers' comments and/or the
@@ -3241,6 +3241,7 @@ WRITE:
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "feedback", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step.
+{selfcheck_block("feedback", sb.name, int(r))}
 """
 
 
@@ -3251,7 +3252,7 @@ def concerns_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
     labels = _journal_feedback_labels(ctx)
     llm_labels = _journal_llm_feedback_labels(ctx)
     from_j = journal_feedback_origin(ctx)
-    return f"""JOURNAL FEEDBACK — {mode.upper()} REVISION RECONCILIATION (one session; NO edits)
+    return CONTRADICTION_RULE + f"""JOURNAL FEEDBACK — {mode.upper()} REVISION RECONCILIATION (one session; NO edits)
 
 This run REPLACES the general review of a {mode} revision (option
 {info['option']}: {info['label']}). The review feedback of
@@ -3334,6 +3335,7 @@ THE FINDING LIST (the revision session consumes it):
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "concerns", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step.
+{selfcheck_block("concerns", sb.name, int(r))}
 """
 
 
@@ -3361,7 +3363,7 @@ def response_prompt(ctx: Ctx, sb: Path, r: int, target_label: str,
                  + f"  * `README*.md` / `README*.txt` files are NEVER submitted (the author's "
                    f"own documentation, dropped from the package like `{CODE_DIR}/`): never "
                    f"cite one in `changes`/`new_data`;\n")
-    return f"""RESPONSE TO REVIEWERS (the point-by-point letter; you do NOT edit the manuscript)
+    return CONTRADICTION_RULE + f"""RESPONSE TO REVIEWERS (the point-by-point letter; you do NOT edit the manuscript)
 
 Revision mode: {mode} (option {info['option']}: {info['label']}).
 Feedback from: {(from_j or '(the source journal)')}. Target journal:
@@ -3416,6 +3418,7 @@ ABSOLUTE RULES:
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "response", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step.
+{selfcheck_block("response", sb.name, int(r))}
 """
 
 
@@ -5408,8 +5411,12 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
 # =====================================================================
 
 SELFCHECK_STAGES = ("rewrite", "guided_review", "cold_start_review", "audit", "revise",
-                    "integrate",
-                    "judge")
+                    "integrate", "judge",
+                    # The journal-mode sessions are agent runs too: they had no
+                    # pre-flight at all, so a missing marker, an empty letter or an
+                    # inconsistent concern ledger was only discovered by the
+                    # postcheck after the attempt.
+                    "feedback", "concerns", "response")
 
 # --- the stage's own bookkeeping deliverables --------------------------------
 # `required` FAILS an attempt when it is missing (the postcheck errors on it);
@@ -5538,12 +5545,62 @@ def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
     return notes
 
 
+def stage_source_gates(sb: Path, kind: str, pkg_dir: Path) -> tuple:
+    """(errs, warns) for the ctx-free source gates of a package-producing stage.
+
+    `add_stage_quality_checks` runs three gates that a SANDBOX can decide on its
+    own -- the e-mail contact gate (`email_address_change_problems`), the opaque
+    identifier gate (`fact_token_change_problems`) and the "no NEW finding-tier
+    family" regression scan -- for rewrite, revise and integrate alike. The
+    pre-flight ran only the regression scan, and only for revise, so a package
+    that inferred an address, replaced a DOI without a verification row, or
+    introduced a new finding-tier family passed the pre-flight and failed the
+    postcheck. These are exactly the families a session can fix while its
+    context is live.
+
+    The root-state gates of the same function (`_check_pristine_copy`,
+    `input_mismatches`, the content-edit policy, the caption/document checks)
+    still run only in the postcheck: they need the run's plan and configuration,
+    which the sandbox does not carry.
+
+    `fixer_reclassified` is NOT passed here (the format-fix record lives in the
+    run record): under `--format-fix` a rule the fixer itself introduced can
+    therefore be reported by the pre-flight where the postcheck reclassifies it
+    as the fixer's -- a stricter preview, never a missing one.
+    """
+    label = kind
+    before = [(sb / ("self" if kind == "integrate" else "base"), "", ())]
+    after = [(pkg_dir, "", CORPUS_EXCLUDE_TOP)]
+    evidence = [(sb / a, "", ()) for a in ("non_revised", "raw_data", "base")
+                if (sb / a).is_dir()]
+    if kind == "integrate" and (sb / "others").is_dir():
+        evidence.append((sb / "others", "", ()))
+    errs, warns = [], []
+    for gate in (email_address_change_problems, fact_token_change_problems):
+        g_errs, g_warns = gate(before, after, pkg_dir, label, evidence_sources=evidence)
+        errs.extend(g_errs)
+        warns.extend(g_warns)
+    fpol = read_json(sb / "format_policy.json", revive=False, lenient=True)
+    r_errs, r_warns = scan_regression_problems(
+        None, before, after, label, policy=fpol if isinstance(fpol, dict) else None)
+    errs.extend(r_errs)
+    warns.extend(r_warns)
+    return errs, warns
+
+
 def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tuple:
     """(ok, errors, warnings) for the paperwork of one sandbox (read-only).
 
     `kind` is the run's stage; `run_id`/`r` are only used to CHECK the marker.
-    Every check below is the postcheck's OWN detector (called, not re-implemented),
-    so the pre-flight can never disagree with the verdict it previews.
+
+    Every detector below is the POSTCHECK'S OWN (called, never re-implemented),
+    so the two verdicts agree on every family a sandbox can decide on its own.
+    The families that need the run ROOT's state -- the pristine-copy digests,
+    the input freshness, the run's content-edit and caption policies, the
+    code-side evidence behind the judge's M20, the journal concern ledger and
+    the split-review merge -- cannot run here by construction and stay in the
+    postcheck. A pass here is a PREVIEW, never a certification, and the prompt
+    says so.
     """
     kind = str(kind or "")
     errs, warns = [], []
@@ -5641,9 +5698,23 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
         perrs, pwarns, findings = _cold_start_contract_problems(sb)
         errs.extend(perrs)
         warns.extend(pwarns)
-        if not (sb / COLD_START_COVERAGE_REL).is_file():
+        # The coverage file's FULL contract, the postcheck's own way: a symlinked
+        # file, an unreadable one and an EMPTY one all failed there while this
+        # pre-flight only tested `is_file()` (which follows a symlink and accepts
+        # a zero-byte file). A 39-minute cold-start pass would have learned that
+        # only after the marker.
+        coverage = sb / COLD_START_COVERAGE_REL
+        if coverage.is_symlink() or not coverage.is_file():
             errs.append(f"{COLD_START_COVERAGE_REL} is missing: the areas examined, the counts and "
                         f"the round's honest limits are part of the deliverable")
+        else:
+            coverage_text = read_text_bounded(coverage)
+            if coverage_text is None:
+                errs.append(f"{COLD_START_COVERAGE_REL} could not be read (it is a symlink/"
+                            f"non-regular file or over the byte budget)")
+            elif not coverage_text.strip():
+                errs.append(f"{COLD_START_COVERAGE_REL} is EMPTY: account for the areas examined, "
+                            f"the findings they produced and what could not be checked")
         if findings:
             repro = cold_start_reproduction(sb, findings)
             for r in repro["results"]:
@@ -5678,6 +5749,43 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
         if not (sb / "audit" / "AUDIT.md").is_file():
             warns.append("audit/AUDIT.md (the human-readable disposition record) is missing")
         errs.extend(probe_audit_problems(sb))
+    elif kind in ("feedback", "concerns"):
+        # The concern ledger's schema and its verbatim-quote verification are
+        # ctx-free: `journal_ledger_problems` takes the ctx for symmetry only, so
+        # the pre-flight calls the postcheck's OWN detector. The families that
+        # need the run root (staging of the original feedback files, the frozen
+        # finding list's relation to the ledger, the pristine copies) stay in
+        # `postcheck_feedback`/`postcheck_concerns`.
+        journal_ledger_problems(None, sb, errs, warns)
+        if kind == "feedback":
+            fdir = sb / "feedback" / "files"
+            ldir = sb / "feedback" / "llm" / "files"
+            if not ((fdir.is_dir() and any(fdir.iterdir()))
+                    or (ldir.is_dir() and any(ldir.iterdir()))):
+                errs.append("feedback/files/ and feedback/llm/files/ are both empty: the "
+                            "original feedback files must be copied in (they are the quote "
+                            "source of record)")
+    elif kind == "response":
+        # The letter and its machine-readable map, the postcheck's own two
+        # error families. The per-concern coverage comparison reads the concern
+        # run's sandbox (root state) and stays in `postcheck_response`.
+        md = sb / JOURNAL_RESPONSE_MD_REL
+        if not md.is_file():
+            errs.append(f"{JOURNAL_RESPONSE_MD_REL} is missing: the response to reviewers is "
+                        f"the deliverable of this mode")
+        else:
+            letter = read_text_bounded(md)
+            if letter is None:
+                errs.append(f"{JOURNAL_RESPONSE_MD_REL} could not be read (it is a symlink/"
+                            f"non-regular file or over the byte budget): the response to "
+                            f"reviewers must be a readable text deliverable")
+            elif not letter.strip():
+                errs.append(f"{JOURNAL_RESPONSE_MD_REL} is EMPTY: the response to "
+                            f"reviewers must carry one block per concern")
+        if not isinstance(read_json(sb / JOURNAL_RESPONSE_MAP_REL, revive=False, lenient=True),
+                          dict):
+            errs.append(f"{JOURNAL_RESPONSE_MAP_REL} is missing/unparsable (the letter's "
+                        f"machine-readable map)")
     elif kind in ("rewrite", "revise", "integrate"):
         pkg = output_dir_of(rec)
         d = sb / pkg
@@ -5695,6 +5803,13 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
         terr, twarn = manual_todo_problems(d)
         errs.extend(terr)
         warns.extend(twarn)
+        # The other ctx-free postcheck gates of the same stage family: the e-mail
+        # and identifier fact gates and the finding-tier regression scan. A
+        # package that inferred an address or introduced a new finding-tier
+        # family must not pass the pre-flight.
+        sgerr, sgwarn = stage_source_gates(sb, kind, d)
+        errs.extend(sgerr)
+        warns.extend(sgwarn)
         if kind == "revise":
             # The ledger contract: one row per finding id the reviser had to
             # resolve. This is the check that failed every attempt of two real
@@ -5724,13 +5839,8 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
                             first = (row.get("errors") or [row.get("detail") or "invalid"])[0]
                             errs.append(f"VALIDATION: {Path(row['file']).name} is not a valid "
                                         f"DOCX: {first}")
-                fpol = read_json(sb / "format_policy.json", revive=False, lenient=True)
-                if (sb / "base").is_dir() and isinstance(fpol, dict):
-                    rerrs, rwarns = scan_regression_problems(
-                        None, [(sb / "base", "", ())], [(d, "", CORPUS_EXCLUDE_TOP)],
-                        "revise", policy=fpol)
-                    errs.extend(rerrs)
-                    warns.extend(rwarns)
+                # The regression scan already ran in `stage_source_gates`, for
+                # this stage and the other two package kinds alike.
             # PRE-FLIGHT PARITY, fourth family: the M30 source-hierarchy ledger.
             # `postcheck_revise` fails a package whose seeded M30 rows carry no
             # disposition, and the 2026-11-01 revise arm lost its second attempt
@@ -5828,6 +5938,19 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             check_visual_artifact(jr / "artifacts" / "VIS_visual.md",
                                   f"the visual-inspection record {VISUAL_ARTIFACT_JUDGE}",
                                   errs, warns, sandbox=sb, render_roots=[jr])
+        # THE JUDGE'S OWN M20 MUST CATCH THE TARGET'S FMT-CL1. The postcheck
+        # derives the rows from `code_side_evidence` (which needs the root's
+        # caption/profile policy); the FORMAT scan needs only the policy file the
+        # sandbox already carries, and `seed_format_policy_file` ships the
+        # `cover_letter` block precisely so a session can reproduce FMT-CL1. The
+        # FMT-CL1 detector reads nothing else from the policy.
+        _fpol = read_json(sb / "format_policy.json", revive=False, lenient=True)
+        _fmt = scan_format_in_sources([(sb / "target", "", CORPUS_EXCLUDE_TOP)],
+                                      policy=_fpol if isinstance(_fpol, dict) else None)
+        _cl_rows = [r for r in ((_fmt or {}).get("rows") or [])
+                    if str(r.get("rule") or "").upper() in COVER_LETTER_STAMP_RULES]
+        if _cl_rows:
+            errs.extend(judge_cover_letter_artifact_problems(sb, _cl_rows))
     return (not errs), errs, warns
 
 

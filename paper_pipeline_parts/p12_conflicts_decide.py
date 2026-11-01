@@ -538,7 +538,7 @@ def _normalize_llm_conflicts(data) -> list:
 
 
 def _judge_conflict_agent_prompt(r: int) -> str:
-    return with_context_budget(F"""You are the pipeline's cross-judge CONFLICT AUDITOR for round {int(r)}.
+    return with_context_budget(CONTRADICTION_RULE + F"""You are the pipeline's cross-judge CONFLICT AUDITOR for round {int(r)}.
 
 The pipeline has just collected the round's independent judge sessions. Two judges
 can legitimately differ by a point, but they can also CONTRADICT each other about a
