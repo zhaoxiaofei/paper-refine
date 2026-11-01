@@ -1200,6 +1200,22 @@ _COVERAGE_NAMED_BASIS_RE = re.compile(
     r"|out\s+of\s+scope\s*(?:--|—|–))\s*(.*)$")
 
 
+def _coverage_reason_named(reason) -> bool:
+    """True when a `<dash> <reason>` tail NAMES an artifact or a reason.
+
+    Shared by the review gate and the audit gate (the audit's prose forms carry
+    the same tail), so both refuse the same filler.
+    """
+    reason = str(reason or "").strip(" \t.;:,—-–")
+    # A reason must say SOMETHING. "unable -- no"/"none"/"n/a" is filler, not a
+    # named reason; the old length-only test counted its two letters and passed.
+    if not reason or re.fullmatch(r"(?i)no|none|n/?a|tbd|todo|unknown", reason):
+        return False
+    # At least two alphanumeric characters: a one-letter token or punctuation
+    # alone cannot name an artifact or a reason.
+    return len(re.findall(r"[A-Za-z0-9]", reason)) >= 2
+
+
 def _coverage_disposition_ok(value) -> bool:
     """True for a REAL review-coverage disposition (see COVERAGE_DISPOSITION_RE).
 
@@ -1215,14 +1231,7 @@ def _coverage_disposition_ok(value) -> bool:
     m = _COVERAGE_NAMED_BASIS_RE.search(text)
     if m is None:
         return True          # "N findings"
-    reason = m.group(1).strip(" \t.;:,—-–")
-    # A reason must say SOMETHING. "unable -- no"/"none"/"n/a" is filler, not a
-    # named reason; the old length-only test counted its two letters and passed.
-    if not reason or re.fullmatch(r"(?i)no|none|n/?a|tbd|todo|unknown", reason):
-        return False
-    # At least two alphanumeric characters: a one-letter token or punctuation
-    # alone cannot name an artifact or a reason.
-    return len(re.findall(r"[A-Za-z0-9]", reason)) >= 2
+    return _coverage_reason_named(m.group(1))
 
 
 def visual_tools_available() -> bool:

@@ -1789,6 +1789,26 @@ def print_failure(rid: str, errors, note: str = "") -> None:
         print(f"        - {m}")
 
 
+def clip_error_line(text, limit: int = 300) -> str:
+    """One recap line for a stored error: whitespace-normalised, cut on a WORD.
+
+    The round summary sliced `last_error` at 200 characters, so the operator's
+    log ended mid-sentence and mid-word: the 2026-11-01 revise verdict printed
+    "... an M30 finding's fix must record the producer" and never showed the
+    requirement (`(rule E12)`) or the follow-up. The full text is printed at
+    failure time and kept in state.json `attempts_log`; this line is the recap,
+    so it says plainly that it was cut instead of trailing off.
+    """
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    if space > limit // 3:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:(") + " [...]"
+
+
 def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
     sb = ctx.sandbox_of(rec)
     print()
@@ -2058,7 +2078,7 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                 f"{rid} ({int(ctx.run(rid).get('attempts') or 0)} attempt(s), "
                 f"budget {max_rounds})" for rid in hard))
             for rid in hard[:6]:
-                err = (ctx.run(rid).get("last_error") or "")[:200]
+                err = clip_error_line(ctx.run(rid).get("last_error") or "")
                 if err:
                     print(f"        {rid}: {err}")
         ctx.save_state()
@@ -3207,7 +3227,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             for rid in hard[:6]:
                 # a run whose dependencies never completed was never even
                 # materialized, so it has no record to report
-                err = ((ctx.run(rid) or {}).get("last_error") or "")[:200]
+                err = clip_error_line((ctx.run(rid) or {}).get("last_error") or "")
                 if err:
                     print(f"        {rid}: {err}")
         ctx.save_state()

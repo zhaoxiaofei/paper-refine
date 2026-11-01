@@ -113,8 +113,20 @@ def test_policy_text():
         text = pp.placeholder_rule_text(mode)
         check(f"{mode} mode carries the table/CSV rule",
               "TODO item ID" in text and "MANUAL_TODO.csv" in text)
-    check("the readme mode still does not name MANUAL_STEPS.md",
-          "MANUAL_STEPS.md" not in pp.placeholder_rule_text("readme"))
+    # The mode must not SEND an item to MANUAL_STEPS.md as this mode's manual
+    # list. It now names that file twice on purpose -- once to say the README is
+    # the manual list and MANUAL_STEPS.md must not repeat the table, and once in
+    # the shared one-id-space rule -- because a session told to fill both files
+    # wrote the same T-001..T-013 table into each and failed on duplicate ids.
+    readme_text = " ".join(pp.placeholder_rule_text("readme").split())
+    check("the readme mode names the README as the manual list",
+          "record it in ONE file in the package root, `README-AUTHOR-TO-COMPLETE.md`"
+          in readme_text)
+    check("the readme mode forbids a second classified table beside the README",
+          "must NOT repeat the table and must NOT reuse a `T-` id" in readme_text)
+    check("the shared rule states the one-id-space contract",
+          "ONE ID SPACE ACROSS BOTH FILES" in readme_text
+          and "may appear in at most ONE of the two files" in readme_text)
 
 
 def test_gate():

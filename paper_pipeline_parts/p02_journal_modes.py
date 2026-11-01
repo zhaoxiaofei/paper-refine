@@ -3725,6 +3725,13 @@ MANUAL_TODO_RULE = """
         from this table (four columns, same values) and fails a malformed table; do not hand-write
         a different CSV. A list that carries actionable items without this table is reported as a
         named gap (no classification is invented, and no CSV is written until the table exists).
+      - ONE ID SPACE ACROSS BOTH FILES. The orchestrator reads `MANUAL_STEPS.md` AND
+        `README-AUTHOR-TO-COMPLETE.md` as ONE inventory: `T-001`, `T-002`, ... are unique across
+        the package, so an id may appear in at most ONE of the two files. Write the classified
+        table in the manual-list file this mode names above and NOWHERE ELSE: copying the same
+        table into the other file repeats every id and FAILS the stage ("duplicate TODO item
+        ID"). The other file, when you write it at all, carries prose detail only -- no second
+        table, no reused id.
 """
 
 PLACEHOLDER_RULE = """PIPELINE HAND-OFF PLACEHOLDERS — the literal token "[AUTHOR TO COMPLETE: ...]":
@@ -4163,7 +4170,7 @@ def _manual_csv_matches(path: Path, rows: list) -> bool:
     return got == expected
 
 
-def manual_todo_gate(pkg_dir: Path) -> tuple:
+def manual_todo_gate(pkg_dir: Path, write: bool = True) -> tuple:
     """(errors, warnings): write/refresh MANUAL_TODO.csv from the classified table.
 
     The markdown is authoritative. A classified table with invalid rows is a
@@ -4171,18 +4178,31 @@ def manual_todo_gate(pkg_dir: Path) -> tuple:
     NAMED warning (the author still has work to do; the stage should add the
     table). The CSV is written next to the manual list and is bookkeeping, so it
     never enters the corpus, judge view, pin or published directory.
+
+    `write=False` is the READ-ONLY half, for a session's pre-flight
+    (`sandbox_selfcheck`): the same parse and the same ERRORS, but the stale CSV
+    is left alone and the two notes that would describe a removal or a
+    regeneration are phrased as a preview. The gate was a postcheck-only error
+    family, so the 2026-11-01 revise arm's pre-flight said "the paperwork checks
+    passed" 23 seconds before the postcheck failed the same package on thirteen
+    duplicate TODO ids.
     """
     pkg = Path(pkg_dir)
     files = [pkg / n for n in MANUAL_TODO_FILES if (pkg / n).is_file()]
     csv_path = pkg / MANUAL_TODO_CSV_NAME
     if not files:
         if csv_path.is_file():
-            try:
-                csv_path.unlink()
-                note = f"removed {MANUAL_TODO_CSV_NAME}; it had no manual-list markdown as its source"
-            except OSError as e:
-                note = (f"{MANUAL_TODO_CSV_NAME} has no manual-list markdown as its source and "
-                        f"could not be removed ({type(e).__name__}: {e})")
+            if write:
+                try:
+                    csv_path.unlink()
+                    note = (f"removed {MANUAL_TODO_CSV_NAME}; it had no manual-list markdown "
+                            f"as its source")
+                except OSError as e:
+                    note = (f"{MANUAL_TODO_CSV_NAME} has no manual-list markdown as its source "
+                            f"and could not be removed ({type(e).__name__}: {e})")
+            else:
+                note = (f"{MANUAL_TODO_CSV_NAME} has no manual-list markdown as its source -- the "
+                        f"postcheck removes it")
             return [], [f"{pkg.name}: {note}"]
         return [], []
     rows, problems, sources = manual_todo_rows(pkg)
@@ -4198,11 +4218,15 @@ def manual_todo_gate(pkg_dir: Path) -> tuple:
                 f"action | description (T-001, fatal/critical/major/minor, one of the three "
                 f"author-action labels) -- MANUAL_TODO.csv is not generated until then")
         if csv_path.is_file():
-            try:
-                csv_path.unlink()
-                removed = "; the stale CSV was removed"
-            except OSError:
-                removed = ""
+            removed = ""
+            if write:
+                try:
+                    csv_path.unlink()
+                    removed = "; the stale CSV was removed"
+                except OSError:
+                    removed = ""
+            else:
+                removed = "; the postcheck removes the stale CSV"
             warns.append(f"{pkg.name}: {MANUAL_TODO_CSV_NAME} exists without a classified "
                          f"markdown TODO table; the markdown is the source and must carry the "
                          f"same four columns{removed}")
@@ -4218,14 +4242,28 @@ def manual_todo_gate(pkg_dir: Path) -> tuple:
                 f"| description)")
     expected = _manual_todo_csv_rows(rows)
     if csv_path.is_file() and not _manual_csv_matches(csv_path, rows):
-        warns.append(f"{pkg.name}: {MANUAL_TODO_CSV_NAME} did not match the markdown TODO "
-                     f"table; it was regenerated from the markdown")
+        if write:
+            warns.append(f"{pkg.name}: {MANUAL_TODO_CSV_NAME} did not match the markdown TODO "
+                         f"table; it was regenerated from the markdown")
+        else:
+            warns.append(f"{pkg.name}: {MANUAL_TODO_CSV_NAME} does not match the markdown TODO "
+                         f"table; the postcheck regenerates it from the markdown")
+    if not write:
+        return errs, warns
     try:
         write_csv_atomic(csv_path, list(MANUAL_TODO_COLUMNS), expected)
     except OSError as e:
         errs.append(f"{pkg.name}: could not write {MANUAL_TODO_CSV_NAME} "
                     f"({type(e).__name__}: {e})")
     return errs, warns
+
+
+def manual_todo_problems(pkg_dir: Path) -> tuple:
+    """(errors, warnings) for a package's manual list, writing nothing.
+
+    The pre-flight face of `manual_todo_gate`: same parse, same errors.
+    """
+    return manual_todo_gate(pkg_dir, write=False)
 
 
 def manual_todo_row_dicts(rows: list) -> list:
@@ -4569,6 +4607,12 @@ MUST NOT APPEAR in any document or in the hand-off README:
     missing, and the precise step the author must take (what to supply, where) in that row's
     description or a detail line below the table. Create the README only when there is at least one
     item; update it as items are resolved and delete it when none remain.
+    This README IS this mode's manual-list file, so its table is the ONLY classified TODO table in
+    the package. A `MANUAL_STEPS.md` written beside it (the master-prompt excerpts still name that
+    file) carries long-form prose detail only: it must NOT repeat the table and must NOT reuse a
+    `T-` id. The orchestrator merges the two files into ONE id space, so the same `T-001` in both
+    FAILS the stage with "duplicate TODO item ID" -- which is exactly what happened to a revise
+    arm that put its thirteen items in both files.
   * The README is the author's checklist, never submission content: a submitted document may not
     depend on it, and the submission copy drops it (it matches README*.md). Do not put prose,
     citations or data in it.
@@ -4759,6 +4803,32 @@ HANDOFF_PROMPT_REWRITES = (
      '        field or an unfixable formatting problem exists), with precise step-by-step\n'
      '        instructions; a missing submission item is listed here too, never as a marker in a\n'
      '        document.'),
+    # The revise prompt's item 5 sends "unfixable issues" to MANUAL_STEPS.md under
+    # EVERY mode. Under `readme` that file is not this mode's manual list (the
+    # README is, see PLACEHOLDER_RULE_README), and a session told to fill both
+    # wrote the SAME `T-001`..`T-013` table into each: the orchestrator reads the
+    # two files as ONE inventory and failed the 2026-11-01 revise arm on thirteen
+    # duplicate ids. The rewrite names the README as the single table and keeps
+    # MANUAL_STEPS.md for detail only, so the two instructions cannot both be
+    # read as "write a classified table here".
+    (' 5. Unfixable issues (unreadable Zotero live fields, numbers visible only inside figures,\n'
+     '     subjective scientific judgment) are never guessed at: report them in '
+     'revised/MANUAL_STEPS.md,\n     grouped by issue type, with precise step-by-step manual '
+     'instructions (which file, which\n     section/paragraph/field, what to check, exact tool '
+     'steps) and any follow-ups.',
+     ' 5. Unfixable issues (unreadable Zotero live fields, numbers visible only inside figures,\n'
+     '     subjective scientific judgment) are never guessed at: give each one a row in the\n'
+     '     classified TODO table of `revised/README-AUTHOR-TO-COMPLETE.md` (this mode\'s manual\n'
+     '     list), grouped by issue type, with precise step-by-step manual instructions (which\n'
+     '     file, which section/paragraph/field, what to check, exact tool steps).\n'
+     '     `revised/MANUAL_STEPS.md` may be written for long-form detail, but it must NOT\n'
+     '     repeat the table and must NOT reuse a `T-` id: the orchestrator reads both files as\n'
+     '     ONE id space and a repeated id FAILS the run.',
+     ' 5. Unfixable issues (unreadable Zotero live fields, numbers visible only inside figures,\n'
+     '     subjective scientific judgment) are never guessed at: report them in '
+     'revised/MANUAL_STEPS.md,\n     grouped by issue type, with precise step-by-step manual '
+     'instructions (which file, which\n     section/paragraph/field, what to check, exact tool '
+     'steps) and any follow-ups.'),
 )
 
 

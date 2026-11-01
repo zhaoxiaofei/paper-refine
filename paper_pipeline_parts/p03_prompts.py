@@ -218,6 +218,63 @@ def pipeline_self_path() -> str:
         return "paper_pipeline.py"
 
 
+def pipeline_fallback_paths() -> list:
+    """Other paths the SAME frozen driver may be reachable at in a session.
+
+    `pipeline_self_path()` is the ROOT's copy and is authoritative (AGENTS.md
+    rule 11), but a jailed harness can mount the run root read-only somewhere
+    else. The 2026-11-01 audit ran `ls` on the absolute path, got "No such file
+    or directory", and had no second way to reach the driver: it wrote
+    "selfcheck command could not run; all requirements verified manually" and
+    shipped a coverage table the postcheck rejected 14 times.
+
+    The root's `state.json` records the snapshot the copy was made from
+    (`pipeline.path` plus the bundle manifest `pipeline.modules`), and a jailed
+    session sees exactly that snapshot read-only -- so it is the fallback and
+    needs no filesystem search. Returns `[]` when nothing is recorded.
+
+    RULE 11 GUARD. The recorded path is where `setup` was RUN FROM, which for a
+    normal root is the maintained checkout, not a frozen copy. Handing a session
+    the live checkout would run code that may have drifted from the root's
+    frozen bundle, and the whole point of this pre-flight is that its verdict is
+    the postcheck's. The candidate is therefore offered ONLY while its bundle
+    still matches the manifest the root recorded (`module_manifest` over the
+    driver, the parts and the asset dirs). A drifted tree is silently withheld:
+    the prompt then tells the session to report that the pre-flight could not
+    run, which is honest, instead of running unfrozen code.
+    """
+    try:
+        module_path = Path(__file__).resolve()
+    except (NameError, OSError):                                 # pragma: no cover
+        return []
+    try:
+        # The pipeline's OWN file: read with the default revive (its Infinity/NaN
+        # sentinels must survive), never leniently -- a state file that does not
+        # parse exactly is not guessed at.
+        state = read_json(module_path.parent / "state.json")
+    except Exception:                                           # noqa: BLE001
+        # A prompt must never fail to render because a state file is unreadable.
+        return []
+    if not isinstance(state, dict):
+        return []
+    recorded = state.get("pipeline") or {}
+    origin = recorded.get("path")
+    if not (isinstance(origin, str) and origin.strip()):
+        return []
+    origin = origin.strip()
+    if origin == str(module_path):
+        return []                       # the root was set up in place: no second copy
+    manifest = recorded.get("modules")
+    if not isinstance(manifest, dict) or not manifest:
+        return []                       # no bundle recorded, so no byte-identity proof
+    try:
+        if module_manifest(Path(origin).parent) != manifest:
+            return []                   # drifted: not this root's frozen bundle
+    except OSError:
+        return []
+    return [origin]
+
+
 def marker_root_rule(out_dir: str = "") -> str:
     """WHERE the completion marker goes, stated the same way in every prompt.
 
@@ -241,15 +298,47 @@ def selfcheck_block(kind: str, run_id: str, r: int) -> str:
     while the session's context is still live, instead of costing a rebuilt
     20-minute attempt. It is a pre-flight, not a second verdict: the content
     checks that need the root's state stay in the postcheck.
+
+    The absolute path is the ROOT's frozen copy (AGENTS.md rule 11: a root runs
+    its own snapshot). A harness that jails the session can mount the run root
+    read-only SOMEWHERE ELSE, so the path is not guaranteed to resolve: the
+    2026-11-01 audit ran `ls` on it, got "No such file or directory", and spent
+    its whole attempt "verified manually" because the prompt offered no second
+    way to reach the driver. The block therefore also prints the snapshot the
+    root was set up from (`pipeline_fallback_paths()`), which is exactly what a
+    jailed session can still read; it costs the prompt one extra line, not a
+    filesystem search.
     """
+    fallbacks = pipeline_fallback_paths()
+    if fallbacks:
+        alternate = "\n".join(
+            f'    python "{path}" selfcheck --sandbox . --stage {kind} --run-id {run_id} '
+            f'--round {int(r)}' for path in fallbacks)
+        alt_text = (f"IF THAT PATH DOES NOT EXIST OR CANNOT BE READ in this session (a sandboxed or\n"
+                    f"jailed harness may mount the run root elsewhere), run the SAME frozen driver from\n"
+                    f"the snapshot this root was set up from:\n{alternate}\n"
+                    f"It is the same bytes; the verdict is the same.\n")
+    else:
+        # No origin snapshot is recorded (an old root, or a state file that does
+        # not carry `pipeline.path`). Naming state.json here would be a dead end:
+        # this branch is reached BECAUSE that key is absent, and `state.json`
+        # lives in the run ROOT, not in the sandbox root the command runs from.
+        alt_text = ("IF THAT PATH DOES NOT EXIST OR CANNOT BE READ in this session (a sandboxed or\n"
+                    "jailed harness may mount the run root elsewhere) and no second path is named\n"
+                    "above, do not guess: report in your final report that the pre-flight could not\n"
+                    "run, and re-read every deliverable schema by hand before writing the marker.\n")
     return (f"""
 SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
     python "{pipeline_self_path()}" selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
 It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
-required deliverable, the seeded decision tables' dispositions, the audit sheet -- and prints
-exactly what the postcheck would reject. Fix everything it reports, run it again until it says OK,
-and only THEN write the completion marker. An attempt that ends with its problems still in the
-files does not get repaired: it FAILS and the whole stage is re-run in a rebuilt sandbox.
+required deliverable, the seeded decision tables' dispositions, the audit sheet, and, for a
+package-producing stage, the manual TODO inventory (and, when the round carries an M30 finding, the
+source-hierarchy ledger) -- and prints exactly what the postcheck would reject. Fix everything it
+reports, run it again until it says OK, and only THEN write the completion marker. An attempt that
+ends with its problems still in the files does not get repaired: it FAILS and the whole stage is
+re-run in a rebuilt sandbox.
+{alt_text}Do not skip the self-check because the first path is missing: a session that cannot run it
+says so in its final report AND re-reads every deliverable schema by hand.
 """)
 
 
@@ -264,7 +353,20 @@ def judge_selfcheck_block(run_id: str) -> str:
     that names NOTHING about how either package was produced, which is what the
     blinding rule forbids (see test_judge_blinding.py): no round, no arm, no
     stage name, no bookkeeping file name, no marker token.
+
+    The sandbox can be jailed, in which case the root's copy of the driver may
+    not resolve (see `selfcheck_block`); the same frozen snapshot is then named
+    as a second path. That path identifies no candidate and carries none of the
+    forbidden vocabulary, so the blinding rule holds.
     """
+    fallbacks = pipeline_fallback_paths()
+    alternate = ""
+    if fallbacks:
+        alternate = (
+            "\nIf the path above cannot be read in this session, the SAME frozen checker is "
+            "reachable at:\n"
+            + "\n".join(f'    python "{path}" selfcheck --sandbox . --stage judge'
+                        for path in fallbacks))
     return (f"""
 === PRE-FLIGHT CHECK — RUN IT BEFORE THE MARKER ===
 
@@ -275,7 +377,7 @@ against the rows that back it, your `checks` map and your coverage of every issu
 and prints exactly what the post-check would reject, quoting the same messages. Fix everything it
 reports, run it again until it says OK, and only THEN write the completion marker: a sheet that ends
 with those problems is discarded and judged again from scratch, which wastes the whole session and
-leaves the panel incomplete.
+leaves the panel incomplete.{alternate}
 """)
 
 
@@ -1082,6 +1184,26 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
         "counts": {"confirmed": N, "dropped": N, "added": 0},
         "coverage": [{"check": "M1", "disposition": "..."}],   # your own coverage table
         "notes": "..."}
+   * THE COVERAGE TABLE IS AN ATTESTATION, NOT A FINDINGS SUMMARY. It carries exactly ONE row
+     for EVERY check this round ran -- `M1`-`M36` and `J1`-`J5`, 41 rows -- whether or not that
+     check produced a finding, and once each. A check with nothing to report is never omitted:
+     it gets a `clean` row naming the artifact you re-derived. (The full id list and each
+     check's bar are in `$paper-review`'s `references/sweeps.md`; the list is deliberately not
+     repeated here, so read it there if you do not know every id.) `disposition` is a VERDICT,
+     not prose: the machine gate accepts only the shapes below, and a true sentence in another
+     shape is REJECTED and costs the whole attempt.
+       - `N findings` or `N findings confirmed ...` -- start the cell with the NUMBER when the
+         check's findings are frozen rows (`0 findings` is the preferred spelling for none);
+       - `clean -- basis: <the artifact or the locations you re-derived>` -- e.g.
+         `clean -- basis: guided_review/artifacts/M8_terms.md (0 competing families)`;
+       - `unable -- <the concrete reason>` -- e.g. `unable -- no rendered artwork in the corpus`;
+       - `out of scope -- <reason>` -- only when this round's review scoped that check out.
+     Two prose spellings are accepted as equivalents ("no findings ..." for a zero count, and
+     "unable to check <object>" for an inability), and a re-derivation sentence is accepted when
+     it states a verb (`re-derived`, `confirmed`, `checked`, `verified`) that no negation
+     governs -- `never verified`, `not re-derived` and `could not be checked` are refused, while
+     a negation elsewhere in the sentence (an evidence clause such as "the CI does not contain
+     the point estimate") is fine. When in doubt use the four shapes above verbatim.
    * `AUDIT.md` — the same, human-readable: one section per dropped finding (with the evidence)
      and the disposition-audit table (rule | row | reviewer's reason |
      your verdict).

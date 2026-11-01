@@ -443,18 +443,57 @@ AUDIT_COVERAGE_CHECKS = tuple([f"M{i}" for i in range(1, 37)]
 # review side's documented vocabulary is accepted verbatim; an audit row may
 # also state the re-derivation it performed ("stub: the sweep was re-derived;
 # clean"), which is what several stages' self-reports use. Bare `x`/`done` (or
-# a bare `clean`) records no re-derivation and is refused (F30). The verb match
-# used to be enough on its own, so "never verified at all" passed: a NEGATED
-# re-derivation is the absence of the check, not a disposition. The shared
-# reason-bearing forms require their reason here too: a bare `out of scope` is
-# the same filler as `unable -- no` and used to skip the reason check entirely.
+# a bare `clean`) records no re-derivation and is refused (F30).
+#
+# A NEGATED re-derivation ("never verified at all", "the sweep was not
+# re-derived", "could not be checked") is the absence of the check, so it stays
+# refused. The FIRST version of that guard was a whole-string negation search
+# (`(?!.*\b(?:not|never|cannot|unable to)\b)`), which rejected any true row
+# whose EVIDENCE happened to contain one of those words: the 2026-11-01 audit
+# lost an entire 39-minute attempt on
+#   "F-002, ... confirmed (...); X-910 confirmed (CI does not contain point estimate)"
+# and on "F-030 confirmed (...); X-949 dropped (... not a defect)". The negation
+# is only disqualifying when it GOVERNS THE VERB, so `_AUDIT_NEGATED_VERB_RE`
+# matches a negation, at most two words, and then the re-derivation verb; the
+# gate rejects a cell only when that phrase occurs. A negation elsewhere in the
+# sentence is evidence, not a missing check.
+#
+# The verdict may be preceded by a qualifier: "No cover letter in submission;
+# no findings" and "No rendered artwork files in corpus; unable to check
+# artwork/text parity" were refused by the anchored match although both are
+# real dispositions. Every shape is therefore searched anywhere in the cell,
+# while bare filler ("x", "done", "not checked") still matches nothing.
+#
+# `No findings ...` is the same verdict as `0 findings` and `unable to check X`
+# the same verdict as `unable -- <reason>`; both spellings are accepted, and the
+# reason-bearing ones still pass the shared filler gate in `_audit_disposition_ok`.
+_AUDIT_REDERIVATION_VERB = r"(?:re-?derived|confirmed|checked|verified)"
+_AUDIT_NEGATED_VERB_RE = (
+    r"\b(?:not|never|cannot|can\s+not|could\s+not|unable\s+to|no\s+longer)\b"
+    r"(?:\s+\w+){0,2}\s+" + _AUDIT_REDERIVATION_VERB + r"\b")
+_AUDIT_COUNT_RE = re.compile(r"(?i)(?:\b\d+\s+finding|\bno\s+finding)")
+_AUDIT_CANONICAL_TAIL_RE = re.compile(
+    r"(?i)(?:clean\s*(?:--|—|–)\s*basis\s*:\s*"
+    r"|unable\s*(?:--|—|–)\s*"
+    r"|out\s+of\s+scope\s*(?:--|—|–)\s*)(.*)$")
+_AUDIT_VERB_RE = re.compile(r"(?i)\b" + _AUDIT_REDERIVATION_VERB + r"\b")
+_AUDIT_NEGATED_VERB_COMPILED = re.compile(_AUDIT_NEGATED_VERB_RE, re.I)
+_AUDIT_PROSE_UNABLE_RE = re.compile(r"(?i)\bunable\s+to\s+(.*)$")
 AUDIT_COVERAGE_DISPOSITION_RE = re.compile(
-    r"(?i)^(?:\d+\s+finding"
+    # A verdict shape anywhere in the cell (the leading `.*?` lets a qualifier
+    # precede it).
+    r"(?i)^(?:.*?(?:\b\d+\s+finding"
+    r"|\bno\s+finding"
     r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
     r"|unable\s*(?:--|—|–)\s*\S"
     r"|out\s+of\s+scope\s*(?:--|—|–)\s*\S"
-    r"|(?!(?:.*\b(?:not|never|cannot|unable\s+to)\b))"
-    r".*?\b(?:re-?derived|confirmed|checked|verified)\b.*$)")
+    # A prose inability that names an object ("unable to check artwork/text
+    # parity"): the `unable --` dash form is preferred, but the same recorded
+    # fact in a sentence is still a disposition, not filler.
+    r"|unable\s+to\s+\w+\s+\S)"
+    # ... or a re-derivation verb that no negation governs.
+    r"|(?!.*?" + _AUDIT_NEGATED_VERB_RE + r")"
+    r".*?\b" + _AUDIT_REDERIVATION_VERB + r"\b.*$)")
 
 
 def _audit_disposition_ok(value) -> bool:
@@ -462,17 +501,35 @@ def _audit_disposition_ok(value) -> bool:
 
     The regex alone accepts `unable -- no`, `clean -- basis: x` and a bare
     `out of scope`; those are the review gate's documented FILLER shapes, so
-    route every reason-bearing form through the shared
-    `_coverage_disposition_ok` (it knows the difference between a named
-    artifact/reason and a one-letter or filler token).
+    route every reason-bearing form through the shared reason check
+    (`_coverage_reason_named` knows the difference between a named
+    artifact/reason and a one-letter or filler token). The prose equivalents get
+    the same treatment: `unable to <verb> <object>` must name an object, not
+    just the verb.
+
+    THE SHAPES ARE TESTED IN ORDER, STRONGEST FIRST, and each shape accepts on
+    its OWN evidence. Testing the prose-`unable` heuristic first let an inability
+    clause in an EVIDENCE sentence veto a perfectly good count:
+    `3 findings; unable to see` and `3 findings confirmed (the reviewer was
+    unable to tell)` were refused because the tail after "unable to" was short.
+    A finding count is a complete verdict, so it is answered first.
     """
     text = str(value or "").strip()
     if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
         return False
-    if re.match(r"(?i)^(?:clean\s*(?:--|—|–)\s*basis\s*:|unable\s*(?:--|—|–)"
-                r"|out\s+of\s+scope\s*(?:--|—|–))", text):
-        return _coverage_disposition_ok(text)
-    return True
+    if _AUDIT_COUNT_RE.search(text):
+        return True          # "3 findings" / "no findings": a complete verdict
+    m = _AUDIT_CANONICAL_TAIL_RE.search(text)
+    if m is not None:
+        return _coverage_reason_named(m.group(1))
+    if _AUDIT_VERB_RE.search(text) and not _AUDIT_NEGATED_VERB_COMPILED.search(text):
+        return True          # a re-derivation sentence, e.g. "the sweep was re-derived"
+    m = _AUDIT_PROSE_UNABLE_RE.search(text)
+    if m is not None:
+        # "unable to check artwork/text parity" names what could not be
+        # checked; "unable to check" alone is the filler shape.
+        return len(re.findall(r"[A-Za-z0-9]", m.group(1))) >= 6
+    return True              # the gate regex matched some other accepted shape
 
 
 def audit_coverage_problems(audit) -> list:
@@ -903,6 +960,132 @@ def postcheck_review(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
+M30_HIERARCHY_REL = "work/M30_hierarchy_reconciliation.md"
+
+
+def _m30_ledger_state(path: Path) -> dict:
+    """{block_problems, actionable, empty} for one M30 ledger file."""
+    block_problems = []
+    actionable = empty = 0
+    for block in parse_markdown_blocks(path):
+        if not block["rows"]:
+            continue
+        block_problems += disposition_artifact_problems(
+            block["rows"], block.get("widths"), len(block["header"]))
+        for row in block["rows"]:
+            producer = str(row.get("candidate producer") or "").strip()
+            # A row the scan already recorded as "no shipped producer" is not an
+            # agent task; the rows that still need a disposition are the ones
+            # with a real candidate.
+            if producer and not producer.startswith("(no shipped table column"):
+                actionable += 1
+                if not str(row.get("disposition") or "").strip():
+                    empty += 1
+    return {"block_problems": block_problems, "actionable": actionable,
+            "empty": empty}
+
+
+def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
+    """(errs, warns) for the M30 source-hierarchy reconciliation record.
+
+    The evidence is the stage's own seeded ledger: every row disposed means the
+    revision looked at the written value AND its producer, so an empty
+    disposition cell means the comparison the finding rests on was never
+    recorded (rule E12).
+
+    WHERE THE ROWS LIVE was ambiguous and cost the 2026-11-01 revise arm its
+    second attempt. The seed is `work/<name>` in the SANDBOX (`decide` writes it
+    next to PROMPT.md), but the stage's deliverables are all under the package,
+    so one reviser disposed `revised/work/<name>` (53/53 rows answered) while
+    the postcheck read the untouched sandbox copy and failed it on "53 of 165
+    ... EMPTY". The check therefore reads BOTH copies and judges the disposed
+    one; a run that answered either copy did the work. The message names which
+    copy was read.
+
+    The old message also reported `len(block_problems)` as "N undisposed
+    row(s)" and then pasted 80 characters of the first problem into it,
+    truncated mid-word, producing
+      "still carries 1 undisposed row(s) (53 of 165 row(s) have an EMPTY
+       disposition cell (every seeded row must be dispos)"
+    -- a count of problems labelled as a count of rows, an unbalanced
+    parenthesis and a cut word, which is what reached the operator's log.
+    """
+    m30_ids = [str(f.get("id") or "").strip() for f in frozen_all
+               if str(f.get("check") or "").strip().upper() == "M30"]
+    errs, warns = [], []
+    if not m30_ids:
+        return errs, warns
+    candidates = []
+    if pkg:
+        package_copy = Path(sb) / pkg / M30_HIERARCHY_REL
+        if package_copy.is_file():
+            candidates.append((f"{pkg}/{M30_HIERARCHY_REL}", package_copy))
+    sandbox_copy = Path(sb) / M30_HIERARCHY_REL
+    if sandbox_copy.is_file():
+        candidates.append((M30_HIERARCHY_REL, sandbox_copy))
+    if not candidates:
+        looked_for = ([f"{pkg}/{M30_HIERARCHY_REL}"] if pkg else []) + [M30_HIERARCHY_REL]
+        warns.append(f"the frozen review carries {len(m30_ids)} M30 source-hierarchy "
+                     f"finding(s) but no {' or '.join(looked_for)} exists: rule E12 requires the "
+                     f"written side to be aligned with the authoritative producer, with the "
+                     f"reconciling reason recorded")
+        return errs, warns
+    judged, judged_state, judged_score, states = None, None, None, {}
+    for label, path in candidates:
+        try:
+            state = _m30_ledger_state(path)
+        except Exception as e:                                      # noqa: BLE001
+            warns.append(f"{label}: could not be read ({type(e).__name__}: {e}); the M30 rows "
+                         f"there stay unverified")
+            continue
+        states[label] = state
+        # The DISPOSED copy is the reviser's answer: a stale seed left empty
+        # beside a filled package copy is not a defect (and the reverse is the
+        # case this check was written for). Ordering: a copy that still holds
+        # seeded candidate rows is evidence of the check; one with none (an
+        # empty or unparsed file) must never beat it just because it has nothing
+        # left to report. Among copies that hold such rows, the one with the
+        # fewest empty dispositions wins (a tie keeps the package copy, listed
+        # first).
+        score = (0 if state["actionable"] else 1, state["empty"])
+        if judged_score is None or score < judged_score:
+            judged, judged_state, judged_score = label, state, score
+    if judged_state is None:
+        return errs, warns
+    sandbox_state = states.get(M30_HIERARCHY_REL)
+    if (judged != M30_HIERARCHY_REL and sandbox_state
+            and sandbox_state["actionable"]
+            and sandbox_state["empty"] == sandbox_state["actionable"]):
+        # The reviser answered the package copy and left the seed in place. That
+        # is accepted (the work is done), but the record should say which copy
+        # was judged so nobody reads the untouched seed as the evidence.
+        warns.append(f"{judged} was judged; the sandbox seed {M30_HIERARCHY_REL} is still "
+                     f"undisposed ({sandbox_state['empty']} of "
+                     f"{sandbox_state['actionable']} row(s) EMPTY)")
+    actionable, empty = judged_state["actionable"], judged_state["empty"]
+    if actionable and empty == actionable:
+        # None of the rows that actually need a comparison was disposed: the
+        # check was not run at all, not merely left one row short. Fail the
+        # attempt (the retry prompt carries this message) instead of accepting
+        # the warning the evaluation run ignored.
+        errs.append(
+            f"{judged} still carries {empty} of {actionable} seeded row(s) with a candidate "
+            f"producer whose disposition cell is EMPTY: an M30 finding's fix must record the "
+            f"producer it reconciled against (rule E12). Dispose every such row in place -- "
+            f"`OK -- <the reconciling reason>`, `contradiction -- <finding id>` or "
+            f"`unable -- <what is missing>` -- in the ledger you were given.")
+    elif empty or judged_state["block_problems"]:
+        detail = "; ".join(str(p) for p in judged_state["block_problems"][:3])
+        if empty:
+            warns.append(f"{judged}: {empty} of {actionable} actionably seeded row(s) still have "
+                         f"an EMPTY disposition cell; dispose every row whose candidate-producer "
+                         f"column names a producer (rule E12)"
+                         + (f" -- {detail}" if detail else ""))
+        else:
+            warns.append(f"{judged}: {detail}")
+    return errs, warns
+
+
 def postcheck_revise(ctx: Ctx, rec: dict):
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
@@ -998,51 +1181,11 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # M30 (source-hierarchy reconciliation): the evidence is the stage's own
     # seeded ledger. Every row disposed means the revision looked at the written
     # value AND its producer; an empty disposition cell means the comparison the
-    # finding rests on was never recorded (rule E12).
-    m30_ids = [str(f.get("id") or "").strip() for f in frozen_all
-               if str(f.get("check") or "").strip().upper() == "M30"]
-    if m30_ids:
-        ledger = sb / "work" / "M30_hierarchy_reconciliation.md"
-        if not ledger.is_file():
-            warns.append(f"the frozen review carries {len(m30_ids)} M30 source-hierarchy "
-                         f"finding(s) but the sandbox has no work/M30_hierarchy_reconciliation.md: "
-                         f"rule E12 requires the written side to be aligned with the authoritative "
-                         f"producer, with the reconciling reason recorded")
-        else:
-            try:
-                block_problems = []
-                actionable = actionable_empty = 0
-                for block in parse_markdown_blocks(ledger):
-                    if not block["rows"]:
-                        continue
-                    block_problems += disposition_artifact_problems(
-                        block["rows"], block.get("widths"), len(block["header"]))
-                    for row in block["rows"]:
-                        producer = str(row.get("candidate producer") or "").strip()
-                        # A row the scan already recorded as "no shipped
-                        # producer" is not an agent task; the rows that still
-                        # need a disposition are the ones with a real candidate.
-                        if producer and not producer.startswith("(no shipped table column"):
-                            actionable += 1
-                            if not str(row.get("disposition") or "").strip():
-                                actionable_empty += 1
-                if block_problems:
-                    message = (f"work/M30_hierarchy_reconciliation.md still carries "
-                               f"{len(block_problems)} undisposed row(s) "
-                               f"({block_problems[0][:80]}): an M30 finding's fix must record "
-                               f"the producer it reconciled against (rule E12)")
-                    if actionable and actionable_empty == actionable:
-                        # None of the rows that actually need a comparison was
-                        # disposed: the check was not run at all, not merely
-                        # left one row short. Fail the attempt (the retry prompt
-                        # carries this message) instead of accepting the warning
-                        # the evaluation run ignored.
-                        errs.append(message + "; every row with a candidate producer is EMPTY")
-                    else:
-                        warns.append(message)
-            except Exception as e:                                  # noqa: BLE001
-                warns.append(f"work/M30_hierarchy_reconciliation.md could not be read ({e}); "
-                             f"the M30 rows stay unverified")
+    # finding rests on was never recorded (rule E12). Shared with the pre-flight
+    # so the two verdicts agree (see `m30_hierarchy_problems`).
+    _m30_errs, _m30_warns = m30_hierarchy_problems(sb, frozen_all, pkg=REVISED_DIR)
+    errs.extend(_m30_errs)
+    warns.extend(_m30_warns)
     if not (rev / "CHANGELOG.md").is_file() and not (rev / "REVISION_REPORT.md").is_file():
         warns.append("neither revised/CHANGELOG.md nor revised/REVISION_REPORT.md was found "
                      "(the human-readable ledger/change log)")
@@ -5519,10 +5662,19 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             errs.append("audit/audit.json is missing: the auditor's dispositions are the "
                         "deliverable the revisers consume")
         else:
+            _audit = read_json(aj, revive=False, lenient=True)
             errs.extend(audit_artifact_problems(
-                read_json(aj, revive=False, lenient=True),
+                _audit,
                 [str(f.get("id") or "").strip() for f in _frozen_review_findings(sb)
                  if str(f.get("id") or "").strip()]))
+            # The coverage table is part of the contract the postcheck enforces:
+            # `postcheck_audit` appends `audit_coverage_problems` to the same
+            # disposition problems, so the pre-flight must run it too. It did
+            # not, and the 2026-11-01 audit's first attempt wrote a 28-of-41
+            # coverage table that this check called clean and the postcheck
+            # then rejected 14 problems on -- the session had no way to see it
+            # before writing the marker ("all requirements verified manually").
+            errs.extend(audit_coverage_problems(_audit))
         if not (sb / "audit" / "AUDIT.md").is_file():
             warns.append("audit/AUDIT.md (the human-readable disposition record) is missing")
         errs.extend(probe_audit_problems(sb))
@@ -5532,6 +5684,17 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
         if not (d.is_dir() and any(d.iterdir())):
             errs.append(f"{pkg}/ is empty: this stage's deliverable is the candidate package it "
                         f"writes there")
+        # The classified TODO inventory is a postcheck ERROR family for EVERY
+        # package-producing stage (`add_stage_quality_checks` runs
+        # `manual_todo_gate` for rewrite, revise and integrate alike): the
+        # 2026-11-01 revise arm was told "the paperwork checks passed" 23 seconds
+        # before the postcheck failed it on thirteen duplicate ids.
+        # `manual_todo_problems` is the gate's read-only half -- it does not
+        # rewrite MANUAL_TODO.csv from a session that is only inspecting a
+        # package.
+        terr, twarn = manual_todo_problems(d)
+        errs.extend(terr)
+        warns.extend(twarn)
         if kind == "revise":
             # The ledger contract: one row per finding id the reviser had to
             # resolve. This is the check that failed every attempt of two real
@@ -5568,6 +5731,14 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
                         "revise", policy=fpol)
                     errs.extend(rerrs)
                     warns.extend(rwarns)
+            # PRE-FLIGHT PARITY, fourth family: the M30 source-hierarchy ledger.
+            # `postcheck_revise` fails a package whose seeded M30 rows carry no
+            # disposition, and the 2026-11-01 revise arm lost its second attempt
+            # to exactly that while this pre-flight said "the paperwork checks
+            # passed". `frozen` is this branch's own frozen list, read above.
+            merr, mwarn = m30_hierarchy_problems(sb, frozen, pkg=pkg)
+            errs.extend(merr)
+            warns.extend(mwarn)
         if kind == "integrate":
             donors = [p.name for p in sorted((sb / "others").iterdir()) if p.is_dir()] \
                 if (sb / "others").is_dir() else []

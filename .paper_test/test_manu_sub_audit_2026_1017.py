@@ -126,9 +126,14 @@ def test_author_to_complete_policy():
               Ctx("/tmp/x", {"author_to_complete": True})) == "document")
     check("a JSON boolean false is off", pp.author_to_complete_of(
         Ctx("/tmp/x", {"author_to_complete": False})) is False)
-    check("the readme rule names the package README, not MANUAL_STEPS",
-          "README-AUTHOR-TO-COMPLETE.md" in pp.placeholder_rule_text("readme")
-          and "MANUAL_STEPS.md" not in pp.placeholder_rule_text("readme"))
+    # The readme rule names MANUAL_STEPS.md ON PURPOSE -- to say the README is the
+    # manual list and that file must not repeat the classified table (the two share
+    # one TODO id space). The invariant is that it does not SEND items there.
+    _readme_rule = " ".join(pp.placeholder_rule_text("readme").split())
+    check("the readme rule names the package README as the manual list",
+          "record it in ONE file in the package root, `README-AUTHOR-TO-COMPLETE.md`"
+          in _readme_rule
+          and "must NOT repeat the table and must NOT reuse a `T-` id" in _readme_rule)
     check("the document rule keeps the marker convention",
           "PIPELINE HAND-OFF PLACEHOLDERS" in pp.placeholder_rule_text("document"))
     check("the off rule sends the item to MANUAL_STEPS",
@@ -185,6 +190,13 @@ def test_author_to_complete_policy():
                                               author_to_complete=mode)}
         all_text = "\n".join(texts.values())
         for idx, row in enumerate(pp.HANDOFF_PROMPT_REWRITES):
+            if row[col] == row[0]:
+                # A no-op row: this mode's wording IS the excerpt's wording (the
+                # revise item 5 already says what `off` wants), so the sentence
+                # must still be there unchanged.
+                check(f"rewrite row {idx} keeps the DOCUMENT wording under {mode}",
+                      row[0] in all_text)
+                continue
             check(f"rewrite row {idx} is replaced under {mode}",
                   row[0] not in all_text and row[col] in all_text)
     j_readme = pp.judge_prompt(Path("/tmp/sb"), "j1", 1, "t", 1, 1, ["a"],

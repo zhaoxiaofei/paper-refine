@@ -177,11 +177,17 @@ def test_mode_destinations():
           in " ".join(doc.split()))
     check("off mode never offers the forbidden marker as the high-priority hand-off",
           "never a `[AUTHOR TO COMPLETE: ...]` placeholder" in off)
+    # The mode may NAME MANUAL_STEPS.md to forbid a second classified table there
+    # (the two files share one TODO id space); what it must never do is SEND the
+    # item to that file as the manual list.
+    readme_flat = " ".join(readme.split())
     check("readme mode sends the low-priority item to the hand-off README",
           "priority is a row in `README-AUTHOR-TO-COMPLETE.md`" in readme
           and "`priority=low` re-verification item to `README-AUTHOR-TO-COMPLETE.md`"
           in readme
-          and "MANUAL_STEPS.md" not in readme)
+          and "record it in ONE file in the package root, `README-AUTHOR-TO-COMPLETE.md`"
+          in readme_flat
+          and "must NOT repeat the table and must NOT reuse a `T-` id" in readme_flat)
     check("the typo rule keeps a high-priority hand-off in every mode",
           "High priority" in doc and "High priority" in off
           and "priority is a row in `README-AUTHOR-TO-COMPLETE.md`" in readme)
