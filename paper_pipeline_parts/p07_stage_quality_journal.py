@@ -429,7 +429,7 @@ def add_stage_quality_checks(ctx: Ctx, rec: dict, before_sources: list, after_so
         evidence_sources=evidence_sources)
     errs.extend(fact_errs)
     warns.extend(fact_warns)
-    todo_errs, todo_warns = manual_todo_gate(pkg)
+    todo_errs, todo_warns = manual_todo_gate(pkg, mode=author_to_complete_mode_of(ctx))
     errs.extend(todo_errs)
     warns.extend(todo_warns)
 AUDIT_VERDICTS = ("confirm", "drop")
@@ -496,6 +496,22 @@ AUDIT_COVERAGE_DISPOSITION_RE = re.compile(
     r".*?\b" + _AUDIT_REDERIVATION_VERB + r"\b.*$)")
 
 
+def _audit_negated_verb(text: str) -> bool:
+    """Whether a negation governs the re-derivation verb in `text`.
+
+    `_AUDIT_NEGATED_VERB_RE` listed only `not/never/cannot/can not/could
+    not/unable to/no longer`, so a true refusal written with a contraction
+    ("wasn't re-derived") or with punctuation between the negation and the verb
+    ("was not, in fact, re-derived") was read as a POSITIVE re-derivation and
+    accepted by the coverage gate (F06). Normalise contractions to their
+    two-word form and the punctuation that separates the negation from the verb
+    to spaces, then apply the same bounded-window match.
+    """
+    probe = re.sub(r"n['\u2019]t\b", " not", str(text or ""), flags=re.I)
+    probe = re.sub(r"[,;:\u2014\u2013]", " ", probe)
+    return bool(_AUDIT_NEGATED_VERB_COMPILED.search(probe))
+
+
 def _audit_disposition_ok(value) -> bool:
     """A real audit coverage disposition (negation- and filler-proof).
 
@@ -522,13 +538,18 @@ def _audit_disposition_ok(value) -> bool:
     m = _AUDIT_CANONICAL_TAIL_RE.search(text)
     if m is not None:
         return _coverage_reason_named(m.group(1))
-    if _AUDIT_VERB_RE.search(text) and not _AUDIT_NEGATED_VERB_COMPILED.search(text):
+    if _AUDIT_VERB_RE.search(text) and not _audit_negated_verb(text):
         return True          # a re-derivation sentence, e.g. "the sweep was re-derived"
     m = _AUDIT_PROSE_UNABLE_RE.search(text)
     if m is not None:
         # "unable to check artwork/text parity" names what could not be
         # checked; "unable to check" alone is the filler shape.
         return len(re.findall(r"[A-Za-z0-9]", m.group(1))) >= 6
+    if _AUDIT_VERB_RE.search(text) and _audit_negated_verb(text):
+        # The coverage regex's negative lookahead only knows the literal
+        # negation spellings; a contraction/punctuated negation reaches here and
+        # must still be REFUSED (F06).
+        return False
     return True              # the gate regex matched some other accepted shape
 
 
@@ -962,12 +983,39 @@ def postcheck_review(ctx: Ctx, rec: dict):
 
 M30_HIERARCHY_REL = "work/M30_hierarchy_reconciliation.md"
 
+# The documented disposition vocabulary: `OK -- <the reconciling reason>`,
+# `contradiction -- <finding id>` or `unable -- <what is missing>` (ASCII dash
+# or the em/en dash the seed's own example uses). An arbitrary non-empty cell
+# ("x") recorded no comparison at all.
+_M30_DISPOSITION_OK_RE = re.compile(
+    r"(?i)^(?:ok|contradiction|unable)\s*(?:--|—|–)\s*\S")
+
+
+def _m30_row_key(row: dict) -> tuple:
+    """The identity of one seeded M30 row (all non-disposition evidence cells).
+
+    Row IDENTITY, not the row count: a candidate copy that keeps one seeded
+    row and drops the other two is not the same ledger, even though the one row
+    it keeps is disposed (F01).
+    """
+    return tuple(re.sub(r"\s+", " ", str(row.get(c) or "")).strip().lower()
+                 for c in ("#", "document", "kind", "number", "unit", "sentence",
+                           "candidate producer"))
+
 
 def _m30_ledger_state(path: Path) -> dict:
-    """{block_problems, actionable, empty} for one M30 ledger file."""
+    """{block_problems, actionable, empty, readable, rows, bad_dispositions}."""
     block_problems = []
     actionable = empty = 0
-    for block in parse_markdown_blocks(path):
+    rows, bad_dispositions = [], []
+    text = read_text_bounded(path)
+    blocks = parse_markdown_blocks(path) if text is not None else []
+    # A zero-byte ledger, an unreadable one, or prose without ONE table is not
+    # "nothing to report": it is missing evidence, and the old all-zero state
+    # silently removed the gate (F02). `readable` carries that fact to the
+    # caller so a copy that cannot be ranked is never accepted as clean.
+    readable = bool(text is not None and blocks)
+    for block in blocks:
         if not block["rows"]:
             continue
         block_problems += disposition_artifact_problems(
@@ -979,10 +1027,55 @@ def _m30_ledger_state(path: Path) -> dict:
             # with a real candidate.
             if producer and not producer.startswith("(no shipped table column"):
                 actionable += 1
-                if not str(row.get("disposition") or "").strip():
+                rows.append(_m30_row_key(row))
+                disposition = str(row.get("disposition") or "").strip()
+                if not disposition:
                     empty += 1
+                elif not _M30_DISPOSITION_OK_RE.match(disposition):
+                    bad_dispositions.append(disposition)
     return {"block_problems": block_problems, "actionable": actionable,
-            "empty": empty}
+            "empty": empty, "readable": readable, "rows": rows,
+            "bad_dispositions": bad_dispositions}
+
+
+def _m30_seed_reference_state(sb: Path) -> tuple:
+    """(row identities, reference_available) from the sandbox's EVIDENCE PACK.
+
+    The seed file is also the documented answer ("dispose every seeded row in
+    place"), so it cannot be its own reference: a session that rewrites the
+    sandbox seed down to one disposed row dropped the other seeded rows with no
+    error (R04). `seed_evidence_pack` writes the scan's own hierarchy rows into
+    `work/CODE_SCANS.json` before the session starts; rebuild the identities
+    through the SAME renderer and parser the seed used, so they match exactly.
+    `reference_available` distinguishes "the pack records no rows" (a clean scan,
+    no comparison owed) from "the pack is missing/unreadable" (the comparison
+    cannot be checked and must be reported).
+    """
+    scans = read_json(Path(sb) / "work" / "CODE_SCANS.json",
+                      revive=False, lenient=True)
+    if not isinstance(scans, dict):
+        return [], False
+    hierarchy = scans.get("hierarchy")
+    rows = hierarchy.get("rows") if isinstance(hierarchy, dict) else None
+    if not isinstance(rows, list):
+        return [], False
+    h_rows = [{"document": r.get("document"), "kind": r.get("kind"),
+               "number": r.get("number"), "unit": r.get("unit") or "",
+               "sentence": (r.get("sentence") or "")[:110],
+               "candidate producer": r.get("candidate producer"),
+               "producer summary": r.get("producer summary"),
+               "seed check": r.get("seed check")}
+              for r in rows if isinstance(r, dict)]
+    text = _evidence_artifact_table(
+        h_rows, ["document", "kind", "number", "unit", "sentence",
+                 "candidate producer", "producer summary", "seed check"], "")
+    out = []
+    for block in _markdown_blocks_from_text(text):
+        for row in block["rows"]:
+            producer = str(row.get("candidate producer") or "").strip()
+            if producer and not producer.startswith("(no shipped table column"):
+                out.append(_m30_row_key(row))
+    return out, True
 
 
 def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
@@ -1062,7 +1155,54 @@ def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
         warns.append(f"{judged} was judged; the sandbox seed {M30_HIERARCHY_REL} is still "
                      f"undisposed ({sandbox_state['empty']} of "
                      f"{sandbox_state['actionable']} row(s) EMPTY)")
+    if not judged_state["readable"]:
+        # A zero-byte, unreadable or table-less ledger is missing EVIDENCE, not
+        # a clean ledger: the old all-zero state returned no error and silently
+        # removed the gate (F02).
+        errs.append(
+            f"{judged} exists but carries no readable M30 table (zero-byte, over the byte "
+            f"budget, a symlink/non-regular file, or no markdown table): the source-hierarchy "
+            f"reconciliation is unverified. Restore the seeded table and dispose every row.")
+        return errs, warns
     actionable, empty = judged_state["actionable"], judged_state["empty"]
+    # ROW IDENTITY: a candidate copy that drops seeded rows cannot pass on the
+    # strength of the one row it kept. The old score compared only
+    # (has actionable rows, empty count), so a one-row package copy with a
+    # filled disposition beat a full seed with three empty rows and the gate
+    # reported nothing (F01). The reference is the seed the EVIDENCE PACK
+    # recorded, not the live seed file -- that file is also the documented answer
+    # ("dispose every seeded row in place"), so a one-row rewrite of it used to
+    # pass the check it was supposed to fail (R04). The live sandbox seed is the
+    # fallback for a sandbox that carries no evidence pack (a unit fixture).
+    judged_keys = set(judged_state["rows"])
+    reference_rows, reference_available = _m30_seed_reference_state(sb)
+    reference_label = "work/CODE_SCANS.json"
+    if not reference_available:
+        if (Path(sb) / "PROMPT.md").is_file():
+            # Every real session sandbox carries PROMPT.md, and the evidence pack
+            # is written beside it. If the pack is gone/unreadable the identity
+            # check CANNOT run: report that instead of silently skipping it (R04).
+            errs.append(
+                f"{judged}: the M30 seed reference work/CODE_SCANS.json is missing, "
+                f"unreadable or carries no hierarchy rows, so the seeded row identities "
+                f"cannot be checked. Restore the evidence pack (or re-run the stage): "
+                f"the identity check is not skipped.")
+            reference_rows = []
+        else:
+            # A unit fixture / legacy sandbox without an evidence pack: fall back
+            # to the live sandbox seed (the pre-R04 behaviour).
+            reference_rows = (sandbox_state["rows"]
+                              if (judged != M30_HIERARCHY_REL and sandbox_state
+                                  and sandbox_state["readable"]) else [])
+            reference_label = M30_HIERARCHY_REL
+    dropped = [k for k in reference_rows if k not in judged_keys]
+    if dropped:
+        errs.append(
+            f"{judged} is missing {len(dropped)} of the {len(reference_rows)} seeded M30 "
+            f"row(s) recorded in {reference_label} that name a candidate producer: "
+            f"{len(dropped)} seeded row(s) were DROPPED instead of disposed. Copy every "
+            f"seeded row into the answer and dispose it in place (`OK -- ...` / "
+            f"`contradiction -- ...` / `unable -- ...`).")
     if actionable and empty == actionable:
         # None of the rows that actually need a comparison was disposed: the
         # check was not run at all, not merely left one row short. Fail the
@@ -1074,15 +1214,26 @@ def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
             f"producer it reconciled against (rule E12). Dispose every such row in place -- "
             f"`OK -- <the reconciling reason>`, `contradiction -- <finding id>` or "
             f"`unable -- <what is missing>` -- in the ledger you were given.")
-    elif empty or judged_state["block_problems"]:
+    else:
+        # EVERY block problem is now an ERROR, not a warning: an empty or
+        # boilerplate disposition recorded no comparison, and the gate exists to
+        # enforce exactly that (F03). The old code downgraded boilerplate to a
+        # warning and never looked at an arbitrary non-empty cell at all.
         detail = "; ".join(str(p) for p in judged_state["block_problems"][:3])
-        if empty:
-            warns.append(f"{judged}: {empty} of {actionable} actionably seeded row(s) still have "
-                         f"an EMPTY disposition cell; dispose every row whose candidate-producer "
-                         f"column names a producer (rule E12)"
-                         + (f" -- {detail}" if detail else ""))
-        else:
-            warns.append(f"{judged}: {detail}")
+        if judged_state["block_problems"]:
+            more = len(judged_state["block_problems"]) - 3
+            errs.append(
+                f"{judged}: {len(judged_state['block_problems'])} disposition problem(s) -- "
+                f"{detail}" + (f" (and {more} more)" if more > 0 else "")
+                + ". Every seeded row needs its own disposition: `OK -- <the reconciling "
+                  "reason>`, `contradiction -- <finding id>` or `unable -- <what is missing>`.")
+        if judged_state["bad_dispositions"]:
+            quotes = "; ".join(repr(x[:80]) for x in judged_state["bad_dispositions"][:3])
+            errs.append(
+                f"{judged}: {len(judged_state['bad_dispositions'])} non-empty disposition "
+                f"cell(s) do not use the documented shape ({quotes}): an arbitrary value is "
+                f"not a recorded comparison. Use `OK -- ...`, `contradiction -- ...` or "
+                f"`unable -- ...`.")
     return errs, warns
 
 
@@ -1102,10 +1253,14 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     if not (rev.is_dir() and any(rev.iterdir())):
         errs.append("revised/ is missing or empty (a non-empty revised/ is required, though it is "
                     "not by itself a completion signal)")
-    if count_manual_steps(rev / "MANUAL_STEPS.md") is None \
-            and count_manual_steps(sb / "MANUAL_STEPS.md") is None:
-        warns.append("MANUAL_STEPS.md not found under revised/ (the decision report will show the "
-                     "manual-item count as unknown; the count is reported only and never ranked)")
+    # Under `readme` (the default) the manual list is the README, not
+    # MANUAL_STEPS.md: counting only the latter reported a correct readme-mode
+    # package's item count as unknown (F21).
+    _manual_rel = handoff_target(author_to_complete_mode_of(ctx))
+    if count_manual_steps(rev / _manual_rel) is None \
+            and count_manual_steps(sb / _manual_rel) is None:
+        warns.append(f"{_manual_rel} not found under revised/ (the decision report will show the "
+                     f"manual-item count as unknown; the count is reported only and never ranked)")
     # The revision ledger is the deliverable that proves "no finding silently
     # dropped": require the machine-readable one, and ask for a human-readable
     # counterpart.
@@ -1150,11 +1305,13 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # artifacts (E11): the convention re-run for M26, and one RESTRUCTURE note
     # per J5 scope. Absence is reported here; the ledger and the residue gate
     # carry the final judgement.
-    frozen_all = _frozen_review_findings(sb)
-    aud = read_json(sb / "audit" / "audit.json", revive=False, lenient=True) \
-        if (sb / "audit" / "audit.json").is_file() else None
-    if isinstance(aud, dict):
-        frozen_all = frozen_all + [f for f in (aud.get("adds") or []) if isinstance(f, dict)]
+    # THE AUDITED LIST, exactly as the pre-flight and `consumed_findings` read
+    # it: the frozen review minus the auditor's DROPS plus its adds. Reading
+    # `_frozen_review_findings` here and only appending the adds kept an
+    # auditor-dropped M30/M26/J5 finding alive for this postcheck, so a drop
+    # could force an artifact for a finding nobody had to act on and the
+    # session's own pre-flight disagreed with the gate (F05).
+    frozen_all = findings_from_sandbox(sb, sandbox_audit_record(sb))
     checks_in = {str(f.get("check") or "").strip().upper() for f in frozen_all}
     if "M26" in checks_in:
         style = rev / "work"
@@ -1410,6 +1567,16 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
         warns.append(f"{INTEGRATED_DIR}/revision_report.json not found (the revision skill's "
                      f"machine-readable ledger; the integration stage's own ledger is "
                      f"{INTEGRATION_LEDGER_REL})")
+    # M30 (source-hierarchy reconciliation): the same ledger the revise arm is
+    # gated on is seeded into THIS sandbox and the stage prompt orders every row
+    # disposed, but only `postcheck_revise` read it -- a rewrite/integration
+    # could leave every seeded row untouched and pass (F04). The round's frozen
+    # list is read from the run root because this sandbox carries no
+    # guided_review/ copy.
+    _m30_errs, _m30_warns = m30_hierarchy_problems(
+        sb, round_consumed_findings(ctx, rec.get("round")), pkg=INTEGRATED_DIR)
+    errs.extend(_m30_errs)
+    warns.extend(_m30_warns)
     # Every donor must be visible in the ledger: a donor the agent never looked
     # at is the failure mode this stage exists to prevent, and the ledger row is
     # the evidence that it was read. Reported as a warning (the ledger is prose,
@@ -1589,11 +1756,21 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     elif not (sb / REWRITE_REPORT_REL).stat().st_size:
         errs.append(f"{REWRITE_REPORT_REL} is EMPTY (structured output): write the organization "
                     f"map, the deliberately-unchanged list and the problems the rewrite surfaced")
-    if count_manual_steps(out / "MANUAL_STEPS.md") is None \
-            and count_manual_steps(sb / "MANUAL_STEPS.md") is None:
-        warns.append(f"MANUAL_STEPS.md not found under {REWRITTEN_DIR}/ (the decision report will "
+    # The mode's own manual-list file (readme by default), not always
+    # MANUAL_STEPS.md (F21).
+    _manual_rel = handoff_target(author_to_complete_mode_of(ctx))
+    if count_manual_steps(out / _manual_rel) is None \
+            and count_manual_steps(sb / _manual_rel) is None:
+        warns.append(f"{_manual_rel} not found under {REWRITTEN_DIR}/ (the decision report will "
                      f"show the manual-item count as unknown; the count is reported only and never "
                      f"ranked)")
+    # M30: seeded into this sandbox and ordered by the stage prompt, but only the
+    # revise postcheck gated it (F04). The round's frozen list lives in the run
+    # root; this sandbox carries no guided_review/ copy.
+    _m30_errs, _m30_warns = m30_hierarchy_problems(
+        sb, round_consumed_findings(ctx, rec.get("round")), pkg=REWRITTEN_DIR)
+    errs.extend(_m30_errs)
+    warns.extend(_m30_warns)
     summ = rec.get("summary") or {}
     for key in ("critical_remaining", "writing_remaining", "manual_items"):
         if not is_int(summ.get(key)):
@@ -2823,7 +3000,10 @@ def _stage_original_submission(ctx: Ctx, sb: Path) -> dict:
     # canonical `non_revised/human_review_feedback/` link.
     make_tree_readonly(root)
     info["present"] = True
-    (sb / "feedback" / "ORIGINAL_SUBMISSION.md").write_text(
+    # The feedback/ tree is agent-writable and this materializer runs again on a
+    # retry: an atomic replace never writes through a planted symlink (F28).
+    write_text_atomic(
+        sb / "feedback" / "ORIGINAL_SUBMISSION.md",
         "# original_submission/ -- the reviewer-visible manuscript (EVIDENCE)\n\n"
         "This directory is the manuscript version the editors/reviewers of the\n"
         "PREVIOUS journal actually saw. It is NOT the current submission: `base/`\n"
@@ -2833,8 +3013,7 @@ def _stage_original_submission(ctx: Ctx, sb: Path) -> dict:
         "a concern. Never edit or copy its text into a candidate package, never\n"
         "sweep, count or quote it as the authors' current prose, and never give a\n"
         "`to-fix` concern a location that exists only in `original_submission/`.\n"
-        f"\nFiles ({len(info['files'])}): " + ", ".join(sorted(info["files"])) + "\n",
-        encoding="utf-8")
+        f"\nFiles ({len(info['files'])}): " + ", ".join(sorted(info["files"])) + "\n")
     return info
 
 
@@ -2944,7 +3123,9 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
         shutil.copy2(path, dest)
         text, note = feedback_text_of(path)
         if text.strip():
-            (parent / "text" / (safe + ".txt")).write_text(text, encoding="utf-8")
+            # Agent-writable retry target: atomic replace, never a write
+            # through a planted symlink (F28).
+            write_text_atomic(parent / "text" / (safe + ".txt"), text)
             if origin != "previous":
                 for row in seed_concern_candidates(text):
                     seed.append(dict(row, source=label, origin=origin))
@@ -2959,8 +3140,8 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
                        "journal_from": str((ctx.cfg or {}).get("journal_feedback_from") or ""),
                        "target_journal": str((ctx.cfg or {}).get("journal") or "")})
     if unparsed:
-        (sb / "feedback" / "unparsed.txt").write_text("\n".join(unparsed) + "\n",
-                                                      encoding="utf-8")
+        write_text_atomic(sb / "feedback" / "unparsed.txt",
+                          "\n".join(unparsed) + "\n")
     return seed
 
 
@@ -4190,12 +4371,18 @@ def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
             continue
         ext = p.suffix.lower()
         if ext == ".docx":
-            paras = _docx_paragraphs(p)
+            # A Word STYLE heading carries the same structural role the text
+            # path strips from `#`/`\section{}`: the text path's
+            # `_content_paragraph_rows` drops it, so the DOCX path must too, or
+            # a heading edit is reported as added/removed prose (F70).
+            paras = _docx_paragraphs_with_styles(p)
             if paras is None:
                 if skipped is not None:
                     skipped.append(rel)
                 continue
-            for index, text in enumerate(paras, 1):
+            for index, (text, style) in enumerate(paras, 1):
+                if re.match(r"(?i)^heading\s*\d*$", str(style or "").strip()):
+                    continue
                 para = _deleted_para_norm(text)
                 if len(para) >= _CONTENT_UNIT_MIN_CHARS \
                         and not _DELETED_PARA_SKIP_RE.match(para):
@@ -5466,8 +5653,14 @@ STAGE_DELIVERABLES = {
                  "expected": (JOURNAL_CONCERNS_MD_REL,)},
     "concerns": {"required": (JOURNAL_CONCERNS_JSON_REL,),
                  "expected": (JOURNAL_CONCERNS_MD_REL,)},
-    "response": {"required": (JOURNAL_RESPONSE_MAP_REL,),
-                 "expected": (JOURNAL_RESPONSE_MD_REL,)},
+    # BOTH response deliverables are REQUIRED: the letter IS the mode's
+    # deliverable, and `postcheck_response`/the pre-flight already fail an
+    # attempt without it. Listing it as EXPECTED made the table claim a warning
+    # where the gate errors, and `rescue_misplaced_deliverable` (which only
+    # adopts REQUIRED entries) would not move a letter written at the sandbox
+    # root (F11).
+    "response": {"required": (JOURNAL_RESPONSE_MAP_REL, JOURNAL_RESPONSE_MD_REL),
+                 "expected": ()},
     "rewrite": {"required": (REWRITE_REPORT_REL,),
                 "expected": (f"{REWRITTEN_DIR}/VISUAL_CHECK.md",
                              f"{REWRITTEN_DIR}/MANUAL_STEPS.md")},
@@ -5501,6 +5694,27 @@ def _prompt_rewrite_level(sb: Path) -> str:
     text = text[:20000]
     m = re.search(r"THIS ARM'S LEVEL:\s*(structural|sentence)", text, re.IGNORECASE)
     return m.group(1).lower() if m else ""
+
+
+def _sandbox_handoff_mode(sb: Path) -> str:
+    """The author-to-complete policy THIS sandbox's prompt states.
+
+    The pre-flight is deliberately root-free (`selfcheck` needs no --root), so it
+    cannot read `pipeline_config.json` the way the postcheck's
+    `author_to_complete_mode_of(ctx)` does. Every stage prompt carries the
+    policy's own block verbatim (`--author-to-complete readme` / `off`, or the
+    document-mode placeholder rule), so the pre-flight reads the rule back from
+    the sandbox. A sandbox with no readable prompt (a unit fixture, an old root)
+    gets the documented default, `readme`.
+    """
+    text = read_text_bounded(Path(sb) / PROMPT_FILE) or ""
+    if "--author-to-complete off" in text:
+        return "off"
+    if "--author-to-complete readme" in text:
+        return "readme"
+    if "PIPELINE HAND-OFF PLACEHOLDERS" in text:
+        return "document"
+    return DEFAULT_AUTHOR_TO_COMPLETE
 
 
 def _usable_deliverable(p: Path) -> bool:
@@ -5650,9 +5864,17 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
     for rel in table.get("required", ()):
         if not (sb / rel).is_file():
             errs.append(f"{rel} is missing (the postcheck fails an attempt without it)")
+    # The manual list is the POLICY's file, not always MANUAL_STEPS.md (R01):
+    # under `readme` (the default) C10/F16 rewrite the prompt to the README and
+    # a compliant package carries no MANUAL_STEPS.md, which the postchecks
+    # already accept (F21). The expectation must name the same file.
+    _handoff_rel = handoff_target(_sandbox_handoff_mode(sb))
     for rel in table.get("expected", ()):
-        if not (sb / rel).is_file():
-            warns.append(f"{rel} is missing (reported by the postcheck as a warning)")
+        expected = rel
+        if Path(rel).name == "MANUAL_STEPS.md":
+            expected = (Path(rel).parent / _handoff_rel).as_posix()
+        if not (sb / expected).is_file():
+            warns.append(f"{expected} is missing (reported by the postcheck as a warning)")
     # 3. any structured output that EXISTS must parse (the postcheck's own parse
     #    gate: a truncated sheet must never be reported as complete).
     for rel, p in structured_output_files(sb, {"kind": kind}):

@@ -265,8 +265,14 @@ def test_d3b_prompt_contract() -> None:
 
     P = Path("/tmp/x")
     revise = pp.revise_prompt(P, "r1_a2_revise", 1)
+    # The old excerpt says "report them in ...", not "record them in ...": the
+    # check pinned a string that never existed, so deleting the rewrite row
+    # would not have failed it (the 2026-11-02 verify pass's F53).
     check("D3b the revise prompt's item 5 no longer sends items to MANUAL_STEPS.md "
-          "as the manual list", "record them in revised/MANUAL_STEPS.md" not in revise)
+          "as the manual list", "report them in revised/MANUAL_STEPS.md" not in revise)
+    check("D3b the revise prompt's item 5 names the README's classified table",
+          "README-AUTHOR-TO-COMPLETE.md" in revise
+          and "classified TODO table" in revise)
     check("D3b the revise prompt carries the one-row/one-file rule",
           "TODO item ID" in revise and "ONE ID SPACE" in revise)
 

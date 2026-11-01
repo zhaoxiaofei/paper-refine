@@ -257,7 +257,13 @@ def pipeline_fallback_paths() -> list:
         return []
     if not isinstance(state, dict):
         return []
-    recorded = state.get("pipeline") or {}
+    # The VALUE is agent/legacy-written too: a string, list or number where the
+    # mapping belongs made `.get` raise AttributeError out of a function whose
+    # docstring (and caller) promise that a prompt never fails to render
+    # because a state file is corrupt (F14).
+    recorded = state.get("pipeline")
+    if not isinstance(recorded, dict):
+        return []
     origin = recorded.get("path")
     if not (isinstance(origin, str) and origin.strip()):
         return []

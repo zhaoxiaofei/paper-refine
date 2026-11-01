@@ -1599,6 +1599,32 @@ def _coerce_text(s) -> str:
     return str(s)
 
 
+def _read_stream_capped(stream, cap: int) -> tuple:
+    """(kept text, total characters read) for one agent pipe.
+
+    The overflow is DISCARDED as it arrives (the child is not blocked on a full
+    pipe) and the caller is told the total so it can record the truncation. The
+    agent's stdout/stderr used to be buffered whole by `communicate()`, so a
+    verbose or looping agent could OOM the orchestrator or fill the root's disk
+    with its transcript (F39).
+    """
+    kept, size = [], 0
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            if size < cap:
+                kept.append(chunk[:cap - size])
+            size += len(chunk)
+    except (OSError, ValueError):
+        pass
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            stream.close()
+    return "".join(kept), size
+
+
 def _terminate_agent_tree(proc: subprocess.Popen) -> None:
     """Kill an agent session's WHOLE process group (see _execute_attempt_in).
 
@@ -1655,8 +1681,15 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     moving the stage attempt's completion marker aside: the repair edits the
     deliverables the postcheck reads, and that marker is one of them.
     """
-    prompt = (sb / prompt_name).read_text(encoding="utf-8")
+    # The prompt lives in the AGENT-WRITABLE sandbox and is read at attempt
+    # start: an unbounded `read_text()` on a planted huge file OOMed the
+    # orchestrator and a FIFO blocked it before the agent launched (F38).
     logf = sb / log_name
+    prompt = read_text_bounded(sb / prompt_name)
+    if prompt is None:
+        return {"rc": None, "dur": 0.0, "log": str(logf), "failure_kind": "",
+                "error": (f"{prompt_name} could not be read (a symlink/non-regular file, "
+                          f"unreadable, or over the byte budget); the attempt was not launched")}
     if archive_marker:
         # A previous attempt's marker must never be mistaken for this attempt's result.
         archive_stale_marker(sb, rec["id"])
@@ -1668,6 +1701,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     started_at = utcnow()
     rec["last_attempt_started"] = started_at
     rc, out, err, exc = None, "", "", None
+    truncation = ""
     try:
         # Popen + a process GROUP, not subprocess.run: a timeout must kill the
         # agent's descendants too (see _terminate_agent_tree).
@@ -1687,22 +1721,54 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         proc = None
         rc, exc = None, f"execution error: {e}"
     if proc is not None:
+        # Stream both pipes through capped readers instead of `communicate()`:
+        # the whole transcript used to be held in memory before it was appended
+        # to _agent.log (F39).
+        captured = {}
+        readers = []
+
+        def _feed():
+            try:
+                if prompt:
+                    proc.stdin.write(prompt)
+                proc.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+
+        feeder = threading.Thread(target=_feed, daemon=True)
+        feeder.start()
+        readers.append(feeder)
+        for key, stream in (("out", proc.stdout), ("err", proc.stderr)):
+            def _pump(stream=stream, key=key):
+                captured[key] = _read_stream_capped(stream, MAX_TOOL_OUTPUT_BYTES)
+            reader = threading.Thread(target=_pump, daemon=True)
+            reader.start()
+            readers.append(reader)
         try:
-            out, err = proc.communicate(input=prompt, timeout=(timeout or None))
-            rc, exc = proc.returncode, None
-        except subprocess.TimeoutExpired as e:
+            rc, exc = proc.wait(timeout=(timeout or None)), None
+        except subprocess.TimeoutExpired:
             _terminate_agent_tree(proc)
             rc, exc = None, f"TIMEOUT after {timeout}s"
-            out, err = _coerce_text(e.stdout), _coerce_text(e.stderr)
         except Exception as e:  # noqa: BLE001
             _terminate_agent_tree(proc)
             rc, exc = None, f"execution error: {e}"
-        out, err = _coerce_text(out), _coerce_text(err)
+        for reader in readers:
+            reader.join(15)
+        out, out_total = captured.get("out", ("", 0))
+        err, err_total = captured.get("err", ("", 0))
+        dropped = []
+        if out_total > len(out):
+            dropped.append(f"stdout {out_total} chars -> {len(out)}")
+        if err_total > len(err):
+            dropped.append(f"stderr {err_total} chars -> {len(err)}")
+        if dropped:
+            truncation = ("\n[OUTPUT TRUNCATED at " + f"{MAX_TOOL_OUTPUT_BYTES} chars per "
+                          f"stream: " + ", ".join(dropped) + "]\n")
     dur = time.time() - t0
     try:
         append_text_no_follow(logf,
                               f"\n===== attempt {next_attempt_number(rec)} start {started_at} =====\n"
-                              f"cmd: {' '.join(cmd)}\n--- stdout ---\n{out}\n--- stderr ---\n{err}\n"
+                              f"cmd: {' '.join(cmd)}{truncation}\n--- stdout ---\n{out}\n--- stderr ---\n{err}\n"
                               f"===== rc={rc} dur={dur:.1f}s error={exc} =====\n")
     except OSError:
         pass

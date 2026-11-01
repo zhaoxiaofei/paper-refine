@@ -3849,13 +3849,26 @@ AUTHOR_TO_COMPLETE_MANAGED_END = "<!-- end pipeline-managed author-to-complete r
 
 
 def _atc_mode(value=None) -> str:
-    """Normalise a policy value (mode string, bool or None) to a mode."""
+    """Normalise a policy value (mode string, bool or None) to a mode.
+
+    An unknown value is an ERROR, like every other mode validator
+    (`journal_mode_of`, `dedup_mode_of`): the legacy `on` value was REMOVED and
+    no compatibility aliases are kept (README, "Backward-compatibility
+    removals (2026-10-25)"). Mapping it -- or a typo -- silently to `readme`
+    changed an old root's hand-off policy without telling anyone: markers that
+    were legitimate under `on` (`document`) started failing the stage, and a
+    typo in a new root was never reported.
+    """
     if isinstance(value, bool):
         return "document" if value else "off"
     s = str(value or "").strip().lower()
+    if not s:
+        return DEFAULT_AUTHOR_TO_COMPLETE
     if s in AUTHOR_TO_COMPLETE_MODES:
         return s
-    return DEFAULT_AUTHOR_TO_COMPLETE
+    die(f"author_to_complete records {value!r}, which is not one of "
+        f"{', '.join(AUTHOR_TO_COMPLETE_MODES)}; the legacy `on` value and its "
+        f"aliases were removed (see README, backward-compatibility removals)")
 
 
 def handoff_target(mode=None) -> str:
@@ -3900,6 +3913,57 @@ def _handoff_items_from_manual_steps(text: str) -> list:
     return out
 
 
+def _merge_manual_todo_rows(text: str, rows: list) -> str:
+    """Append classified rows to the classified TODO table in `text`.
+
+    One table, not a second one: the readme rule names the README's table as
+    THE classified inventory, so new rows are inserted after the existing
+    table's last data row. When the text carries no table yet, one is written.
+    """
+    rendered = manual_todo_markdown_table(rows).splitlines()[2:]
+    lines = str(text or "").splitlines()
+    header_at = None
+    for i in range(max(0, len(lines) - 1)):
+        if "|" not in lines[i] or not _manual_header_columns(_manual_md_cells(lines[i])):
+            continue
+        if _manual_md_separator(lines[i + 1]):
+            header_at = i
+    if header_at is None:
+        return str(text or "").rstrip("\n") + "\n\n" + manual_todo_markdown_table(rows)
+    j = header_at + 2
+    while j < len(lines) and lines[j].strip().startswith("|"):
+        j += 1
+    lines[j:j] = rendered
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _drop_manual_todo_rows(text: str, ids: set) -> str:
+    """Remove every classified TODO row whose item id is in `ids`.
+
+    The re-publication merge keeps the stage's CURRENT row in place of the
+    sibling's stale row with the same T-id, so the two files cannot disagree and
+    no id appears twice (R03). Tables that carry no such id are untouched.
+    """
+    lines = str(text or "").splitlines()
+    out, i = [], 0
+    while i < len(lines):
+        header = _manual_md_cells(lines[i]) if "|" in lines[i] else []
+        idx = _manual_header_columns(header) if header else {}
+        if not idx or i + 1 >= len(lines) or not _manual_md_separator(lines[i + 1]):
+            out.append(lines[i])
+            i += 1
+            continue
+        out.extend(lines[i:i + 2])
+        i += 2
+        while i < len(lines) and "|" in lines[i] and not _manual_md_separator(lines[i]):
+            cells = _manual_md_cells(lines[i])
+            ident = cells[idx["id"]].strip() if len(cells) > idx["id"] else ""
+            if ident not in ids:
+                out.append(lines[i])
+            i += 1
+    return ("\n".join(out).rstrip("\n") + "\n") if out else ""
+
+
 def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
                           rec: dict = None) -> dict:
     """Materialize the author hand-off README from a stage's MANUAL_STEPS.md.
@@ -3932,22 +3996,48 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
     target = pkg_dir / AUTHOR_TO_COMPLETE_README
     existing = ""
     if target.is_file():
-        try:
-            existing = target.read_text("utf-8", "replace")
-        except OSError:
-            existing = ""
+        # Agent-written README: the shared bounded/no-follow reader. A raw
+        # `read_text()` loaded a runaway checklist whole (F30).
+        existing = read_text_bounded(target)
+        if existing is None:
+            raise RuntimeError(
+                f"{AUTHOR_TO_COMPLETE_README} could not be read (it is a symlink/non-regular "
+                f"file, unreadable, or over the byte budget); the hand-off item cannot be "
+                f"merged into it")
+    existing_rows, _row_problems = manual_todo_rows_from_text(existing)
     known = {re.sub(r"\s+", " ", re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", ln)).strip().lower()
              for ln in existing.splitlines()
              if re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", ln)}
+    # A classified TABLE row is the author-facing form of the same item: the
+    # duplicate check used to see bullets only, so the same item was appended
+    # again as a bullet beside its own row and counted twice (F64).
+    for row in existing_rows:
+        desc = re.sub(r"\s+", " ", str(row.get("description") or "")).strip().lower()
+        if desc:
+            known.add(desc)
     new = [it for it in items if it.lower() not in known]
     if not new:
         return {}
+    # The fallback must produce the SAME classified inventory the readme rule
+    # requires, not a prose bullet: one four-column row per item, in the ONE
+    # table, with a T-id that does not collide with the rows already there
+    # (F20).
+    used = [int(m.group(1)) for m in re.finditer(r"\bT-(\d+)\b", existing)]
+    next_n = max(used, default=0) + 1
+    classified = []
+    for offset, it in enumerate(new):
+        classified.append({
+            MANUAL_TODO_COLUMNS[0]: f"T-{next_n + offset:03d}",
+            MANUAL_TODO_COLUMNS[1]: "major",
+            MANUAL_TODO_COLUMNS[2]: MANUAL_ACTIONS[2],
+            MANUAL_TODO_COLUMNS[3]: it,
+        })
     if not existing.strip():
         existing = AUTHOR_TO_COMPLETE_README_HEADER
     elif not existing.endswith("\n"):
         existing += "\n"
-    block = "".join(f"- {it}\n" for it in new)
-    write_text_atomic(target, existing + block)
+    existing = _merge_manual_todo_rows(existing, classified)
+    write_text_atomic(target, existing)
     note = (f"the stage did not write {AUTHOR_TO_COMPLETE_README}; {len(new)} hand-off "
             f"item(s) were moved there from MANUAL_STEPS.md (the marker text is removed, "
             f"the surrounding instruction is kept)")
@@ -4130,10 +4220,14 @@ def manual_todo_rows(pkg_dir: Path) -> tuple:
         path = pkg / name
         if not path.is_file():
             continue
-        try:
-            text = path.read_text("utf-8", "replace")
-        except OSError as e:
-            problems.append(f"{name}: unreadable ({type(e).__name__}: {e})")
+        # Agent-written hand-off file: the shared regular-file/no-follow/byte
+        # budget reader, like `count_manual_steps` one function away. A raw
+        # `read_text()` allocated a runaway file whole (or blocked on a FIFO)
+        # while the documented cap applied to JSON only (F29).
+        text = read_text_bounded(path)
+        if text is None:
+            problems.append(f"{name}: unreadable (a symlink/non-regular file, unreadable, "
+                            f"or over the shared byte budget)")
             continue
         file_rows, file_problems = manual_todo_rows_from_text(text)
         if file_rows or _manual_has_table(text) or any("classified TODO" in p for p in file_problems):
@@ -4170,7 +4264,7 @@ def _manual_csv_matches(path: Path, rows: list) -> bool:
     return got == expected
 
 
-def manual_todo_gate(pkg_dir: Path, write: bool = True) -> tuple:
+def manual_todo_gate(pkg_dir: Path, write: bool = True, mode: str = None) -> tuple:
     """(errors, warnings): write/refresh MANUAL_TODO.csv from the classified table.
 
     The markdown is authoritative. A classified table with invalid rows is a
@@ -4178,6 +4272,17 @@ def manual_todo_gate(pkg_dir: Path, write: bool = True) -> tuple:
     NAMED warning (the author still has work to do; the stage should add the
     table). The CSV is written next to the manual list and is bookkeeping, so it
     never enters the corpus, judge view, pin or published directory.
+
+    `mode` is the author-to-complete policy. Under `readme` the README table is
+    the ONLY classified author checklist: a MANUAL_STEPS.md table beside it is
+    still parsed (the two files share one id space, so a duplicate id is
+    detected) but it cannot stand in for the missing README table -- that made
+    the old table pass and the author checklist the readme policy promises
+    never get produced (F18). `None` means "the caller did not say"; the mode is
+    then read from the enclosing run root's `pipeline_config.json`, so the
+    postcheck, the publication gate and the session's own pre-flight all apply
+    the same rule. A package outside a run root (a unit fixture) stays
+    policy-free and keeps the old permissive behaviour.
 
     `write=False` is the READ-ONLY half, for a session's pre-flight
     (`sandbox_selfcheck`): the same parse and the same ERRORS, but the stale CSV
@@ -4231,6 +4336,28 @@ def manual_todo_gate(pkg_dir: Path, write: bool = True) -> tuple:
                          f"markdown TODO table; the markdown is the source and must carry the "
                          f"same four columns{removed}")
         return errs, warns
+    # THE POLICY'S OWN FILE MUST CARRY THE TABLE. `sources` names the files that
+    # actually have one; a table only in MANUAL_STEPS.md passes the parse but is
+    # not the author checklist under `readme`.
+    effective_mode = mode
+    if effective_mode is None:
+        root = _enclosing_run_root(pkg)
+        if root is not None:
+            cfg = read_json(root / "pipeline_config.json", revive=False, lenient=True)
+            # A run root without the key resolves to the same documented default
+            # `author_to_complete_mode_of` reads (`readme`). Treating a missing
+            # key as "no policy" made the root-free pre-flight permissive while
+            # the postcheck enforced the default on the very same package (R02).
+            effective_mode = (_atc_mode((cfg or {}).get("author_to_complete"))
+                              if isinstance(cfg, dict) else DEFAULT_AUTHOR_TO_COMPLETE)
+    if effective_mode is not None:
+        target = handoff_target(effective_mode)
+        if target not in sources:
+            errs.append(
+                f"{pkg.name}: author_to_complete is {_atc_mode(effective_mode)!r}, so the "
+                f"classified TODO table belongs in `{target}`, but that file carries none "
+                f"(found in: {', '.join(sources)}); the readme policy's author checklist "
+                f"cannot be replaced by a MANUAL_STEPS.md table")
     rows_by_source = Counter(r.get("source") for r in rows)
     for path in files:
         n = int(count_manual_steps(path) or 0)
@@ -4258,12 +4385,13 @@ def manual_todo_gate(pkg_dir: Path, write: bool = True) -> tuple:
     return errs, warns
 
 
-def manual_todo_problems(pkg_dir: Path) -> tuple:
+def manual_todo_problems(pkg_dir: Path, mode: str = None) -> tuple:
     """(errors, warnings) for a package's manual list, writing nothing.
 
-    The pre-flight face of `manual_todo_gate`: same parse, same errors.
+    The pre-flight face of `manual_todo_gate`: same parse, same errors (and the
+    same `mode` policy, so the pre-flight cannot preview a different verdict).
     """
-    return manual_todo_gate(pkg_dir, write=False)
+    return manual_todo_gate(pkg_dir, write=False, mode=mode)
 
 
 def manual_todo_row_dicts(rows: list) -> list:
@@ -4396,7 +4524,18 @@ def _handoff_marker_occurrences(root: Path, problems: list = None) -> list:
                 _txt = _pdf_text(p)
                 blocks = _txt.splitlines() if _txt else []
             elif ext in (".md", ".txt", ".tex", ".ltx", ".rtf", ".html", ".htm"):
-                blocks = p.read_text("utf-8", "replace").splitlines()
+                # Agent-written package source: bounded/no-follow. A raw
+                # `read_text()` loaded a runaway file whole (F62).
+                _text = read_text_bounded(p)
+                if _text is None:
+                    if problems is not None:
+                        problems.append({
+                            "file": rel,
+                            "problem": "unreadable (symlink/non-regular file, unreadable, or "
+                                       "over the byte budget); its hand-off markers were not "
+                                       "scanned"})
+                    continue
+                blocks = _text.splitlines()
             elif ext == ".doc":
                 if problems is not None:
                     problems.append({
@@ -4421,7 +4560,8 @@ def _handoff_marker_occurrences(root: Path, problems: list = None) -> list:
 
 def write_published_handoff_readme(root: Path, open_items: dict = None,
                                    residuals: dict = None,
-                                   target_path: Path = None) -> dict:
+                                   target_path: Path = None,
+                                   existing_from: Path = None) -> dict:
     """Write the author checklist for a published package.
 
     The stage prompts ask a revision session to write the README. A package
@@ -4474,13 +4614,36 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     if not target.is_file() and not rows and not problems:
         return {}
     existing = ""
+    stage_text = ""
     if target.is_file():
-        try:
-            existing = target.read_text("utf-8", "replace")
-        except OSError as e:
-            return {"error": f"could not read the existing checklist ({type(e).__name__}: {e})",
+        # Agent-written checklist: bounded/no-follow (F63).
+        existing = read_text_bounded(target)
+        if existing is None:
+            return {"error": ("could not read the existing checklist (it is a symlink/"
+                              "non-regular file, unreadable, or over the byte budget)"),
                     "problems": problems}
+        # RE-PUBLICATION: the sibling from an earlier publish already exists, and
+        # the stage checklist now carries the CURRENT rows. Read it too; the
+        # merge below replaces a stale same-T-id row and appends a new one, so
+        # the two files cannot disagree after a repaired decide (R03).
+        if existing_from is not None and Path(existing_from).is_file():
+            stage_text = read_text_bounded(Path(existing_from)) or ""
+    elif existing_from is not None and Path(existing_from).is_file():
+        # The published corpus still carries the stage-written checklist (it is
+        # part of the pinned bytes), and the publisher writes ONE authoritative
+        # sibling. Start the sibling from the stage's rows so the two cannot
+        # disagree about what the author owes (F68).
+        existing = read_text_bounded(Path(existing_from)) or ""
     external, _managed_rows, had_block = _split_managed_handoff_readme(existing)
+    if stage_text:
+        stage_rows, _stage_problems = manual_todo_rows_from_text(stage_text)
+        if stage_rows:
+            stage_ids = {str(r.get("id") or "").strip() for r in stage_rows}
+            if external.strip():
+                external = _drop_manual_todo_rows(external, stage_ids)
+                external = _merge_manual_todo_rows(external, stage_rows)
+            else:
+                external = stage_text
     header = AUTHOR_TO_COMPLETE_README_HEADER.strip()
     # A stage-authored checklist has the standard header but no managed-block
     # markers. Its bullets are author work, not a disposable generated block:
@@ -4500,6 +4663,20 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     if not base:
         base = AUTHOR_TO_COMPLETE_README_HEADER.strip()
     base = re.sub(r"\n{3,}", "\n\n", base)
+    # The publisher's managed block must carry the SAME classified inventory
+    # the readme rule promises the author: one four-column row per item (with a
+    # T-id that does not collide with the author's own rows), not a bullet list
+    # (F61). The description keeps the ledger/marker text, so no item is
+    # invented and none is lost.
+    used = [int(m.group(1)) for m in re.finditer(
+        r"\bT-(\d+)\b", existing + ("\n" + stage_text if stage_text else ""))]
+    next_n = max(used, default=0) + 1
+    managed_rows = [{
+        MANUAL_TODO_COLUMNS[0]: f"T-{next_n + i:03d}",
+        MANUAL_TODO_COLUMNS[1]: "major",
+        MANUAL_TODO_COLUMNS[2]: MANUAL_ACTIONS[2],
+        MANUAL_TODO_COLUMNS[3]: row,
+    } for i, row in enumerate(managed_now)]
     result = {"path": (target.name if target.parent == root else str(target)),
               "items": len(managed_now),
               "external_items": len(external_rows),
@@ -4517,8 +4694,8 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
         return {}
     pieces = [base]
     if managed_now:
-        pieces.append(AUTHOR_TO_COMPLETE_MANAGED_BEGIN + "\n"
-                      + "".join(f"- {row}\n" for row in managed_now)
+        table = manual_todo_markdown_table(managed_rows).rstrip("\n")
+        pieces.append(AUTHOR_TO_COMPLETE_MANAGED_BEGIN + "\n" + table + "\n"
                       + AUTHOR_TO_COMPLETE_MANAGED_END)
     text = "\n\n".join(pieces).rstrip() + "\n"
     action = "unchanged" if existing == text else ("updated" if existing else "created")
@@ -4829,6 +5006,14 @@ HANDOFF_PROMPT_REWRITES = (
      'revised/MANUAL_STEPS.md,\n     grouped by issue type, with precise step-by-step manual '
      'instructions (which file, which\n     section/paragraph/field, what to check, exact tool '
      'steps) and any follow-ups.'),
+    # The INTEGRATE prompt was not covered by any row above: its directives still
+    # sent hand-off items, recompile steps and new observations to
+    # `integrated/MANUAL_STEPS.md` under every mode, while the readme rule made
+    # `integrated/README-AUTHOR-TO-COMPLETE.md` the manual list (F16). Every
+    # occurrence of the path in the prompt is one of those hand-off pathways.
+    ('integrated/MANUAL_STEPS.md',
+     'integrated/README-AUTHOR-TO-COMPLETE.md',
+     'integrated/MANUAL_STEPS.md'),
 )
 
 

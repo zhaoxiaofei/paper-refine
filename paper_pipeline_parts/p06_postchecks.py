@@ -241,8 +241,13 @@ def _copy_session_tools(sb: Path, stamp: float = None) -> None:
             return False
 
     try:
+        # `dst` lives in the agent-writable sandbox: `shutil.copyfile` FOLLOWED
+        # a symlink or FIFO planted there and overwrote the target outside the
+        # sandbox (or hung on it). `_safe_restore_copy` refuses a symlinked
+        # parent, replaces a symlinked/FIFO final entry and writes through a
+        # temp + os.replace, so the final open never follows a link (F24).
         if src.is_file() and (not dst.is_file() or not _same_bytes(dst, src)):
-            shutil.copyfile(src, dst)
+            _safe_restore_copy(src, dst, sb)
         # The formatter is a thin loader too: its ordered parts must sit beside
         # it, or the stage's `python paper_docx_format.py scan` call cannot run.
         parts_name = "paper_docx_format_parts"
@@ -5534,25 +5539,13 @@ def _disposition_table_problems(path: Path) -> list:
     return problems
 
 
-def parse_markdown_blocks(path: Path) -> list:
-    """Every markdown table block of one artifact, each against ITS OWN header.
+def _markdown_blocks_from_text(text: str) -> list:
+    """`parse_markdown_blocks` over already-read text (no path involved).
 
-    Returns [{"header": [...], "rows": [{column: cell}], "appended": n,
-    "ragged": n}, ...] in file order. A block is a run of consecutive `|` lines:
-    the first is the header, a separator row is skipped, the rest are data rows.
-
-    Blocks must be parsed separately because the artifacts legitimately contain
-    MORE THAN ONE table: the M20 sweep requires the review to add the classes the
-    code-side scan cannot see ("rows added from the visual pass"), and the
-    coverage/summary tables are appended the same way. Parsing the whole file
-    against the FIRST header turned those rows' own cells into empty
-    `disposition` cells of the seeded table.
+    The seed side of the M30 gate builds the seed's expected table with the SAME
+    renderer and parses it back through this function, so the row identities it
+    compares against are exactly the ones the session was given (R04).
     """
-    # Agent-written table artifact: shared regular-file/no-follow/byte-budget
-    # reader (the integration ledger is read here a second time, F59).
-    text = read_text_bounded(path)
-    if text is None:
-        return []
     raw_blocks, cur = [], []
     for line in text.splitlines():
         if line.strip().startswith("|"):
@@ -5584,6 +5577,28 @@ def parse_markdown_blocks(path: Path) -> list:
         blocks.append({"header": header, "rows": rows, "widths": widths,
                        "appended": appended, "ragged": ragged})
     return blocks
+
+
+def parse_markdown_blocks(path: Path) -> list:
+    """Every markdown table block of one artifact, each against ITS OWN header.
+
+    Returns [{"header": [...], "rows": [{column: cell}], "appended": n,
+    "ragged": n}, ...] in file order. A block is a run of consecutive `|` lines:
+    the first is the header, a separator row is skipped, the rest are data rows.
+
+    Blocks must be parsed separately because the artifacts legitimately contain
+    MORE THAN ONE table: the M20 sweep requires the review to add the classes the
+    code-side scan cannot see ("rows added from the visual pass"), and the
+    coverage/summary tables are appended the same way. Parsing the whole file
+    against the FIRST header turned those rows' own cells into empty
+    `disposition` cells of the seeded table.
+    """
+    # Agent-written table artifact: shared regular-file/no-follow/byte-budget
+    # reader (the integration ledger is read here a second time, F59).
+    text = read_text_bounded(path)
+    if text is None:
+        return []
+    return _markdown_blocks_from_text(text)
 
 
 def parse_markdown_table(path: Path) -> list:
@@ -5888,16 +5903,33 @@ def judge_cover_letter_artifact_problems(sb: Path, target_rows: list) -> list:
     # Prefer the parsed table cells; a free-form note still gets the OK gate on
     # its own line. An OK closure without the journal's quoted override is the
     # disposition the pipeline exists to forbid.
-    candidates = []
+    #
+    # An EMPTY disposition is not a considered row: the old code fell back to
+    # the joined cells, which never starts with OK, so the seeded row passed
+    # untouched (F66). The row that NAMES FMT-CL1 in its rule column must carry
+    # a disposition of its own.
+    candidates, undisposed = [], 0
     for block in parse_markdown_blocks(path):
         for r in block["rows"]:
+            rule = str(r.get("rule") or "").strip().upper()
             cells = [str(v or "") for v in r.values()]
-            if any("FMT-CL1" in c.upper() for c in cells):
-                disp = " ".join(str(r.get(k) or "") for k in
-                                ("disposition", "resolution", "verdict", "decision",
-                                 "audit", "notes", "note")).strip()
-                candidates.append(disp or " | ".join(cells))
-    if not candidates:
+            if not (rule == "FMT-CL1"
+                    or (not rule and any("FMT-CL1" in c.upper() for c in cells))):
+                continue
+            disp = " ".join(str(r.get(k) or "") for k in
+                            ("disposition", "resolution", "verdict", "decision",
+                             "audit", "notes", "note")).strip()
+            if not disp:
+                undisposed += 1
+                continue
+            candidates.append(disp)
+    if undisposed:
+        problems.append(
+            f"{rel}: {undisposed} FMT-CL1 row(s) carry an EMPTY disposition: the target's "
+            f"cover letter is formatted in the MANUSCRIPT template and the judge must state "
+            f"whether the compared versions carry it and how it weighs in the formatting "
+            f"tier (a bare mention of the rule id is not a consideration)")
+    if not candidates and not undisposed:
         candidates = [ln.strip() for ln in raw.splitlines() if "FMT-CL1" in ln.upper()]
     for text in candidates:
         if not COVER_LETTER_OK_CLOSE_RE.match(text):
@@ -6378,8 +6410,16 @@ def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
     return argv, key, reason
 
 
-def resume_prompt(rec: dict, problems: list, reason: str, used: int) -> str:
-    """The CONTINUATION prompt: finish the stage's own work, marker last."""
+def resume_prompt(rec: dict, problems: list, reason: str, used: int,
+                  author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
+    """The CONTINUATION prompt: finish the stage's own work, marker last.
+
+    `author_to_complete` is the run's hand-off policy: the escape item goes to
+    THAT mode's manual-list file. The prompt was policy-blind and always said
+    MANUAL_STEPS.md, the file the readme policy reserves for long-form detail
+    (F17).
+    """
+    manual_target = handoff_target(author_to_complete)
     listed = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(problems)) or "  (none recorded)"
     return with_context_budget((CONTRADICTION_RULE +
         "CONTINUATION - YOUR OWN SESSION STOPPED BEFORE IT FINISHED.\n\n"
@@ -6403,7 +6443,7 @@ def resume_prompt(rec: dict, problems: list, reason: str, used: int) -> str:
         "bookkeeping are actually done. It is the only completion signal this pipeline accepts.\n"
         "  * If something cannot be finished honestly, use the pipeline's escape: write "
         "`unable — manual verification required: <what the author must check>` in the ledger / "
-        "language pass / visual record, record the item in MANUAL_STEPS.md, and say so in the "
+        f"language pass / visual record, record the item in {manual_target}, and say so in the "
         "marker.\n"
         "  * Stay inside this sandbox; never touch sibling sandboxes or parent directories.\n"))
 
@@ -7203,7 +7243,9 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
         rec.pop("revision_chain", None)
     used = int((rec.get("resume_attempts") or {}).get(key) or 0)
     problems = list((rec.get("postcheck") or {}).get("errors") or [])
-    write_text_atomic(sb / RESUME_PROMPT_FILE, resume_prompt(rec, problems, reason, used))
+    write_text_atomic(sb / RESUME_PROMPT_FILE,
+                      resume_prompt(rec, problems, reason, used,
+                                    author_to_complete=author_to_complete_mode_of(ctx)))
     # Charge the budget NOW: a continuation that dies half-way must not be
     # restarted forever by a later invocation.
     rec["resume_attempts"] = dict(rec.get("resume_attempts") or {}, **{key: used + 1})

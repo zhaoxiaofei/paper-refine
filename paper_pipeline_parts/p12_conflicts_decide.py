@@ -2054,7 +2054,15 @@ def declared_submission_set(root: Path) -> dict:
 
     patterns = []
     hint_readmes = []
+    untrusted_readmes = []
     for p in candidates:
+        if not _declaration_readme_from_author(root, p):
+            # A README created or changed by the session under review cannot
+            # narrow the submitted set (F23). The declaration is ignored; every
+            # carried file counts as submitted, which fails SAFE for the
+            # content/format gates.
+            untrusted_readmes.append(p.relative_to(root).as_posix())
+            continue
         candidate_text = read_text_bounded(p)
         if candidate_text is None:
             continue
@@ -2067,12 +2075,19 @@ def declared_submission_set(root: Path) -> dict:
             for token in found:
                 if token not in patterns:
                     patterns.append(token)
+    if untrusted_readmes:
+        out["untrusted_readmes"] = untrusted_readmes
     if not readmes:
         if hint_readmes:
             out["readme"] = hint_readmes[0].relative_to(root).as_posix()
             out["readmes"] = [p.relative_to(root).as_posix() for p in hint_readmes]
             out["ignored_reason"] = (
                 f"{out['readme']} names a submission rule but carries no parseable pattern")
+        elif untrusted_readmes:
+            out["ignored_reason"] = (
+                f"the submission declaration in {untrusted_readmes[0]} was ignored: the file "
+                f"is not the author's byte-identical copy (it was created or changed by the "
+                f"session), so it cannot narrow the submitted set")
         return out
     out["readme"] = readmes[0].relative_to(root).as_posix()
     out["readmes"] = [p.relative_to(root).as_posix() for p in readmes]
@@ -2770,22 +2785,44 @@ def _same_work(a: str, b: str, minimum: int = 3) -> bool:
     return len(shared) >= minimum and len(shared) / min(len(wa), len(wb)) >= 0.4
 
 
-def _read_delimited_table(path: Path, max_bytes: int = 8 * 1024 * 1024):
-    """(header, rows) of a small .tsv/.csv, or (None, []) when unreadable."""
+def _read_delimited_table(path: Path, max_bytes: int = 8 * 1024 * 1024,
+                          gaps: list = None):
+    """(header, rows) of a small .tsv/.csv, or (None, []) when unreadable.
+
+    A caller that passes `gaps` gets a one-line reason for every table it could
+    NOT read (over the budget, unreadable, a symlink/FIFO), so a large table is
+    recorded as a NAMED coverage gap instead of silently disappearing from the
+    consistency scan (F40). The read goes through the shared bounded/no-follow
+    reader, never a raw `read_text()`.
+    """
     try:
         if path.stat().st_size > max_bytes:
+            if gaps is not None:
+                gaps.append(f"{Path(path).name}: over the {max_bytes // (1024 * 1024)} MiB "
+                            f"table budget")
             return None, []
-        text = path.read_text("utf-8", "replace")
+        text = read_text_bounded(path)
     except OSError:
+        if gaps is not None:
+            gaps.append(f"{Path(path).name}: unreadable")
+        return None, []
+    if text is None:
+        if gaps is not None:
+            gaps.append(f"{Path(path).name}: unreadable (symlink/non-regular file, or over "
+                        f"the shared byte budget)")
         return None, []
     sample = text[:4096]
     delim = "\t" if path.suffix.lower() in (".tsv", ".tab") else \
         ("," if sample.count(",") >= sample.count("\t") else "\t")
     try:
         rows = list(csv.reader(io.StringIO(text), delimiter=delim))
-    except csv.Error:
+    except csv.Error as e:
+        if gaps is not None:
+            gaps.append(f"{Path(path).name}: malformed delimited table ({e})")
         return None, []
     if not rows:
+        if gaps is not None:
+            gaps.append(f"{Path(path).name}: empty delimited table")
         return None, []
     return rows[0], rows[1:]
 
@@ -2798,10 +2835,11 @@ def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
     """PKG-11: sibling tables whose header names differ only by case/one char."""
     root = Path(root)
     headers = []
+    gaps = []
     for p in sorted(_iter_tree_files(root)):
         if not p.is_file() or p.suffix.lower() not in TABLE_TEXT_EXTS:
             continue
-        header, body = _read_delimited_table(p)
+        header, body = _read_delimited_table(p, gaps=gaps)
         if not header or len(body) < 2:
             continue
         try:
@@ -2851,8 +2889,8 @@ def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
                         "counterpart": {"file": fb, "column": b},
                     })
                     if len(rows) >= limit:
-                        return rows
-    return rows
+                        return _with_table_gaps(rows, gaps, "PKG-11", limit)
+    return _with_table_gaps(rows, gaps, "PKG-11", limit)
 
 
 def _parse_ci(cell: str):
@@ -2941,17 +2979,26 @@ def _latex_command_bodies(text: str, command: str) -> list:
 
 
 def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
-    """PKG-12: a table row whose p and its own interval say opposite things."""
+    """PKG-12: a table row whose p and its own interval say opposite things.
+
+    Every source is read through the shared bounded/no-follow reader. A source
+    the scan cannot read is recorded as a one-row COVERAGE GAP: the old code
+    silently `continue`d for every file over 4 MiB, so a contradictory MCB table
+    could sit in a large .tex/.md and the operator saw a clean consistency
+    report for a document nobody had examined (F34; AGENTS rule 8).
+    """
     root = Path(root)
-    rows = []
+    rows, gaps = [], []
     for p in sorted(_iter_tree_files(root)):
         if not p.is_file() or p.suffix.lower() not in (".tex", ".ltx", ".txt", ".md"):
             continue
         try:
-            if p.stat().st_size > 4 * 1024 * 1024:
-                continue
-            text = p.read_text("utf-8", "replace")
-        except OSError:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        text = read_text_bounded(p)
+        if text is None:
+            gaps.append(rel)
             continue
         if "mcb" not in p.name.lower() and "MCB" not in text[:4000]:
             continue
@@ -2959,10 +3006,6 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
                            + _latex_command_bodies(text, "caption"))
         if not caption or not (MCB_P_SMALL_RULE_RE.search(caption)
                                and MCB_CI_RULE_RE.search(caption)):
-            continue
-        try:
-            rel = p.relative_to(root).as_posix()
-        except ValueError:
             continue
         for line_no, line in enumerate(text.splitlines(), 1):
             if "&" not in line or line.lstrip().startswith("%"):
@@ -3005,7 +3048,10 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
     rows.sort(key=lambda r: (not r.get("_strong"), r.get("file"), r.get("line")))
     for r in rows:
         r.pop("_strong", None)
-    return rows[:limit]
+    # A COVERAGE GAP row is prepended, never a clean scan: the row says which
+    # sources were not examined, so an empty conflict list cannot read as
+    # "PKG-12 ran and found nothing" (F34).
+    return _with_table_gaps(rows, gaps, "PKG-12", limit)
 
 
 # PKG-15 (2026-10-17, second pass): a DEPOSITED statistics table whose
@@ -3029,9 +3075,9 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
 POOLED_UNITS_VALUE_COLUMNS = ("mean", "pct_within", "value", "score")
 
 
-def _pooled_units_by_method(path: Path) -> dict:
+def _pooled_units_by_method(path: Path, gaps: list = None) -> dict:
     """{method: (n_units, mean of the value column)} for a pooled-units table."""
-    header, body = _read_delimited_table(path)
+    header, body = _read_delimited_table(path, gaps=gaps)
     if not header or not body:
         return {}
     header = [h.strip() for h in header]
@@ -3366,10 +3412,11 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
     root = Path(root)
     docs = _package_document_texts(root, texts)
     grids = []
+    gaps = []
     for p in sorted(_iter_tree_files(root)):
         if not p.is_file() or p.suffix.lower() != ".tsv" or "grid" not in p.name.lower():
             continue
-        header, body = _read_delimited_table(p)
+        header, body = _read_delimited_table(p, gaps=gaps)
         if not header:
             continue
         header = [h.strip() for h in header]
@@ -3381,7 +3428,7 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
             continue
         grids.append((rel, header, body))
     if not grids or not docs:
-        return []
+        return _with_table_gaps([], gaps, "PKG-18", limit)
     rows = []
     seen = set()
     for rel, _paras, text in docs:
@@ -3464,8 +3511,8 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
                                   "surfaces disagreeing about the ranking.")),
                 })
                 if len(rows) >= limit:
-                    return rows
-    return rows
+                    return _with_table_gaps(rows, gaps, "PKG-18", limit)
+    return _with_table_gaps(rows, gaps, "PKG-18", limit)
 
 
 RECOVERED_CLAIM_RE = re.compile(
@@ -3940,10 +3987,11 @@ def scan_form_failure_claims(root: Path, texts=None, limit: int = 8) -> list:
     if not claim:
         return []
     tables = []
+    gaps = []
     for p in sorted(_iter_tree_files(root)):
         if not p.is_file() or p.suffix.lower() != ".tsv":
             continue
-        header, body = _read_delimited_table(p)
+        header, body = _read_delimited_table(p, gaps=gaps)
         if not header:
             continue
         header = [h.strip() for h in header]
@@ -4033,7 +4081,7 @@ def scan_form_failure_claims(root: Path, texts=None, limit: int = 8) -> list:
                                        f"as failed/no-output) or scope the form's claim"),
                         })
                         if len(rows) >= limit:
-                            return rows
+                            return _with_table_gaps(rows, gaps, "PKG-25", limit)
                         continue
                     if fi is not None and len(panel_rows[0]) > fi:
                         marks = {str(r[fi]).strip().lower() for r in panel_rows if len(r) > fi}
@@ -4051,8 +4099,8 @@ def scan_form_failure_claims(root: Path, texts=None, limit: int = 8) -> list:
                                            f"form's claim"),
                             })
                             if len(rows) >= limit:
-                                return rows
-    return rows
+                                return _with_table_gaps(rows, gaps, "PKG-25", limit)
+    return _with_table_gaps(rows, gaps, "PKG-25", limit)
 
 
 def _pooled_table_caption(caption_file: Path) -> str:
@@ -4060,8 +4108,13 @@ def _pooled_table_caption(caption_file: Path) -> str:
 
     The standard `\\caption{...}` is the common form; reading only
     `\\captionof` left the row's quote empty and skipped the caption comparison.
+    The source is an agent-written package file, so it is read through the
+    shared bounded/no-follow reader (F33): an oversized or planted file yields
+    no caption instead of allocating it whole.
     """
-    text = Path(caption_file).read_text("utf-8", "replace")
+    text = read_text_bounded(Path(caption_file))
+    if text is None:
+        return ""
     return " ".join(_latex_command_bodies(text, "caption")
                     + _latex_command_bodies(text, "captionof"))
 
@@ -4070,6 +4123,7 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
     """PKG-15: a pooled statistics table computed on fewer units than it claims."""
     root = Path(root)
     rows = []
+    gaps = []
     for p in sorted(_iter_tree_files(root)):
         if not p.is_file() or "mcb" not in p.name.lower() or p.suffix.lower() != ".tsv":
             continue
@@ -4079,7 +4133,7 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
         # correct table.
         if "pooled" not in p.name.lower():
             continue
-        header, body = _read_delimited_table(p)
+        header, body = _read_delimited_table(p, gaps=gaps)
         if not header:
             continue
         header = [h.strip() for h in header]
@@ -4101,7 +4155,7 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
 
         candidates = sorted(p.parent.glob("*units*.tsv"), key=units_match, reverse=True)
         for q in candidates:
-            units = _pooled_units_by_method(q)
+            units = _pooled_units_by_method(q, gaps=gaps)
             if units:
                 units_file = q
                 break
@@ -4173,8 +4227,8 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
                            f"different populations under the same word"),
             })
             if len(rows) >= limit:
-                return rows
-    return rows
+                return _with_table_gaps(rows, gaps, "PKG-15", limit)
+    return _with_table_gaps(rows, gaps, "PKG-15", limit)
 
 
 def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int = 8) -> list:
@@ -6614,7 +6668,11 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         try:
             _hreadme = write_published_handoff_readme(
                 tmp, open_items, residuals,
-                target_path=ctx.root / FINAL_CLEAN_AUTHOR_README_NAME)
+                target_path=ctx.root / FINAL_CLEAN_AUTHOR_README_NAME,
+                # The pinned corpus still carries the stage's own checklist; the
+                # sibling is the ONE authoritative one and starts from those rows
+                # so the two cannot disagree (F68).
+                existing_from=tmp / AUTHOR_TO_COMPLETE_README)
             if _hreadme:
                 hygiene["handoff_readme"] = _hreadme
         except Exception as e:                                        # noqa: BLE001
@@ -7435,19 +7493,25 @@ def package_readiness(final_clean: dict, residuals: dict = None,
     # with zero items is reported
     # too: it is the stale checklist the stage was told to delete.
     if _atc == "readme":
-        for rel, rows in _handoff_readme_items(final_clean).items():
-            findings.append({
-                "rule": "AUTH-2", "document": rel,
-                "detail": (f"the package carries {rows} author-to-complete item(s) in "
-                           f"{rel} (a hand-off README beside the cover letter and main text; "
-                           f"it is never submitted, and no submitted document may depend on "
-                           f"it). Supply each item in the documents, then update or delete the "
-                           f"README")})
         _handoff_rec = hyg.get("handoff_readme") or {}
         _handoff_path = Path(str(_handoff_rec.get("path") or ""))
         _published = Path(str((final_clean or {}).get("path") or ""))
-        if _handoff_path.is_file() and _published.is_dir() \
-                and _handoff_path.parent != _published:
+        # The publisher's SIBLING is the ONE authoritative checklist: it was
+        # built from the stage's own rows plus the ledger, so reporting the
+        # in-package copy beside it described the same author work twice and
+        # let two files with different contents compete (F68).
+        _sibling_authoritative = (_handoff_path.is_file() and _published.is_dir()
+                                  and _handoff_path.parent != _published)
+        if not _sibling_authoritative:
+            for rel, rows in _handoff_readme_items(final_clean).items():
+                findings.append({
+                    "rule": "AUTH-2", "document": rel,
+                    "detail": (f"the package carries {rows} author-to-complete item(s) in "
+                               f"{rel} (a hand-off README beside the cover letter and main text; "
+                               f"it is never submitted, and no submitted document may depend on "
+                               f"it). Supply each item in the documents, then update or delete the "
+                               f"README")})
+        if _sibling_authoritative:
             _rows = count_manual_steps(_handoff_path)
             findings.append({
                 "rule": "AUTH-2", "document": _handoff_path.name,

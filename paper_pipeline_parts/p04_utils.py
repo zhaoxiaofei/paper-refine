@@ -1483,12 +1483,19 @@ def append_text_no_follow(path: Path, text: str, encoding: str = "utf-8") -> Non
     calls and the append followed the link (the 2026-10-28 audit's F10).
     """
     path = Path(path)
+    # O_NONBLOCK is what makes a planted FIFO FAIL FAST: O_WRONLY on a FIFO
+    # with no reader blocks forever before the function can return, so one
+    # agent could hang the whole pipeline after it exited (F26). On a FIFO the
+    # non-blocking open raises ENXIO and the log append is simply skipped.
     flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT
-             | getattr(os, "O_NOFOLLOW", 0))
+             | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0))
     for _ in range(3):
         try:
             fd = os.open(path, flags, 0o666)
-        except OSError:
+        except OSError as e:
+            if e.errno in (errno.ENXIO, errno.ENODEV, errno.EWOULDBLOCK):
+                return                      # a FIFO/socket: no log to append to
             if path.is_symlink():
                 try:
                     path.unlink()
@@ -1496,6 +1503,19 @@ def append_text_no_follow(path: Path, text: str, encoding: str = "utf-8") -> Non
                     pass
                 continue
             raise
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            os.close(fd)
+            return
+        # A hard link is a regular file with another name: appending through it
+        # rewrites a file outside the sandbox. Only a single-link regular file
+        # is this run's own transcript.
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            os.close(fd)
+            with contextlib.suppress(OSError):
+                path.unlink()
+            return
         with os.fdopen(fd, "a", encoding=encoding) as f:
             f.write(text)
         return
@@ -7476,36 +7496,16 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     """
     p = sb / "format_policy.json"
     policy = format_policy_of(ctx)
-    # The venue template's own blank-paragraph slots travel too: the session's
-    # own scan must exempt exactly the blanks the journal's template prescribes
-    # (the spacer above the title, a placeholder slot between two headings),
-    # never flag them as stray.
-    body = {"tables": copy.deepcopy(policy.get("tables") or {}),
-            "figures": copy.deepcopy(policy.get("figures") or {}),
-            "empty_paragraph_slots": copy.deepcopy(policy.get("empty_paragraph_slots") or []),
-            # The cover-letter rule's data travels too: the scan the session runs
-            # itself must be able to prove a letter was formatted in the
-            # manuscript template (FMT-CL1), exactly like the postcheck does.
-            "cover_letter": copy.deepcopy(policy.get("cover_letter") or {}),
-            # Reference-entry preference (FMT-R5), display-item numbering
-            # (FMT-O1) and the other publisher's leftover phrases (FMT-L1) are
-            # venue-level DATA as well: without them the session's own scan
-            # reports fewer rows than the postcheck does.
-            "numbering": policy.get("numbering") or "",
-            "references": copy.deepcopy(policy.get("references") or {}),
-            "leftover_phrases": copy.deepcopy(policy.get("leftover_phrases") or []),
-            "image_aspect_tolerance": policy.get("image_aspect_tolerance", 0.02),
-            # Venue image rules (FMT-IM4/FMT-IM6): the session's own scan must
-            # gate the same DPI/figure-text rules the postcheck does.
-            "figure_text": copy.deepcopy(policy.get("figure_text") or {}),
-            "image_dpi": copy.deepcopy(policy.get("image_dpi") or {}),
-            # The venue's own M20 sentence/paragraph limits: the session's scan
-            # must gate FMT-T9c/T9i on exactly the profile data the postcheck
-            # reads, or the two scans disagree about whether a row is a finding.
-            "style_limits": copy.deepcopy(policy.get("style_limits") or {}),
-            "page_budget": copy.deepcopy(policy.get("page_budget") or {}),
-            "min_image_dpi": policy.get("min_image_dpi", 0),
-            "min_figure_text_pt": policy.get("min_figure_text_pt", 0)}
+    # The COMPLETE effective policy, not a hand-picked subset: the session's own
+    # scan starts from the module defaults and updates with this file, so a key
+    # the seed omitted (max_em_dashes_per_1000, figure_ocr,
+    # max_empty_paragraph_run, ...) silently reverted to the default while the
+    # postcheck used the operator's value -- a pre-flight and a postcheck that
+    # disagreed about the same package, under a prompt that claims they are the
+    # same detector (F10). Every value comes from POLICY_DEFAULTS, the venue
+    # profile or the operator's config: venue-level DATA, never package content,
+    # so a judge is not blinded by it.
+    body = copy.deepcopy(policy)
     # tmp + rename, NOT write_json_atomic's extra fsync: this file is a pure
     # INPUT every session reads, and the pipeline seeds one per session
     # materialization. On this box each fsync costs ~0.08 s (measured: the
@@ -8048,13 +8048,18 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
               f"- digest: `{str((ev.get('corpus_identity') or {}).get('digest'))[:16]}`",
               f"- revision token: `{(ev.get('corpus_identity') or {}).get('revision_token') or '(none)'}`",
               f"- files: {len((ev.get('corpus_identity') or {}).get('files') or [])}", ""]
-    (work / "EVIDENCE_PACK.md").write_text("\n".join(lines), encoding="utf-8")
-    (sb / "EVIDENCE_PACK.md").write_text("\n".join(lines), encoding="utf-8")
+    # These land in the AGENT-WRITABLE sandbox and the materializer runs again
+    # on a retry: an atomic replace never writes through a planted symlink. The
+    # surrounding seeds already use _seed_write/atomic writers (F27).
+    _pack = "\n".join(lines)
+    write_text_atomic(work / "EVIDENCE_PACK.md", _pack)
+    write_text_atomic(sb / "EVIDENCE_PACK.md", _pack)
     if where in ("review", "judge"):
         # also inside the session's OUT directory, where the agent's own report
         # lives, so the pack is one path away from the artifact tables
-        (sb / (GUIDED_REVIEW_DIR if where == "review" else "judge_review")
-         / "EVIDENCE_PACK.md").write_text("\n".join(lines), encoding="utf-8")
+        write_text_atomic(
+            sb / (GUIDED_REVIEW_DIR if where == "review" else "judge_review")
+            / "EVIDENCE_PACK.md", _pack)
     return ev
 
 

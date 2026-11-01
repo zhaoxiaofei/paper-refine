@@ -443,6 +443,20 @@ def _docx_paragraphs(path: Path, include_tables: bool = True):
     FMT-X2 reported a line that renders perfectly (the 2026-10-15b neohet
     package, re-found by the operator's audit).
     """
+    pairs = _docx_paragraphs_with_styles(path, include_tables=include_tables)
+    return None if pairs is None else [text for text, _style in pairs]
+
+
+def _docx_paragraphs_with_styles(path: Path, include_tables: bool = True):
+    """[(paragraph text, paragraph style id)] of a .docx, or None.
+
+    The style id is the LIVE `w:pPr/w:pStyle` value ("" when the paragraph sets
+    none). A Word style heading (`Heading1`, `Title`, ...) carries no Markdown
+    `#` marker, so a text-only reader cannot tell it from prose: the content
+    policy treated a style-based heading as a content unit and reported a
+    heading edit as added/removed prose (F70). Style ids are matched by the
+    codebase's existing `Heading*` convention (see `corpus_text_documents`).
+    """
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     try:
@@ -477,8 +491,65 @@ def _docx_paragraphs(path: Path, include_tables: bool = True):
                 parts.append("\ufffd")
             elif node.tag == ns + "t":
                 parts.append(node.text or "")
-        out.append("".join(parts))
+        ppr = para.find(ns + "pPr")
+        style_el = ppr.find(ns + "pStyle") if ppr is not None else None
+        style = (style_el.get(ns + "val") or "") if style_el is not None else ""
+        out.append(("".join(parts), style))
     return out
+
+
+def _declaration_readme_from_author(root: Path, p: Path) -> bool:
+    """Whether `p`'s submission declaration comes from the AUTHOR's copy.
+
+    The package README is agent-writable, so a session could add
+    `README.md` saying "only `cover*` will be submitted": the publisher then
+    dropped the main manuscript from the journal submission, and the content and
+    format gates skipped it too (F23). A declaration is honoured only when the
+    README is byte-identical to the copy the author supplied in
+    `non_revised/` (or the stage's own read-only `base/`/`self/` copy). A
+    README the session created or changed does not narrow the submitted set.
+    Outside a run root (a unit fixture, or the pristine corpus itself) there is
+    no agent-session context, so the declaration stands.
+    """
+    root = Path(root)
+    run_root = _enclosing_run_root(root)
+    if run_root is None:
+        return True
+    pristine = run_root / PRISTINE_DIR
+    for anchor_root in (pristine,):
+        try:
+            root.resolve().relative_to(anchor_root.resolve())
+            return True                      # we ARE the author's corpus copy
+        except (ValueError, OSError):
+            pass
+    try:
+        rel = p.relative_to(root)
+        digest = sha256_file(p)
+    except (OSError, ValueError):
+        return False
+    for anchor in (pristine / rel, root.parent / "base" / rel,
+                   root.parent / "self" / rel):
+        try:
+            if anchor.is_file() and not anchor.is_symlink() \
+                    and sha256_file(anchor) == digest:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _with_table_gaps(rows: list, gaps: list, rule: str, limit: int) -> list:
+    """Prepend the scan's named coverage gap (when any) to its rows."""
+    if not gaps:
+        return rows[:limit]
+    gap = {
+        "rule": rule, "severity": "low", "fix": "none", "file": "", "line": 0,
+        "reference": "", "gap": True, "advisory": True,
+        "detail": (f"{rule} was NOT evaluated on {len(gaps)} input(s): "
+                   + "; ".join(gaps[:6]) + (" ..." if len(gaps) > 6 else "")
+                   + ". Examine them by hand; a defect there would not appear in this list"),
+    }
+    return [gap] + rows[:max(0, limit - 1)]
 
 
 # =====================================================================

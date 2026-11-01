@@ -523,7 +523,8 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
     if doc.is_file():
         rows = (json.loads(doc.read_text(encoding="utf-8")) or {}).get("concerns") or []
     target = sb / "target"
-    skip_names = {"changelog.md", "manual_steps.md", "revision_report.md", "revision_report.json",
+    skip_names = {"changelog.md", "manual_steps.md", "manual_todo.csv",
+                  "revision_report.md", "revision_report.json",
                   "diff_ledger.md", "visual_check.md"}
     # The areas a letter must not cite while they are not submitted: the
     # evidence areas (never) and the analysis-code area (unless the root ships
@@ -706,8 +707,8 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
     changed = [p.relative_to(out).as_posix() for p in sorted(out.rglob("*"))
                if p.is_file() and not np_aux(p)
                and p.name.lower() not in ("changelog.md", "manual_steps.md",
-                                          "revision_report.md", "revision_report.json",
-                                          "visual_check.md")
+                                          "manual_todo.csv", "revision_report.md",
+                                          "revision_report.json", "visual_check.md")
                and "work" not in p.relative_to(out).parts[:-1]]
     rows = []
     for rel in ("guided_review/findings.json", "guided_review/round2/findings_extra.json",
@@ -989,6 +990,7 @@ def _revision_audit_stub(sb: Path) -> int:
     if os.environ.get("PAPER_STUB_REVISION_AUDIT_ROWS"):
         targets = [p for p in sorted((sb / "revised").rglob("*.md"))
                    if p.name.lower() not in ("changelog.md", "manual_steps.md",
+                                             "manual_todo.csv", "readme-author-to-complete.md",
                                              "revision_report.md", "visual_check.md")]
         if targets:
             rel = targets[0].relative_to(sb / "revised").as_posix()

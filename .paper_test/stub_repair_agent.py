@@ -487,7 +487,8 @@ def go_out_of_scope(sb: Path, name: str) -> str:
     pkg = package_dir(sb, stage)
     # A MANUSCRIPT file: the stage's bookkeeping reports and its work/ scratch are
     # legitimately writable, so pick a file that is neither.
-    bookkeeping = {"changelog.md", "manual_steps.md", "revision_report.md",
+    bookkeeping = {"changelog.md", "manual_steps.md", "manual_todo.csv",
+                   "readme-author-to-complete.md", "revision_report.md",
                    "revision_report.json", "diff_ledger.md", "rewrite_report.md",
                    "visual_check.md"}
     docs = [d for d in sorted(pkg.rglob("*"))
