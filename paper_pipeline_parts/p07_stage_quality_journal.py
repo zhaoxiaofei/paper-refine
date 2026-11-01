@@ -3240,7 +3240,7 @@ WRITE:
 
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "feedback", run_id "{sb.name}",
-round {int(r)}, status "complete") as the very LAST step.
+round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
 {selfcheck_block("feedback", sb.name, int(r))}
 """
 
@@ -3334,7 +3334,7 @@ THE FINDING LIST (the revision session consumes it):
 
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "concerns", run_id "{sb.name}",
-round {int(r)}, status "complete") as the very LAST step.
+round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
 {selfcheck_block("concerns", sb.name, int(r))}
 """
 
@@ -3417,7 +3417,7 @@ ABSOLUTE RULES:
 
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "response", run_id "{sb.name}",
-round {int(r)}, status "complete") as the very LAST step.
+round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
 {selfcheck_block("response", sb.name, int(r))}
 """
 
@@ -3627,6 +3627,21 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
     return data
 
 
+def feedback_files_problems(sb: Path) -> list:
+    """The feedback run's quote-source files (both areas empty is an error).
+
+    The postcheck's own check, shared with the pre-flight: the ledger's quotes
+    are verified against `feedback/text/`, and the original files must be copied
+    in as the evidence of record.
+    """
+    fdir = sb / "feedback" / "files"
+    ldir = sb / "feedback" / "llm" / "files"
+    if (fdir.is_dir() and any(fdir.iterdir())) or (ldir.is_dir() and any(ldir.iterdir())):
+        return []
+    return ["feedback/files/ and feedback/llm/files/ are both empty: the original "
+            "feedback files must be copied in (they are the quote source of record)"]
+
+
 def postcheck_feedback(ctx: Ctx, rec: dict):
     """Modes 1-2: the concern ledger is complete and verbatim."""
     sb = ctx.sandbox_of(rec)
@@ -3640,13 +3655,7 @@ def postcheck_feedback(ctx: Ctx, rec: dict):
         rec["concerns"] = {"count": len(data.get("concerns") or []),
                            "to_fix": data.get("_to_fix", 0),
                            "files": rec.get("feedback_files") or []}
-    fdir = sb / "feedback" / "files"
-    ldir = sb / "feedback" / "llm" / "files"
-    have_human = fdir.is_dir() and any(fdir.iterdir())
-    have_llm = ldir.is_dir() and any(ldir.iterdir())
-    if not (have_human or have_llm):
-        errs.append("feedback/files/ and feedback/llm/files/ are both empty: the original "
-                    "feedback files must be copied in (they are the quote source of record)")
+    errs.extend(feedback_files_problems(sb))
     errs.extend(original_submission_staging_problems(ctx, sb))
     _check_pristine_copy(ctx, rec, pristine_dirname(sb), errs)
     errs.extend(input_mismatches(ctx, rec))
@@ -3763,16 +3772,18 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
     return errs
 
 
-def postcheck_concerns(ctx: Ctx, rec: dict):
-    """Modes 3-4: the scoped ledger AND the finding list it produces."""
-    sb = ctx.sandbox_of(rec)
+def concerns_finding_list_problems(sb: Path, data: dict) -> tuple:
+    """(errs, warns, counts) for the scoped ledger's FINDING LIST -- ctx-free.
+
+    The finding list is what the single revision session consumes: every
+    `to-fix`/`manual` concern needs exactly one `JF` finding with its status
+    matching the ledger, its evidence and location filled, and a `JF_concerns.md`
+    artifact. `postcheck_concerns` runs this block; so does the sandbox
+    pre-flight, which previously checked only the ledger schema -- a session that
+    wrote a complete ledger and an unusable finding list passed the pre-flight
+    and lost the attempt.
+    """
     errs, warns = [], []
-    marker = marker_json(sb, rec["kind"])
-    _marker_checks(rec, marker, "concerns", errs, warns, sb=sb)
-    errs.extend(structured_output_problems(ctx, rec))
-    warns.extend(inherited_structured_output_notes(ctx, rec))
-    data = journal_ledger_problems(ctx, sb, errs, warns)
-    errs.extend(original_submission_staging_problems(ctx, sb))
     rows = [r for r in (data.get("concerns") or []) if isinstance(r, dict)]
     must_fix = {str(r.get("id")) for r in rows
                 if str(r.get("disposition")) in ("to-fix", "manual")}
@@ -3823,9 +3834,26 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
             fj, (sb / "feedback" / "llm").is_dir()))
         if not (sb / GUIDED_REVIEW_DIR / "findings.md").is_file():
             warns.append(f"{GUIDED_REVIEW_DIR}/findings.md is missing (the human-readable list)")
-    if data:
-        rec["concerns"] = {"count": len(rows), "to_fix": len(must_fix),
-                           "manual": len(manual), "files": rec.get("feedback_files") or []}
+    counts = ({"count": len(rows), "to_fix": len(must_fix), "manual": len(manual)}
+              if data else {})
+    return errs, warns, counts
+
+
+def postcheck_concerns(ctx: Ctx, rec: dict):
+    """Modes 3-4: the scoped ledger AND the finding list it produces."""
+    sb = ctx.sandbox_of(rec)
+    errs, warns = [], []
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "concerns", errs, warns, sb=sb)
+    errs.extend(structured_output_problems(ctx, rec))
+    warns.extend(inherited_structured_output_notes(ctx, rec))
+    data = journal_ledger_problems(ctx, sb, errs, warns)
+    errs.extend(original_submission_staging_problems(ctx, sb))
+    ferrs, fwarns, counts = concerns_finding_list_problems(sb, data)
+    errs.extend(ferrs)
+    warns.extend(fwarns)
+    if counts:
+        rec["concerns"] = dict(counts, files=rec.get("feedback_files") or [])
     _check_pristine_copy(ctx, rec, pristine_dirname(sb), errs)
     errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
@@ -5750,21 +5778,21 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             warns.append("audit/AUDIT.md (the human-readable disposition record) is missing")
         errs.extend(probe_audit_problems(sb))
     elif kind in ("feedback", "concerns"):
-        # The concern ledger's schema and its verbatim-quote verification are
-        # ctx-free: `journal_ledger_problems` takes the ctx for symmetry only, so
-        # the pre-flight calls the postcheck's OWN detector. The families that
-        # need the run root (staging of the original feedback files, the frozen
-        # finding list's relation to the ledger, the pristine copies) stay in
-        # `postcheck_feedback`/`postcheck_concerns`.
-        journal_ledger_problems(None, sb, errs, warns)
+        # The concern ledger (schema + verbatim quotes) and, for a scoped
+        # ledger, the finding list it produces are ctx-free: the pre-flight calls
+        # the postcheck's OWN detectors. What still needs the run root (the
+        # staging of the original feedback against the evidence area, the
+        # pristine copies) stays in `postcheck_feedback`/`postcheck_concerns`.
+        data = journal_ledger_problems(None, sb, errs, warns)
         if kind == "feedback":
-            fdir = sb / "feedback" / "files"
-            ldir = sb / "feedback" / "llm" / "files"
-            if not ((fdir.is_dir() and any(fdir.iterdir()))
-                    or (ldir.is_dir() and any(ldir.iterdir()))):
-                errs.append("feedback/files/ and feedback/llm/files/ are both empty: the "
-                            "original feedback files must be copied in (they are the quote "
-                            "source of record)")
+            errs.extend(feedback_files_problems(sb))
+        else:
+            # The finding list the single revision session consumes: its own
+            # ctx-free half of `postcheck_concerns`. The pre-flight used to check
+            # only the ledger schema, so an unusable finding list passed it.
+            ferrs, fwarns, _counts = concerns_finding_list_problems(sb, data)
+            errs.extend(ferrs)
+            warns.extend(fwarns)
     elif kind == "response":
         # The letter and its machine-readable map, the postcheck's own two
         # error families. The per-concern coverage comparison reads the concern

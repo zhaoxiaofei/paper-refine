@@ -199,6 +199,44 @@ def test_p3_judge_cover_letter() -> None:
     check("P3 the judge pre-flight branch calls the cover-letter family", found)
 
 
+def test_p4b_journal_finding_list_and_preview_claim() -> None:
+    print("\n== P4b: the journal pre-flights and the preview claim ==")
+    # The `concerns` pre-flight used to run only the ledger schema; the finding
+    # list the scoped revision consumes is a postcheck error family too.
+    sb = scratch("p4b_concerns_")
+    (sb / "feedback" / "files").mkdir(parents=True)
+    (sb / "feedback" / "text").mkdir(parents=True)
+    quote = "the sample is too small for the claim"
+    (sb / "feedback" / "files" / "r.txt").write_text(f"Reviewer: {quote}.", encoding="utf-8")
+    (sb / "feedback" / "text" / "r.txt").write_text(f"Reviewer: {quote}.", encoding="utf-8")
+    (sb / pp.JOURNAL_CONCERNS_JSON_REL).parent.mkdir(parents=True, exist_ok=True)
+    (sb / pp.JOURNAL_CONCERNS_JSON_REL).write_text(
+        '{"concerns": [{"id": "C1", "quote": "%s", "disposition": "to-fix",'
+        ' "severity": "major", "action": "analysis", "summary": "the claim outruns the data"}]}'
+        % quote, encoding="utf-8")
+    _marker(sb, "concerns", sb.name)
+    _ok, errs, _w = pp.sandbox_selfcheck(sb, "concerns", sb.name, 1)
+    check("P4b the concerns pre-flight reports a missing finding list",
+          any("findings.json is missing/unparsable" in e for e in errs), str(errs)[:200])
+
+    # The shared prompt text must not claim more than the pre-flight can do: the
+    # root-state families stay at postcheck time.
+    sb_block = pp.selfcheck_block("revise", "r1_a2_revise", 1)
+    check("P4b the self-check block says a pass is a preview, not a certification",
+          "PREVIEW, NEVER A CERTIFICATION" in " ".join(sb_block.split()))
+    j_block = pp.judge_selfcheck_block("judge_tok_j1")
+    check("P4b the judge block says the same",
+          "PREVIEW, NEVER A CERTIFICATION" in " ".join(j_block.split()))
+
+    # The marker sentence must not tell a journal session the marker is the last
+    # step and then add a pre-marker instruction without saying so.
+    src = (WS / "paper_pipeline_parts" / "p07_stage_quality_journal.py").read_text(
+        encoding="utf-8")
+    check("P4b the journal marker sentence points at the pre-flight below",
+          src.count("as the very LAST step, AFTER the pre-flight below.") == 3,
+          str(src.count("as the very LAST step, AFTER the pre-flight below.")))
+
+
 # ---------------------------------------------------------------------------
 # P4 -- every agent prompt carries the contradiction rule.
 # ---------------------------------------------------------------------------
@@ -251,13 +289,16 @@ def test_p4_contradiction_rule() -> None:
     # The rule states the precedence AND the reporting duty, and stays free of
     # the judges' forbidden provenance vocabulary.
     rule = pp.CONTRADICTION_RULE
+    flat_rule = " ".join(rule.split())
     check("P4 the rule names the four precedence levels",
-          all(k in rule for k in ("PROHIBITION", "THIS RUN", "SPECIFIC",
-                                  "ORCHESTRATOR CHECKS")))
+          all(k in flat_rule for k in ("PROHIBITION", "THIS RUN", "SPECIFIC",
+                                       "ORCHESTRATOR CHECKS")))
     check("P4 the rule requires the surviving conflict to be REPORTED",
-          "NAME the conflict" in rule and "final report" in rule)
+          "NAME the conflict" in flat_rule and "final report" in flat_rule)
     check("P4 the rule forbids satisfying both readings at once",
-          "doing both at once" in rule)
+          "doing both at once" in flat_rule)
+    check("P4 the rule does not point at a pre-flight block every prompt lacks",
+          "the pre-flight command where this prompt gives you one" in flat_rule)
     for pat, label in ((r"\bround\b", "round"), (r"\barm\b", "arm"),
                        (r"\brewrite\b", "rewrite"), (r"\brevised\b", "revised"),
                        (r"\brevision\b", "revision"), (r"\bintegration\b", "integration"),
@@ -265,7 +306,7 @@ def test_p4_contradiction_rule() -> None:
                        (r"CHANGELOG", "CHANGELOG"), (r"MANUAL_STEPS", "MANUAL_STEPS"),
                        (r"AUTHOR TO COMPLETE", "the marker token")):
         import re as _re
-        check(f"P4 the rule carries no {label}", not _re.search(pat, rule, _re.I))
+        check(f"P4 the rule carries no {label}", not _re.search(pat, flat_rule, _re.I))
     # It must not be the AGENTS.md rule verbatim.
     agents = (WS / "AGENTS.md").read_text(encoding="utf-8")
     agents_rule = agents[agents.index("Last rule."):]
@@ -311,6 +352,7 @@ def main() -> int:
         test_p2_cold_start_coverage()
         test_p3_judge_cover_letter()
         test_p4_contradiction_rule()
+        test_p4b_journal_finding_list_and_preview_claim()
         test_skill_surfaces()
     finally:
         cleanup()

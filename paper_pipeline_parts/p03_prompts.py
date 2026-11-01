@@ -308,9 +308,9 @@ Resolve the conflict in this order and keep working:
      gives for this run outrank a general default quoted from a skill, an example or a template.
   3. The more SPECIFIC rule binds next. A rule that names the file, the check id, the column set,
      the id shape or the placement outranks the general rule it specializes.
-  4. Only if the conflict survives all three, the requirement the ORCHESTRATOR CHECKS binds -- the
-     pre-flight command below applies those checks. Then NAME the conflict in your final report,
-     quoting both statements.
+  4. Only if the conflict survives all three, the requirement the ORCHESTRATOR CHECKS binds: the
+     pipeline's own postcheck, and the pre-flight command where this prompt gives you one. Then NAME
+     the conflict in your final report, quoting both statements.
 Never resolve a conflict by doing both at once (writing the same table into two files, a marker in a
 document as well as its checklist) and never leave one silent: the report is where a surviving
 conflict belongs.
@@ -360,12 +360,15 @@ def selfcheck_block(kind: str, run_id: str, r: int) -> str:
 SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
     python "{pipeline_self_path()}" selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
 It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
-required deliverable, the seeded decision tables' dispositions, the audit sheet, and, for a
-package-producing stage, the manual TODO inventory (and, when the round carries an M30 finding, the
-source-hierarchy ledger) -- and prints exactly what the postcheck would reject. Fix everything it
-reports, run it again until it says OK, and only THEN write the completion marker. An attempt that
-ends with its problems still in the files does not get repaired: it FAILS and the whole stage is
-re-run in a rebuilt sandbox.
+required deliverable, the seeded decision tables' dispositions, the audit sheet, the manual TODO
+inventory and source gates of a package-producing stage, the M30 ledger when the round carries an
+M30 finding, and the journal letter/ledger -- and prints what the postcheck would reject for every
+family a sandbox can decide on its own. The families that need the run ROOT's own state (the
+pristine copies, the input freshness, the content-edit/caption policy, the code-side evidence behind
+a judge's M20 and the journal ledger a response is checked against) still run at postcheck time only,
+so a PASS HERE IS A PREVIEW, NEVER A CERTIFICATION. Fix everything it reports, run it again until it
+says OK, and only THEN write the completion marker. An attempt that ends with its problems still in
+the files does not get repaired: it FAILS and the whole stage is re-run in a rebuilt sandbox.
 {alt_text}Do not skip the self-check because the first path is missing: a session that cannot run it
 says so in its final report AND re-reads every deliverable schema by hand.
 """)
@@ -403,10 +406,11 @@ From the sandbox root, before you write `{MARKER_FILE}`:
     python "{pipeline_self_path()}" selfcheck --sandbox . --stage judge
 It applies the orchestrator's OWN detectors to this sandbox -- scores.json, its schema, the integer
 against the rows that back it, your `checks` map and your coverage of every issued opponent label --
-and prints exactly what the post-check would reject, quoting the same messages. Fix everything it
-reports, run it again until it says OK, and only THEN write the completion marker: a sheet that ends
-with those problems is discarded and judged again from scratch, which wastes the whole session and
-leaves the panel incomplete.{alternate}
+and prints what the post-check would reject for every family a sandbox can decide on its own (the
+code-side grounding evidence is computed by the orchestrator and stays at post-check time, so a PASS
+HERE IS A PREVIEW, NEVER A CERTIFICATION). Fix everything it reports, run it again until it says OK,
+and only THEN write the completion marker: a sheet that ends with those problems is discarded and
+judged again from scratch, which wastes the whole session and leaves the panel incomplete.{alternate}
 """)
 
 
