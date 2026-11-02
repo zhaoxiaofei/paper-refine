@@ -1038,27 +1038,19 @@ def _m30_ledger_state(path: Path) -> dict:
             "bad_dispositions": bad_dispositions}
 
 
-def _m30_seed_reference_state(sb: Path) -> tuple:
-    """(row identities, reference_available) from the sandbox's EVIDENCE PACK.
+def _m30_identities_from_pack(scans):
+    """The seeded row identities a CODE_SCANS-shaped pack records, or None.
 
-    The seed file is also the documented answer ("dispose every seeded row in
-    place"), so it cannot be its own reference: a session that rewrites the
-    sandbox seed down to one disposed row dropped the other seeded rows with no
-    error (R04). `seed_evidence_pack` writes the scan's own hierarchy rows into
-    `work/CODE_SCANS.json` before the session starts; rebuild the identities
-    through the SAME renderer and parser the seed used, so they match exactly.
-    `reference_available` distinguishes "the pack records no rows" (a clean scan,
-    no comparison owed) from "the pack is missing/unreadable" (the comparison
-    cannot be checked and must be reported).
+    None means the pack is missing/unreadable/has no hierarchy list (the
+    comparison cannot be checked); [] means it is a readable pack with no
+    actionable hierarchy rows (a clean scan, no comparison owed).
     """
-    scans = read_json(Path(sb) / "work" / "CODE_SCANS.json",
-                      revive=False, lenient=True)
     if not isinstance(scans, dict):
-        return [], False
+        return None
     hierarchy = scans.get("hierarchy")
     rows = hierarchy.get("rows") if isinstance(hierarchy, dict) else None
     if not isinstance(rows, list):
-        return [], False
+        return None
     h_rows = [{"document": r.get("document"), "kind": r.get("kind"),
                "number": r.get("number"), "unit": r.get("unit") or "",
                "sentence": (r.get("sentence") or "")[:110],
@@ -1075,7 +1067,38 @@ def _m30_seed_reference_state(sb: Path) -> tuple:
             producer = str(row.get("candidate producer") or "").strip()
             if producer and not producer.startswith("(no shipped table column"):
                 out.append(_m30_row_key(row))
-    return out, True
+    return out
+
+
+def _m30_seed_reference_state(sb: Path) -> tuple:
+    """(row identities, reference_available, reference_label) from the PIN.
+
+    The seed file is also the documented answer ("dispose every seeded row in
+    place"), so it cannot be its own reference: a session that rewrites the
+    sandbox seed down to one disposed row dropped the other seeded rows with no
+    error (R04). R04 made the live `work/CODE_SCANS.json` the reference, but
+    that file is still agent-writable, so truncating both it and the ledger
+    passed the gate (F39). `seed_evidence_pack` now writes the same hierarchy
+    payload to `m30_seed_pin_path(sb)` BESIDE the sandbox, outside the agent's
+    tree; that pin is read first.
+    `reference_available` distinguishes "the pack records no rows" (a clean scan,
+    no comparison owed) from "the reference is missing/unreadable" (the
+    comparison cannot be checked and must be reported). A real session sandbox
+    (one carrying PROMPT.md) whose pin is missing does NOT fall back to the
+    agent-writable live seed; only a PROMPT-less unit fixture does.
+    """
+    sb = Path(sb)
+    pin = m30_seed_pin_path(sb)
+    identities = _m30_identities_from_pack(read_json(pin, revive=False, lenient=False))
+    if identities is not None:
+        return identities, True, str(pin)
+    if (sb / "PROMPT.md").is_file():
+        return [], False, str(pin)
+    identities = _m30_identities_from_pack(
+        read_json(sb / "work" / "CODE_SCANS.json", revive=False, lenient=True))
+    if identities is not None:
+        return identities, True, "work/CODE_SCANS.json"
+    return [], False, str(pin)
 
 
 def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
@@ -1169,27 +1192,28 @@ def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
     # strength of the one row it kept. The old score compared only
     # (has actionable rows, empty count), so a one-row package copy with a
     # filled disposition beat a full seed with three empty rows and the gate
-    # reported nothing (F01). The reference is the seed the EVIDENCE PACK
-    # recorded, not the live seed file -- that file is also the documented answer
-    # ("dispose every seeded row in place"), so a one-row rewrite of it used to
-    # pass the check it was supposed to fail (R04). The live sandbox seed is the
-    # fallback for a sandbox that carries no evidence pack (a unit fixture).
+    # reported nothing (F01). The reference is the identity PIN the orchestrator
+    # wrote BESIDE the sandbox, not the live seed file -- that file is also the
+    # documented answer ("dispose every seeded row in place"), so a rewrite of it
+    # (or of both it and the ledger) used to pass the check it was supposed to
+    # fail (R04/F39). The live sandbox seed is the fallback only for a
+    # PROMPT-less unit fixture.
     judged_keys = set(judged_state["rows"])
-    reference_rows, reference_available = _m30_seed_reference_state(sb)
-    reference_label = "work/CODE_SCANS.json"
+    reference_rows, reference_available, reference_label = _m30_seed_reference_state(sb)
     if not reference_available:
         if (Path(sb) / "PROMPT.md").is_file():
-            # Every real session sandbox carries PROMPT.md, and the evidence pack
-            # is written beside it. If the pack is gone/unreadable the identity
-            # check CANNOT run: report that instead of silently skipping it (R04).
+            # Every real session sandbox carries PROMPT.md, and the seed pin is
+            # written beside it. If the pin is gone/unreadable the identity
+            # check CANNOT run: report that instead of silently trusting the
+            # agent-writable live copy (F39).
             errs.append(
-                f"{judged}: the M30 seed reference work/CODE_SCANS.json is missing, "
+                f"{judged}: the M30 seed reference {reference_label} is missing, "
                 f"unreadable or carries no hierarchy rows, so the seeded row identities "
-                f"cannot be checked. Restore the evidence pack (or re-run the stage): "
+                f"cannot be checked. Restore the evidence pin (or re-run the stage): "
                 f"the identity check is not skipped.")
             reference_rows = []
         else:
-            # A unit fixture / legacy sandbox without an evidence pack: fall back
+            # A unit fixture / legacy sandbox without an evidence pin: fall back
             # to the live sandbox seed (the pre-R04 behaviour).
             reference_rows = (sandbox_state["rows"]
                               if (judged != M30_HIERARCHY_REL and sandbox_state
@@ -1259,8 +1283,10 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     _manual_rel = handoff_target(author_to_complete_mode_of(ctx))
     if count_manual_steps(rev / _manual_rel) is None \
             and count_manual_steps(sb / _manual_rel) is None:
-        warns.append(f"{_manual_rel} not found under revised/ (the decision report will show the "
-                     f"manual-item count as unknown; the count is reported only and never ranked)")
+        if not _zero_item_handoff_package(author_to_complete_mode_of(ctx), marker):
+            warns.append(f"{_manual_rel} not found under revised/ (the decision report will show "
+                         f"the manual-item count as unknown; the count is reported only and never "
+                         f"ranked)")
     # The revision ledger is the deliverable that proves "no finding silently
     # dropped": require the machine-readable one, and ask for a human-readable
     # counterpart.
@@ -1765,9 +1791,10 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     _manual_rel = handoff_target(author_to_complete_mode_of(ctx))
     if count_manual_steps(out / _manual_rel) is None \
             and count_manual_steps(sb / _manual_rel) is None:
-        warns.append(f"{_manual_rel} not found under {REWRITTEN_DIR}/ (the decision report will "
-                     f"show the manual-item count as unknown; the count is reported only and never "
-                     f"ranked)")
+        if not _zero_item_handoff_package(author_to_complete_mode_of(ctx), marker):
+            warns.append(f"{_manual_rel} not found under {REWRITTEN_DIR}/ (the decision report "
+                         f"will show the manual-item count as unknown; the count is reported only "
+                         f"and never ranked)")
     # M30: seeded into this sandbox and ordered by the stage prompt, but only the
     # revise postcheck gated it (F04). The round's frozen list lives in the run
     # root; this sandbox carries no guided_review/ copy.
@@ -5735,6 +5762,24 @@ def _sandbox_handoff_mode(sb: Path) -> str:
     return DEFAULT_AUTHOR_TO_COMPLETE
 
 
+def _zero_item_handoff_package(mode, marker) -> bool:
+    """True when the readme policy and the marker agree no manual item is owed.
+
+    The readme hand-off policy creates `README-AUTHOR-TO-COMPLETE.md` only when
+    at least one item exists and deletes it when none remain, so expecting that
+    file unconditionally warned on a compliant zero-item package (F17). The
+    marker's `summary.manual_items` is the stage's own item count; a missing or
+    non-integer count keeps the warning (the count is unknown, so the file may
+    be owed). Non-readme modes keep their unconditional MANUAL_STEPS.md
+    expectation.
+    """
+    if handoff_target(mode) != AUTHOR_TO_COMPLETE_README:
+        return False
+    summary = marker.get("summary") if isinstance(marker, dict) else None
+    count = summary.get("manual_items") if isinstance(summary, dict) else None
+    return is_int(count) and count == 0
+
+
 def _usable_deliverable(p: Path) -> bool:
     """Is this file worth ADOPTING into its canonical path?
 
@@ -5886,12 +5931,16 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
     # under `readme` (the default) C10/F16 rewrite the prompt to the README and
     # a compliant package carries no MANUAL_STEPS.md, which the postchecks
     # already accept (F21). The expectation must name the same file.
-    _handoff_rel = handoff_target(_sandbox_handoff_mode(sb))
+    _handoff_mode = _sandbox_handoff_mode(sb)
+    _handoff_rel = handoff_target(_handoff_mode)
     for rel in table.get("expected", ()):
         expected = rel
-        if Path(rel).name == "MANUAL_STEPS.md":
+        _is_manual_list = Path(rel).name == "MANUAL_STEPS.md"
+        if _is_manual_list:
             expected = (Path(rel).parent / _handoff_rel).as_posix()
         if not (sb / expected).is_file():
+            if _is_manual_list and _zero_item_handoff_package(_handoff_mode, marker):
+                continue
             warns.append(f"{expected} is missing (reported by the postcheck as a warning)")
     # 3. any structured output that EXISTS must parse (the postcheck's own parse
     #    gate: a truncated sheet must never be reported as complete).

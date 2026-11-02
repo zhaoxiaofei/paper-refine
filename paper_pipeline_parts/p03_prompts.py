@@ -823,7 +823,7 @@ def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
         "  unit where the section scope allows; do not drop the unit.",
         "",
     ]
-    if forbidden:
+    if not deletions_allowed:
         lines += [
             "Record `manual-required` only when no honest in-place rewrite exists — for",
             "example, when the only honest repair would invent a fact, citation, dataset",
@@ -855,12 +855,45 @@ def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
         "",
     ]
     if forbidden:
+        # Key each paragraph on the direction THIS policy actually forbids: with
+        # insertions only, a deletion is still allowed, so the block must not
+        # tell the agent that removing text is banned or that a later
+        # removal instruction is overridden (R01).
+        if not insertions_allowed and not deletions_allowed:
+            repair_ban = "removing or adding"
+            precedence_ban = "add or remove"
+            precedence_examples = ("the language pass's split/merge/add-sibling repairs, a "
+                                   "rewrite's requested transitions, and an integration port "
+                                   "that would replace a unit")
+            precedence_after = (
+                "Where a later mandate can be met without adding or removing a unit, make "
+                "that in-place edit; otherwise record the item as manual-required/unable "
+                "and leave the unit unchanged.")
+        elif not insertions_allowed:
+            repair_ban = "adding"
+            precedence_ban = "add"
+            precedence_examples = ("a later split, add-sibling, transition or integration "
+                                   "port that would create one")
+            precedence_after = (
+                "Where a later mandate can be met without adding a unit, make that "
+                "in-place edit; a deletion remains allowed when it is honestly the best "
+                "repair; otherwise record the item as manual-required/unable and leave "
+                "the unit unchanged.")
+        else:
+            repair_ban = "removing"
+            precedence_ban = "remove"
+            precedence_examples = ("a later merge, transition or integration port that "
+                                   "would drop one")
+            precedence_after = (
+                "Where a later mandate can be met without removing a unit, make that "
+                "in-place edit; otherwise record the item as manual-required/unable and "
+                "leave the unit unchanged.")
         lines += [
             "THE ORCHESTRATOR ENFORCES THIS MECHANICALLY. Its postcheck compares the",
             "delivered package with the base and fails the attempt for every sentence it",
             "finds violating this policy. A failed attempt is retried with that message;",
-            "make the repair in place rather than removing or adding text."
-            " The retry message asks for the in-place rewrite.",
+            (f"make the repair in place rather than {repair_ban} text."
+             " The retry message asks for the in-place rewrite."),
             "The mechanical comparison is sentence-level: the paragraph/heading/caption/row/",
             "document classes above are policy guidance, so a heading- or row-only change",
             "may not be caught by the postcheck. Keep them anyway; the policy still applies.",
@@ -875,13 +908,12 @@ def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
         ]
     if forbidden:
         lines += [
-            "PRECEDENCE: this block overrides every later instruction that would add or",
-            "remove a unit, including the language pass's split/merge/add-sibling repairs,",
-            "a rewrite's requested transitions, and an integration port that would replace",
-            "a unit. Where a later mandate can be met without adding or removing a unit,",
-            "make that in-place edit; otherwise record the item as manual-required/unable",
-            "and leave the unit unchanged. Under PREFER REWRITE OVER DELETION, try the",
-            "in-place rewrite before that fallback.",
+            (f"PRECEDENCE: this block overrides every later instruction that would "
+             f"{precedence_ban} a"),
+            f"unit, including {precedence_examples}.",
+            precedence_after,
+            "Under PREFER REWRITE OVER DELETION, try the in-place rewrite before that",
+            "fallback.",
             "",
         ]
     else:
@@ -1684,15 +1716,16 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
      occurrences you update first, never which value wins.
   2. V1-V5 validation: round-trip integrity, diff locality with no unmapped hunks, a full mechanical
      rescan of the integrated corpus with the pipeline's frozen integration rescan set (the
-     M1-M17 + J1-J4 sweeps of $paper-review; this stage's M18-M20, the rewrite-parity
+     M1-M17 + J1-J4 sweeps of $paper-review; this stage's M18-M24, the rewrite-parity
      M25-M29 and the M30-M36 blocks cover the
      rest; the revision skill's V3 covers a wider set than this stage does), checksum
      verification that self/, every others/<id>/ and non_revised/ are untouched, and the final
      reports.
      NOTE: this sandbox intentionally has no guided_review/ directory, so the revision skill's V3 pointer to
      "./guided_review/round2/new_sweeps.md" is vacuous here. Rescan with the standard frozen set
-     (M1-M17 + J1-J4)@@M18_INTEGRATE_CLAUSE@@; if some other sweep file is genuinely absent, record
-     that instead of inventing results. When `frozen_discovery/` is present, the rescan ALSO
+     (M1-M17 + J1-J4), the adopted M21-M24 checks@@M18_INTEGRATE_CLAUSE@@; if some other sweep
+     file is genuinely absent, record that instead of inventing results. When
+     `frozen_discovery/` is present, the rescan ALSO
      re-locates every X-* finding in integrated/ and records, per id, whether the defect is
      present, resolved or not applicable -- the reconciliation your ledger must carry.
   3. Confirm explicitly that nothing in integrated/ is worse than non_revised/ (no deleted claims,

@@ -262,6 +262,15 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
                 f"symlink or a non-directory while preparing ({sb}).")
         parts = [PROFILE_RULES_HEADER, f"_Stage: {stage}_\n"]
         for title, body in sections:
+            # A paged body may itself carry `## ` headings (the attached
+            # review/revision brief starts with `## Phase 1` / `## Phase 2`).
+            # Writing those unchanged made the pointer's section end at the
+            # first embedded heading, so a heading-bounded read of
+            # `## <title>` lost the rest of the very block it named. Demote
+            # level-2 headings inside the body; the only `## ` headings left
+            # in PROFILE_RULES.md are then the section titles the pointer
+            # names.
+            body = re.sub(r"(?m)^## (?=\S)", "### ", str(body))
             parts.append(f"\n## {title}\n\n{body.rstrip()}\n")
         write_text_atomic(sb / PROFILE_RULES_REL, "".join(parts))
     # The contradiction rule leads every stage prompt (it names no stage, mode

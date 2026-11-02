@@ -1985,6 +1985,10 @@ CONTENT_EDIT_KEYS = {
                   "disable_deletions"),
 }
 _CONTENT_EDIT_OFF = ("off", "disabled", "disable", "false", "no", "0", "forbidden")
+# The explicit ON spellings. Only these turn a switch on: an unrecognised
+# hand-edited value keeps the historical default (off for prefer-rewrite,
+# enabled for the content-edit switches), never a silent switch.
+_CONTENT_EDIT_ON = ("on", "true", "yes", "1", "enabled")
 
 PREFER_REWRITE_OVER_DELETION = "prefer_rewrite_over_deletion"
 
@@ -2006,9 +2010,10 @@ def prefer_rewrite_over_deletion(ctx=None) -> bool:
     cfg = (getattr(ctx, "cfg", None) or {}) if ctx is not None else {}
     raw = cfg.get(PREFER_REWRITE_OVER_DELETION, False)
     if isinstance(raw, str):
-        # The setup file writes "on"/"off"; a hand-edited value must not turn
-        # the mode on by accident.
-        return raw.strip().lower() not in _CONTENT_EDIT_OFF + ("",)
+        # The setup file writes "on"/"off". Recognise only the explicit ON
+        # spellings: a hand-edited or misspelled value must not turn the
+        # benchmark-only mode on by accident (the historical default is off).
+        return raw.strip().lower() in _CONTENT_EDIT_ON
     return bool(raw)
 
 
@@ -2045,7 +2050,7 @@ def _content_edit_enabled(ctx, kind: str, default: bool = True) -> bool:
             text = str(value or "").strip().lower()
             if not text:
                 continue
-            truthy = text in ("on", "true", "yes", "1", "enabled")
+            truthy = text in _CONTENT_EDIT_ON
         if key.startswith("disable_"):
             return not truthy
         if truthy:
@@ -3353,7 +3358,8 @@ REWRITE_PARITY_REVIEW = """3d. The REWRITE-PARITY checks M25-M29 and the ARCHITE
 
 REWRITE_PARITY_AUDIT = """4. ATTACK THE REWRITE-PARITY RECORD - the classes a rewrite fixes as it goes, and the
    dispositions that lost the last root's points. A blanket closure is not a disposition here
-   either; raise every real defect as your own `AU-` finding:
+   either; record every real defect you can evidence as an observation in
+   `audit/UNRESOLVED.md` (location + re-runnable evidence), never as an `AU-` row:
      * M1 / M1b: a row closed "it is a name / proper noun, not an abbreviation" is NOT a
        disposition when the sentence itself prints the token's expansion
        (`MALBAC-sequenced (multiple annealing and looping-based amplification cycles)`,
@@ -3362,21 +3368,21 @@ REWRITE_PARITY_AUDIT = """4. ATTACK THE REWRITE-PARITY RECORD - the classes a re
      * M25-M29: for every row the reviewer disposed, ask whether the reason is about THAT row's
        own bar (the term ledger's decision, the claim's required evidence set, the printed
        header) or a blanket sentence. A row closed "the artwork is read-only" while an editable
-       caption/main-text/SI-legend surface still carries the non-authoritative form is an AU-
-       finding, not a manual item. Same for a convention family closed per document while the
-       convention is a corpus-level decision.
+       caption/main-text/SI-legend surface still carries the non-authoritative form is an
+       observation in `audit/UNRESOLVED.md`, not a manual item. Same for a convention family
+       closed per document while the convention is a corpus-level decision.
        (M25 artwork/text parity · M26 house-style conventions · M27 claim-to-evidence coverage ·
        M28 sibling-definition symmetry · M29 caption-promise parity - each artifact must carry a
        disposition on every row.)
      * the TWO-SIDED rows: a caption row disposed "the print is what it is" while a printed
-       column/panel is described nowhere is an AU-finding (M29 reads in both directions), and a
-       J3 row disposed as "the wording is appropriately cautious" is an AU-finding when the
+       column/panel is described nowhere is an observation (M29 reads in both directions), and a
+       J3 row disposed as "the wording is appropriately cautious" is an observation when the
        corpus's own data prove the claim the sentence hedges (an underclaim is the other half of
        the calibration check, not a virtue). Read `guided_review/artifacts/CLAIM_STRENGTH.md` both ways.
      * J5 / guided_review/ARCHITECTURE.md: every scope row must carry a row-specific disposition. A
        document with no rows, or one "OK - reads well" sentence repeated on every row, is an
-       UNFILLED artifact - raise the scopes you can evidence yourself as `AU-` findings
-       (`check: J5`, scope recorded).
+       UNFILLED artifact - record the scopes you can evidence yourself as observations in
+       `audit/UNRESOLVED.md` (`check: J5`, scope recorded).
    The reviewer's M25-M29/J5 FINDINGS are disposed like every other frozen id (confirm, or drop
    with evidence)."""
 
@@ -3489,10 +3495,11 @@ HIERARCHY_RECONCILE_REVIEW = """3e. The SOURCE-HIERARCHY reconciliation (check i
 
 HIERARCHY_RECONCILE_AUDIT = """     * M30 source-hierarchy reconciliation: a row closed "the code/raw data is out of scope",
        "raw_data/ is read-only" or "not in the written parts" is NOT a disposition when the
-       corpus ships the producer and the written value disagrees with it -- that is an AU-
-       finding (`check: M30`, both sides cited). "No shipped table matches" is not a disposition
-       either while the code declares the constant or the figure's source is in the corpus, and a
-       row disposed "unable" without saying which producer was searched is unfilled. The authority
+       corpus ships the producer and the written value disagrees with it -- that is an
+       observation in `audit/UNRESOLVED.md` (`check: M30`, both sides cited). "No shipped table
+       matches" is not a disposition either while the code declares the constant or the figure's
+       source is in the corpus, and a row disposed "unable" without saying which producer was
+       searched is unfilled. The authority
        you cite is the standing hierarchy (@@SOURCE_HIERARCHY@@), and the M30 artifact's rows are
        disposed like every other sweep's."""
 
@@ -3624,8 +3631,8 @@ EVIDENCE_INTEGRITY_AUDIT = """     * M31-M36 evidence integrity: attack a class 
        describes, an M35 `clean` while the disclosure names a client instead of a model or the
        package ships internal working material, or an M36 `clean` while a citation marker's
        number disagrees with the item's own rank in the Zotero citation order (or the
-       bibliography entry at that rank describes another work) -- each is an `AU-` finding under
-       that check id, with both sides quoted."""
+       bibliography entry at that rank describes another work) -- each is an observation in
+       `audit/UNRESOLVED.md` under that check id, with both sides quoted."""
 
 EVIDENCE_INTEGRITY_REVISE = """15. EVIDENCE-INTEGRITY findings (M31-M36) - resolve what is editable and hand the rest to
     MANUAL_STEPS.md with the exact artifact named:

@@ -972,6 +972,7 @@ def read_regular_file(p: Path, max_bytes: int = None) -> bytes:
 def sha256_file(p: Path) -> str:
     """SHA-256 of one file, reusing this process's cached digest when the
     file's full stat identity is unchanged (see the block comment above)."""
+    _refuse_symlinked_read_parent(Path(p))
     key = None
     try:
         # lstat, not stat: a path that was swapped for a symlink must not inherit
@@ -1119,12 +1120,24 @@ def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=(),
     """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
-    if dirp.is_symlink() and not follow_dir_links:
+    if dirp.is_symlink():
         # A directory that is ITSELF a link is not the package the caller named:
         # hash it as empty rather than certifying the link target's files
-        # (F11). Callers that legitimately materialize an evidence link pass
-        # follow_dir_links=True (the containment proof applies there).
-        return {"files": {}, "count": 0}
+        # (F11). `follow_dir_links=True` used to opt into following ANY such
+        # root, so `dir_matches` accepted a symlinked destination as the
+        # package and `hash_manifest` certified outside files as its identity
+        # (F80). The ONE legal root link is the canonical evidence area
+        # `<root>/non_revised/<area>`, which the input-manifest comparison hashes
+        # directly; it is followed only when that containment proof holds.
+        evidence_root = None
+        if is_evidence_rel(dirp.name):
+            evidence_root = _write_anchor_for(dirp) or _enclosing_run_root(dirp)
+        ok = (evidence_root is not None
+              and is_canonical_evidence_link(dirp, evidence_root))
+        if not ok and evidence_root is None and is_evidence_rel(dirp.name):
+            ok = _evidence_link_shape_ok(dirp)      # unit fixture / legacy root
+        if not (follow_dir_links and ok):
+            return {"files": {}, "count": 0}
     paths = _iter_tree_files(dirp, follow_dir_links=follow_dir_links)
     if exclude_top:
         blocked = set(exclude_top)
@@ -1362,6 +1375,66 @@ def _refuse_symlinked_parent(path: Path) -> Path:
     return path
 
 
+def _evidence_link_shape_ok(link: Path) -> bool:
+    """The target-shape fallback for a canonical evidence link with no run root.
+
+    The strict containment proof (`is_canonical_evidence_link`) needs the run
+    root that owns the copy. A unit fixture or a legacy sandbox may carry the
+    documented `<root>/non_revised/<area>` layout without a `state.json`; the
+    walker has always accepted that shape there, and refusing it would break
+    tests and fixture roots rather than a real agent sandbox (a real root always
+    has `state.json`). Never used when a root IS found.
+    """
+    try:
+        if not (link.is_symlink() and is_evidence_rel(link.name)):
+            return False
+        target = link.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return (target.is_dir() and target.name == link.name
+            and target.parent.name == PRISTINE_DIR)
+
+
+def _refuse_symlinked_read_parent(path: Path) -> Path:
+    """Refuse a READ that traverses a symlinked directory below the run root.
+
+    The readers lstat/open only the FINAL component with O_NOFOLLOW, so a
+    staged agent could replace an agent-writable directory with a link to an
+    arbitrary outside directory and make the orchestrator read outside the
+    sandbox (F42). The writers already call `_refuse_symlinked_parent`; this is
+    its read-side twin. The walk stops at the most specific registered write
+    anchor (or the enclosing run root when no anchor is registered), because a
+    legitimate operator root may itself live under a symlinked ancestor.
+
+    The ONE legal directory link is a version corpus's top-level canonical
+    evidence area (`<root>/non_revised/<area>`), which `ensure_pristine_input`
+    creates and which input manifests and postchecks must hash/read through; it
+    is allowed only when the containment proof holds (`is_canonical_evidence_link`).
+    """
+    path = Path(path)
+    parent = Path(os.path.abspath(str(path))).parent
+    anchor = _write_anchor_for(parent)
+    root = anchor if anchor is not None else _enclosing_run_root(parent)
+    probe = parent
+    while True:
+        if probe != anchor and probe.is_symlink():
+            if not is_evidence_rel(probe.name):
+                allowed = False
+            elif root is None:
+                allowed = _evidence_link_shape_ok(probe)
+            else:
+                # Prove containment against the CURRENT root (the registered
+                # anchor when there is one), never against the root the link's
+                # target happens to sit under.
+                allowed = is_canonical_evidence_link(probe, root)
+            if not allowed:
+                raise OSError(f"refusing to read through symlinked directory {probe}")
+        if probe == root or probe.parent == probe:
+            break
+        probe = probe.parent
+    return path
+
+
 def tmp_path_for(path: Path) -> Path:
     """A UNIQUE, exclusively-created temporary sibling for `path`.
 
@@ -1483,6 +1556,11 @@ def append_text_no_follow(path: Path, text: str, encoding: str = "utf-8") -> Non
     calls and the append followed the link (the 2026-10-28 audit's F10).
     """
     path = Path(path)
+    # O_NOFOLLOW protects only the FINAL component: a planted parent link
+    # (`sb/work -> outside`) still redirected this append outside the sandbox
+    # (F41). Refuse the parent chain before opening, exactly like the atomic
+    # writers.
+    _refuse_symlinked_parent(path)
     # O_NONBLOCK is what makes a planted FIFO FAIL FAST: O_WRONLY on a FIFO
     # with no reader blocks forever before the function can return, so one
     # agent could hang the whole pipeline after it exited (F26). On a FIFO the
@@ -1679,6 +1757,7 @@ def read_json(path: Path, revive: bool = True, lenient: bool = False):
     # is applied to os.read, not to st_size, so a FIFO cannot block the read.
     fd = None
     try:
+        _refuse_symlinked_read_parent(path)
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
                      | getattr(os, "O_NONBLOCK", 0))
         st = os.fstat(fd)
@@ -1731,6 +1810,7 @@ def read_text_bounded(path: Path, errors: str = "replace"):
     """
     path = Path(path)
     try:
+        _refuse_symlinked_read_parent(path)
         st = path.lstat()
         if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
             return None
@@ -7521,6 +7601,29 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     return p
 
 
+def m30_seed_pin_path(sb: Path) -> Path:
+    """The orchestrator-owned pin of a stage sandbox's M30 row identities.
+
+    `seed_evidence_pack` writes the M30 hierarchy rows into the sandbox's own
+    `work/CODE_SCANS.json`, which the session is also asked to dispose in
+    place. That makes it agent-writable, so it cannot also be the reference the
+    row-identity gate trusts (F39). The pin lives BESIDE the sandbox (in the
+    root's runs directory), not inside the agent's tree; `m30_hierarchy_problems`
+    reads it first and treats a missing pin in a real session sandbox (one with
+    PROMPT.md) as "the identity check cannot run", never as a fallback to the
+    live file.
+    """
+    sb = Path(sb)
+    return sb.parent / f"{sb.name}.m30_seed.json"
+
+
+def pin_m30_seed(sb: Path, ev: dict) -> Path:
+    """Write the M30 row-identity pin beside `sb` (outside the agent's tree)."""
+    path = m30_seed_pin_path(sb)
+    write_json_atomic(path, {"hierarchy": (ev or {}).get("hierarchy") or {}})
+    return path
+
+
 def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict:
     """Write the code-side evidence pack into one session sandbox.
 
@@ -7614,6 +7717,11 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     # ONE atomic write per seeded scan (provenance included): a second one cost
     # another fsync on the critical path with no benefit.
     write_json_atomic(work / "CODE_SCANS.json", ev)
+    if where == "stage":
+        # Pin the identities the M30 row-identity gate compares against OUTSIDE
+        # the sandbox the agent can write (F39); the live pack above stays the
+        # session's workbook and may be edited/disposed.
+        pin_m30_seed(sb, ev)
     lines = [f"# Code-side evidence pack ({where}: {sb.name})",
              "",
              f"Corpus: `{corpus_dir}`  |  {utcnow()}",
@@ -9299,7 +9407,17 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     Every skipped link is named in a warning so the loss is visible instead of
     silent.
     """
+    dst = Path(dst)
+    # A planted destination ROOT symlink (`dst -> outside`) received every
+    # copied file: `_refuse_symlinked_parent` checks the parent chain, never the
+    # final component (F43). Refuse the link itself before the mkdir, and
+    # re-check after it against a race.
+    if dst.is_symlink():
+        raise OSError(f"refusing to copy into a symlinked destination directory {dst}")
+    _refuse_symlinked_parent(dst)
     dst.mkdir(parents=True, exist_ok=True)
+    if dst.is_symlink():
+        raise OSError(f"refusing to copy into a symlinked destination directory {dst}")
     skipped = []
     # A symlinked SOURCE ROOT was followed even though every entry inside it is
     # checked individually: `src.iterdir()` traversed the link and copied the

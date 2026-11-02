@@ -19,7 +19,7 @@ content digests of every PAYLOAD file in DIR. Payload = every file except:
     that produced the source corpus, never to this package (keep in step with
     paper_pipeline.revision_token_for_dir, whose `hex_tokens`/`tokens_seen`
     apply the same rule while the token VALUE still hashes every payload file);
-  * the process scratch: work/ at the top level.
+  * the process scratch: work/ at any depth.
 
 The walk descends into symlinked DIRECTORIES (see `tree_files`), exactly like
 paper_pipeline._iter_tree_files(follow_dir_links=True): a sandbox package

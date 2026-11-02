@@ -664,6 +664,10 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     base_extra = [ET.tostring(c) for c in base_body if c.tag != _w("p")]
     rev_extra = [ET.tostring(c) for c in rev_body if c.tag != _w("p")]
     non_paragraph_changed = base_extra != rev_extra
+    # A paired non-paragraph child whose bytes differ also changes INSIDE the
+    # child; the relocation warning must keep reporting that the writer cannot
+    # mark such edits (R02).
+    non_paragraph_internal_changed = False
     counter, ts = [0], datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_body = ET.Element(_w("body"))
     n_ins = n_del = 0
@@ -688,7 +692,8 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
         if child.tag == _w("p"):
             rev_seen += 1
         else:
-            rev_anchored.append([rev_seen, 0, child])  # (rev paras before, base paras before)
+            # (revised paras before, base paras before, child, paired)
+            rev_anchored.append([rev_seen, 0, child, False])
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
             None, base_extra, rev_extra, autojunk=False).get_opcodes():
         if tag in ("equal", "replace"):
@@ -696,14 +701,67 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
             # is a replace: same slot, different bytes).
             for off in range(min(i2 - i1, j2 - j1)):
                 rev_anchored[j1 + off][1] = base_extra_anchor[i1 + off]
+                rev_anchored[j1 + off][3] = True
+                if base_extra[i1 + off] != rev_extra[j1 + off]:
+                    non_paragraph_internal_changed = True
+    # The paragraph correspondence, from the SAME diff the emit loop uses.
+    # A non-paragraph child that sits at a consistent place in both bodies can
+    # wait for BOTH anchors. When the bodies disagree about its order (a table
+    # moved from after a paragraph to before it), no single unmarked position
+    # satisfies both; the REVISED position must win (accepting all changes has
+    # to reproduce the revised package) and the relocation is reported instead
+    # of emitted silently at the base position (F44). A child inserted only in
+    # the revised body has no base-order constraint at all.
+    para_ops = difflib.SequenceMatcher(
+        None, base_texts, rev_texts, autojunk=False).get_opcodes()
+    rev_of_base = [None] * len(base_paras)
+    base_of_rev = [None] * len(rev_paras)
+    for tag, i1, i2, j1, j2 in para_ops:
+        if tag == "equal":
+            common = i2 - i1
+        elif tag == "replace":
+            common = min(i2 - i1, j2 - j1)
+        else:
+            common = 0
+        for off in range(common):
+            rev_of_base[i1 + off] = j1 + off
+            base_of_rev[j1 + off] = i1 + off
+    max_rev_before_base = [-1] * (len(base_paras) + 1)
+    for i in range(len(base_paras)):
+        max_rev_before_base[i + 1] = max(
+            max_rev_before_base[i],
+            rev_of_base[i] if rev_of_base[i] is not None else -1)
+    max_base_before_rev = [-1] * (len(rev_paras) + 1)
+    for j in range(len(rev_paras)):
+        max_base_before_rev[j + 1] = max(
+            max_base_before_rev[j],
+            base_of_rev[j] if base_of_rev[j] is not None else -1)
     emitted_base = emitted_rev = flushed = 0
+    non_paragraph_relocated = False
+
+    def _relocated(entry) -> bool:
+        """Does this paired child's base position contradict its revised one?"""
+        rev_before, base_before, _child, paired = entry
+        if not paired:
+            return False
+        return (max_rev_before_base[base_before] >= rev_before
+                or max_base_before_rev[rev_before] >= base_before)
 
     def flush_anchored() -> None:
-        nonlocal flushed
-        while (flushed < len(rev_anchored)
-               and rev_anchored[flushed][0] <= emitted_rev
-               and rev_anchored[flushed][1] <= emitted_base):
-            new_body.append(copy.deepcopy(rev_anchored[flushed][2]))
+        nonlocal flushed, non_paragraph_changed, non_paragraph_relocated
+        while flushed < len(rev_anchored):
+            entry = rev_anchored[flushed]
+            if _relocated(entry):
+                # The revised position is the contract here; waiting for the
+                # base anchor would place the child after paragraphs the
+                # revised body puts it before.
+                if entry[0] > emitted_rev:
+                    break
+                non_paragraph_changed = True
+                non_paragraph_relocated = True
+            elif not (entry[0] <= emitted_rev and entry[1] <= emitted_base):
+                break
+            new_body.append(copy.deepcopy(entry[2]))
             flushed += 1
 
     def emit(element, base_after=None, rev_after=None) -> None:
@@ -742,8 +800,7 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
         return body(a) == body(b)
 
     flush_anchored()                                    # before the first revised para
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-            None, base_texts, rev_texts, autojunk=False).get_opcodes():
+    for tag, i1, i2, j1, j2 in para_ops:
         if tag == "equal":
             for k in range(i1, i2):
                 rp_index = j1 + (k - i1)
@@ -806,7 +863,16 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     info = {"paragraphs_inserted": n_ins, "paragraphs_deleted": n_del,
             "revision_ids": counter[0],
             "non_paragraph_changed": non_paragraph_changed}
-    if non_paragraph_changed:
+    if non_paragraph_relocated:
+        warning = ("tables/content-controls/section properties MOVED relative to the "
+                   "paragraphs; the built-in writer places them at their revised "
+                   "positions (accepting all changes reproduces the revised body), but "
+                   "rejecting all changes does not reproduce the base order")
+        if non_paragraph_internal_changed:
+            warning += ("; the revised non-paragraph content also differs, and the "
+                        "built-in writer does NOT mark changes inside it")
+        info["warning"] = warning + " -- inspect the diff with a real tracked-changes backend"
+    elif non_paragraph_changed:
         info["warning"] = ("tables/content-controls/section properties differ between base and "
                            "revised; the built-in writer keeps the revised ones in place but "
                            "does NOT mark changes inside them -- inspect the diff with a real "

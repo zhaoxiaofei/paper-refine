@@ -2316,19 +2316,21 @@ postcheck.
   is WHERE the instructions live, not what they demand.
 
 Measured effect (every stage prompt, rendered from the same checkout; the split and
-formatting-writing review variants track `review`):
+formatting-writing review variants track `review`). Reproduce with
+`python3 .paper_test/render_stage_prompts.py .` and `... --medium`; the columns are
+those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 109 KB | 42 KB | 61% |
-| cold_start_review | 57 KB | 18 KB | 67% |
-| audit | 79 KB | 35 KB | 55% |
-| revise | 107 KB | 55 KB | 49% |
-| integrate | 105 KB | 54 KB | 49% |
-| rewrite | 99 KB | 51 KB | 49% |
-| judge | 95 KB | 65 KB | 32% |
-| revision_audit | 23 KB | 9 KB | 61% |
-| revision_repair | 19 KB | 5 KB | 73% |
+| review | 112 KB | 44 KB | 60% |
+| cold_start_review | 59 KB | 20 KB | 65% |
+| audit | 83 KB | 39 KB | 53% |
+| revise | 110 KB | 57 KB | 48% |
+| integrate | 109 KB | 57 KB | 48% |
+| rewrite | 102 KB | 52 KB | 48% |
+| judge | 96 KB | 66 KB | 32% |
+| revision_audit | 24 KB | 10 KB | 58% |
+| revision_repair | 20 KB | 6 KB | 69% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
@@ -3437,7 +3439,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 176 suites (a few
+any failure. They are independent, so run them in parallel — 178 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

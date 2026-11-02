@@ -109,7 +109,7 @@ USAGE_EXAMPLES = """usage:
           [--enable-deletions] [--disable-deletions]
           [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
           (default: the root's recorded policy; both enabled unless `setup` disabled one;
-           prefer-rewrite off unless `setup`/a previous run turned it on)
+           prefer-rewrite off unless `setup` recorded it on or this invocation's flag sets it)
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent codex|claude|dsh|qwen|manual] [--agent-cmd '<json argv>']
           [--judge-agent codex|claude|dsh|qwen|manual] [--judge-agent-cmd '<json argv>']

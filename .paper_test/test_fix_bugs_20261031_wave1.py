@@ -473,7 +473,7 @@ def test_f60() -> None:
     check("F60 no unresolved @@TOKEN@@ is left",
           not re.search(r"@@[A-Z0-9_]+@@", text))
     check("F60 the coverage sentence names the parity classes",
-          "M18-M20, the rewrite-parity" in text)
+          "M18-M24, the rewrite-parity" in text and "M21-M24" in text)
 
 
 # ---------------------------------------------------------------------------
