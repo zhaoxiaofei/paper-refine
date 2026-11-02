@@ -662,6 +662,21 @@ not create revised/, do not edit base/ or non_revised/, and do not ask the user 
 
 
 def content_edit_policy_block(insertions_allowed: bool = True,
+                              deletions_allowed: bool = True,
+                              prefer_rewrite: bool = False) -> str:
+    """The benchmark-only content-edit policy block.
+
+    The OFF path is the verbatim pre-feature function (`_legacy_…`): when the
+    prefer-rewrite mode is not enabled, the prompt bytes are identical to the
+    pipeline before the mode existed. Only the ON path adds the extra
+    prefer-rewrite text; the strict directions are unchanged.
+    """
+    if not prefer_rewrite:
+        return _legacy_content_edit_policy_block(insertions_allowed, deletions_allowed)
+    return _prefer_rewrite_policy_block(insertions_allowed, deletions_allowed)
+
+
+def _legacy_content_edit_policy_block(insertions_allowed: bool = True,
                               deletions_allowed: bool = True) -> str:
     """The benchmark-only strict content-edit policy, or "" for the default.
 
@@ -740,8 +755,124 @@ def content_edit_policy_block(insertions_allowed: bool = True,
     return "\n".join(lines) + "\n"
 
 
+def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
+                                 deletions_allowed: bool = True) -> str:
+    """The prompt block for the prefer-rewrite-over-deletion mode (on only).
+
+    The strict directions (when present) stay in force; the extra text makes an
+    in-place rewrite of the SAME content unit the required first attempt before
+    a deletion-only finding is recorded as `manual-required`.
+    """
+    forbidden = []
+    if not insertions_allowed:
+        forbidden.append("INSERTIONS")
+    if not deletions_allowed:
+        forbidden.append("DELETIONS")
+    lines = [
+        "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===",
+        "",
+    ]
+    if forbidden:
+        lines += ["THIS RUN FORBIDS " + " AND ".join(forbidden) + ".", ""]
+    lines += ["PREFER REWRITE OVER DELETION.", ""]
+    lines += [
+        "A content UNIT is a sentence, a paragraph, a heading, a caption, or one",
+        "table/figure row. The base package (`base/`, or `self/` for an integration)",
+        "is the reference set.",
+        "",
+    ]
+    if not deletions_allowed:
+        lines += [
+            "NO DELETIONS: do not remove, drop, merge away or replace-by-omission any",
+            "content unit. Rewrite the unit in place so the defect is gone and the unit",
+            "survives; the PREFER REWRITE OVER DELETION rules below say how. Record",
+            "`manual-required` only when no honest in-place rewrite exists. A true",
+            "duplicate is still a unit: keep it and rewrite the duplicate occurrence",
+            "(or merge its unique fact into the surviving unit and rewrite it in",
+            "place).",
+            "",
+        ]
+    if not insertions_allowed:
+        lines += [
+            "NO INSERTIONS: do not add a sentence, paragraph, heading, caption or row",
+            "the base does not carry. Do not add transitional or explanatory prose,",
+            "a new citation, a new table/figure row, or a new document. Correct the",
+            "existing unit in place. EXCEPTION: an author hand-off marker",
+            "(`[AUTHOR TO COMPLETE: ...]`) that the pipeline's own placeholder rule",
+            "requires is a scaffold, not manuscript content; add it only where that",
+            "rule says and record it in the hand-off list.",
+            "",
+        ]
+    lines += [
+        "The benchmark credits a restored claim, not a removed one. Before you",
+        "record a finding as `manual-required` — or leave the",
+        "unit unchanged — because it \"can only be removed\", try an in-place rewrite of",
+        "that SAME unit:",
+        "",
+        "* wrong premise, verb, value, number, unit, citation, table/figure/section",
+        "  pointer or caption: restore the correct fact inside the existing sentence,",
+        "  caption or reference entry.",
+        "* duplicate sentence: keep the unit; rewrite the duplicate occurrence so it is",
+        "  no longer a duplicate and preserves any unique fact, or merge its unique fact",
+        "  into the surviving unit and rewrite the duplicate unit in place.",
+        "* leftover prompt or placeholder: replace the prompt/placeholder text in the",
+        "  same unit with a substantive sentence consistent with the surrounding",
+        "  paragraph; do not add a new unit and do not invent data, citations or",
+        "  results.",
+        "* structural order/split/merge: reorder, split or merge inside the same atomic",
+        "  unit where the section scope allows; do not drop the unit.",
+        "",
+        "Record `manual-required` only when no honest in-place rewrite exists — for",
+        "example, when the only honest repair would invent a fact, citation, dataset",
+        "or claim. Say exactly why the unit cannot be rewritten. A deletion is never a",
+        "substitute for a rewrite; a unit may be rewritten in full, but the unit must",
+        "survive. This preference is part of the precedence above: try the rewrite",
+        "before the later manual-required fallback.",
+        "",
+    ]
+    lines += [
+        "WHAT IS STILL ALLOWED: rewriting the words INSIDE an existing unit, and",
+        "replacing an existing statement with a corrected statement of the same unit",
+        "(the defect is repaired in place, not deleted and re-created). Number and",
+        "identifier corrections, terminology changes and style fixes are all in-place",
+        "edits when the unit survives.",
+        "",
+    ]
+    if forbidden:
+        lines += [
+            "THE ORCHESTRATOR ENFORCES THIS MECHANICALLY. Its postcheck compares the",
+            "delivered package with the base and fails the attempt for every sentence it",
+            "finds violating this policy. A failed attempt is retried with that message;",
+            "make the repair in place rather than removing or adding text."
+            " The retry message asks for the in-place rewrite.",
+            "The mechanical comparison is sentence-level: the paragraph/heading/caption/row/",
+            "document classes above are policy guidance, so a heading- or row-only change",
+            "may not be caught by the postcheck. Keep them anyway; the policy still applies.",
+            "",
+        ]
+    else:
+        lines += [
+            "THE PREFER-REWRITE RULE IS A PROMPT-LEVEL QUALITY PREFERENCE. With both kinds",
+            "enabled the orchestrator does not mechanically reject a deletion, but a",
+            "deletion is not the preferred repair: try the in-place rewrite first.",
+            "",
+        ]
+    lines += [
+        "PRECEDENCE: this block overrides every later instruction that would add or",
+        "remove a unit, including the language pass's split/merge/add-sibling repairs,",
+        "a rewrite's requested transitions, and an integration port that would replace",
+        "a unit. Where a later mandate can be met without adding or removing a unit,",
+        "make that in-place edit; otherwise record the item as manual-required/unable",
+        "and leave the unit unchanged. Under PREFER REWRITE OVER DELETION, try the",
+        "in-place rewrite before that fallback.",
+        "",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def prompt_content_edit_policy_matches(prompt: Path, insertions_allowed: bool = True,
-                                        deletions_allowed: bool = True) -> bool:
+                                        deletions_allowed: bool = True,
+                                        prefer_rewrite: bool = False) -> bool:
     """Does an already-materialized PROMPT.md state the CURRENT policy?
 
     Prompt files are written once, when a sandbox is materialized. If the
@@ -756,14 +887,16 @@ def prompt_content_edit_policy_matches(prompt: Path, insertions_allowed: bool = 
     if text is None:
         return False
     has_block = "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===" in text
-    if insertions_allowed and deletions_allowed:
+    if insertions_allowed and deletions_allowed and not prefer_rewrite:
         return not has_block
     if not has_block:
         return False
     # The block names each forbidden direction exactly once, in its own
-    # `NO INSERTIONS:` / `NO DELETIONS:` paragraph.
+    # `NO INSERTIONS:` / `NO DELETIONS:` paragraph, and the prefer mode once in
+    # its heading. A strict prompt without the heading is the old policy.
     return (("NO INSERTIONS:" in text) == (not insertions_allowed)
-            and ("NO DELETIONS:" in text) == (not deletions_allowed))
+            and ("NO DELETIONS:" in text) == (not deletions_allowed)
+            and (("PREFER REWRITE OVER DELETION." in text) == prefer_rewrite))
 
 
 def content_edit_policy_from_prompt(prompt: Path):
@@ -780,6 +913,41 @@ def content_edit_policy_from_prompt(prompt: Path):
     if "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===" not in text:
         return (True, True)
     return ("NO INSERTIONS:" not in text, "NO DELETIONS:" not in text)
+
+
+def prefer_rewrite_from_prompt(prompt: Path):
+    """Does an existing PROMPT.md state the prefer-rewrite mode, or None.
+
+    A prompt without the policy block is the historical default (the mode off);
+    a prompt with the block states the mode in its `PREFER REWRITE OVER
+    DELETION.` heading. A missing/unreadable prompt returns None so the caller
+    can fall back to the invocation.
+    """
+    text = read_text_bounded(prompt)
+    if text is None:
+        return None
+    if "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===" not in text:
+        return False
+    return "PREFER REWRITE OVER DELETION." in text
+
+
+def prefer_rewrite_for_sandbox(ctx, rec, prompt: Path) -> bool:
+    """The prefer-rewrite mode an already-materialized sandbox was prompted under.
+
+    The same binding rule as `content_edit_policy_for_sandbox`: a run record's
+    `content_edit_policy` is authoritative; a record without the key is bound
+    by the prompt it already has; only a sandbox with no prompt yet takes the
+    current invocation's mode.
+    """
+    policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
+    if isinstance(policy, dict) and "prefer_rewrite_over_deletion" in policy:
+        return bool(policy["prefer_rewrite_over_deletion"])
+    prompt = Path(prompt)
+    if prompt.is_file():
+        from_prompt = prefer_rewrite_from_prompt(prompt)
+        if from_prompt is not None:
+            return from_prompt
+    return prefer_rewrite_over_deletion(ctx)
 
 
 def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
@@ -804,7 +972,8 @@ def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
 
 
 def apply_content_edit_policy(text: str, insertions_allowed: bool = True,
-                              deletions_allowed: bool = True) -> str:
+                              deletions_allowed: bool = True,
+                              prefer_rewrite: bool = False) -> str:
     """Fill the policy placeholder WITHOUT perturbing a default prompt.
 
     The placeholder sits on its own line after the prior-attempt block. When
@@ -812,7 +981,8 @@ def apply_content_edit_policy(text: str, insertions_allowed: bool = True,
     removed, so the default prompt is byte-identical to the pre-feature one
     (the hard constraint: defaults must not change behaviour or output).
     """
-    block = content_edit_policy_block(insertions_allowed, deletions_allowed)
+    block = content_edit_policy_block(insertions_allowed, deletions_allowed,
+                                      prefer_rewrite)
     if block:
         return text.replace("@@CONTENT_EDIT_POLICY@@", block)
     return text.replace("@@CONTENT_EDIT_POLICY@@\n", "")
@@ -3045,7 +3215,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                   execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                   guided_review_off: bool = False,
                   insertions_allowed: bool = True,
-                  deletions_allowed: bool = True) -> str:
+                  deletions_allowed: bool = True,
+                  prefer_rewrite: bool = False) -> str:
     """Phase 2 prompt: $paper-revise, consuming the round's frozen guided_review/ copy."""
     prof = _as_profile(venue)
     audit_block = ("""
@@ -3075,7 +3246,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_REVISED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
-    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
+                                     prefer_rewrite)
     text = apply_rewrite_parity(text, "revise")
     text = apply_hierarchy_reconcile(text, "revise")
     text = apply_evidence_integrity(text, "revise")
@@ -3435,7 +3607,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
                      execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                      insertions_allowed: bool = True,
-                     deletions_allowed: bool = True) -> str:
+                     deletions_allowed: bool = True,
+                     prefer_rewrite: bool = False) -> str:
     """Integration prompt: self/ reworked with ALL the other pool members.
 
     One run per pool member (there are no pairwise arms): the base stays the
@@ -3461,7 +3634,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_INTEGRATED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
-    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
+                                     prefer_rewrite)
     text = text.replace("@@DISCOVERY_PARITY@@",
                         discovery_parity_integrate_block(discovery_ids, discovery_dropped))
     text = render_venue_tokens(text, prof)
@@ -3496,7 +3670,8 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                    author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
                    execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                    insertions_allowed: bool = True,
-                   deletions_allowed: bool = True) -> str:
+                   deletions_allowed: bool = True,
+                   prefer_rewrite: bool = False) -> str:
     """The rewrite prompt: one of the round's M rewritten candidates.
 
     Staged FIRST in the round (before the review), and it is a CANDIDATE like
@@ -3524,7 +3699,8 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("rewrite", zotero))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
-    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
+                                     prefer_rewrite)
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
     text = apply_m20(text, prof)
@@ -3723,7 +3899,8 @@ or `code/`.
 def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
                           execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                           insertions_allowed: bool = True,
-                          deletions_allowed: bool = True) -> str:
+                          deletions_allowed: bool = True,
+                          prefer_rewrite: bool = False) -> str:
     """The REVISION AUDITOR prompt: audit the revision, write the repair plan only.
 
     The audit's REPAIR_PLAN drives the bounded repair, and the repair prompt
@@ -3735,7 +3912,8 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r))))
-    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
+                                     prefer_rewrite)
     # The audit is a full session like the guided-review/revise ones: it gets the
     # shared decision rules, the source hierarchy and the context-budget rule.
     shared = shared_blocks()
@@ -3798,14 +3976,16 @@ files changed.
 def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int,
                            execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                            insertions_allowed: bool = True,
-                           deletions_allowed: bool = True) -> str:
+                           deletions_allowed: bool = True,
+                           prefer_rewrite: bool = False) -> str:
     """The BOUNDED REPAIR prompt: re-validate the plan, apply only confirmed rows."""
     text = (REVISION_REPAIR_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@ROWS@@", str(int(rows))))
-    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed)
+    text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
+                                     prefer_rewrite)
     shared = shared_blocks()
     text = apply_hierarchy_reconcile(text + shared, "revise")
     text = with_context_budget(text)

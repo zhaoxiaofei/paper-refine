@@ -2366,6 +2366,35 @@ caption, table/figure-row and document list above is the policy a session follow
 each class is mechanically counted. The mode is for benchmarking only; ordinary editorial use should
 leave both kinds enabled.
 
+### Prefer rewrite over deletion (`--prefer-rewrite-over-deletion`)
+
+The strict modes above leave a deletion-only finding in place and record it
+`manual-required`. Some benchmarks credit the original claim, so that fallback
+scores nothing even though the defect is real. This soft mode keeps the
+content-edit policy in force but makes the in-place rewrite the first attempt:
+
+* the revise/rewrite/integrate/bounded-repair prompts state the preference:
+  a wrong premise/verb/value/reference/caption is restored inside the existing
+  unit; a duplicate is rewritten in place; a leftover prompt or placeholder is
+  replaced with a substantive sentence in the same unit; a deletion is not the
+  preferred repair;
+* `manual-required` is still allowed only when no honest in-place rewrite
+  exists (it would have to invent a fact, citation, dataset or claim);
+* the strict enforcement is unchanged: with `--disable-deletions` the postcheck
+  still rejects a missing unit, and its retry message now asks for the
+  in-place rewrite instead of the manual-required fallback;
+* with both insertions and deletions enabled (the historical policy) the
+  preference is prompt-level only; a deletion remains allowed when it is
+  honestly the best repair.
+
+The flag is a pair (`--prefer-rewrite-over-deletion` /
+`--no-prefer-rewrite-over-deletion`), accepted by `setup` and `run`. `setup`
+records it in `pipeline_config.json` only when it was passed; `run` can override
+it for one invocation without rewriting the root. It is OFF by default and the
+off path is byte-identical to the pre-feature pipeline: the prompt block is the
+verbatim legacy function, the stage records and the postcheck messages are
+unchanged, and no key is written to `pipeline_config.json`.
+
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
 
 A from-scratch rewrite fixes a family of defects as a side-effect of rewriting:

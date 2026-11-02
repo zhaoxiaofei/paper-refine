@@ -1367,11 +1367,13 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # The benchmark-only strict policy (no-op unless the operator disabled one):
     # the delivered sentences must still correspond to the base's.
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
+    _edit_prefer = prefer_rewrite_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "base", rev, "revise",
                                       exempt_removed=pipeline_removed_sentences(
                                           rec, with_document=True),
                                       insertions_allowed=_edit_ins,
-                                      deletions_allowed=_edit_del))
+                                      deletions_allowed=_edit_del,
+                                      prefer_rewrite=_edit_prefer))
     # AFTER the recovery, so the READ-ONLY raw-data directory ends up exactly as
     # the untouched original has it -- never as the base (or a donor) left it.
     rec["raw_data"] = verify_readonly_raw_data(ctx, rev, warns)
@@ -1625,11 +1627,13 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
     restrip_after_backfill(ctx, rec, out, warns)
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
+    _edit_prefer = prefer_rewrite_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "self", out, "integrate",
                                       exempt_removed=pipeline_removed_sentences(
                                           rec, with_document=True),
                                       insertions_allowed=_edit_ins,
-                                      deletions_allowed=_edit_del))
+                                      deletions_allowed=_edit_del,
+                                      prefer_rewrite=_edit_prefer))
     rec["raw_data"] = verify_readonly_raw_data(ctx, out, warns)
     errs.extend(rec["raw_data"].get("legacy_input_areas") or [])
     _record_revision_token(rec, out, warns, errs=errs)
@@ -1791,11 +1795,13 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
     restrip_after_backfill(ctx, rec, sb / REWRITTEN_DIR, warns)
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
+    _edit_prefer = prefer_rewrite_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "base", sb / REWRITTEN_DIR, "rewrite",
                                       exempt_removed=pipeline_removed_sentences(
                                           rec, with_document=True),
                                       insertions_allowed=_edit_ins,
-                                      deletions_allowed=_edit_del))
+                                      deletions_allowed=_edit_del,
+                                      prefer_rewrite=_edit_prefer))
     rec["raw_data"] = verify_readonly_raw_data(ctx, sb / REWRITTEN_DIR, warns)
     errs.extend(rec["raw_data"].get("legacy_input_areas") or [])
     _record_revision_token(rec, sb / REWRITTEN_DIR, warns, errs=errs)
@@ -4603,7 +4609,8 @@ def pipeline_removed_sentences(rec: dict, with_document: bool = False) -> list:
 
 def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                           stage: str = "", exempt_removed=None,
-                          insertions_allowed=None, deletions_allowed=None) -> list:
+                          insertions_allowed=None, deletions_allowed=None,
+                          prefer_rewrite=None) -> list:
     """Fail a package that inserts/deletes content under the strict policy.
 
     Returns [] immediately when both kinds are enabled: the default pipeline
@@ -4628,6 +4635,8 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
               else bool(insertions_allowed))
     delete = (deletions_enabled(ctx) if deletions_allowed is None
               else bool(deletions_allowed))
+    prefer = (prefer_rewrite_over_deletion(ctx) if prefer_rewrite is None
+              else bool(prefer_rewrite))
     if insert and delete:
         return []
     base_package, candidate_package = Path(base_package), Path(candidate_package)
@@ -4666,11 +4675,20 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
             + (" ..." if len(set(skipped)) > 6 else "")
             + ". The policy is UNENFORCED on those files; repair or remove them before retrying.")
     if not delete and missing:
-        problems.append(
-            f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
-            f"delivered package although --disable-deletions is in force (a deletion is not a "
-            f"repair): " + "; ".join(_content_unit_example(u) for u in missing[:5])
-            + (" ..." if len(missing) > 5 else ""))
+        if prefer:
+            problems.append(
+                f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
+                f"delivered package although --disable-deletions is in force. REWRITE the "
+                f"missing unit in place rather than recording it as manual-required while an "
+                f"honest rewrite exists (a deletion is not a repair): "
+                + "; ".join(_content_unit_example(u) for u in missing[:5])
+                + (" ..." if len(missing) > 5 else ""))
+        else:
+            problems.append(
+                f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
+                f"delivered package although --disable-deletions is in force (a deletion is not a "
+                f"repair): " + "; ".join(_content_unit_example(u) for u in missing[:5])
+                + (" ..." if len(missing) > 5 else ""))
     if not insert and added:
         problems.append(
             f"{label}{len(added)} content unit(s) in the delivered package have NO counterpart "

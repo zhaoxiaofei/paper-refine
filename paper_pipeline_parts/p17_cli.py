@@ -17,7 +17,8 @@ USAGE_EXAMPLES = """usage:
           [--zotero off|read|edit|apply]
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]   (default: both enabled)
-          copy the pristine corpus read-only, record its SHA-256 manifest, and
+          [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
+          (default: off) copy the pristine corpus read-only, record its SHA-256 manifest, and
           create pipeline_config.json + state.json (no sandboxes are built yet).
           --venue selects the VENUE PROFILE whose submission rules every stage
           enforces (default: nature-biotechnology, this pipeline's pre-venue
@@ -106,7 +107,9 @@ USAGE_EXAMPLES = """usage:
           [--champion-select judge|revise|integrate]
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]
-          (default: the root's recorded policy; both enabled unless `setup` disabled one)
+          [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
+          (default: the root's recorded policy; both enabled unless `setup` disabled one;
+           prefer-rewrite off unless `setup`/a previous run turned it on)
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent codex|claude|dsh|qwen|manual] [--agent-cmd '<json argv>']
           [--judge-agent codex|claude|dsh|qwen|manual] [--judge-agent-cmd '<json argv>']
@@ -438,6 +441,23 @@ def add_content_edit_policy_opts(parser: argparse.ArgumentParser,
                             const=False, default=default,
                             help=f"forbid {noun}; an in-place rewrite is still allowed "
                                  f"(benchmark-only strict mode)")
+    # The soft companion of --disable-deletions: keep the forbidden direction
+    # forbidden, but make the agent try an in-place rewrite before it records a
+    # deletion-only finding as manual-required. A pair (not a single
+    # store_true) so `run --no-prefer-…` can turn it off for one invocation
+    # without rewriting the root's pipeline_config.json.
+    parser.add_argument("--prefer-rewrite-over-deletion",
+                        dest="prefer_rewrite_over_deletion",
+                        action=ContentEditPolicyAction, const=True, default=None,
+                        help="before recording a deletion-only finding as "
+                             "manual-required, rewrite the same content unit in place "
+                             "(benchmark-only soft policy; does not itself permit a "
+                             "deletion)")
+    parser.add_argument("--no-prefer-rewrite-over-deletion",
+                        dest="prefer_rewrite_over_deletion",
+                        action=ContentEditPolicyAction, const=False, default=None,
+                        help="use the historical deletion-only manual-required fallback "
+                             "(the default)")
 
 
 CHAMPION_SELECT_HELP = (

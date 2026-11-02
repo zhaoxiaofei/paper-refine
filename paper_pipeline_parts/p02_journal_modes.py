@@ -1986,6 +1986,31 @@ CONTENT_EDIT_KEYS = {
 }
 _CONTENT_EDIT_OFF = ("off", "disabled", "disable", "false", "no", "0", "forbidden")
 
+PREFER_REWRITE_OVER_DELETION = "prefer_rewrite_over_deletion"
+
+
+def prefer_rewrite_over_deletion(ctx=None) -> bool:
+    """Is the prefer-rewrite-over-deletion mode on for this invocation?
+
+    The invocation override (`ctx._prefer_rewrite_override`) wins, then the
+    root's `pipeline_config.json`, then the default (off, the historical
+    behaviour). The mode changes what the revise/rewrite/integrate prompts ask
+    the agent to try before it records a deletion-only finding as
+    `manual-required`: rewrite the same content unit in place first. It does
+    not by itself permit a deletion; the content-edit policy still decides that.
+    """
+    override = (getattr(ctx, "_prefer_rewrite_override", None)
+                if ctx is not None else None)
+    if override is not None:
+        return bool(override)
+    cfg = (getattr(ctx, "cfg", None) or {}) if ctx is not None else {}
+    raw = cfg.get(PREFER_REWRITE_OVER_DELETION, False)
+    if isinstance(raw, str):
+        # The setup file writes "on"/"off"; a hand-edited value must not turn
+        # the mode on by accident.
+        return raw.strip().lower() not in _CONTENT_EDIT_OFF + ("",)
+    return bool(raw)
+
 
 def _content_edit_enabled(ctx, kind: str, default: bool = True) -> bool:
     """Is `kind` ('insertions'|'deletions') allowed for this invocation?
@@ -2042,15 +2067,20 @@ def deletions_enabled(ctx=None) -> bool:
 def content_edit_policy_of(ctx=None):
     """The non-default effective policy as a run-record dict, else None.
 
-    Recorded only when a kind is disabled, so a default root's run records stay
-    byte-identical. `run --disable-…` overrides the root's policy for that
-    invocation and is captured here, making a later resume enforce the policy
+    Recorded only when a kind is disabled or the prefer-rewrite mode is on, so
+    a default root's run records stay byte-identical. `run --disable-…` and
+    `run --prefer-rewrite-over-deletion` override the root's policy for that
+    invocation and are captured here, making a later resume enforce the policy
     the session's prompt actually stated.
     """
     ins, dele = insertions_enabled(ctx), deletions_enabled(ctx)
-    if ins and dele:
+    prefer = prefer_rewrite_over_deletion(ctx)
+    if ins and dele and not prefer:
         return None
-    return {"insertions": ins, "deletions": dele}
+    policy = {"insertions": ins, "deletions": dele}
+    if prefer:
+        policy[PREFER_REWRITE_OVER_DELETION] = True
+    return policy
 
 
 def content_edit_policy_allowed(ctx=None, rec=None) -> tuple:
@@ -2069,16 +2099,52 @@ def content_edit_policy_allowed(ctx=None, rec=None) -> tuple:
     return insertions_enabled(ctx), deletions_enabled(ctx)
 
 
+def prefer_rewrite_allowed(ctx=None, rec=None) -> bool:
+    """Is the prefer-rewrite mode on for a stage that started under `rec`?
+
+    A stage record carrying `content_edit_policy` was prompted under that
+    policy, including this flag; a legacy record without the key falls back to
+    the context. This is the same binding rule as `content_edit_policy_allowed`.
+    """
+    policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
+    if isinstance(policy, dict) and PREFER_REWRITE_OVER_DELETION in policy:
+        return bool(policy[PREFER_REWRITE_OVER_DELETION])
+    return prefer_rewrite_over_deletion(ctx)
+
+
+def content_edit_policy_record(ctx, ins, dele, prefer) -> dict | None:
+    """The run-record dict a stage needs, or None for the default.
+
+    A stage is bound to the policy its PROMPT stated, which can differ from the
+    current invocation's (a resumed package keeps the policy it was produced
+    under). The default (both kinds allowed, prefer off) needs no record; every
+    other combination records `insertions`/`deletions` and, only when on, the
+    prefer flag (so a strict record without the mode keeps its old shape).
+    """
+    current = (insertions_enabled(ctx), deletions_enabled(ctx),
+               prefer_rewrite_over_deletion(ctx))
+    bound = (bool(ins), bool(dele), bool(prefer))
+    if bound == current and ins and dele and not prefer:
+        return None
+    record = {"insertions": bool(ins), "deletions": bool(dele)}
+    if prefer:
+        record[PREFER_REWRITE_OVER_DELETION] = True
+    return record
+
+
 def content_edit_policy_note(ctx=None) -> str:
     """A short operator-facing description, or "" for the default policy."""
     ins, dele = insertions_enabled(ctx), deletions_enabled(ctx)
-    if ins and dele:
+    prefer = prefer_rewrite_over_deletion(ctx)
+    if ins and dele and not prefer:
         return ""
     parts = []
     if not ins:
         parts.append("insertions OFF")
     if not dele:
         parts.append("deletions OFF")
+    if prefer:
+        parts.append("prefer rewrite over deletion")
     return ", ".join(parts) + " (benchmark-only content-edit policy)"
 
 

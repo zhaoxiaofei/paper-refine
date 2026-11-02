@@ -786,6 +786,12 @@ def cmd_setup(args) -> None:
         ctx.cfg["insertions"] = "off"
     if getattr(args, "deletions", True) is False:
         ctx.cfg["deletions"] = "off"
+    # The soft companion of the strict policy. Only an explicit flag writes a
+    # key, so a setup that does not use the mode keeps the historical (and
+    # byte-identical) pipeline_config.json.
+    _prefer = getattr(args, "prefer_rewrite_over_deletion", None)
+    if _prefer is not None:
+        ctx.cfg["prefer_rewrite_over_deletion"] = "on" if _prefer else "off"
     if round_indices:
         # Traceability: pipeline round k follows built-in schedule round
         # round_indices[k-1]. The recorded per-round lists below already carry
@@ -1092,9 +1098,13 @@ def cmd_setup(args) -> None:
               "sandbox and in pipeline_config.json")
     _edit_note = content_edit_policy_note(ctx)
     if _edit_note:
-        print(f"[setup] content edits: {_edit_note}; the revise/rewrite/integrate prompts "
-              f"forbid the disabled change and the postcheck rejects a package that "
-              f"inserts/deletes a content unit")
+        if prefer_rewrite_over_deletion(ctx):
+            print(f"[setup] content edits: {_edit_note}; the revise/rewrite/integrate prompts "
+                  f"state the policy and the postcheck enforces any disabled direction")
+        else:
+            print(f"[setup] content edits: {_edit_note}; the revise/rewrite/integrate prompts "
+                  f"forbid the disabled change and the postcheck rejects a package that "
+                  f"inserts/deletes a content unit")
     print(f"[setup] next: python {root / script.name} run --root {root}")
     print(f"[setup] manual mode: add --agent manual (staging is respected; each round's revise "
           f"prompt appears only after its review marker)")
@@ -3320,6 +3330,12 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                                 if getattr(args, "_insertions_explicit", False) else None)
     ctx._deletions_override = (getattr(args, "deletions", True)
                                if getattr(args, "_deletions_explicit", False) else None)
+    # The prefer-rewrite mode is a setup/run policy too. An explicit
+    # `--no-prefer…` must be able to turn it off for one invocation without
+    # rewriting the root, so only an explicitly passed flag overrides.
+    ctx._prefer_rewrite_override = (
+        getattr(args, "prefer_rewrite_over_deletion")
+        if getattr(args, "_prefer_rewrite_over_deletion_explicit", False) else None)
     _edit_note = content_edit_policy_note(ctx)
     if _edit_note:
         print(f"[run] content-edit policy: {_edit_note}")
