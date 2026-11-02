@@ -822,14 +822,30 @@ def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
         "* structural order/split/merge: reorder, split or merge inside the same atomic",
         "  unit where the section scope allows; do not drop the unit.",
         "",
-        "Record `manual-required` only when no honest in-place rewrite exists — for",
-        "example, when the only honest repair would invent a fact, citation, dataset",
-        "or claim. Say exactly why the unit cannot be rewritten. A deletion is never a",
-        "substitute for a rewrite; a unit may be rewritten in full, but the unit must",
-        "survive. This preference is part of the precedence above: try the rewrite",
-        "before the later manual-required fallback.",
-        "",
     ]
+    if forbidden:
+        lines += [
+            "Record `manual-required` only when no honest in-place rewrite exists — for",
+            "example, when the only honest repair would invent a fact, citation, dataset",
+            "or claim. Say exactly why the unit cannot be rewritten. A deletion is never a",
+            "substitute for a rewrite; a unit may be rewritten in full, but the unit must",
+            "survive. This preference is part of the precedence above: try the rewrite",
+            "before the later manual-required fallback.",
+            "",
+        ]
+    else:
+        lines += [
+            "Record `manual-required` only when neither an honest in-place rewrite nor a",
+            "justified deletion solves the finding — for example, when the only honest",
+            "repair would invent a fact, citation, dataset or claim. Say exactly why.",
+            "A deletion is a last resort, not the default: the benchmark credits a",
+            "restored claim, not a removed one, so a rewrite is preferred. A unit may be",
+            "rewritten in full, but the unit must survive unless a deletion is honestly",
+            "the best repair and the content-edit policy permits it. This preference is",
+            "part of the precedence above: try the rewrite before the deletion, and the",
+            "deletion before manual-required.",
+            "",
+        ]
     lines += [
         "WHAT IS STILL ALLOWED: rewriting the words INSIDE an existing unit, and",
         "replacing an existing statement with a corrected statement of the same unit",
@@ -857,16 +873,26 @@ def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
             "deletion is not the preferred repair: try the in-place rewrite first.",
             "",
         ]
-    lines += [
-        "PRECEDENCE: this block overrides every later instruction that would add or",
-        "remove a unit, including the language pass's split/merge/add-sibling repairs,",
-        "a rewrite's requested transitions, and an integration port that would replace",
-        "a unit. Where a later mandate can be met without adding or removing a unit,",
-        "make that in-place edit; otherwise record the item as manual-required/unable",
-        "and leave the unit unchanged. Under PREFER REWRITE OVER DELETION, try the",
-        "in-place rewrite before that fallback.",
-        "",
-    ]
+    if forbidden:
+        lines += [
+            "PRECEDENCE: this block overrides every later instruction that would add or",
+            "remove a unit, including the language pass's split/merge/add-sibling repairs,",
+            "a rewrite's requested transitions, and an integration port that would replace",
+            "a unit. Where a later mandate can be met without adding or removing a unit,",
+            "make that in-place edit; otherwise record the item as manual-required/unable",
+            "and leave the unit unchanged. Under PREFER REWRITE OVER DELETION, try the",
+            "in-place rewrite before that fallback.",
+            "",
+        ]
+    else:
+        lines += [
+            "PRECEDENCE: this block does not forbid a content-unit edit; it asks for the",
+            "in-place rewrite first. Where a later mandate can be met without adding or",
+            "removing a unit, make that in-place edit. A deletion remains allowed when",
+            "the content-edit policy permits it and it is honestly the best repair, but",
+            "try the rewrite before the deletion and the deletion before manual-required.",
+            "",
+        ]
     return "\n".join(lines) + "\n"
 
 

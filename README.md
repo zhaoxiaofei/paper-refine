@@ -2378,8 +2378,10 @@ content-edit policy in force but makes the in-place rewrite the first attempt:
   unit; a duplicate is rewritten in place; a leftover prompt or placeholder is
   replaced with a substantive sentence in the same unit; a deletion is not the
   preferred repair;
-* `manual-required` is still allowed only when no honest in-place rewrite
-  exists (it would have to invent a fact, citation, dataset or claim);
+* `manual-required` is still allowed only when neither an honest in-place
+  rewrite nor a justified deletion exists (the rewrite would have to invent a
+  fact, citation, dataset or claim); with both kinds enabled, a deletion
+  remains allowed when it is honestly the best repair;
 * the strict enforcement is unchanged: with `--disable-deletions` the postcheck
   still rejects a missing unit, and its retry message now asks for the
   in-place rewrite instead of the manual-required fallback;

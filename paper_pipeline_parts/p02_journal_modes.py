@@ -2118,17 +2118,19 @@ def content_edit_policy_record(ctx, ins, dele, prefer) -> dict | None:
     A stage is bound to the policy its PROMPT stated, which can differ from the
     current invocation's (a resumed package keeps the policy it was produced
     under). The default (both kinds allowed, prefer off) needs no record; every
-    other combination records `insertions`/`deletions` and, only when on, the
-    prefer flag (so a strict record without the mode keeps its old shape).
+    other combination records `insertions`/`deletions` and the prefer flag when
+    it is on OR when it differs from the current invocation (a stage prompted
+    with the mode OFF must not be judged under a later run's mode ON). A strict
+    record without the mode keeps its old shape when the current mode is off.
     """
-    current = (insertions_enabled(ctx), deletions_enabled(ctx),
-               prefer_rewrite_over_deletion(ctx))
+    current_prefer = prefer_rewrite_over_deletion(ctx)
+    current = (insertions_enabled(ctx), deletions_enabled(ctx), current_prefer)
     bound = (bool(ins), bool(dele), bool(prefer))
     if bound == current and ins and dele and not prefer:
         return None
     record = {"insertions": bool(ins), "deletions": bool(dele)}
-    if prefer:
-        record[PREFER_REWRITE_OVER_DELETION] = True
+    if prefer or prefer != current_prefer:
+        record[PREFER_REWRITE_OVER_DELETION] = bool(prefer)
     return record
 
 

@@ -56,6 +56,12 @@ def main() -> int:
     soft = pp.content_edit_policy_block(True, True, True)
     check("on soft has the marker", "PREFER REWRITE OVER DELETION." in soft)
     check("on soft has no NO DELETIONS", "NO DELETIONS:" not in soft)
+    check("on soft allows a best deletion",
+          "A deletion is a last resort" in soft)
+    check("on soft does not claim a strict block override",
+          "does not forbid a content-unit edit" in soft)
+    check("on strict still forbids deletion",
+          "A deletion is never a" in prefer)
 
     # Config/override.
     check("default off", pp.prefer_rewrite_over_deletion(Ctx()) is False)
@@ -79,6 +85,17 @@ def main() -> int:
           prefer_rec is not None
           and prefer_rec.get("prefer_rewrite_over_deletion") is True
           and prefer_rec.get("insertions") is False)
+    # A stage prompted with the mode OFF must not be judged under a later
+    # invocation's mode ON: the record carries the explicit False.
+    bound_off = pp.content_edit_policy_record(
+        Ctx(prefer_rewrite_over_deletion="on"), False, False, False)
+    check("bound-off record carries False",
+          bound_off is not None
+          and bound_off.get("prefer_rewrite_over_deletion") is False)
+    check("bound-off stage stays off under a current on",
+          pp.prefer_rewrite_allowed(
+              Ctx(prefer_rewrite_over_deletion="on"),
+              {"content_edit_policy": bound_off}) is False)
     # Prompt matching and the prompt-bound mode.
     tmp = Path(tempfile.mkdtemp(prefix="prefer_rewrite_"))
     prompt = tmp / "PROMPT.md"
