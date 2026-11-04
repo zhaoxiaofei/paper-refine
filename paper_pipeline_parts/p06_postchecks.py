@@ -7077,8 +7077,10 @@ Everything else must stay BYTE-IDENTICAL, above all:
     references, and the ids the frozen review in this sandbox carries. Never invent a finding
     id, a number, a donor or a change that the package does not show.
   * {pkg}/revision_report.json (where this stage has one): one row per id the frozen review
-    lists -- `fixed` / `not_applicable` / `unable` with the rationale and the evidence (the
-    package location that proves it). Do not renumber or drop an id the review carries.
+    lists -- a documented final status (`fixed` / `fixed-with-caveat` / `manual-required` /
+    `discarded`, or `clarification`) with the rationale and the evidence (the package location
+    that proves it); `unable — <reason>` belongs in the rationale, not the status cell. Do not
+    renumber or drop an id the review carries.
   * {pkg}/DIFF_LEDGER.md (integration): one row per ported or deliberately skipped difference,
     naming the donor, the size class, the finding effect and a before/after artifact reference
     (a file:line pair, or an outline diff) so the row can be re-checked.

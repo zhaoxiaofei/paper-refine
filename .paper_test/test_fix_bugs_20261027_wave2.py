@@ -137,18 +137,32 @@ def test_f45_split_review_a_freshness():
     b = root / "runs" / "r1_guided_review_b"
     (b / "base").mkdir(parents=True)
     (b / "base" / "doc.txt").write_text("base\n", encoding="utf-8")
-    (b / "guided_review_a").mkdir()
-    (b / "guided_review_a" / "findings.json").write_text('{"findings": []}\n', encoding="utf-8")
+    # B's sandbox is cold: A's output is not copied into it. Only A's findings
+    # DIGEST is recorded, so the postcheck can still detect an A retry.
     rec = register(ctx, "r1_guided_review_b", "guided_review", b,
-                   inputs_manifest={"base": pp.hash_manifest(b / "base"),
-                                    "guided_review_a": pp.hash_manifest(b / "guided_review_a")})
-    check("F45 a matching review_a is fresh", pp._input_freshness_problems(ctx, rec) == [],
+                   inputs_manifest={"base": pp.hash_manifest(b / "base")},
+                   review_a_findings=pp.sha256_file(
+                       a / "guided_review" / "findings.json"))
+    check("F45 a matching session A keeps B fresh",
+          pp._input_freshness_problems(ctx, rec) == [],
           str(pp._input_freshness_problems(ctx, rec)))
+    check("F45 B's sandbox carries no copy of A's review",
+          not (b / "guided_review_a").exists())
+    # A split-review B record must stay a valid INPUT record for every
+    # inputs_manifest consumer: the postcheck's structured-output scan and the
+    # reconcile/evidence-integrity input check both walk the map as {area:
+    # manifest}. A scalar in the map breaks both.
+    scan = pp.structured_output_problems(ctx, rec)
+    check("F45 B's input record still passes the structured-output scan",
+          scan == [], str(scan))
+    mism = pp.input_mismatches(ctx, rec)
+    check("F45 B's input record reports no phantom sandbox area",
+          mism == [], str(mism))
     (a / "guided_review" / "findings.json").write_text(
         '{"findings": [{"id": "FA-1", "new": true}]}\n', encoding="utf-8")
     probs = pp._input_freshness_problems(ctx, rec)
-    check("F45 a retried session A makes B's frozen review_a stale",
-          any("guided_review_a" in p for p in probs), str(probs))
+    check("F45 a retried session A makes B's frozen merge stale",
+          any("session A's findings changed" in p for p in probs), str(probs))
 
 
 # ---------------------------------------------------------------------------

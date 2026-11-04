@@ -4735,7 +4735,10 @@ WRITE (only inside out/):
      while you restyle around it. If a citation position carries a NUMBER or
      author-year text with no live field (a previous stage unlinked it), RE-CREATE
      the field from the source document's own field data (citationID, itemData,
-     item URIs) -- never leave plain text in a citation position. You may add,
+     item URIs) when that data exists; an originally plain citation has none, so
+     keep its plain text unchanged and record the gap in out/REPLACEMENT_LEDGER.md
+     -- never invent a field, a citationID or a library item. Never leave text
+     that WAS a live field as plain text. You may add,
      edit or individually delete fields, but the output must not delete all
      fields, make a field malformed, or replace a field by its visible text. The
      code side audits the output against source/ and fails the attempt on any of

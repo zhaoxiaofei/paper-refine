@@ -3175,7 +3175,7 @@ M20_JUDGE_SWEEP = """PLUS the pipeline-mandated OOXML formatting sweep M20 (deri
    difference -- report it). The TEXT-level consistency rows
    (citation dialect, US/UK spelling, attributive hyphenation) are deliberately NOT pre-normalized:
    a corpus that completed a convention where the other did not is a real CONSISTENCY-tier
-   difference (second in the priority order) and is scored as one.
+   difference (fourth in the priority order) and is scored as one.
 
 @@DISPLAY_RULE@@"""
 
@@ -5485,16 +5485,21 @@ def defect_class_rule(profile=None) -> str:
     return out
 
 
-def shared_blocks() -> str:
-    """The shared decision rules + the adopted checklist, verbatim for every session.
+def shared_blocks(include_checks: bool = True) -> str:
+    """The shared decision rules, verbatim for every session.
 
     ONE text, appended to every prompt: the sessions cannot agree on a
     vocabulary they each describe differently, and a session cannot apply a bar
-    it was never told about. The comparison session receives the same two blocks
+    it was never told about. The comparison session receives the same blocks
     (they carry no provenance); its extra blindness rule is added separately.
+
+    `include_checks=False` is for the COLD-START review only: that role is
+    required to read the corpus without an adopted checklist (AGENTS rule 8), so
+    it receives the taxonomy and evidence rules but not `ADOPTED_SWEEPS_BLOCK`.
     """
-    return (SHARED_DECISION_BLOCK + ADOPTED_SWEEPS_BLOCK + RAW_DATA_READONLY_RULE
-            + CONTEXT_BUDGET_RULE)
+    base = (SHARED_DECISION_BLOCK + RAW_DATA_READONLY_RULE + CONTEXT_BUDGET_RULE)
+    return ((SHARED_DECISION_BLOCK + ADOPTED_SWEEPS_BLOCK + RAW_DATA_READONLY_RULE
+             + CONTEXT_BUDGET_RULE) if include_checks else base)
 
 
 CONTEXT_BUDGET_RULE = """
@@ -5715,6 +5720,10 @@ def validation_block(role: str) -> str:
     identical in substance and the drift test asserts the difference is exactly
     this one token.
     """
+    if role == "audit":
+        # The review auditor edits no package file and generates no new finding;
+        # the producer's "repair the file it names" duty would contradict both.
+        return VALIDATION_RULE_READONLY
     if role == "judge":
         return VALIDATION_RULE.replace("MANUAL_STEPS.md", "your own review note")
     return VALIDATION_RULE
@@ -6154,8 +6163,6 @@ REVISED_DIR = "revised"
 REWRITTEN_DIR = "rewritten"          # the rewrite stage's output package
 INTEGRATED_DIR = "integrated"        # the integration stage's output package
 CODE_DIR = "code"
-# The split review's copy of session A's output, inside session B's sandbox.
-GUIDED_REVIEW_A_DIR = "guided_review_a"
 FINDINGS_REL = "guided_review/findings.json"
 FINDINGS_MD_REL = "guided_review/findings.md"
 ARTIFACTS_REL = "guided_review/artifacts"

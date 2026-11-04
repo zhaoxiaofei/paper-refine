@@ -261,9 +261,9 @@ def upstream_deps(rec: dict, ctx=None) -> list:
     if kind == "guided_review":
         deps = [rid_a1(r)]
         if rec.get("id") == rid_guided_review_b(r):
-            # A split part B consumes part A's guided_review/ (merge_review_parts
-            # freezes A's findings into B's guided_review/findings.json), so an A
-            # retry must defer B instead of rebuilding it from stale output.
+            # Part B's sandbox is cold (no copy of A's review), but the code-side
+            # merge in B's postcheck reads A's finished findings.json; an A retry
+            # must therefore still defer B, and B is rebuilt from the corpus only.
             deps.append(rid_guided_review(r))
         # `materialize_review` now stages the concern ledger for EVERY feedback
         # mode that is not scoped -- transfer/resubmit AND `llm` -- because the
@@ -3381,14 +3381,18 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                 shutil.copy2(audit_obs, prior_audit_dir / "UNRESOLVED.md")
                 inputs["prior_audit"] = hash_manifest(prior_audit_dir)
     split_mode = review_split_of(ctx)
+    review_a_findings = None
     if part == "b" and split_mode != "off":
-        # The second session's scope is complementary; it does NOT merge (the
-        # orchestrator concatenates the two findings files after both finish),
-        # but it can read the other session's OUTPUT once it is complete.
-        a_sb = ctx.sandbox_of(ctx.run(rid_guided_review(r)) or {"sandbox": f"runs/{rid_guided_review(r)}"})
-        if (a_sb / GUIDED_REVIEW_DIR).is_dir():
-            ensure_copy(a_sb / GUIDED_REVIEW_DIR, sb / GUIDED_REVIEW_A_DIR)
-            inputs[GUIDED_REVIEW_A_DIR] = hash_manifest(sb / GUIDED_REVIEW_A_DIR)
+        # B reads the corpus cold: A's output is never copied into B's sandbox.
+        # Record only a DIGEST of A's findings, so the postcheck can still detect
+        # an A retry that happened after B's merge inputs were frozen. The digest
+        # travels on the run record, NOT in inputs_manifest: every consumer of
+        # that map walks it as {area: directory-manifest}.
+        a_rec = ctx.run(rid_guided_review(r))
+        a_findings = (ctx.sandbox_of(a_rec) / GUIDED_REVIEW_DIR / "findings.json"
+                      if a_rec is not None else None)
+        if a_findings is not None and a_findings.is_file():
+            review_a_findings = sha256_file(a_findings)
     (sb / GUIDED_REVIEW_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
@@ -3428,6 +3432,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     rec = ctx.register(rid, "guided_review", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
     rec["inputs_manifest"] = inputs
+    rec["review_a_findings"] = review_a_findings
     return rec
 
 
@@ -3974,12 +3979,19 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
         except OSError as e:                                     # noqa: BLE001
             entry.update(status="failed", detail=f"{type(e).__name__}: {e}"[:120])
         results.append(entry)
-    verified = [r for r in results if r["status"] != "no-verifier"]
+    # A verifier skipped because the aggregate budget ran out was never re-run:
+    # it is NOT a verified computation (the old code counted it while its status
+    # was absent from `broken`, so an unexecuted declared computation passed).
+    verified = [r for r in results if r["status"] not in ("no-verifier",
+                                                          "skipped-over-budget")]
+    skipped = [r["row"] for r in results if r["status"] == "skipped-over-budget"]
     mismatches = [r["row"] for r in verified if r["status"] == "mismatch"]
     broken = [r["row"] for r in verified
               if r["status"] in ("missing", "timeout", "failed", "empty")]
+    broken += skipped
     return {"rows": len(results), "verified": len(verified),
             "reproduced": sum(1 for r in verified if r["status"] == "reproduced"),
+            "skipped": skipped,
             "mismatches": mismatches, "broken": broken, "results": results}
 
 
@@ -3995,10 +4007,10 @@ def _write_cold_start_reproduction(sb: Path, repro: dict) -> None:
             detail=(f" ({r['detail']})" if r.get("detail") else "")))
     lines += ["", f"{repro.get('reproduced', 0)} of {repro.get('verified', 0)} declared "
                   f"verifier(s) reproduced exactly; {len(repro.get('mismatches') or [])} "
-                  f"mismatch(es), {len(repro.get('broken') or [])} broken script(s). A mismatch "
-                  "or a broken script fails the attempt: a computation the cold-start review "
-                  "cannot "
-                  "reproduce is a correctness blocker, not a finding.", ""]
+                  f"mismatch(es), {len(repro.get('broken') or [])} broken/skipped script(s). "
+                  "A mismatch, a broken script or a verifier the budget skipped fails the "
+                  "attempt: a computation the cold-start review cannot reproduce is a "
+                  "correctness blocker, not a finding.", ""]
     write_text_atomic(sb / COLD_START_REPRO_REL, "\n".join(lines))
 
 
@@ -4056,6 +4068,11 @@ def postcheck_cold_start_review(ctx: Ctx, rec: dict):
                         + " -- a declared verifier must be a re-runnable script that prints its "
                           "`computed` value as the last stdout line (omit the verifier when no "
                           "computation can show the defect)")
+        elif r["status"] == "skipped-over-budget":
+            errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` was "
+                        "NOT re-run because the aggregate verifier budget was exhausted -- an "
+                        "unexecuted declared computation is not a verified one; declare fewer or "
+                        "faster verifiers, or drop the verifier and file the row as evidence")
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
@@ -4985,19 +5002,21 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
                 probs.append("prior_audit/UNRESOLVED.md no longer matches the prior audit")
         elif (sb / "prior_audit").is_dir():
             probs.append("prior_audit/ is present but the prior audit no longer has observations")
-        # Session B's frozen input is session A's guided_review/ OUTPUT. Retrying A
-        # changes it, but B's own guided_review_a/ still matches the manifest B recorded
-        # when it was built, so the old checks above never saw the drift. Compare
-        # the copy against A's CURRENT guided_review/ (the audit and every reviser
-        # consume B's merged list, so a stale copy would silently freeze an old
-        # finding set).
-        if review_split_of(ctx) != "off" and rec.get("id") == rid_guided_review_b(r):
+        # Split review B reads the corpus COLD (A's output is never in B's
+        # sandbox), but B's code-side merge freezes A's findings. A retry of A
+        # after B was built would leave that merge stale; the digest recorded at
+        # materialization detects it without handing B any of A's content.
+        want_a = rec.get("review_a_findings")
+        if review_split_of(ctx) != "off" and rec.get("id") == rid_guided_review_b(r) and want_a:
             a_rec = ctx.run(rid_guided_review(r))
-            if a_rec is None or a_rec.get("status") != "done":
-                probs.append("upstream review session A is not done")
-            elif not manifests_equal(hash_manifest(sb / GUIDED_REVIEW_A_DIR),
-                                     hash_manifest(ctx.sandbox_of(a_rec) / GUIDED_REVIEW_DIR)):
-                probs.append(f"{GUIDED_REVIEW_A_DIR}/ no longer matches session A's current review")
+            a_path = (ctx.sandbox_of(a_rec) / GUIDED_REVIEW_DIR / "findings.json"
+                      if a_rec is not None else None)
+            if a_path is None or not a_path.is_file():
+                probs.append("session A's guided_review/findings.json is missing (B's merge "
+                             "cannot be re-derived)")
+            elif sha256_file(a_path) != want_a:
+                probs.append("session A's findings changed after B was built (B's merge is "
+                             "stale): rebuild B")
     elif kind == "revise":
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))

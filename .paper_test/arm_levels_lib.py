@@ -263,8 +263,8 @@ def test_language_pass_contract_and_prompts():
         "| L9 | p3 | stiff | smoother | flow |\n"
         "| L4 | p4 | vague referent | named | clarity |\n", encoding="utf-8")
     rep3 = nb.language_pass_report(pkg)
-    check("the steps with no coverage row are named",
-          set(rep3["missing"]) == {f"L{i}" for i in range(1, 12)} - {"L4", "L9"},
+    check("change-log rows alone do not satisfy the coverage table",
+          set(rep3["missing"]) == {f"L{i}" for i in range(1, 12)},
           str(rep3["missing"])[:80])
     # 2026-09-22: strict is the DEFAULT, so an uncovered step fails the attempt;
     # `--strict-artifacts off` is the opt-out that records it as a warning.

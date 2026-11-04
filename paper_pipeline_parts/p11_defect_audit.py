@@ -77,8 +77,8 @@ Write `audit.json` in this directory with EXACTLY this schema (no extra text):
       "reason": "<<= 40 words: what you checked and why the label holds>"}}
   ]
 }}
-Every defect_id from `defects.json` must appear exactly once, with label "TP" or
-"FP". Write only `audit.json`; do not modify any other file.
+Every defect_id from `defects.json` must appear exactly once, with label "TP", "FP" or "UNVERIFIED".
+Write only `audit.json`; do not modify any other file.
 """)
 
 

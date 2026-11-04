@@ -2262,8 +2262,9 @@ review is the independent, cold, unanchored pass documented above.
 
 The three recorded names were renamed together (2026-10) from `review` / `r<r>_review` / `review/`,
 so the vocabulary matches the role: a run's record now reads `kind: "guided_review"`, its sandbox
-is `runs/r<r>_guided_review/`, and its output area is `guided_review/` (with the split session's
-`guided_review_a/` and the frozen `guided_review/round2/` unchanged in shape). The CLI keeps
+is `runs/r<r>_guided_review/`, and its output area is `guided_review/` (with the frozen
+`guided_review/round2/` unchanged in shape; the split review's session B is cold and carries
+no copy of session A's output). The CLI keeps
 `review` as the name of the review STEP, which selects BOTH discovery passes
 (`guided_review` and `cold_start_review`); each stage's own name selects only that stage.
 This applies to every selection option, including `retry --runs 1:review`, which therefore
@@ -2323,14 +2324,14 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
 | review | 112 KB | 44 KB | 60% |
-| cold_start_review | 59 KB | 20 KB | 65% |
-| audit | 83 KB | 39 KB | 53% |
+| cold_start_review | 56 KB | 20 KB | 63% |
+| audit | 83 KB | 40 KB | 52% |
 | revise | 110 KB | 57 KB | 48% |
 | integrate | 109 KB | 57 KB | 48% |
-| rewrite | 102 KB | 52 KB | 48% |
+| rewrite | 102 KB | 53 KB | 48% |
 | judge | 96 KB | 66 KB | 32% |
 | revision_audit | 24 KB | 10 KB | 58% |
-| revision_repair | 20 KB | 6 KB | 69% |
+| revision_repair | 20 KB | 6 KB | 68% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
@@ -3439,7 +3440,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 180 suites (a few
+any failure. They are independent, so run them in parallel — 181 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

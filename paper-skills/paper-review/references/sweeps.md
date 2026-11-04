@@ -141,15 +141,19 @@ writing rubric (J3/Q1–Q12), never merely because the two wordings differ:
   a writing row, and they are never scored twice. Venue or template rules that do not apply to
   this manuscript are ignored rather than imported as defects.
 
-**Layout budgets are part of the delivered artifact.** The FRONT PAGE must hold the title, the
-authors, the affiliations, the abstract AND the keywords together -- a keywords line that starts
-page 2 is a finding -- and the COVER LETTER must render to at most TWO pages (a third page is a
-Major formatting finding). Both are decided by a RENDER, never by the cached `docProps/app.xml`
-page property (it is stale in programmatically generated files); cut boilerplate and redundancy to
-fit, never a claim about the work. The code-side M20 scan reports the front-page split
+**Layout budgets are part of the delivered artifact ONLY when the active venue states one.**
+When the venue profile (or the operator) states a front-page keyword block or a cover-letter page
+maximum, apply that rule; otherwise record the missing rule as a named gap and file no
+page-budget finding. A stated FRONT-PAGE rule requires the title, the authors, the affiliations,
+the abstract AND the keywords to share page one -- a keywords line that starts page 2 is a
+finding -- and a stated COVER-LETTER maximum makes a page past it a Major formatting finding. A
+stated budget is decided by a RENDER, never by the cached `docProps/app.xml` page property (it is
+stale in programmatically generated files); a cached count that disagrees is a reason to
+re-render, never the finding itself. Cut boilerplate and redundancy to fit, never a claim about
+the work. The code-side M20 scan reports the front-page split
 deterministically from Word's own `w:lastRenderedPageBreak` record (rule FMT-T8g), the indentation
-inconsistency between sibling paragraphs/captions (FMT-T8f), and a cover letter past two pages
-when a render or the cached count shows it (FMT-T8h).
+inconsistency between sibling paragraphs/captions (FMT-T8f), and a cover letter past the venue's
+stated maximum when the render shows it (FMT-T8h).
 
 **A claim both versions get wrong is scored by the DISTANCE between the two errors**, not by two
 absolute severities that cancel: file the opponent's error as `resolved` and the target's error as
@@ -271,8 +275,8 @@ Manual pass: regex still cannot catch a token with neither an internal capital
 nor a digit (e.g. a lowercase `tnf`), so read each file's title, headings, and
 legend lines for such tokens, or declare them in `WORK/extra_acronyms.txt`
 (case-insensitive). The manual pass also covers long forms the variant matcher
-cannot see: a reworded synonym of the expansion (`aberration burden` for
-`copy-number (CN)`), and a definition written without parentheses
+cannot see: a genuine alternative name of the expansion (`Quetelet index` for
+`body mass index (BMI)`), and a definition written without parentheses
 (`copy-number, hereafter CN`). The artifact header prints every reference-list
 region it skipped, with the boundary reason, so an inferred cut is never
 silent.
@@ -325,9 +329,12 @@ form as written | excerpt) -- audit each of those rows individually.
     art, or a generated rendering (figure PDF, build output) whose text is
     regenerated from code or from a source that is also in the corpus -- name
     the source and route the fix there;
-  - a reworded synonym of the long form (`aberration burden` for `copy-number`)
-    is not matched by the script; catch it in this manual pass and record it
-    with the same remedy.
+  - a genuine alternative name of the long form (`Quetelet index` for `body mass
+    index`) is not matched by the script; catch it in this manual pass and record
+    it with the same remedy -- but only when the text (or a defining source)
+    establishes that the phrase names the same measured quantity. A phrase that
+    names a DIFFERENT measurement or unit is a different term of art, not a
+    long-form repetition: leave it verbatim and record the reason.
 
 **Exemption:** universal abbreviations (DNA, RNA, ATP, SDS-PAGE, PBS, SD, SEM,
 ANOVA, SI units, statistical symbols) need no redefinition. If unsure whether
@@ -618,10 +625,16 @@ count is not yet a finding.
 
 **Purpose:** presentation of numbers and units.
 
-**Enumeration:** regex sweep: SI unit usage (µL vs uL vs μl; mM vs M;
+**Enumeration:** regex sweep: SI unit usage (µL vs uL vs μl;
 spaces between number and unit), leading zeros for p-values (0.05 not .05),
 thousands separators, percent vs % consistency, degrees (°C), fold-change
 format, time formats (12 h vs 12 hours), En-dash in numeric ranges.
+A PREFIXED UNIT IS A QUANTITY, NOT A PRESENTATION VARIANT: `mM` vs `M` (or `µg`
+vs `mg`) differ by a factor of 1,000, and normalizing the label while keeping
+the number changes the reported concentration. Treat such a pair as a
+correctness/factual question and require a paired numeric conversion verified
+against the source (or a recorded factual correction); never file it as a
+formatting row.
 
 **Artifact:** `M11_si.md`: file | line | token | issue | disposition.
 
@@ -1068,10 +1081,14 @@ sections), overlap with published literature or the authors' own prior work
 (methods, legends). Possible AI-generated content ONLY with concrete evidence
 (hallucinated citations, internally inconsistent fabricated details,
 characteristic stylistic patterns) and ALWAYS labeled "possible" — never a
-definitive accusation. Springer Nature generative-AI policy: AI tools must
-not be authors; generative-AI use (text/images) must be disclosed;
-AI-generated images restricted — flag the ABSENCE of a disclosure statement as
-a guideline finding, not as proof of use.
+definitive accusation. Apply the ACTIVE venue's generative-AI policy: when the
+resolved venue profile (or the run's recorded guidelines) states one, check its
+author, disclosure and image rules; when it states none, record the policy gap
+as a named gap -- never apply another publisher's rule by default. The default
+profile's (Nature Biotechnology, Springer Nature) policy is: AI tools must not
+be authors; generative-AI use (text/images) must be disclosed; AI-generated
+images restricted -- flag the ABSENCE of a disclosure statement as a guideline
+finding, not as proof of use.
 
 ## J5 — Architecture & rewrite-class pass (scope-level, one row per scope)
 
@@ -1562,11 +1579,15 @@ produce is likewise not evidence of gradation.
 **Enumeration.** For every numeric claim on a claim-bearing surface (abstract,
 cover letter, Results highlights, figure legends): the test, the unit of
 analysis, n, the p-value, and — from Methods/Statistics — the correction and
-its family size. Compute the correction threshold (e.g. Holm: 0.05/family
-size) and the test's achievable floor (a one-sided signed-rank with n units
-cannot go below 2^−n). Check that the level in the abstract is the level the
-corrected test reaches, and that the abstract names the correction when it
-reports one (or states explicitly that the tests are descriptive).
+its family size. Compute the correction the paper states. For Holm's step-down
+procedure, order the family's p-values and compare the k-th (1-based) with
+0.05 / (m − k + 1), rejecting until the first failure; 0.05/m is only the first
+threshold, never the whole procedure. If the family cannot be reconstructed,
+record `unable` or cite validated adjusted p-values instead of a single
+threshold. Also compute the test's achievable floor (a one-sided signed-rank
+with n units cannot go below 2^−n). Check that the level in the abstract is the
+level the corrected test reaches, and that the abstract names the correction
+when it reports one (or states explicitly that the tests are descriptive).
 
 **Finding rules.**
 - a significance claim the stated correction cannot reach → `correctness`; the
@@ -1575,7 +1596,7 @@ reports one (or states explicitly that the tests are descriptive).
 - "unadjusted" numbers reported without the correction status the Methods
   themselves state → `consistency` (same claim, two standards);
 - a p-value equal to the design's floor presented as a graded result →
-  `writing`, with the ceiling named;
+  `writing`, with that minimum attainable p-value named;
 - a ranking the abstract states as a result while the Methods/Results call it
   qualitative, or while the deposited comparison table orders the callers
   differently → `correctness`, and the discrepant table is quoted as the other
@@ -1687,8 +1708,9 @@ list, and individual fields can even be left behind by the refresh, so the
 document ships with markers that point at the wrong reference.
 
 **Enumeration.** The pipeline's code-side scan emits the machine-checkable half
-(every row is `fix=manual`, `protected=true` — a field result is never edited by
-the tools):
+(every row is `fix=manual`, `protected=true` — the scan reads field results and
+never edits them; the separate offline refresh below may rewrite the cached
+results):
 
 * `FMT-Z1` — a citation marker whose number is not the cited item's rank in the
   document's own citation order (a STALE marker: the refresh rewrites it, and
@@ -1718,6 +1740,10 @@ because its item could not be resolved).
 **Finding rules.**
 * any `FMT-Z1`/`FMT-Z2`/`FMT-Z4` row → `correctness`: the submitted numbering is
   not the numbering a reader of the published file will see;
+* a `FMT-Z3` row → `correctness` for a duplicate number or a number outside 1..N (a citation
+  pointer the reader cannot resolve), and `consistency` for a listed entry the document never
+  cites (the cached bibliography no longer matches the citation set); if the author confirms an
+  uncited entry is intentional, record `manual-required` and keep it;
 * a `FMT-Z5` conflict → `consistency`: name both stores and the style the target
   journal expects;
 * the resolution is ALWAYS: run the pipeline's offline refresh

@@ -581,8 +581,10 @@ def package_sandbox(root: Path, rid: str, kind: str, *, lang=True, marker=True):
     write(pkg / "manuscript.md", "# revised\n")
     if lang:
         write(pkg / "work" / "R6_language.md",
-              "# language pass\n\n| step | change |\n|---|---|\n"
-              + "".join(f"| L{i} | none |\n" for i in range(1, 12)))
+              "# language pass\n\n| step | location | before | after | reason |\n"
+              "|---|---|---|---|---|\n\n"
+              "| step | rows changed | note |\n|---|---|---|\n"
+              + "".join(f"| L{i} | 0 | none found |\n" for i in range(1, 12)))
     if marker:
         write(sb / nb.MARKER_FILE, {"stage": kind, "run_id": rid, "round": 1,
                                     "status": "complete"})

@@ -407,8 +407,8 @@ def test_pipeline_rules():
     check("G-008 an empty response letter is an error",
           "is EMPTY: the response to" in p07)
     check("G-009 a repeated concern id is an error",
-          "response letter mentions concern {cid!r} {mentions}" in p07
-          and pp._finding_id_occurrences("R1-1", "## R1-1 x\n## R1-1 y") == 2)
+          "response letter carries {mentions} `## {cid}` headings" in p07
+          and pp.response_heading_occurrences("R1-1", "## R1-1 x\n## R1-1 y") == 2)
     check("G-012 coverage rows are validated",
           pp.concern_coverage_problems({"coverage": []}, False)
           and pp.concern_coverage_problems(

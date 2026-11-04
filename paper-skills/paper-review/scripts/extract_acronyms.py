@@ -52,10 +52,12 @@ pass in references/sweeps.md M1 covers it, and project-specific tokens can be
 declared one per line in WORK/extra_acronyms.txt.
 
 Known limits of the M1b long-form matcher (the manual pass covers them): a
-reworded synonym of the long form ("aberration burden" for "copy-number") is
+genuine alternative name of the long form ("Quetelet index" for "body mass
+index") is
 not matched, and a definition written without parentheses ("copy-number,
 hereafter CN") is recorded only through its long-form occurrence, not as a
-definition.
+definition. A phrase that names a DIFFERENT quantity or unit is not a long-form
+repetition at all and must not be treated as one.
 
 stdlib-only. Usage:
   python extract_acronyms.py --work ./guided_review/work [--out ./guided_review]

@@ -173,13 +173,14 @@ def test_prompts():
     check("a split round plans two review runs and the revise waits for both",
           "r1_guided_review_b" in split_plan and "r1_guided_review" in split_plan
           and "r1_guided_review_b" in rev["deps"], str(split_plan))
-    # Session B consumes session A's OUTPUT (materialize_review copies A's
-    # guided_review/ into B's review_a/); with the same deps as A, B was materialized
-    # before A had written anything, so its review_a/ held the seeded skeleton
-    # at best. B must wait for A.
+    # Session B reads the corpus cold (materialize_review does not copy A's
+    # guided_review/ into B's sandbox), but B's code-side merge freezes a digest
+    # of A's findings; with the same deps as A, B would be materialized before A
+    # had written anything, so the merge input would be missing. B must wait for A.
     b_entry = [e for e in np.round_run_plan(split_ctx, 1)
                if e["id"] == "r1_guided_review_b"][0]
-    check("the split review's second session waits for the first (it reads review_a/)",
+    check("the split review's second session waits for the first "
+          "(the merge needs A's findings)",
           "r1_guided_review" in b_entry["deps"], str(b_entry["deps"]))
     # The frozen-review cross-check of the self-reported writing count exists
     # only for the arm that consumes guided_review/ (revise). The integration prompt

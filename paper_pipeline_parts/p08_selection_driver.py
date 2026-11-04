@@ -2225,11 +2225,10 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
         if (review_split_of(ctx) != "off" and not scoped and guided_review_enabled(ctx)
                 and round_review_scope(ctx, r) == "full"):
             entries.append({"id": rid_guided_review_b(r), "kind": "guided_review", "vid": None,
-                            # Session B consumes session A's OUTPUT (`guided_review_a/`,
-                            # copied by materialize_review): with the same deps as
-                            # A, B was materialized first and kept whatever A had
-                            # written at that instant -- the seeded evidence pack
-                            # at best, nothing at worst, never the findings.
+                            # Session B reads the corpus COLD: A's output is never
+                            # staged into B's sandbox. The dependency exists only so
+                            # the code-side merge in B's postcheck can read A's
+                            # finished findings.json after both sessions ran.
                             "deps": [rid_a1(r), rid_guided_review(r)], "stage": "guided_review",
                             "materialize": (lambda c: materialize_review(c, r, "b"))})
             review_deps.append(rid_guided_review_b(r))

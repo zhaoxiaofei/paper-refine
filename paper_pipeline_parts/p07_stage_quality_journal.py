@@ -102,14 +102,26 @@ def language_pass_report(pkg: Path) -> dict:
     if not path.is_file():
         return {"file": str(path), "present": False, "rows": 0, "steps_seen": [],
                 "missing": want}
-    text = read_text_bounded(path) or ""
     rows = parse_markdown_table(path)
+    # The coverage table is a SEPARATE table (step | rows changed | note); a bare
+    # `L1` line, or a change-log row that cites L1, is not a coverage row. Parse
+    # the coverage table by its own header and require a numeric change count and
+    # a note, so eleven bare labels no longer satisfy the gate.
+    coverage_rows = []
+    for block in parse_markdown_blocks(path):
+        header = [str(h).strip().lower() for h in (block.get("header") or [])]
+        if ("step" in header and any("row" in h for h in header)
+                and any("note" in h for h in header)):
+            coverage_rows.extend(block.get("rows") or [])
     steps = set()
-    for r in rows:
-        for m in re.finditer(r"L(\d{1,2})", str(r.get("step") or "")):
+    for row in coverage_rows:
+        m = re.fullmatch(r"L(\d{1,2})", str(row.get("step") or "").strip())
+        if not m:
+            continue
+        changed = next((str(row.get(k) or "").strip() for k in row if "row" in k), "")
+        note = next((str(row.get(k) or "").strip() for k in row if "note" in k), "")
+        if re.fullmatch(r"\d+", changed) and note:
             steps.add(f"L{m.group(1)}")
-    for m in re.finditer(r"(?m)^\s*\|?\s*\**L(\d{1,2})\b", text):
-        steps.add(f"L{m.group(1)}")
     seen = sorted(steps, key=lambda s: int(s[1:]))
     return {"file": str(path), "present": True, "rows": len(rows), "steps_seen": seen,
             "missing": [s for s in want if s not in steps]}
@@ -1916,11 +1928,23 @@ def ledger_items(comp: dict):
 
 
 def tier_net_scores(items) -> dict:
-    """{tier: capped net} -- resolved rows add, introduced rows subtract (per tier)."""
+    """{tier: capped net} -- resolved rows add, introduced rows subtract (per tier).
+
+    The M18/M19 length contribution is capped at +-1: both are formatting-tier
+    MINOR rows, and the judge prompt promises length "may move a comparison by at
+    most one point". The cap applies to the length rows' aggregate, so a length
+    row plus another formatting row still counts normally.
+    """
     raw = {tier: 0 for tier in BASIS_TIERS}
-    for side, tier, severity, _e, _c, _ai in items:
+    length_net = 0
+    for side, tier, severity, _e, cid, _ai in items:
         weight = TIER_ROW_WEIGHTS.get(tier, {}).get(severity, 0)
-        raw[tier] = raw.get(tier, 0) + (weight if side == "resolved" else -weight)
+        signed = weight if side == "resolved" else -weight
+        if tier == "formatting" and cid in LENGTH_GUARD_CHECKS:
+            length_net += signed
+        else:
+            raw[tier] = raw.get(tier, 0) + signed
+    raw["formatting"] += max(-1, min(1, length_net))
     return {tier: max(-TIER_CAPS.get(tier, 0), min(TIER_CAPS.get(tier, 0), net))
             for tier, net in raw.items()}
 
@@ -3515,6 +3539,11 @@ SEED (read the real text after it):
 
 THE LEDGER (one row per distinct concern; same shape as modes 1-2):
 {JOURNAL_LEDGER_SCHEMA}
+Write the ledger to BOTH canonical paths (the same rows):
+  * concerns/JF_concerns.json — the machine-readable ledger every later journal stage reads;
+    the postcheck fails the run when it is missing.
+  * concerns/JF_concerns.md — the same rows as a markdown table
+    (id | source | author | action | disposition | quote | summary | location).
 `disposition` for a scoped revision:
   * to-fix             the manuscript must change; becomes ONE finding
   * already-addressed  quote the base/ location that already answers it (never
@@ -3542,7 +3571,8 @@ THE FINDING LIST (the revision session consumes it):
   * The scoped review covers ONLY the admitted concerns: add one `coverage` row
     with `check`: "scope" naming that scope and stating that every class outside
     the ledger is a named gap, not a clean result.
-  * guided_review/artifacts/JF_concerns.md — the ledger as a markdown table.
+  * guided_review/artifacts/JF_concerns.md — a copy of that ledger table for the review
+    artifacts (the canonical copy is `concerns/JF_concerns.md`).
   * guided_review/findings.md — the findings in the review's markdown shape.
   * Do NOT edit base/ or the feedback; do not write revised/ here.
 
@@ -3788,14 +3818,59 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
                     f"deliverable (one row per distinct concern), and an empty ledger would "
                     f"silently answer nothing")
         return data
-    texts = []
-    for tdir in (sb / "feedback" / "text", sb / "feedback" / "llm" / "text"):
-        if tdir.is_dir():
-            for p in sorted(tdir.glob("*.txt")):
-                text_part = read_text_bounded(p)
-                if text_part is not None:
-                    texts.append(_norm_ws(text_part))
-    haystack = " \n ".join(texts)
+    def _stream_text(dirs) -> str:
+        parts = []
+        for tdir in dirs:
+            if tdir.is_dir():
+                for p in sorted(tdir.glob("*.txt")):
+                    text_part = read_text_bounded(p)
+                    if text_part is not None:
+                        parts.append(_norm_ws(text_part))
+        return " \n ".join(parts)
+
+    def _source_tokens(label: str) -> set:
+        """Every spelling a ledger `source` may use for one staged feedback file.
+
+        The session is handed the CORPUS-RELATIVE label (`human_review_feedback/
+        editor_letter.txt`, the name CONCERN_SEED.json records), while the file is
+        staged under the flattened `human_review_feedback__editor_letter.txt`
+        (`_write_journal_feedback_inputs` replaces `/` with `__`). A ledger may
+        cite the label, its basename or the staged name; all three name the same
+        stream, so all three must bind.
+        """
+        lab = str(label or "").strip().lower()
+        if not lab:
+            return set()
+        safe = lab.replace("/", "__")
+        base = lab.rsplit("/", 1)[-1]
+        stem = base.rsplit(".", 1)[0] if "." in base else base
+        return {lab, safe, base, stem, safe.rsplit(".", 1)[0]}
+
+    def _staged_sources(d: Path, labels) -> set:
+        """The `source` spellings that name a file ACTUALLY staged in `d`."""
+        tokens = set()
+        for label in labels or ():
+            lab = str(label or "").strip()
+            if lab and (d / lab.replace("/", "__")).is_file():
+                tokens |= _source_tokens(lab)
+        if d.is_dir():
+            for p in d.iterdir():
+                if p.is_file() and p.name:
+                    tokens |= _source_tokens(p.name)
+        return {t for t in tokens if t}
+
+    seed = read_json(sb / "feedback" / "CONCERN_SEED.json", revive=False, lenient=True)
+    seed = seed if isinstance(seed, dict) else {}
+
+    def _seed_labels(key: str) -> list:
+        raw = seed.get(key)
+        return [str(x) for x in raw if isinstance(x, str)] if isinstance(raw, list) else []
+
+    human_hay = _stream_text([sb / "feedback" / "text"])
+    llm_hay = _stream_text([sb / "feedback" / "llm" / "text"])
+    haystack = " \n ".join(x for x in (human_hay, llm_hay) if x)
+    human_sources = _staged_sources(sb / "feedback" / "files", _seed_labels("files"))
+    llm_sources = _staged_sources(sb / "feedback" / "llm" / "files", _seed_labels("llm_files"))
     seen = set()
     for i, row in enumerate(rows, 1):
         if not isinstance(row, dict):
@@ -3809,14 +3884,49 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
             errs.append(f"concern id {cid!r} appears twice: ids are the keys every later stage "
                         f"uses, so they must be unique")
         seen.add(cid)
+        # Bind the quote to the stream the row claims: the combined haystack could
+        # not catch a quote attributed to the wrong voice, and the source/author
+        # columns were never checked at all.
+        source = str(row.get("source") or "").strip()
+        author = str(row.get("author") or "").strip()
+        if not source:
+            errs.append(f"concern {cid}: the `source` cell is empty (name the feedback file "
+                        f"the quote comes from)")
+        if not author:
+            errs.append(f"concern {cid}: the `author` cell is empty (name the reviewer or "
+                        f"'LLM review (pre-filtered)')")
+        stream = ""
+        if source:
+            src_l = source.lower()
+            in_human = any(tok in src_l for tok in human_sources)
+            in_llm = any(tok in src_l for tok in llm_sources)
+            if in_llm and not in_human:
+                stream = "llm"
+            elif in_human and not in_llm:
+                stream = "human"
+            elif in_human and in_llm:
+                stream = "both"
+            else:
+                errs.append(f"concern {cid}: source {source!r} does not name any file staged "
+                            f"under feedback/files/ or feedback/llm/files/ (name the feedback "
+                            f"file the quote comes from)")
         quote = _norm_ws(row.get("quote"))
         if len(quote) < 8:
             errs.append(f"concern {cid}: quote is missing/too short (a verbatim <=300-char "
                         f"excerpt is required)")
-        elif quote not in haystack:
-            errs.append(f"concern {cid}: the quote is not verbatim in any feedback/text/ or "
-                        f"feedback/llm/text/ rendering (checked whitespace-normalised); a "
-                        f"paraphrase fails here")
+        elif len(quote) > 300:
+            errs.append(f"concern {cid}: quote is {len(quote)} characters; the ledger's limit "
+                        f"is <=300 characters after whitespace normalisation")
+        else:
+            named = {"human": human_hay, "llm": llm_hay, "both": haystack}.get(stream, haystack)
+            if quote not in named:
+                where = {"human": "feedback/text/ (the human feedback)",
+                         "llm": "feedback/llm/text/ (the LLM review)",
+                         "both": "feedback/text/ or feedback/llm/text/"}.get(
+                             stream, "any feedback/text/ or feedback/llm/text/")
+                errs.append(f"concern {cid}: the quote is not verbatim in {where} -- the stream "
+                            f"its `source` names (checked whitespace-normalised); a paraphrase "
+                            f"or a quote from the other stream fails here")
         action = str(row.get("action") or "").strip()
         if action not in JOURNAL_CONCERN_ACTIONS:
             errs.append(f"concern {cid}: action {action!r} is not one of "
@@ -4862,6 +4972,33 @@ def response_comment_quotes(letter: str) -> dict:
     return out
 
 
+def response_comment_is_verbatim(comment: str, concern_quote: str) -> bool:
+    """Is `comment` a contiguous, whitespace-normalised excerpt of the verified quote?
+
+    The letter promises a VERBATIM quotation. Containment in EITHER direction
+    accepted a quote with invented reviewer words appended (the true quote stayed
+    a substring); only the comment being contained in the already-verified
+    concern quote proves every word came from the reviewer. A shorter excerpt is
+    still allowed.
+    """
+    c_norm = " ".join(str(comment or "").split()).lower()
+    q_norm = " ".join(str(concern_quote or "").split()).lower()
+    return bool(c_norm) and c_norm in q_norm
+
+
+def response_heading_occurrences(pid: str, blob: str) -> int:
+    """How many markdown headings name `pid` (one response block per concern).
+
+    `_finding_id_occurrences` counted every mention, so a legitimate
+    cross-reference in another block ("we also address R1-2") made the referenced
+    concern look duplicated and failed its block. The prompt's contract is one
+    HEADING per concern, so only headings are counted here.
+    """
+    return len(re.findall(
+        r"(?m)^\s{0,3}#{1,6}\s*" + re.escape(pid) + r"(?![A-Za-z0-9])",
+        str(blob or "")))
+
+
 def postcheck_response(ctx: Ctx, rec: dict):
     """Modes 2-4: the letter covers every concern and cites the package truthfully."""
     sb = ctx.sandbox_of(rec)
@@ -4941,13 +5078,13 @@ def postcheck_response(ctx: Ctx, rec: dict):
                         f"verbatim quotation")
         elif concern_quote and comment:
             c_norm = " ".join(comment.split()).lower()
-            q_norm = concern_quote.lower()
             if len(re.findall(r"\S+", c_norm)) < 4:
                 errs.append(f"response {cid!r}: the Comment quotation is shorter than 4 words "
                             f"({comment!r}); quote the reviewer's own wording, not a label")
-            elif c_norm not in q_norm and q_norm not in c_norm:
+            elif not response_comment_is_verbatim(comment, concern_quote):
                 errs.append(f"response {cid!r}: the Comment quotation is not verbatim from the "
-                            f"reviewer feedback (the concern ledger's quote is {concern_quote!r})")
+                            f"reviewer feedback (the concern ledger's quote is {concern_quote!r}); "
+                            f"it may be a shorter excerpt but must add no words")
         changes = [c for c in (row.get("changes") or []) if isinstance(c, dict)]
         new_data = [str(x) for x in (row.get("new_data") or []) if str(x).strip()]
         for c in changes:
@@ -5015,14 +5152,14 @@ def postcheck_response(ctx: Ctx, rec: dict):
             errs.append(f"response row {cid!r}: the concern needs a new experiment; an "
                         f"'addressed' answer must cite the new data file(s)")
         if cid and letter.strip():
-            mentions = _finding_id_occurrences(str(cid), letter)
+            mentions = response_heading_occurrences(str(cid), letter)
             if not mentions:
-                errs.append(f"response letter does not mention concern {cid!r}")
+                errs.append(f"response letter does not carry a `## {cid}` block")
             elif mentions > 1:
-                # The prompt requires one block per concern; a repeated section
-                # passed merely because the id was mentioned somewhere.
-                errs.append(f"response letter mentions concern {cid!r} {mentions} "
-                            f"times: exactly one block per concern is required")
+                # One HEADING per concern; a cross-reference elsewhere in the
+                # letter is prose, not a second block.
+                errs.append(f"response letter carries {mentions} `## {cid}` headings: "
+                            f"exactly one block per concern is required")
     # Like every sibling postcheck: the response session must not rewrite the
     # read-only package copy its letter is verified against (target/), or the
     # change citations can "exist" in a package that was never checked.
@@ -6044,6 +6181,12 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
                     errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
                                 f"{'is missing' if r['status'] == 'missing' else r['status']}"
                                 + (f" ({r['detail']})" if r["detail"] else ""))
+                elif r["status"] == "skipped-over-budget":
+                    errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
+                                "was NOT re-run because the aggregate verifier budget was "
+                                "exhausted -- an unexecuted declared computation is not a verified "
+                                "one; declare fewer or faster verifiers, or drop the verifier and "
+                                "file the row as evidence")
     elif kind == "audit":
         aj = sb / "audit" / "audit.json"
         if not aj.is_file():

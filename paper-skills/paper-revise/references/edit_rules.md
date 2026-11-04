@@ -78,8 +78,10 @@ or remove a citation by operating on the WHOLE complex field (begin →
 instrText → separate → result → end) and keep the surrounding sentence
 grammatical; never edit the bibliography field itself; a field you cannot fully
 read or parse (foreign namespace, missing `itemData`, unreadable XML) stays
-untouched and goes to MANUAL_STEPS.md; never trigger Zotero Refresh yourself —
-the author refreshes in Word.
+untouched and goes to MANUAL_STEPS.md; never trigger the Word/Zotero Refresh
+yourself — the author refreshes in Word. The pipeline's OFFLINE
+`zotero-refresh` (below) is the sanctioned deterministic path, not that
+interactive refresh.
 
 **The pipeline's formatter performs the deterministic refresh OFFLINE
 (2026-10-11).** Every package-producing stage's postcheck runs `fix_package`,
@@ -108,9 +110,13 @@ field at once, leave a field malformed (an unterminated begin, a missing
 separate/end, a stray `fldChar`/`instrText`, unparseable citation JSON, a
 missing or duplicate `citationID`) or replace a field by its visible text.
 If the document you received -- or a paragraph you rebuilt -- carries citation
-or bibliography TEXT where a live field is missing, RE-CREATE the field from
+or bibliography TEXT where a live field is missing, then in `edit` or `apply` mode
+RE-CREATE the field from
 the baseline package's own `citationID`/`itemData`/item URIs with the same
-visible text. Rebuilding a paragraph from its `w:t` text (python-docx, a text
+visible text. In `off`/`read` mode that rebuild is a field edit and is forbidden:
+record it as a manual step naming the paragraph and the baseline
+`citationID`/`itemData`/item URIs, and leave the text unchanged. Rebuilding a
+paragraph from its `w:t` text (python-docx, a text
 round-trip, any regex that keeps only text runs) destroys every
 `fldChar`/`instrText` run inside it: use a field-preserving edit, or re-insert
 the whole field afterwards. The pipeline re-checks the delivered package
@@ -156,7 +162,10 @@ Plagiarism findings: rewrite the flagged passage with proper paraphrase and
 attribution (or direct quote + citation). AI-generated-content findings:
 revise flagged text for accuracy and internal consistency, but do NOT attempt
 to conceal AI use — if generative AI was actually used anywhere, ensure
-disclosure complies with Springer Nature policy. Ask the user to confirm
+disclosure complies with the ACTIVE venue's policy (the default profile's
+Springer Nature rule is one such policy, not a universal one); when the resolved
+venue profile records no policy, record the policy gap and ask the user to check
+the target journal's own author guide. Ask the user to confirm
 actual usage; never assume.
 
 ## E5 — Difference-tracking auxiliary files
@@ -245,7 +254,12 @@ reverse: an edit applied in the abstract but forgotten in Figure 3's legend.
 
 When a finding says the un-abbreviated long form was used again after the
 acronym's first use (an M1b instance row), the fix is to SUBSTITUTE THE ACRONYM
-for that occurrence — never the reverse:
+for that occurrence — never the reverse. Before substituting, verify from the
+text (or a defining source) that the phrase and the acronym name the same
+measured quantity: a phrase naming a different quantity or unit (an aberration
+burden versus a copy-number measurement, or `M` versus `mM`) is a different
+term of art, not a long-form repetition — leave it verbatim and record the
+reason in the ledger row.
 
 - edit exactly the occurrences the finding lists (one A6 row each; the script's
   M1b table gives the exact file:line), never expand a short form that is
@@ -266,10 +280,16 @@ for that occurrence — never the reverse:
   the proof that the convention is consistent now — a revision that leaves the
   M1b table unchanged has not fixed the finding.
 
-## C — Code revisions (only if analysis code is part of the submission)
+## C — Code revisions (run whenever the corpus carries analysis code)
 
-Locate the relevant repository (path in the submission directory, or URL
-supplied by the user); copy it to `code/` and edit only the copy.
+Analysis code is revision content like any other file: it is revised and
+evaluated whether or not `submit_code` exports it in the submission. The
+submission-export setting decides what ships, never whether an identified code
+bug may be fixed.
+
+Locate the relevant repository (path in the submission directory, the corpus's
+`code/` area, or a URL supplied by the user); copy it to `code/` and edit only
+the copy.
 
 **Scientific integrity rule: never change analysis code merely to make
 outputs match manuscript numbers.** First determine the ground-truth value
@@ -420,8 +440,9 @@ in the package you produced:
 * ONE row per change: `step | location | before | after | reason`;
 * a COVERAGE table at the end with ONE row per step, including the steps that
   changed nothing (`L3 | 0 | no logic jumps found`). A step with no row is an
-  UNAUDITED step, and the orchestrator records which steps are missing (it warns
-  by default and fails the attempt under `setup --strict-artifacts`);
+  UNAUDITED step, and the orchestrator records which steps are missing (it fails
+  the attempt by default; with `setup --strict-artifacts off` the same detector
+  is recorded as a warning);
 * after EACH step, re-run the code-side scan of the package
   (`python paper_docx_format.py scan <package dir>`): a step that introduces a
   finding-tier row (a long sentence over a bar the venue profile declares in
@@ -687,8 +708,9 @@ exists.
 * never invent a locator, never deposit anything, and never cite a file the submission does not
   carry "because the reviewers have the package";
 * it is NEVER a reason to edit, delete or extend the excluded area (`raw_data/`, the feedback
-  areas and the author's README files are read-only evidence; `code/` is revised only under rule
-  C and only when the operator submits it) — the MANUSCRIPT is the side that changes;
+  areas and the author's README files are read-only evidence; `code/` is revised under rule C
+  whether or not the operator exports it in the submission) — the MANUSCRIPT is the side that
+  changes;
 * a pointer inside a live Zotero field, or inside a structural file (`.csv`, `.json`, `.bib`),
   is not removed mechanically: record it in `MANUAL_STEPS.md` with the sentence quoted, or, when
   the file is prose and your own edit can carry it, rewrite it in the revision.
