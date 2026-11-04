@@ -459,7 +459,7 @@ def _strip_latex(text: str) -> str:
     # M19 count. An ESCAPED dollar (`\$5`) is a literal, not math: the math
     # pattern is lookbehind-guarded (keep this in step with
     # paper_pipeline._strip_latex).
-    text = re.sub(r"\\(?:cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
+    text = re.sub(r"\\(?:[a-zA-Z]*cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
                   r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text)
     # Inline and single-line display math (`$p<0.05$`, `\(x\)`, `\[x\]`) is not
     # prose; only the command names used to be stripped, so the body's tokens

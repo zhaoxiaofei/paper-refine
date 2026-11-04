@@ -88,8 +88,10 @@ def test_candidate_extractors():
           and bool(ec.TEX_CITE_RE.search("\\citep[see][p. 2]{a,b}")))
     pat5 = eo.variant_pattern("5", "value")
     pat234 = eo.variant_pattern("234", "value")
-    check("F35 value mode rejects a sign and a thousands separator",
-          pat5.findall("5 mg -5 mg \u22125 mg +5 mg") == ["5"]
+    check("F35 value mode rejects a NEGATIVE sign and a thousands separator",
+          # An explicit POSITIVE sign names the same value (+5 == 5); only a
+          # negative sign makes it a different value.
+          pat5.findall("5 mg -5 mg \u22125 mg +5 mg") == ["5", "+5"]
           and pat234.findall("1,234 cells and 234 cells") == ["234"])
     check("F35 a thousands value does not gain a decimal spelling",
           not eo.variant_pattern("1,234", "value").search("1.234 cells"))

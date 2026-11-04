@@ -24,6 +24,15 @@ PDF_MANIFEST = "manifest.json"
 LATEX_COMPILE_TIMEOUT = 900
 PDF_CONVERT_TIMEOUT = 900
 
+# TeX regions that are never compiled: the verbatim family, the `comment`
+# package, and inline \verb/\lstinline samples. A `\documentclass` inside one
+# is a quotation, not a compile root.
+_TEX_NONCOMPILED_ENV_RE = re.compile(
+    r"\\begin\{(?P<env>verbatim\*?|Verbatim|lstlisting|minted|comment)\}.*?"
+    r"\\end\{(?P=env)\}", re.S)
+_TEX_INLINE_VERB_RE = re.compile(
+    r"\\(?:verb|lstinline)\*?(?:\[[^\]]*\])?(?P<delim>[^\sA-Za-z]).*?(?P=delim)")
+
 
 def latex_root_documents(dirp: Path) -> list:
     """Relative paths of the `.tex`/`.ltx` files that are a COMPILE ROOT.
@@ -50,7 +59,15 @@ def latex_root_documents(dirp: Path) -> list:
             head = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if re.search(r"\\documentclass\b", head):
+        # Comments and verbatim bodies are not compiled source; a
+        # `% \documentclass` or a sample inside verbatim is not a root (F74).
+        # Every non-compiled region counts: the comment/lstlisting/minted
+        # environments and inline \verb/\lstinline too, or a fragment whose
+        # only `\documentclass` sits in one is compiled standalone (R08).
+        _visible = _TEX_NONCOMPILED_ENV_RE.sub("", head)
+        _visible = strip_tex_comment(_visible)
+        _visible = _TEX_INLINE_VERB_RE.sub("", _visible)
+        if re.search(r"\\documentclass\b", _visible):
             out.append(rel.as_posix())
     return out
 
@@ -252,11 +269,29 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
     docs, previous = [], previous or {}
     pkg_sources = [s for s in sources if not s[1]]
     latex_targets = set()
+    latex_jobs = []
+    _used_latex = set()
     for src, _prefix, _excluded in pkg_sources:
         if not src.is_dir():
             continue
         for rel in latex_root_documents(src):
-            latex_targets.add((Path(out_root) / Path(rel).with_suffix(".pdf")).resolve())
+            out_pdf = Path(out_root) / Path(rel).with_suffix(".pdf")
+            # `main.tex` and `main.ltx` both want `main.pdf`. Give the later
+            # root a path that names its source extension instead of silently
+            # overwriting the first render (F76).
+            if out_pdf.resolve() in _used_latex:
+                _stem, _ext = Path(rel).stem, Path(rel).suffix.lstrip(".")
+                _n = 1
+                while True:
+                    _cand = (Path(out_root) / Path(rel).parent
+                             / (f"{_stem}-{_ext}" + ("" if _n == 1 else f"-{_n}") + ".pdf"))
+                    if _cand.resolve() not in _used_latex:
+                        out_pdf = _cand
+                        break
+                    _n += 1
+            _used_latex.add(out_pdf.resolve())
+            latex_targets.add(out_pdf.resolve())
+            latex_jobs.append((src, rel, out_pdf))
     # Every DOCX's default render path. A moved-aside name must avoid these:
     # `main-docx.docx` legitimately renders to `main-docx.pdf`, which is exactly
     # the name the colliding `main.docx` would otherwise be moved to.
@@ -267,6 +302,9 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
         docx_defaults.add(
             (Path(out_root) / Path(f["rel"]).with_suffix(".pdf")).resolve())
     chosen = set()
+    # latex_jobs was built in exactly this iteration order; an iterator keeps
+    # duplicate (src, rel) entries from collapsing in a dict.
+    _latex_jobs = iter(latex_jobs)
     for src, _prefix, excluded in pkg_sources:
         if not src.is_dir():
             continue
@@ -277,7 +315,7 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
         _latex_digest = manifest_digest(hash_manifest(src, follow_dir_links=True))
         for rel in latex_root_documents(src):
             digest = _latex_digest
-            out_pdf = out_root / Path(rel).with_suffix(".pdf")
+            _job_src, _job_rel, out_pdf = next(_latex_jobs)
             rec = _reuse_pdf_record(previous, label, rel, digest, out_pdf, "latex")
             if rec is None:
                 # The evidence areas are read-only INPUTS the manuscript may

@@ -2298,10 +2298,16 @@ def _table_value_index(tables: list, rich: bool = False) -> dict:
     """
     index = {}
 
-    def _add(cand, desc, kind, column, name):
-        index.setdefault(cand, desc if not rich else {
-            "source": desc, "kind": kind,
-            "column": str(column or ""), "file": str(name or "")})
+    def _add(cand, desc, kind, column, name, row="", rows=()):
+        if not rich:
+            index.setdefault(cand, desc)
+            return
+        hit = {"source": desc, "kind": kind,
+               "column": str(column or ""), "file": str(name or ""),
+               "row": str(row or ""), "rows": list(rows or ())}
+        # Keep EVERY provenance for the value: the first cell hit used to hide
+        # a later, context-compatible source (F02).
+        index.setdefault(cand, []).append(hit)
 
     for name, text in tables or []:
         header, body = _simple_table(text)
@@ -2310,6 +2316,10 @@ def _table_value_index(tables: list, rich: bool = False) -> dict:
         for c in range(min(len(header), max(len(r) for r in body))):
             vals = []
             col_has_unit = False
+            row_labels = []
+            for r in body:
+                if r and str(r[0]).strip():
+                    row_labels.append(str(r[0]).strip())
             for r in body:
                 if c >= len(r):
                     continue
@@ -2330,7 +2340,7 @@ def _table_value_index(tables: list, rich: bool = False) -> dict:
                     _add(cand,
                          f"value in column {header[c]!r}, row {label!r} in {name}"
                          if label else f"value in column {header[c]!r} in {name}",
-                         "cell", header[c], name)
+                         "cell", header[c], name, row=label, rows=row_labels)
             if col_has_unit or len(vals) < 3:
                 continue
             # The table's SHAPE is a reported statistic: G-041 requires the row
@@ -2980,6 +2990,17 @@ def _number_proof_context_ok(row: dict, hit: dict) -> bool:
     written = _context_tokens(sentence)
     if not written:
         return False
+    # Row identity is part of the proof: "the control cohort age was 42" must
+    # not be proved by the TREATMENT row's 42 (F01). If the sentence names a
+    # row from this column, the hit must be that row; a sentence that names no
+    # row at all still falls back to the column/file context.
+    if kind == "cell":
+        hit_row = str(hit.get("row") or "").strip()
+        if hit_row:
+            known_rows = [str(x).strip() for x in hit.get("rows") or () if str(x).strip()]
+            named = [x for x in known_rows if _context_tokens(x) & written]
+            if named and hit_row not in named:
+                return False
     return bool(written & (_context_tokens(hit.get("column"))
                             | _context_tokens(hit.get("file"))))
 
@@ -2995,14 +3016,19 @@ def reconcile_number_rows(rows: list, tables: list) -> dict:
         if not num:
             continue
         key = re.sub(r"[,\u2009\u202f\u00a0\s]", "", num).rstrip(".")
-        hit = index.get(num) or index.get(key)
-        if hit and not (isinstance(hit, dict)
-                        and hit.get("kind") == "rowcount") \
-                and _number_proof_context_ok(r, hit):
+        hits = index.get(num) or index.get(key) or []
+        if isinstance(hits, dict):
+            hits = [hits]
+        for hit in hits:
+            if not isinstance(hit, dict) or hit.get("kind") == "rowcount":
+                continue
+            if not _number_proof_context_ok(r, hit):
+                continue
             r["source"] = f"recomputed: {hit['source']}"
             r["source_kind"] = "shipped-table"
             r["status"] = "proved"
             filled += 1
+            break
     return {"filled": filled, "candidates": len(index)}
 
 

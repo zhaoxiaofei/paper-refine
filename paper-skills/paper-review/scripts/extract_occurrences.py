@@ -162,28 +162,42 @@ def variant_pattern(term, mode):
             pats.append(re.escape(num) + "0*")
             if num.startswith("0."):
                 pats.append(re.escape(num[1:]) + "0*")
+        # A grouped integer (`1,234`) is the same value as its plain form.
+        # float() rejects the comma, so the plain spelling has to be added
+        # explicitly.
+        grouped = bool(re.fullmatch(r"[+\-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?", num))
+        norm = num.replace(",", "") if grouped else num
+        if norm != num:
+            pats.append(re.escape(norm))
         try:
-            v = float(num)
-            # One decimal of mantissa is NOT the value: for 1234.5 it produced
-            # "1.2e+03" (1200) and for 0.0215 "2.1e-02" (0.021). Derive the
-            # precision from the target's own significant digits (trailing
-            # zeros are not significant) so the scientific spelling is exactly
-            # the same number, no rounding in either direction.
-            # The exponent's digits are part of the SPELLING, not the
-            # mantissa: "1e-3" must yield 1e-03 (0.001), not 1.3e-03.
-            _mantissa = re.split(r"[eE]", str(num), 1)[0]
-            _digits = re.sub(r"[^0-9]", "", _mantissa).lstrip("0").rstrip("0") or "0"
-            sci = "%.*e" % (len(_digits) - 1, v)
+            # Decimal, not float: `float("9007199254740993")` is
+            # 9007199254740992, so the generated scientific spelling named a
+            # DIFFERENT integer (F59). Decimal keeps the written value exact.
+            _dec = Decimal(norm.replace("\u2212", "-"))
+        except InvalidOperation:
+            _dec = None
+        if _dec is not None and _dec.is_finite():
+            sci = format(_dec, "e")
             mant, exp = sci.split("e")
-            pats.append(re.escape(mant + "e" + exp))
+            exp_i = int(exp)
+            # Decimal preserves the written integer's trailing zeros
+            # (`1500` -> `1.500e+3`); the shortest exact mantissa is the one
+            # manuscripts write (`1.5e+3`). The `0*` padding below still
+            # enumerates the longer spellings.
+            if "." in mant:
+                mant = mant.rstrip("0").rstrip(".")
+            # An INTEGER mantissa may not be padded with zeros: `5` + `0*` +
+            # `e+0` matched `50e+00`, a different value (F55). Only a written
+            # decimal point makes trailing zeros value-preserving.
+            mant_pad = "0*" if "." in mant else ""
+            pats.append(re.escape(mant) + "e" + re.escape(exp))
             # The same value written in plain decimal is an equivalent
             # notation ("1e-3" ~ "0.001"), and the mode promises to
-            # enumerate equivalents. Decimal(str(num)) keeps the written
-            # value exact (no float formatting noise).
-            if "e" in str(num).lower():
+            # enumerate equivalents. Decimal keeps the written value exact.
+            if "e" in str(norm).lower():
                 try:
-                    dec = format(Decimal(str(num)), "f")
-                except InvalidOperation:
+                    dec = format(_dec, "f")
+                except (InvalidOperation, ValueError):
                     dec = ""
                 if dec and dec not in ("0", "0.0"):
                     pats.append(re.escape(dec))
@@ -191,44 +205,45 @@ def variant_pattern(term, mode):
                         short = dec.rstrip("0").rstrip(".")
                         if short and short != dec:
                             pats.append(re.escape(short))
-            # "%.1e" always pads the exponent to two digits (3.1e-02) while
-            # manuscripts usually write 3.1e-2 -- the short form (and the
-            # uppercase E) must be enumerated too, or those occurrences of the
-            # value are invisible to the M4 number sweep.
-            # `%.*e` pads a positive exponent ("+02") and drops a trailing zero
-            # from the mantissa; manuscripts write "e+2" and "3.10e+2". Both
-            # spellings (and uppercase E, and the padded exponent) are the same
-            # value and must be enumerated.
-            short = ("+" if exp.startswith("+") else "") + str(int(exp))
+            # Manuscripts write "e+2" and "3.10e+2" as well as the padded
+            # "e+02"; all are the same value and must be enumerated.
+            short = ("+" if exp.startswith("+") else "") + str(exp_i)
+            padded = ("+" if exp_i >= 0 else "-") + f"{abs(exp_i):02d}"
             for e_char in ("e", "E"):
-                pats.append(re.escape(mant) + "0*" + re.escape(e_char + short))
+                pats.append(re.escape(mant) + mant_pad + re.escape(e_char + short))
                 # The UNSIGNED short form (`3.1e2`, `3.1E2`) is the same value
                 # as `3.1e+2`: adding the sign must not drop it.
-                pats.append(re.escape(mant) + "0*" + re.escape(e_char + str(int(exp))))
-                pats.append(re.escape(mant) + "0*" + re.escape(e_char + exp))
-            pats.append(re.escape(mant + " × 10^" + str(int(exp))))
+                pats.append(re.escape(mant) + mant_pad + re.escape(e_char + str(exp_i)))
+                # %.2e pads the exponent to two digits (`2.15e-02`).
+                pats.append(re.escape(mant) + mant_pad + re.escape(e_char + padded))
+                pats.append(re.escape(mant) + mant_pad + re.escape(e_char + exp))
+            pats.append(re.escape(mant) + mant_pad + re.escape(" × 10^" + str(exp_i)))
             # The multiplication sign is also written without the caret and
             # with a U+2212 minus ("3.1 × 10−2"); those occurrences were
             # invisible to the M4 sweep.
-            pats.append(re.escape(mant + " × 10" + str(int(exp))))
+            pats.append(re.escape(mant) + mant_pad + " × 10" + re.escape(str(exp_i)))
             # The U+2212 spelling is the SAME value only when the exponent is
             # negative. Emitting it for a positive exponent also matched the
             # different value ("1.5 × 10^−3" for a target of 1500).
-            if int(exp) < 0:
+            if exp_i < 0:
                 for mul in (" × 10^", " × 10"):
-                    pats.append(re.escape(mant + mul + "\u2212" + str(abs(int(exp)))))
+                    pats.append(re.escape(mant) + mant_pad + re.escape(mul + "\u2212"
+                                          + str(abs(exp_i))))
             # Unicode superscripts ("3.1 × 10⁻²") and the LaTeX \times forms
             # ("3.1 \times 10^{-2}") are the same value in other manuscripts.
-            _sup = str(int(exp)).translate(str.maketrans(
+            _sup = str(exp_i).translate(str.maketrans(
                 "0123456789-", "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079\u207b"))
-            pats.append(re.escape(mant + " × 10" + _sup))
+            pats.append(re.escape(mant) + mant_pad + " × 10" + re.escape(_sup))
             for mul in (r" \times 10^", r" \times 10^{"):
                 close = r"\}" if mul.endswith("{") else ""
-                pats.append(re.escape(mant + mul + str(int(exp))) + close)
-                if int(exp) < 0:
-                    pats.append(re.escape(mant + mul + "\u2212" + str(abs(int(exp)))) + close)
-        except ValueError:
-            pass
+                pats.append(re.escape(mant) + mant_pad + re.escape(mul + str(exp_i)) + close)
+                if exp_i < 0:
+                    pats.append(re.escape(mant) + mant_pad + re.escape(mul + "\u2212"
+                                          + str(abs(exp_i))) + close)
+        # An explicit positive sign names the same value; the leading guard
+        # rejected it, so `--value 5` never found "+5" (F58).
+        if not str(num).startswith(("+", "-", "\u2212")):
+            pats.append(r"\+" + re.escape(num))
         # A trailing comma or period is only a separator when no digit follows:
         # without the ",digit" guard the value 5 also matched inside "5,000",
         # and without the ".digit" one the value 12 matched inside the DIFFERENT
@@ -236,7 +251,7 @@ def variant_pattern(term, mode):
         # preceding thousands separator changes the value just as much: `--value
         # 5` must not match "-5" and `--value 234` must not match "1,234".
         return re.compile(r"(?<![\w.,+\-\u2212])(" + "|".join(sorted(set(pats), key=len, reverse=True))
-                          + r")(?![\w]|,\d|\.\d)")
+                          + r")(?![\w]|,\d|\.\d|\s*(?:[×x*]|\\times)\s*10(?:\^|\{)?)")
     # term mode: allow hyphen/space interchange, case-insensitive, optional 's'.
     # EVERY inter-word separator in the given term becomes the same class, so a
     # term written with a space also matches its hyphenated spelling and a

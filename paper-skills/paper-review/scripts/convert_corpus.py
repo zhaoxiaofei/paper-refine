@@ -238,9 +238,96 @@ def _docx_part(z, name: str):
     return data
 
 
+def _docx_xml_text(raw: bytes) -> str:
+    """Decode a DOCX part using its BOM/declaration, not an assumed UTF-8."""
+    if raw[:2] == b"\xff\xfe" or raw[:2] == b"\xfe\xff":
+        return raw.decode("utf-16", "replace")
+    if b"\x00" in raw[:200] and raw[:4].lower() in (b"<\x00?\x00", b"\x00<\x00?"):
+        return raw.decode("utf-16-le" if raw[:1] == b"<" else "utf-16-be", "replace")
+    return raw.decode("utf-8", "replace")
+
+
+_WORD_NS_TEXT = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_WORD_NS_DECL_RE = re.compile(
+    r"xmlns(?::(?P<prefix>[A-Za-z_][\w.-]*))?\s*=\s*(?P<q>[\"'])"
+    + re.escape(_WORD_NS_TEXT) + r"(?P=q)")
+
+
+def _word_prefix_xml(xml: str) -> str:
+    """Rename a legal non-`w` Word namespace declaration to `w`.
+
+    The reader's regexes name elements by prefix; OOXML binds the namespace,
+    not the spelling, so `a:document/a:p/a:t` is valid WordprocessingML and
+    must yield the same text (F24).
+
+    Either quote style, whitespace around `=`, and the Word namespace as the
+    DEFAULT namespace (`<document xmlns="...">`) are legal XML; the
+    double-quote-only pattern produced no text for them (R02).
+    """
+    m = _WORD_NS_DECL_RE.search(xml)
+    if not m:
+        return xml
+    prefix = m.group("prefix")
+    if prefix == "w":
+        return xml
+    if prefix is not None:
+        out = re.sub(r"(?<=[<\s/])" + re.escape(prefix) + r":", "w:", xml)
+        return _WORD_NS_DECL_RE.sub(
+            lambda mm: "xmlns:w=" + mm.group("q") + _WORD_NS_TEXT + mm.group("q"),
+            out, count=1)
+    # Default namespace: qualify every unprefixed element name so the
+    # `w:`-based reader sees the document.
+    if re.search(r"xmlns\s*=", _WORD_NS_DECL_RE.sub("", xml, count=1)):
+        return xml                # another default declaration: not resolvable here
+    out = _WORD_NS_DECL_RE.sub(
+        lambda mm: "xmlns:w=" + mm.group("q") + _WORD_NS_TEXT + mm.group("q"),
+        xml, count=1)
+    return re.sub(r"<(?P<close>/?)(?P<name>[A-Za-z_][\w.-]*)(?=[\s/>])",
+                  lambda mm: "<" + mm.group("close") + "w:" + mm.group("name"), out)
+
+
+_VANISH_OFF = frozenset(("false", "0", "off"))
+
+
+def _run_is_hidden(run: str) -> bool:
+    """True when the run carries a `w:vanish` property that is ON.
+
+    `w:vanish` is an OOXML on/off property: `w:val="false"`/`"0"`/`"off"`
+    leaves the run VISIBLE. Treating the bare element as "hidden" dropped
+    visible prose from the corpus (R05).
+    """
+    for m in re.finditer(r"<w:vanish\b([^>]*?)/?>", run):
+        val = re.search(r"\b(?:[\w.-]+:)?val\s*=\s*(?:\"([^\"]*)\"|'([^']*)')",
+                        m.group(1))
+        if val is None:
+            return True                        # val absent = ON
+        value = (val.group(1) if val.group(1) is not None else val.group(2))
+        if value.strip().lower() not in _VANISH_OFF:
+            return True
+    return False
+
+
 def docx_part_to_lines(xml: str):
     """Paragraph lines + notes for one WordprocessingML part."""
     notes, out_lines = [], []
+    xml = _word_prefix_xml(xml)
+    # XML comments are markup, not document text: a commented-out paragraph
+    # used to be extracted as a visible claim (F30).
+    xml = re.sub(r"<!--.*?-->", "", xml, flags=re.S)
+    # Moved-FROM content is the pre-move position (deleted); only moveTo is the
+    # current text. Extracting both duplicated passages (F26).
+    xml = re.sub(r"<w:moveFrom\b.*?</w:moveFrom>", "", xml, flags=re.S)
+    xml = re.sub(r"<w:moveFrom\b[^>]*/>", "", xml)
+    # Hidden runs (`w:vanish`) are not visible prose. Dropping them (with a
+    # note) keeps a hidden draft value from entering the manuscript corpus as
+    # an ordinary claim (F27). Only a property that is ON hides the run.
+    _visible = xml
+    for _run in re.findall(r"<w:r\b[^>]*>.*?</w:r>", xml, flags=re.S):
+        if _run_is_hidden(_run):
+            _visible = _visible.replace(_run, "", 1)
+    if _visible != xml:
+        notes.append("hidden text omitted (w:vanish)")
+        xml = _visible
     for para in re.split(r"</w:p>", _MC_ALTERNATE_RE.sub(_mc_visible_branch, xml)):
         if "<w:ins " in para:
             notes.append("tracked-insertion present in a paragraph")
@@ -286,7 +373,7 @@ def docx_to_text(path: str) -> tuple:
         if raw is None:
             return "", ["docx-unreadable: word/document.xml is over the size/"
                         "entity budget and was refused"]
-        body = raw.decode("utf-8", errors="replace")
+        body = _docx_xml_text(raw)
         lines, part_notes = docx_part_to_lines(body)
         out_lines.extend(lines)
         notes.extend(part_notes)
@@ -303,7 +390,7 @@ def docx_to_text(path: str) -> tuple:
                 notes.append("%s part refused: over the size/entity budget: %s"
                              % (kind.lower(), name))
                 continue
-            xml = raw.decode("utf-8", errors="replace")
+            xml = _docx_xml_text(raw)
             part_lines, part_notes = docx_part_to_lines(xml)
             if part_lines:
                 # lowercase marker: an all-caps marker would itself be inventoried as an acronym.
@@ -322,7 +409,7 @@ def docx_to_text(path: str) -> tuple:
                 if raw_core is None:
                     notes.append("docProps/core.xml refused: over the size/entity budget")
                 else:
-                    core = raw_core.decode("utf-8", errors="replace")
+                    core = _docx_xml_text(raw_core)
                     for tag in ("lastModifiedBy", "creator"):
                         m = re.search(r"<[^>]*%s[^>]*>(.*?)</[^>]*%s" % (tag, tag),
                                       core, re.S)
@@ -347,8 +434,8 @@ def _xlsx_shared_strings(z):
             # Shared strings carry XML entities ("A&amp;B", "caf&eacute;") and the
             # inline-string path already unescapes them; leaving them literal here
             # made the two paths disagree and poisoned the corpus with "&amp;".
-            shared.append(_html_unescape(
-                "".join(re.findall(r"<t(?:\s[^>]*)?>(.*?)</t>", si, re.S))))
+            shared.append(_xlsx_unescape(_html_unescape(
+                "".join(re.findall(r"<t(?:\s[^>]*)?>(.*?)</t>", si, re.S)))))
     return shared
 
 
@@ -386,12 +473,24 @@ def _xlsx_sheet_plan(z):
     return plan
 
 
+def _xlsx_unescape(text: str) -> str:
+    """Decode SpreadsheetML's `_xHHHH_` escapes after XML decoding (F33)."""
+    return re.sub(r"_x([0-9A-Fa-f]{4})_",
+                  lambda m: chr(int(m.group(1), 16)), text or "")
+
+
 def _xlsx_cell_value(attrs, body, shared):
     if body is None:
         return ""
+    # A rich inline string is a sequence of runs; taking only the first <t>
+    # silently truncated the cell (F31).
+    if "<is>" in body:
+        texts = re.findall(r"<t(?:\s[^>]*)?>(.*?)</t>", body, re.S)
+        if texts:
+            return _xlsx_unescape("".join(_html_unescape(t) for t in texts))
     tm = re.search(r"<t(?:\s[^>]*)?>(.*?)</t>", body, re.S)
     if tm:
-        return _html_unescape(tm.group(1))
+        return _xlsx_unescape(_html_unescape(tm.group(1)))
     vm = re.search(r"<v(?:\s[^>]*)?>(.*?)</v>", body, re.S)
     if not vm:
         return ""
@@ -517,7 +616,10 @@ def plain_copy(path: str) -> tuple:
 
 
 RTF_META_WORDS = {"fonttbl", "colortbl", "stylesheet", "info", "pict", "object",
-                  "themedata", "datastore", "generator", "listtable", "listoverridetable"}
+                  "themedata", "datastore", "generator", "listtable", "listoverridetable",
+                  # A tracked deletion lives in its own destination group; the
+                  # body is not current prose (F38).
+                  "deleted"}
 
 
 def rtf_to_text(path: str) -> tuple:
@@ -530,14 +632,41 @@ def rtf_to_text(path: str) -> tuple:
         return "", ["rtf-unreadable: %s" % e]
     out, i, depth, skip_depth = [], 0, 0, None
     pending_high = None
+    # RTF state is GROUP-scoped: `\ucN` changes how many fallback characters
+    # follow each `\uN`, and `\ansicpgN` selects the code page for `\'hh`.
+    uc_stack, uc, skip_chars, codepage = [1], 1, 0, 1252
     n = len(raw)
     while i < n:
         ch = raw[i]
+        if skip_chars and ch == "\\":
+            # The `\ucN` fallback is a CHARACTER, so a `\'hh` escape is that
+            # fallback: consume it without emitting its text (R07). A following
+            # `\uN` is decoded as a REAL escape, not consumed as the fallback:
+            # producers omit the fallback after a BMP escape, and the surrogate
+            # pair path (`\uD83D\uDE00`) needs its second half (pinned by the
+            # 2026-10-09 audit's E3a/E3b). A control WORD (`\par`) is not a
+            # character either, so it ends the fallback run.
+            _hex = (re.match(r"'[0-9A-Fa-f]{2}", raw[i + 1:])
+                    if i + 1 < n and raw[i + 1] == "'" else None)
+            if _hex:
+                skip_chars -= 1
+                i += 1 + len(_hex.group(0))
+                continue
+            skip_chars = 0
+        if skip_chars and ch not in "{}":
+            # The fallback characters after a Unicode escape are an alternate
+            # rendering, not a second copy of the text.
+            skip_chars -= 1
+            i += 1
+            continue
         if ch == "{":
             depth += 1
+            uc_stack.append(uc)
             i += 1
         elif ch == "}":
             depth -= 1
+            if len(uc_stack) > 1:
+                uc = uc_stack.pop()
             if skip_depth is not None and depth < skip_depth:
                 skip_depth = None
             i += 1
@@ -553,10 +682,21 @@ def rtf_to_text(path: str) -> tuple:
             elif nxt == "*":
                 skip_depth = depth
                 i += 1
+            elif nxt in "~_-":
+                # Text-producing control symbols: a non-breaking space, a
+                # non-breaking hyphen and an optional hyphen. Skipping them
+                # merged distinct words (F37).
+                if skip_depth is None:
+                    out.append({"~": "\u00a0", "_": "\u2011", "-": ""}[nxt])
+                i += 1
             elif nxt == "'":
                 try:
                     if skip_depth is None:
-                        out.append(bytes.fromhex(raw[i + 1:i + 3]).decode("cp1252", errors="replace"))
+                        _enc = ("cp%d" % codepage) if codepage else "latin-1"
+                        try:
+                            out.append(bytes.fromhex(raw[i + 1:i + 3]).decode(_enc, errors="replace"))
+                        except LookupError:
+                            out.append(bytes.fromhex(raw[i + 1:i + 3]).decode("latin-1", errors="replace"))
                 except ValueError:
                     pass
                 i += 3
@@ -573,7 +713,7 @@ def rtf_to_text(path: str) -> tuple:
                 # that should have produced the character vanished. Dropping the
                 # backslash from the delimiter class also lets the surrogate-pair
                 # path see its second half.
-                m = re.match(r"u(-?\d+)(?:[^\s\\\d]| )?", raw[i:])
+                m = re.match(r"u(-?\d+)(?: )?", raw[i:])
                 code = int(m.group(1))
                 if code < 0:
                     code += 65536
@@ -594,6 +734,8 @@ def rtf_to_text(path: str) -> tuple:
                             out.append(chr(code))
                     except ValueError:
                         pending_high = None
+                # Skip exactly the group's declared fallback count.
+                skip_chars = uc
                 i += len(m.group(0))
             else:
                 m = re.match(r"([A-Za-z]+)(-?\d+)?[ ]?", raw[i:])
@@ -604,6 +746,10 @@ def rtf_to_text(path: str) -> tuple:
                             out.append("\n")
                         elif word == "tab":
                             out.append("\t")
+                    if word == "ansicpg" and m.group(2):
+                        codepage = int(m.group(2))
+                    elif word == "uc" and m.group(2):
+                        uc = max(0, int(m.group(2)))
                     if word in RTF_META_WORDS:
                         skip_depth = depth
                     i += len(m.group(0))
@@ -635,6 +781,13 @@ def pdf_to_text(path: str) -> tuple:
             proc = subprocess.run(["pdftotext", "-layout", path, "-"],
                                   capture_output=True, timeout=60)
             text = proc.stdout.decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                # A non-zero pdftotext exit with partial stdout is NOT a full
+                # conversion: later pages may be missing (F39).
+                notes.append("pdftotext-incomplete: exited %d; the extracted text may "
+                             "cover only part of the document; stderr: %s"
+                             % (proc.returncode,
+                                proc.stderr.decode("utf-8", errors="replace").strip()[:200]))
             if not text.strip():
                 notes.append("pdftotext produced no text (scanned/image PDF?) — "
                              "visually unverifiable; first stderr: %s"
@@ -682,9 +835,13 @@ def convert_one(path: str, rel: str) -> dict:
         # header/footer and tracked-change notes), so "empty text and any note at
         # all" classified an image-only or empty-shell .docx as FAILED, counted
         # it in the could-not-convert warning and wrote no corpus file at all.
-        status = "converted" if text else ("converted-empty"
-                                           if any("unreadable" not in n for n in notes)
-                                           else "failed")
+        # A readable but EMPTY document is not a failed conversion. The test is
+        # "did any note say unreadable?", not "is there at least one note?":
+        # an empty document with no metadata note used to be `failed`, while
+        # the same content plus an incidental creator note became
+        # `converted-empty` (F29).
+        status = "converted" if text else (
+            "converted-empty" if not any("unreadable" in n for n in notes) else "failed")
     elif ext == ".xlsx":
         text, notes = xlsx_to_text(path)
         status = "converted" if text else ("converted-empty"
@@ -694,7 +851,10 @@ def convert_one(path: str, rel: str) -> dict:
         notes.append(".doc is legacy binary — convert to .docx before editing; treat as read-only here")
     elif ext == ".pdf":
         text, notes = pdf_to_text(path)
-        status = "converted" if text.strip() else "read-only/unreadable"
+        if any(n.startswith("pdftotext-incomplete") for n in notes):
+            status = "converted-partial" if text.strip() else "read-only/unreadable"
+        else:
+            status = "converted" if text.strip() else "read-only/unreadable"
     elif ext in BINARY_EXTS:
         status = "read-only/binary"
         if ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".gif", ".svg", ".eps"):
@@ -719,8 +879,19 @@ def main():
     if not os.path.isdir(sub):
         print("ERROR: SUBMISSION_DIR %s does not exist. Stop and ask the user." % sub)
         sys.exit(2)
+    sub_real, work_real = os.path.realpath(sub), os.path.realpath(work)
+    if sub_real == work_real or sub_real.startswith(work_real + os.sep):
+        print("ERROR: the work directory overlaps the submission (work is the "
+              "submission or one of its parents): %s vs %s" % (work, sub))
+        sys.exit(2)
     corpus_dir = os.path.join(work, "corpus")
     evidence_dir = os.path.join(work, EVIDENCE_DIRNAME)
+    # Re-conversion is a FRESH corpus: a document removed from the submission
+    # must not survive as stale generated text in the same work directory
+    # (F40). Only the generated corpus/evidence trees are removed.
+    for _generated in (corpus_dir, evidence_dir):
+        if os.path.isdir(_generated):
+            shutil.rmtree(_generated, ignore_errors=True)
     os.makedirs(corpus_dir, exist_ok=True)
     os.makedirs(evidence_dir, exist_ok=True)
 
@@ -730,6 +901,11 @@ def main():
         kept_dirs = []
         for d in sorted(dirs):
             dp = os.path.join(root, d)
+            # A work directory INSIDE the submission must not be inventoried:
+            # the previous run's own inventory/corpus would be re-read and
+            # recursively amplified (F41).
+            if os.path.realpath(dp) == work_real:
+                continue
             if os.path.islink(dp):
                 # os.walk(followlinks=False) does not descend into a linked
                 # directory, but naming it in the warning keeps the omission
@@ -825,7 +1001,7 @@ def main():
                 entry["status"] in ("converted", "converted-empty")
         entry["size_bytes"] = os.path.getsize(p)
         inventory.append(entry)
-        if entry["status"] in ("converted", "converted-empty"):
+        if entry["status"] in ("converted", "converted-empty", "converted-partial"):
             stem = rel.replace(os.sep, "__")
             if entry["area"] in EVIDENCE_DIRNAMES:
                 out_txt = os.path.join(evidence_dir, stem + ".txt")

@@ -61,8 +61,10 @@ _REPLY_RE = re.compile(
 # were silently dropped from every manuscript sweep (M1/M2/M4/M19).
 _SCIENCE_ROLE_COMPOUND_RE = re.compile(
     r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
-    r"pharmacodynamic)[-_ ]?response"
-    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"pharmacodynamic|treatment|clinical|therapeutic|behaviou?ral|survey)"
+    r"[-_ ]?responses?"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable|"
+    r"inhibition|amplitude|strength|bias)"
     r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
     r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
 # A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
@@ -154,8 +156,14 @@ NUM_CIT_RE = re.compile(r"\[(\d{1,4}(?:\s*[,;–—-]\s*\d{1,4})*)\]")
 # 2019)` matched only `Waals et al., 2019`: the call-out was recorded under the
 # wrong surname and the reference entry (which starts `van der Waals ...`)
 # never matched it (F50).
-_AY_NAME = (r"(?:(?:van|von|der|den|de|del|della|di|da|la|le|du|des|dos|"
-            r"ten|ter|zu)\s+)*[A-Z][A-Za-z'\-]+")
+_AY_PARTICLES = ("van", "von", "der", "den", "de", "del", "della", "di", "da",
+                 "la", "le", "du", "des", "dos", "ten", "ter", "zu")
+# A surname's first letter need not be ASCII uppercase: Åberg, Émile, Öztürk.
+# `[^\W\d_a-z]` is a Unicode letter that is not a lowercase ASCII letter; it
+# still accepts non-ASCII LOWERCASE letters, so the real case test is applied
+# to each match by `ay_name_case_ok` (R09).
+_AY_NAME = (r"(?:(?:" + "|".join(_AY_PARTICLES) + r")\s+)*"
+            r"[^\W\d_a-z][^\W\d_]*(?:['\-][^\W\d_]+)*")
 AY_CIT_RE = re.compile(
     r"(?P<a1>" + _AY_NAME + r")\s+et al\.?\s*,?\s*\(?(?P<y1>(?:1[5-9]|20)\d{2}[a-z]?)\)?"
     r"|(?P<a2>" + _AY_NAME + r")\s+(?:and|&)\s+(?P<a2b>" + _AY_NAME +
@@ -163,6 +171,20 @@ AY_CIT_RE = re.compile(
     r"|\((?P<a3>" + _AY_NAME + r")(?:\s+(?:et al\.?|and|&)\s+" + _AY_NAME + r")?\s*,\s*"
     r"(?P<y3>(?:1[5-9]|20)\d{2}[a-z]?)\)"
     r"|(?P<a4>" + _AY_NAME + r")\s+\((?P<y4>(?:1[5-9]|20)\d{2}[a-z]?)\)")
+# A parenthetical cluster `(Smith, 2019; Jones, 2020)` is two author-year
+# call-outs. The single-author branch above requires the closing parenthesis
+# directly after the year, so the cluster produced no rows at all. Each item
+# accepts the same author forms as AY_CIT_RE (`et al.`, `and`/`&`); a
+# single-author pair grammar dropped the first item of a mixed cluster (R10).
+_AY_CLUSTER_PAIR = (_AY_NAME + r"(?:\s+et al\.?)?"
+                    r"(?:\s+(?:and|&)\s+" + _AY_NAME + r")?"
+                    r"\s*,\s*((?:1[5-9]|20)\d{2}[a-z]?)")
+AY_CLUSTER_RE = re.compile(
+    r"\(" + _AY_CLUSTER_PAIR + r"(?:\s*;\s*" + _AY_CLUSTER_PAIR + r")+\)")
+_AY_CLUSTER_ITEM_RE = re.compile(
+    r"(?P<a>" + _AY_NAME + r")(?:\s+et al\.?)?"
+    r"(?:\s+(?:and|&)\s+(?P<a2>" + _AY_NAME + r"))?"
+    r"\s*,\s*(?P<y>(?:1[5-9]|20)\d{2}[a-z]?)")
 # a bracketed number right after these words is a measurement interval, not a citation
 SUSPECT_PRECEDERS = re.compile(
     r"(?:interval|range|between|cut-?off|threshold|score|coordinate|temperature|"
@@ -180,7 +202,8 @@ SUSPECT_PRECEDERS = re.compile(
 # number ("[1]Smith"); a DIGIT after the separator is a decimal, not a new
 # entry ("12.5 mg was given" is not reference 12).
 REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,4})[\].)](?!\d)\s*(.*)$")
-BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,]+),")
+BIB_ENTRY_RE = re.compile(
+    r"@(?!(?:comment|string|preamble)\b)\w+\s*[{(]\s*([^,]+),", re.I)
 # LaTeX: the call-out is a KEY inside a \cite-family macro (`\cite`, `\citep`,
 # `\citet`, `\citealp`, `\textcite`, `\parencite`, `\autocite`, `\nocite`, ...),
 # the list entry is a `\bibitem[...]{key}`. Without these, a .tex submission
@@ -191,10 +214,24 @@ BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,]+),")
 TEX_CITE_RE = re.compile(
     r"\\(?P<macro>(?i:cite|citep|citet|citealt|citealp|citeauthor|citeyear|"
     r"citeyearpar|citenum|citeurl|nocite|textcite|parencite|autocite|"
-    r"footcite|footfullcite|smartcite|supercite|fullcite|notecite|citeA|citeN))\*?"
-    r"(?:\s*\[[^\]]*\]){0,3}\s*\{(?P<keys>[^{}]*)\}")
+    r"footcite|footfullcite|smartcite|supercite|fullcite|notecite|citeA|citeN|"
+    r"cites|parencites|textcites|autocites|footcites|smartcites|supercites|"
+    r"fullcites|notecites|citeAs|citeNs))\*?"
+    r"(?:\s*\[[^\]]*\]){0,3}\s*\{(?P<keys>[^{}]*)\}"
+    r"(?:(?:\s*\[[^\]]*\]){0,3}\s*\{[^{}]*\})*")
+# Only the BibLaTeX MULTICITE macros take several brace arguments. Repeating
+# the brace argument for every macro made `\cite{a} {Figure 1}` report a second
+# call-out with key `Figure 1`, a phantom orphan (R04).
+TEX_MULTICITE_MACROS = frozenset((
+    "cites", "parencites", "textcites", "autocites", "footcites", "smartcites",
+    "supercites", "fullcites", "notecites", "citeas", "citens"))
 TEX_BIBITEM_RE = re.compile(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{(?P<key>[^{}]+)\}")
-TEX_BEGIN_VERBATIM_RE = re.compile(r"\\begin\{(?P<env>verbatim|lstlisting|minted|Verbatim)\}")
+TEX_BEGIN_VERBATIM_RE = re.compile(
+    r"\\begin\{(?P<env>verbatim|lstlisting|minted|Verbatim|comment)\}")
+# `\verb|...|` / `\lstinline!...!` is an inline code sample, not manuscript
+# content: a `\cite{ghost}` inside one became a real orphan call-out.
+TEX_INLINE_VERB_RE = re.compile(
+    r"\\(?:verb|lstinline)\*?(?P<d>[^\sA-Za-z])(?P<body>.*?)(?P=d)")
 
 
 def strip_tex_comment(line: str) -> str:
@@ -221,16 +258,29 @@ def latex_source_text(text: str) -> str:
     Every line is replaced in place, so the reported line numbers stay the
     source's own.
     """
-    kept, in_verbatim = [], None
+    kept, in_verbatim, ended = [], None, False
     for line in text.split("\n"):
+        if ended:
+            kept.append("")
+            continue
         if in_verbatim is not None:
             if ("\\end{%s}" % in_verbatim) in line:
                 in_verbatim = None
             kept.append("")
             continue
+        # Inline verbatim is not source content. Blank it BEFORE the comment
+        # scan, because a `%` inside the sample is still sample text.
+        line = TEX_INLINE_VERB_RE.sub("", line)
         # Strip the comment BEFORE looking for the environment fence: a
         # commented-out `% \begin{verbatim}` used to blank the rest of the file.
         line = strip_tex_comment(line)
+        # TeX stops reading the file at \endinput; text after it (including the
+        # rest of that line) is never compiled.
+        endinput = re.search(r"\\endinput\b", line)
+        if endinput:
+            kept.append(line[:endinput.start()])
+            ended = True
+            continue
         m = TEX_BEGIN_VERBATIM_RE.search(line)
         if m:
             # A one-line `\begin{verbatim}...\end{verbatim}` closes on the
@@ -407,6 +457,22 @@ def is_date_prose(m) -> bool:
     return False
 
 
+def ay_name_case_ok(name: str) -> bool:
+    """True when every surname starts with an uppercase letter (Unicode case).
+
+    Python's `re` has no Unicode `Lu` class, and `_AY_NAME`'s first character
+    test cannot tell `élève` from `Émile`; without this guard a lowercase
+    French/Spanish prose word became an author-year call-out (R09). Nobiliary
+    particles and the `and`/`&` connector are exempt.
+    """
+    for part in re.split(r"\s+", str(name or "")):
+        if not part or part.lower() in _AY_PARTICLES or part in ("and", "&"):
+            continue
+        if not part[0].isupper():
+            return False
+    return True
+
+
 def ay_callout(m):
     """Normalise an author-year match into (raw, author string, year)."""
     if m.group("y1"):
@@ -481,6 +547,7 @@ def main():
     nocite_all_files = set()          # \nocite{*}: the WHOLE list is cited
     suspect_brackets = []
     reference_notes = []
+    tex_sources = {}    # compile-visible source text per .tex corpus file
 
     for fname in sorted(os.listdir(corpus)):
         if not fname.endswith(".txt"):
@@ -506,28 +573,45 @@ def main():
             continue
         is_latex = fname.endswith((".tex.txt", ".ltx.txt"))
         if is_latex:
-            for li, pline in enumerate(latex_source_text(text).split("\n"), 1):
-                for m in TEX_CITE_RE.finditer(pline):
-                    keys = [k.strip() for k in m.group("keys").split(",") if k.strip()]
-                    if m.group("macro").lower() == "nocite" and "*" in keys:
-                        # `\nocite{*}` has no key to record: every entry of the
-                        # document's list is cited, which the key space below
-                        # turns into "cited" for this file (before this, the
-                        # star was dropped and EVERY \bibitem was reported as
-                        # listed-but-never-cited).
-                        nocite_all_files.add(fname)
-                    keys = [k for k in keys if k != "*"]   # \nocite{*} = the whole list
-                    if m.group("macro").lower() == "nocite":
-                        nocite_keys[fname].extend(keys)
-                        continue
-                    for key in keys:
-                        # one row per KEY, so "every call-out on one row" holds for
-                        # `\cite{a,b}` too; the numeric/author-year bookkeeping below
-                        # ignores the string `refs` (only ints enter a number space)
-                        callouts.append({"file": fname, "line": li, "raw": m.group(0)[:120],
-                                         "refs": [key], "excerpt": pline.strip()[:120],
-                                         "style": "latex-key", "key": key,
-                                         "macro": m.group("macro")})
+            # Scan the WHOLE source, not one line at a time: whitespace
+            # (including a newline) is legal inside a cite argument, and the
+            # line-by-line scan silently dropped every such call-out.
+            source = "\n".join(callout_lines)
+            tex_sources[fname] = source
+            source_lines = source.split("\n")
+            for m in TEX_CITE_RE.finditer(source):
+                li = source.count("\n", 0, m.start()) + 1
+                macro = m.group("macro").lower()
+                # BibLaTeX multicite macros carry several brace arguments;
+                # gather every one. A singular macro's first argument is its
+                # only key list: a brace group after it is prose
+                # (`\cite{a} {Figure 1}`), not a second key (R04).
+                if macro in TEX_MULTICITE_MACROS:
+                    groups = re.findall(r"\{([^{}]*)\}", m.group(0))
+                else:
+                    groups = [m.group("keys")]
+                keys = [k.strip() for k in ",".join(groups).split(",") if k.strip()]
+                if macro == "nocite" and "*" in keys:
+                    # `\nocite{*}` has no key to record: every entry of the
+                    # document's list is cited, which the key space below
+                    # turns into "cited" for this file (before this, the
+                    # star was dropped and EVERY \bibitem was reported as
+                    # listed-but-never-cited).
+                    nocite_all_files.add(fname)
+                keys = [k for k in keys if k != "*"]   # \nocite{*} = the whole list
+                if macro == "nocite":
+                    nocite_keys[fname].extend(keys)
+                    continue
+                excerpt = source_lines[li - 1].strip()[:120] if li <= len(source_lines) else ""
+                for key in keys:
+                    # one row per KEY, so "every call-out on one row" holds for
+                    # `\cite{a,b}` too; the numeric/author-year bookkeeping below
+                    # ignores the string `refs` (only ints enter a number space)
+                    callouts.append({"file": fname, "line": li, "raw": m.group(0)[:120],
+                                     "refs": [key], "excerpt": excerpt,
+                                     "style": "latex-key", "key": key,
+                                     "macro": m.group("macro")})
+            for li, pline in enumerate(source_lines, 1):
                 for m in TEX_BIBITEM_RE.finditer(pline):
                     tex_bibitems.append({"file": fname, "line": li,
                                          "key": m.group("key").strip(),
@@ -597,10 +681,29 @@ def main():
                                  "refs": parse_nums(inner),
                                  "excerpt": scan_raw.strip()[:120], "style": "numeric",
                                  "suspect": suspect})
+            cluster_spans = []
+            for cm in AY_CLUSTER_RE.finditer(scan_raw):
+                cluster_spans.append((cm.start(), cm.end()))
+                for im in _AY_CLUSTER_ITEM_RE.finditer(cm.group(0)):
+                    author, year = im.group("a"), im.group("y")
+                    if im.group("a2"):
+                        author = "%s and %s" % (author, im.group("a2"))
+                    if author.lower() in MONTH_NAMES:
+                        continue
+                    if not ay_name_case_ok(author):
+                        continue
+                    callouts.append({"file": fname, "line": li, "raw": im.group(0),
+                                     "refs": ["%s %s" % (author, year)],
+                                     "excerpt": scan_raw.strip()[:120],
+                                     "style": "author-year"})
             for m in AY_CIT_RE.finditer(scan_raw):
+                if any(a <= m.start() < b for a, b in cluster_spans):
+                    continue
                 if is_date_prose(m):
                     continue
                 raw_cit, author, year = ay_callout(m)
+                if not ay_name_case_ok(author):
+                    continue
                 callouts.append({"file": fname, "line": li, "raw": raw_cit,
                                  "refs": ["%s %s" % (author, year)],
                                  "excerpt": scan_raw.strip()[:120], "style": "author-year"})
@@ -646,10 +749,12 @@ def main():
 
     uncited_by_list = {}
     for f, nums in lists_by_file.items():
-        # Per-document numbering space, mirroring the orphan check above: a
-        # call-out in another document (cover letter, supplement) must not mask
-        # an uncited entry of THIS document's list.
-        space = set(cited_by_file[f]) if f in cited_by_file else all_cited
+        # Per-document numbering space: a call-out in another document (cover
+        # letter, supplement) must not mask an uncited entry of THIS document's
+        # list. A document with its own list and NO call-out has an EMPTY local
+        # cited set -- falling back to the cross-file union made another
+        # document's [1] certify this list's [1] as cited.
+        space = set(cited_by_file.get(f, ()))
         uncited = sorted({n for n in nums if n not in space})
         if uncited:
             uncited_by_list[f] = uncited
@@ -658,19 +763,84 @@ def main():
     # ---- LaTeX key space (a .tex cites by KEY; the list is \bibitem or a .bib)
     tex_callouts = [c for c in callouts if c.get("style") == "latex-key"]
     tex_key_space = {b["key"] for b in tex_bibitems} | {b["key"] for b in bib_entries}
+    # Each compile root owns its key space. The global union let a \bibitem in
+    # an UNRELATED .tex certify a \cite in another document as resolved.
+    def _corpus_stem(name):
+        return re.sub(r"\.(?:tex|ltx)\.txt$", "", name).split("__")[-1]
+
+    files_by_stem = defaultdict(set)
+    for _f in tex_sources:
+        files_by_stem[_corpus_stem(_f)].add(_f)
+    input_refs = {}
+    for _f, _src in tex_sources.items():
+        refs = set()
+        for _m in re.finditer(r"\\(?:input|include|subfile)\s*\{([^{}]+)\}", _src):
+            _target = _m.group(1).strip().replace("\\", "/").rsplit("/", 1)[-1]
+            _target = re.sub(r"\.(?:tex|ltx)$", "", _target)
+            if _target:
+                refs.add(_target)
+        input_refs[_f] = refs
+    tex_roots = {f for f, src in tex_sources.items()
+                 if re.search(r"\\documentclass\b", src)}
+    root_closures = {}
+    for _root in tex_roots:
+        seen, queue = set(), [_root]
+        while queue:
+            cur = queue.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            for _name in input_refs.get(cur, ()):
+                for _dep in files_by_stem.get(_name, ()):
+                    if _dep not in seen:
+                        queue.append(_dep)
+        root_closures[_root] = seen
+    file_root = {}
+    for _root, _files in root_closures.items():
+        for _f in _files:
+            file_root.setdefault(_f, _root)
+
+    # A `.bib` file belongs to the compile root that names it with
+    # `\bibliography`/`\addbibresource`; its keys resolve there. Unioning every
+    # `.bib` key in the package let one unrelated bibliography satisfy a cite
+    # in another document (F44/R06).
+    bib_refs = {}
+    for _f, _src in tex_sources.items():
+        refs = set()
+        for _m in re.finditer(r"\\(?:bibliography|addbibresource)\s*"
+                              r"(?:\[[^\]]*\])?\s*\{([^{}]+)\}", _src):
+            for _item in _m.group(1).split(","):
+                _target = _item.strip().replace("\\", "/").rsplit("/", 1)[-1]
+                _target = re.sub(r"\.bib$", "", _target)
+                if _target:
+                    refs.add(_target)
+        bib_refs[_f] = refs
+    bib_files_by_stem = defaultdict(set)
+    for _bib_file in {b["file"] for b in bib_entries}:
+        bib_files_by_stem[
+            re.sub(r"\.bib\.txt$", "", _bib_file).split("__")[-1]].add(_bib_file)
+
+    def _tex_space_for(f):
+        root = file_root.get(f)
+        files = root_closures.get(root, {f}) if root else {f}
+        bib_files = set()
+        for _f in files:
+            for _name in bib_refs.get(_f, ()):
+                bib_files |= bib_files_by_stem.get(_name, set())
+        return ({b["key"] for b in tex_bibitems if b["file"] in files}
+                | {b["key"] for b in bib_entries if b["file"] in bib_files})
     tex_cited_by_file = defaultdict(list)
     for c in tex_callouts:
         tex_cited_by_file[c["file"]].append(c["key"])
     for f, keys in nocite_keys.items():
         tex_cited_by_file[f].extend(keys)
     for f in sorted(nocite_all_files):
-        tex_cited_by_file[f].extend(b["key"] for b in tex_bibitems if b["file"] == f)
-        tex_cited_by_file[f].extend(b["key"] for b in bib_entries if b["file"] == f)
+        tex_cited_by_file[f].extend(sorted(_tex_space_for(f)))
     all_tex_cited = {k for keys in tex_cited_by_file.values() for k in keys}
     tex_orphans_by_file = {}
     if tex_key_space:
         for f, keys in tex_cited_by_file.items():
-            orphans = sorted({k for k in keys if k not in tex_key_space})
+            orphans = sorted({k for k in keys if k not in _tex_space_for(f)})
             if orphans:
                 tex_orphans_by_file[f] = orphans
     tex_orphans = sorted({k for keys in tex_orphans_by_file.values() for k in keys})

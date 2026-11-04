@@ -153,7 +153,10 @@ LABEL_PATTERNS = [
         # not: the `of` separator is licensed only after the word "value".
         r"\b[pP](?:(?:\s*[-_]?\s*[vV]alues?)\s*(?:<=|>=|[=<>≤≥]|\bof\b)"
         r"|\s*(?:<=|>=|[=<>≤≥]))\s*"
-        r"((?:\d+\.?\d*|\.\d+)(?:[eE][+\-\u2212]?\d+)?)")),
+        r"((?:\d+\.?\d*|\.\d+)(?:[eE][+\-\u2212]?\d+)?"
+        r"(?:\s*(?:[×x]|\\times)\s*10\s*"
+        r"(?:\^\s*\{?\s*[+\-\u2212]?\d+\s*\}?"
+        r"|[\u2070\u00b9\u00b2\u00b3\u2074-\u2079\u207b]+))?)")),
     # `n = 1,234` is one count and `n = 12.5` is not a count at all; the old
     # `(\d+)\b` read them as 1 and 12, inventing a conflict with `n = 1234`.
     ("n", re.compile(
@@ -163,16 +166,22 @@ LABEL_PATTERNS = [
         r"\bAU(?:C|ROC)\s*(?:(?:was|is|of|approximately|approx\.?|about)\s*)*"
         r"(?:[:=]\s*)?((?:0?\.\d+|1(?:\.0+)?))(?!\d|\.\d)", re.I)),
     ("percentage", re.compile(
-        r"(?<![\w.])((?:\.\d+|\d{1,4}(?:\.\d+)?))\s*%")),
+        # The sign is part of the value: -12.5% is a decrease, not 12.5.
+        r"(?<![\w.])([+\-\u2212]?(?:\.\d+|\d{1,4}(?:\.\d+)?))\s*%")),
     ("CI", re.compile(
-        r"\bCI\s*(?:[:=,]\s*)?(?:\[\s*)?"
+        # Confidence intervals are written with square brackets, parentheses,
+        # or none at all.
+        r"\bCI\s*(?:[:=,]\s*)?(?:[\[(]\s*)?"
         r"([+\-\u2212]?\d+(?:\.\d+)?)\s*(?:[–—−-]|to|,)\s*"
-        r"([+\-\u2212]?\d+(?:\.\d+)?)\s*\]?", re.I)),
+        r"([+\-\u2212]?\d+(?:\.\d+)?)\s*[\]\)]?", re.I)),
     # The exponent is mandatory: without it a plain Pearson "r = 0.8" was
     # inventoried as R², and the M4 label was simply wrong.
     ("R2", re.compile(
         r"\bR(?:\^?2|²)\s*(?:[:=]|\bwas\b|\bis\b|\bof\b)\s*"
-        r"(0?\.\d+|\d\.\d+)\b", re.I)),
+        # Signed and integer values are valid (negative out-of-sample R²; a
+        # perfect 1), and scientific notation is the same number.
+        r"([+\-\u2212]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+\-\u2212]?\d+)?)\b",
+        re.I)),
     ("fold", re.compile(r"\b(\d+\.?\d*)[- ]?fold\b", re.I)),
 ]
 
@@ -185,6 +194,27 @@ def _metric_key(label: str, val) -> str:
     excerpt, but the comparison key is numeric.
     """
     text = str(val).replace("\u2212", "-")
+    if label == "n":
+        # A count is an arbitrary-precision integer: float(".15g") collapsed
+        # 9007199254740992 and 9007199254740993 onto one key.
+        compact = (text.replace(",", "").replace("\u00a0", "")
+                   .replace("\u202f", "").replace(" ", "").strip())
+        if re.fullmatch(r"[+\-]?\d+", compact):
+            return str(int(compact))
+    if label == "p-value":
+        # `p = 5 × 10^-8`, `5 \times 10^{-8}` and `5 × 10⁻⁸` are one number;
+        # capturing only the coefficient made it look like p = 5.
+        _sup = str.maketrans("\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076"
+                             "\u2077\u2078\u2079\u207b", "0123456789-")
+        _raw = text.replace("\\times", "×").replace("{", "").replace("}", "")
+        _raw = _raw.translate(_sup)
+        m = re.fullmatch(r"\s*([+\-]?\d+(?:\.\d+)?)\s*[×x]\s*10\s*\^?\s*"
+                         r"([+\-]?\d+)\s*", _raw)
+        if m:
+            try:
+                return format(float(m.group(1)) * (10 ** int(m.group(2))), ".15g")
+            except (ValueError, OverflowError):
+                return text
     if label == "CI":
         # A CI is joined as "<lower>-<upper>"; a signed bound carries its own
         # minus, so splitting on every hyphen turned "-0.5--0.1" into four

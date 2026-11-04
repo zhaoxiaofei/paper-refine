@@ -30,7 +30,7 @@ from __future__ import annotations
 # An audit that cannot run (no backend) or returns nothing leaves the round
 # exactly as it was, minus a warning.
 PAPER_DEFECT_AUDIT_ENV = "PAPER_DEFECT_AUDIT_CMD"
-DEFECT_AUDIT_LABELS = ("TP", "FP")
+DEFECT_AUDIT_LABELS = ("TP", "FP", "UNVERIFIED")
 DEFECT_AUDIT_FIELDS = tuple(DEFECT_LIST_FIELDS) + ("audit_label", "audit_reason")
 
 
@@ -61,16 +61,19 @@ or a FALSE POSITIVE about the cited `version`:
   * FP -- the row is contradicted: the cited version contains the text the row
     says is missing, the claimed omission/defect does not exist, the row is
     attributed to the wrong version, or the claim is otherwise unfounded.
+  * UNVERIFIED -- the row could not be checked with the material available
+    (missing file, unreadable rendering, absent context). It is neither a
+    verified true positive nor a false positive; its uncertainty is recorded,
+    never promoted to TP.
 A style or architecture observation whose quoted text is really there is a TP
 (the pipeline counts such rows as minor defects); it is not an FP merely because
-you would not have raised it. Never invent evidence. If you cannot verify a row,
-label it TP and say "unverified" in the reason -- a possibly real defect must not
-be dropped silently.
+you would not have raised it. Never invent evidence. A row you cannot verify is
+UNVERIFIED with the reason, not TP.
 
 Write `audit.json` in this directory with EXACTLY this schema (no extra text):
 {{
   "verdicts": [
-    {{"defect_id": "r{int(r)}-D0001", "label": "TP",
+    {{"defect_id": "r{int(r)}-D0001", "label": "TP" | "FP" | "UNVERIFIED",
       "reason": "<<= 40 words: what you checked and why the label holds>"}}
   ]
 }}
@@ -90,6 +93,8 @@ def _normalize_defect_audit(data, valid_ids) -> dict:
         "pass": "TP", "ok": "TP",
         "fp": "FP", "false_positive": "FP", "false positive": "FP", "false": "FP",
         "fail": "FP",
+        "unverified": "UNVERIFIED", "unknown": "UNVERIFIED",
+        "uncertain": "UNVERIFIED", "unable": "UNVERIFIED",
     }
     for item in rows:
         if not isinstance(item, dict):
@@ -486,6 +491,8 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
         return {"used": True, "reused": True, "ok": True, "rows": len(rows),
                 "tp": sum(1 for x in labelled if x["audit_label"] == "TP"),
                 "fp": sum(1 for x in labelled if x["audit_label"] == "FP"),
+                "unverified": sum(1 for x in labelled
+                                  if x["audit_label"] == "UNVERIFIED"),
                 "incomplete": sum(1 for x in labelled if not x["audit_label"]),
                 "labelled": labelled, "audited": audited,
                 "agent": existing.get("agent") or {},
@@ -506,23 +513,26 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
     labelled = apply_defect_audit(rows, verdicts)
     tp = [x for x in labelled if x["audit_label"] == "TP"]
     fp = [x for x in labelled if x["audit_label"] == "FP"]
+    unverified = [x for x in labelled if x["audit_label"] == "UNVERIFIED"]
     incomplete = [x for x in labelled if not x["audit_label"]]
     if not verdicts:
         return {"used": True, "ok": False, "rows": len(rows), "tp": 0, "fp": 0,
-                "incomplete": len(rows), "labelled": labelled, "agent": info,
+                "unverified": 0, "incomplete": len(rows), "labelled": labelled,
+                "agent": info,
                 "reason": info.get("error") or "the audit returned no verdict"}
     audited = audited_defect_agg(ctx, r, agg, labelled)
     files = write_defect_audit_reports(ctx, r, agg, labelled, audited=audited)
     meta = {"run": ctx.root.name, "round": r, "generated": utcnow(),
             "input_fingerprint": fingerprint, "ok": True,
             "rows": len(rows), "tp": len(tp), "fp": len(fp),
-            "incomplete": len(incomplete),
+            "unverified": len(unverified), "incomplete": len(incomplete),
             "agent": info, "files": [str(x) for x in files],
             "verdicts": [{"defect_id": x["defect_id"], "label": x["audit_label"],
                           "reason": x["audit_reason"]}
                          for x in labelled if x["audit_label"]]}
     write_json_atomic(meta_path, meta)
     return {"used": True, "reused": False, "ok": True, "rows": len(rows),
-            "tp": len(tp), "fp": len(fp), "incomplete": len(incomplete),
+            "tp": len(tp), "fp": len(fp), "unverified": len(unverified),
+            "incomplete": len(incomplete),
             "labelled": labelled, "audited": audited, "agent": info,
             "files": [str(x) for x in files] + [str(meta_path)]}

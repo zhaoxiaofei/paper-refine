@@ -207,6 +207,37 @@ class PairScores:
 def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
     """Return run -> round -> {(member, opponent): PairScores} plus notes."""
     files = discover_csv_files(inputs)
+    # The run NAME is a display label, not an identity. Two independent runs
+    # can share the directory basename (`x/run`, `y/run`); keying the cubes by
+    # that name merged their judgments into one false score (F72).
+    _bases = [run_name_for(path) for path, _inline in files]
+    _run_dirs = []
+    for path, _inline in files:
+        _rd = (path.parent.parent if path.parent.name == "reports" else path.parent)
+        try:
+            _rd = _rd.resolve()
+        except OSError:
+            pass
+        _run_dirs.append(str(_rd))
+    _dirs_by_base = {}
+    for _base, _rd in zip(_bases, _run_dirs):
+        _dirs_by_base.setdefault(_base, set()).add(_rd)
+    run_names, _name_dirs = [], {}
+    for (path, _inline), _base, _rd in zip(files, _bases, _run_dirs):
+        name = _base
+        if len(_dirs_by_base[_base]) > 1:
+            # `x/run` and `y/run`: qualify with the distinct parent directory.
+            _owner = Path(_rd).parent.name
+            if _owner:
+                name = f"{_owner}/{_base}"
+        _n = 2
+        # Two files of ONE run (round1/round2) keep that run's name; only a
+        # DIFFERENT run directory may not reuse it.
+        while name in _name_dirs and _name_dirs[name] != _rd:
+            name = f"{name}#{_n}"
+            _n += 1
+        _name_dirs[name] = _rd
+        run_names.append(name)
     # run -> round -> pair -> PairScores
     cubes: dict[str, dict[str, dict[tuple[str, str], PairScores]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(PairScores))
@@ -218,10 +249,9 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
     skipped_incomplete = 0
     truncated = False
 
-    for path, inline in files:
+    for (path, inline), run in zip(files, run_names):
         if inline is not None:
             truncated = True
-        run = run_name_for(path)
         file_round = round_from_filename(path)
         try:
             rows = read_rows(path, inline)
@@ -352,8 +382,11 @@ def sheet_tab(stem: str, round_id: str, used: set[str]) -> str:
     room = 31 - len(suffix)
     base = cleaned if len(cleaned) + len(suffix) <= 31 else cleaned[:room]
     candidate = (base + suffix)[:31]
+    # Excel sheet names are case-INSENSITIVE: `ABC_r1` and `abc_r1` are one
+    # name to openpyxl/Excel. Reserve names case-insensitively (F73).
+    seen = {str(u).casefold() for u in used}
     index = 2
-    while candidate in used:
+    while candidate.casefold() in seen:
         tag = f"~{index}"
         base = cleaned[: max(room - len(tag), 1)]
         candidate = (base + tag + suffix)[:31]

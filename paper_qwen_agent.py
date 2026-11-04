@@ -432,12 +432,17 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
         return "", err or f"HTTP {status}: {str(body)[:400]}"
     try:
         choice = body["choices"][0]
-        # A `length` finish means the server stopped at max_tokens: the answer
-        # is a PREFIX, not a deliverable. Returning it as success let a
-        # truncated stage answer pass as complete (F30).
-        if choice.get("finish_reason") == "length":
+        # Only a normal terminal reason is a deliverable. `length` is a
+        # max_tokens PREFIX; `content_filter` is a partial answer the provider
+        # refused to finish. Both used to pass as success (F30/F68).
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "length":
             return "", (f"the chat completion was truncated (finish_reason='length', "
                         f"max_tokens={cfg.get('max_tokens')}): the answer is incomplete")
+        if finish_reason not in (None, "stop", "end_turn", "stop_sequence",
+                                 "tool_calls", "function_call"):
+            return "", (f"the chat completion did not finish normally "
+                        f"(finish_reason={finish_reason!r}): the answer is incomplete")
         message = choice["message"]
         content = message.get("content")
         if isinstance(content, list):
@@ -448,11 +453,13 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
                               if isinstance(part, dict) and part.get("type") == "text")
         if not isinstance(content, str) or not content.strip():
             # Qwen3 reasoning responses can carry the text in `reasoning_content`
-            # and leave `content` null. `str(None)` made the wrapper report the
-            # four characters "None" and exit 0.
+            # and leave `content` null. That is an INTERMEDIATE reasoning
+            # channel, not the requested deliverable: returning it as the answer
+            # let a stage consume the model's private scratchpad (F67).
             reasoning = message.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning.strip():
-                return reasoning, ""
+                return "", ("empty chat content: the response carried only a "
+                            "reasoning channel, with no final answer")
             return "", f"empty chat content: {json.dumps(body)[:400]}"
         return content, ""
     except (KeyError, IndexError, TypeError, AttributeError):
@@ -504,7 +511,14 @@ def _dsh_turn_failed(line: bytes):
         return None
     status = str(event.get("status") or "").lower()
     kind = str(event.get("kind") or "").lower()
-    return status in ("error", "failed") or kind in ("error", "failed")
+    if kind in ("error", "failed"):
+        return True
+    # An explicit allowlist, not a denylist: `cancelled`, `interrupted`,
+    # `aborted`, `timeout` and any future non-success status are incomplete.
+    # Treating every status except error/failed as success let a cancelled
+    # turn pass as a completed deliverable (F71).
+    return status not in ("", "ok", "success", "succeeded", "completed",
+                          "complete", "done", "finished")
 
 
 def run_dsh_streaming(cmd: list, env: dict) -> tuple:

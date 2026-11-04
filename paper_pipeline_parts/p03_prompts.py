@@ -1278,14 +1278,15 @@ sandbox root with exactly this structure:
    "status": "complete" | "failed", "error": null | "<short reason>",
    "summary": {"findings_total": <int>, "fixed": <int>,
                "critical_remaining": <int>, "writing_remaining": <int>, "manual_items": <int>}}
-IMPROVEMENT ROWS: an edit that repairs a defect the frozen review did NOT name is legal when it is
-recorded, not hidden -- add an `I-xxx` row to revised/revision_report.json with its check id
-(M1-M36 / J1-J5), tier, severity and one line of evidence with a location; ONE row per instance
-(five fixed instances are five rows). Rigor repairs are legal under E6: n, confidence intervals,
-error-bar definitions, sample sizes, seeds, software versions and accessions the package already
-implies, plus leakage/baseline/validation statements the Methods already support. Scientific
-claims, interpretations and conclusion strength stay frozen -- those remain proposed wordings in
-the report, never an edit.
+IMPROVEMENT ROWS: the ONLY edit the frozen review did NOT name that is permitted here is the
+in-role mechanical language/format pass -- record each as an `I-xxx` row in
+revised/revision_report.json with its check id (M1-M36 / J1-J5), tier, severity and one line of
+evidence with a location; ONE row per instance (five fixed instances are five rows). That pass may
+not change a claim, fact, number, citation, identifier or other externally assigned value. A
+SUBSTANTIVE defect the frozen review did not name is a NEW OBSERVATION, not an improvement row:
+record it in revised/revision_report.json and the manual items for an independent
+finding-generating session; do not edit it. Scientific claims, interpretations and conclusion
+strength stay frozen -- those remain proposed wordings in the report, never an edit.
 CLAIM-CALIBRATION FINDINGS ARE THE ONE EXCEPTION, and they run in BOTH directions. A frozen J3
 finding (or the seeded `work/CLAIM_STRENGTH.md` row it came from) that names an OVERCLAIM
 authorises lowering that claim -- to exactly the strength the finding's evidence supports, never

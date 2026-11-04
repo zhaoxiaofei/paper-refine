@@ -1645,7 +1645,10 @@ def _terminate_agent_tree(proc: subprocess.Popen) -> None:
         try:
             pgid = os.getpgid(proc.pid)
         except OSError:
-            pgid = None
+            # The leader may already have exited. With `start_new_session=True`
+            # its PID is also the group id, so this still names the surviving
+            # descendants (F11).
+            pgid = proc.pid
     try:
         if pgid:
             os.killpg(pgid, signal.SIGTERM)
@@ -1655,9 +1658,11 @@ def _terminate_agent_tree(proc: subprocess.Popen) -> None:
         pass
     try:
         proc.wait(timeout=5)
-        return
     except subprocess.TimeoutExpired:
         pass
+    # The LEADER exiting does not mean the group is gone: a child may ignore
+    # SIGTERM and keep running. Always send SIGKILL to the whole group, even
+    # when the leader already exited (F11).
     try:
         if pgid:
             os.killpg(pgid, signal.SIGKILL)
@@ -2430,7 +2435,12 @@ def _revision_repair_ledger(sb: Path, rows: list, with_ids: bool = False):
 # file-level bound because there is no text to diff.
 _REPAIR_DESCRIBED_KEYS = ("location", "wrong", "correct", "basis", "edit", "evidence")
 _REPAIR_TEXT_EXTS = {".md", ".txt", ".tex", ".ltx", ".json", ".csv", ".tsv",
-                     ".bib", ".yaml", ".yml", ".rst"}
+                     ".bib", ".yaml", ".yml", ".rst",
+                     # Analysis code is text too: a `.py`/`.R`/notebook repair
+                     # must be span-checked like a manuscript paragraph, not
+                     # accepted at file level (F05).
+                     ".py", ".r", ".jl", ".m", ".sh", ".bash", ".c", ".cc",
+                     ".cpp", ".h", ".hpp", ".java", ".scala", ".ipynb"}
 
 
 def _repair_ledger_entries(root: Path) -> dict:
@@ -2477,32 +2487,96 @@ def _repair_norm(text) -> str:
 
 
 def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
-    """Why `rel`'s actual text change is outside the union of quoted spans, or None.
+    """Why `rel`'s actual text change is outside the confirmed rows' spans, or None.
 
     The plan describes a span, and the ledger must quote the text it applied.
     Comparing the quoted text with the real pre/post content is what keeps a
     confirmed row from authorizing a whole-file replacement: every removed text
-    run must sit inside SOME confirmed row's `before`, and every added run inside
-    SOME confirmed row's `after`. Checking each row against the WHOLE file
-    instead made a valid repair with two confirmed rows in two paragraphs of one
-    file fail each other's diff (the 2026-10-28 audit's F17).
+    run must sit inside a confirmed row's quoted `before`, and every added run
+    inside its `after`. Checking each row against the WHOLE file instead made a
+    valid repair with two confirmed rows in two paragraphs of one file fail each
+    other's diff (the 2026-10-28 audit's F17).
+
+    A row authorizes ONE occurrence of its quote, not every occurrence: its
+    `before` and `after` occurrences are paired by ordinal. Without that binding
+    a quote of a bare value (`10 -> 20`) matched the first occurrence and every
+    later one, so a second unplanned `10 -> 20` elsewhere in the file passed the
+    F03 guard. A row may cover several diff runs inside its one occurrence (a
+    rewritten sentence is several opcodes, one edit).
     """
     pre_text = _repair_file_text(pre / rel)
     cur_text = _repair_file_text(cur / rel)
     if pre_text is None or cur_text is None or pre_text == cur_text:
         return None                     # opaque/binary, or no textual change
-    before_ns = [b for b, _a in quotes]
-    after_ns = [a for _b, a in quotes]
-    matcher = difflib.SequenceMatcher(None, pre_text, cur_text, autojunk=False)
+    # Compare NORMALIZED text and anchor every changed span to a concrete
+    # occurrence of the quoted text.
+    pre_n = _repair_norm(pre_text)
+    cur_n = _repair_norm(cur_text)
+    if pre_n == cur_n:
+        return None
+    quote_ns = [(_repair_norm(b), _repair_norm(a)) for b, a in quotes]
+
+    def _occurrences(hay: str, needle: str) -> list:
+        if not needle:
+            return []
+        out, start = [], 0
+        while True:
+            i = hay.find(needle, start)
+            if i < 0:
+                return out
+            out.append((i, i + len(needle)))
+            start = i + 1
+
+    # Per row, every occurrence of the quote, before/after paired by ordinal.
+    # A pure insertion (empty before) or deletion (empty after) has a span on
+    # only one side.
+    row_pairs = []
+    for before, after in quote_ns:
+        pre_occs = _occurrences(pre_n, before) if before else []
+        cur_occs = _occurrences(cur_n, after) if after else []
+        if before and after:
+            pairs = [(pre_occs[i], cur_occs[i])
+                     for i in range(min(len(pre_occs), len(cur_occs)))]
+        elif before:
+            pairs = [(span, None) for span in pre_occs]
+        elif after:
+            pairs = [(None, span) for span in cur_occs]
+        else:
+            pairs = []
+        row_pairs.append(pairs)
+
+    assigned = {}   # row index -> the ONE occurrence index it authorizes
+    matcher = difflib.SequenceMatcher(None, pre_n, cur_n, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag in ("replace", "delete"):
-            removed = _repair_norm(pre_text[i1:i2])
-            if removed and not any(removed in before_n for before_n in before_ns):
-                return "removed text is outside the confirmed rows' quoted `before`"
-        if tag in ("replace", "insert"):
-            added = _repair_norm(cur_text[j1:j2])
-            if added and not any(added in after_n for after_n in after_ns):
-                return "added text is outside the confirmed rows' quoted `after`"
+        if tag == "equal":
+            continue
+        candidates = []
+        for row, pairs in enumerate(row_pairs):
+            for occ, (pre_span, cur_span) in enumerate(pairs):
+                pre_ok = ((pre_span is None and i1 == i2)
+                          or (pre_span is not None
+                              and pre_span[0] <= i1 and i2 <= pre_span[1]))
+                cur_ok = ((cur_span is None and j1 == j2)
+                          or (cur_span is not None
+                              and cur_span[0] <= j1 and j2 <= cur_span[1]))
+                if pre_ok and cur_ok:
+                    candidates.append((row, occ))
+        if not candidates:
+            return ("removed text is outside the confirmed rows' quoted `before`"
+                    if tag in ("replace", "delete")
+                    else "added text is outside the confirmed rows' quoted `after`")
+        # Prefer a row already bound to this occurrence (several runs of one
+        # edit), then the row with the fewest alternatives, so a row that can
+        # authorize only one occurrence is not consumed by another edit.
+        candidates.sort(key=lambda c: (0 if assigned.get(c[0]) == c[1] else 1,
+                                       c[0] in assigned,
+                                       len(row_pairs[c[0]]), c[0], c[1]))
+        chosen = next((c for c in candidates
+                       if c[0] not in assigned or assigned[c[0]] == c[1]), None)
+        if chosen is None:
+            return ("a confirmed row's quote matches more than one occurrence; "
+                    "the edit is not bound to the quoted location")
+        assigned[chosen[0]] = chosen[1]
     return None
 
 
@@ -2531,7 +2605,29 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
                 allowed.add(rel)
     before = (hash_manifest(pre, on_error="<unreadable>") or {}).get("files") or {}
     after = (hash_manifest(cur, on_error="<unreadable>") or {}).get("files") or {}
+    ledger = _repair_ledger_entries(cur)
+    plan_by_id = {row["id"]: row for row in rows}
     bad = set()
+    # A CONFIRMED repair whose file is byte-identical to the pre-repair copy
+    # was accepted without being applied. Equality used to short-circuit every
+    # postcondition check (F06): if the promised `after` is absent while the
+    # `before` is still present, the file is a no-op, not a repair.
+    for rid in sorted(confirmed_ids):
+        row = plan_by_id.get(rid) or {}
+        rel = strip_leading_dot_slash(str(row.get("file") or ""))
+        if not rel or rel in REPAIR_BOOKKEEPING or before.get(rel) != after.get(rel):
+            continue
+        entry = ledger.get(rid) or {}
+        _before_q = _repair_norm(entry.get("before") or row.get("wrong") or "")
+        _after_q = _repair_norm(entry.get("after") or row.get("correct") or "")
+        if not _before_q or not _after_q or _before_q == _after_q:
+            continue
+        _text = _repair_file_text(cur / rel)
+        if _text is None:
+            continue
+        _tn = _repair_norm(_text)
+        if _before_q in _tn and _after_q not in _tn:
+            bad.add(rel)
     for rel in sorted(set(before) | set(after)):
         if before.get(rel) == after.get(rel):
             continue
@@ -2584,8 +2680,6 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     # files keep the documented file-level bound because there is no text diff.
     # Rows are grouped by FILE: two confirmed rows may legitimately change two
     # different paragraphs of one file (F17).
-    ledger = _repair_ledger_entries(cur)
-    plan_by_id = {row["id"]: row for row in rows}
     quotes_by_file = {}
     for rid in sorted(confirmed_ids):
         row = plan_by_id.get(rid) or {}
@@ -2853,6 +2947,12 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     pre = sb / "revised_prerepair"
     if not pre.exists():
         shutil.copytree(sb / REVISED_DIR, pre)
+    # The snapshot lives inside the agent-writable sandbox. Keep its digest in
+    # the run record (outside the sandbox) so a repair cannot rewrite BOTH the
+    # baseline and the package to make the pre/post guard see no change (F07).
+    rec["revision_prerepair_digest"] = manifest_digest(
+        hash_manifest(pre, on_error="<unreadable>", follow_dir_links=True))
+    ctx.save_state()
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     _edit_prefer = prefer_rewrite_allowed(ctx, rec)
     write_text_atomic(sb / REVISION_REPAIR_PROMPT_FILE,
@@ -2888,8 +2988,20 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                 repair_rec["error"] = ("the pre-repair snapshot revised_prerepair/ is missing; "
                                        "the repair cannot be proven to touch only its plan")
             else:
-                unplanned = _revised_repair_violations(pre, sb / REVISED_DIR, rows,
-                                                       confirmed_ids)
+                _expected_pre = rec.get("revision_prerepair_digest")
+                _actual_pre = manifest_digest(
+                    hash_manifest(pre, on_error="<unreadable>", follow_dir_links=True))
+                if _expected_pre and _actual_pre and _expected_pre != _actual_pre:
+                    repair_rec["status"] = "failed"
+                    repair_rec["error"] = (
+                        "the pre-repair baseline revised_prerepair/ was modified during "
+                        "the repair; the applied-change audit is untrustworthy")
+                    rec["revision_repair"] = repair_rec
+                    ctx.save_state()
+                    unplanned = ["revised_prerepair/ (baseline digest changed)"]
+                else:
+                    unplanned = _revised_repair_violations(pre, sb / REVISED_DIR, rows,
+                                                           confirmed_ids)
                 if unplanned:
                     repair_rec["status"] = "failed"
                     repair_rec["error"] = (

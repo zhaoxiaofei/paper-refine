@@ -1463,6 +1463,17 @@ def _normalize_version_refs(data: bytes, tokens) -> bytes:
     alts = [re.escape(str(t).encode()) for t in sorted(set(tokens), key=len, reverse=True) if t]
     alts.append(rb"[0-9a-f]{7}")
     tok = rb"(?:" + b"|".join(alts) + rb")"
+    # A remote URL is not a version-tokenized package file: its path segment
+    # may happen to look like a 7-hex token, and erasing it changed a distinct
+    # external identifier (F77). Stash URLs, normalize local references, then
+    # restore them byte-identically.
+    _urls = []
+
+    def _stash_url(m):
+        _urls.append(m.group(0))
+        return b"\x00VIEWURL%d\x00" % (len(_urls) - 1)
+
+    data = re.sub(rb"https?://[^\s\"'<>)]+", _stash_url, data)
     data = re.sub(rb"([-_])" + tok + rb"(?=\.[A-Za-z][A-Za-z0-9]{0,9}\b)",
                   rb"", data)
     cmd = re.compile(
@@ -1474,7 +1485,10 @@ def _normalize_version_refs(data: bytes, tokens) -> bytes:
         inner = re.sub(rb"([-_])" + tok + rb"(?![0-9A-Za-z_])", rb"", m.group(2))
         return m.group(1) + inner + m.group(3)
 
-    return cmd.sub(_arg, data)
+    data = cmd.sub(_arg, data)
+    for _i, _url in enumerate(_urls):
+        data = data.replace(b"\x00VIEWURL%d\x00" % _i, _url)
+    return data
 
 
 def revision_token_for_dir(dirp: Path) -> dict:
@@ -1866,7 +1880,7 @@ def _latex_stem(rel: str) -> str:
 
 LATEX_REF_CMDS = ("input", "include", "subfile", "bibliography", "bibliographystyle",
                   "addbibresource", "includegraphics", "lstinputlisting", "inputminted",
-                  "externaldocument", "subimport", "import")
+                  "externaldocument", "subimport", "import", "usepackage", "documentclass")
 
 
 def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: dict) -> str:
@@ -1882,31 +1896,82 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
     stems = {}
     stems_source = {}
     stems_target = {}
+    stems_sty = {}
+    stems_cls = {}
+    stems_bst = {}
     dir_map = {}
+    # Ambiguity is PER TABLE: `plot` may be an ambiguous SOURCE stem (two
+    # `plot.tex` in different directories) while the TARGET stem `plot` names
+    # one image. A global set made the source clash suppress the valid
+    # `\includegraphics{plot}` rewrite, leaving a dangling reference (R03).
+    ambiguous = {}
+
+    # An external URL is an identifier, not a package path: a local `data.csv`
+    # rename must not rewrite `https://example.org/data.csv` (F16).
+    _urls = []
+
+    def _stash_url(m):
+        _urls.append(m.group(0))
+        return "\ue000%d\ue001" % (len(_urls) - 1)
+
+    text = re.sub(r"https?://[^\s\"'<>]+", _stash_url, text)
 
     def add(mapping, old, new):
-        if old and old != new and old not in mapping:
-            mapping[old] = new
+        amb = ambiguous.setdefault(id(mapping), set())
+        if not old or old == new or old in amb:
+            return
+        if old in mapping and mapping[old] != new:
+            # A bare basename that names TWO different package files cannot be
+            # rewritten globally: the first insertion used to win and could point
+            # at the wrong directory (F17). Keep the exact/relative mappings and
+            # let the command-specific resolver decide.
+            mapping.pop(old, None)
+            amb.add(old)
+            return
+        mapping[old] = new
 
     for o, n in file_map.items():
         o_base, n_base = posixpath.basename(o), posixpath.basename(n)
         o_rel, n_rel = posixpath.relpath(o, old_dir), posixpath.relpath(n, new_dir)
+        o_stem, n_stem = _latex_stem(o_rel), _latex_stem(n_rel)
+        o_bstem, n_bstem = _latex_stem(o_base), _latex_stem(n_base)
+        # The same source contributes a path-relative alias and a basename
+        # alias. When both spellings are one key, the relative (destination-
+        # aware) mapping is the one to keep: adding the basename form as a
+        # second value made the file disagree with itself and marked the key
+        # ambiguous, which suppressed a valid rewrite (R03).
         add(subs, o_rel, n_rel)
-        add(subs, o_base, n_base)
+        if o_base != o_rel:
+            add(subs, o_base, n_base)
         suffix = Path(o).suffix.lower()
         if suffix in VIEW_LATEX_TARGET_EXTS:
             # A target (`plot.pdf`) is what \includegraphics{plot} means.
-            add(stems_target, _latex_stem(o_rel), _latex_stem(n_rel))
-            add(stems_target, _latex_stem(o_base), _latex_stem(n_base))
+            add(stems_target, o_stem, n_stem)
+            if o_bstem != o_stem:
+                add(stems_target, o_bstem, n_bstem)
         if suffix in (VIEW_LATEX_TARGET_EXTS + VIEW_LATEX_SOURCE_EXTS):
-            add(stems, _latex_stem(o_rel), _latex_stem(n_rel))
-            add(stems, _latex_stem(o_base), _latex_stem(n_base))
+            add(stems, o_stem, n_stem)
+            if o_bstem != o_stem:
+                add(stems, o_bstem, n_bstem)
         if suffix in VIEW_LATEX_SOURCE_EXTS:
             # `\input{fig1}` means the SOURCE `fig1.tex`, never the image
             # `fig1.png` that shares the stem; mixing both in one table let a
             # shuffled directory order rewrite the input to an image.
-            add(stems_source, _latex_stem(o_rel), _latex_stem(n_rel))
-            add(stems_source, _latex_stem(o_base), _latex_stem(n_base))
+            add(stems_source, o_stem, n_stem)
+            if o_bstem != o_stem:
+                add(stems_source, o_bstem, n_bstem)
+        if suffix == ".sty":
+            add(stems_sty, o_stem, n_stem)
+            if o_bstem != o_stem:
+                add(stems_sty, o_bstem, n_bstem)
+        elif suffix == ".cls":
+            add(stems_cls, o_stem, n_stem)
+            if o_bstem != o_stem:
+                add(stems_cls, o_bstem, n_bstem)
+        elif suffix == ".bst":
+            add(stems_bst, o_stem, n_stem)
+            if o_bstem != o_stem:
+                add(stems_bst, o_bstem, n_bstem)
         o_dir, n_dir = posixpath.dirname(o), posixpath.dirname(n)
         if o_dir:
             add(dir_map, posixpath.relpath(o_dir, old_dir), posixpath.relpath(n_dir, new_dir))
@@ -1915,12 +1980,26 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
         pat = re.compile(r"(?<![A-Za-z0-9_\\])(" + "|".join(re.escape(k) for k in keys)
                          + r")(?![A-Za-z0-9_])")
         text = pat.sub(lambda m: subs[m.group(1)], text)
-    if stems:
+    if stems or stems_sty or stems_cls or stems_bst:
         cmd_pat = re.compile(r"\\(?P<cmd>" + "|".join(LATEX_REF_CMDS)
-                             + r")\b(\s*\[[^\]]*\])?\s*\{([^{}]*)\}")
+                             + r")\b\*?(\s*\[[^\]]*\])?\s*\{([^{}]*)\}")
+
+        def _relative_input_target(arg):
+            r"""The renamed path for an `\input` argument, by the file's OWN dir."""
+            for cand in (arg, arg + ".tex", arg + ".ltx"):
+                resolved = (posixpath.normpath(posixpath.join(old_dir, cand))
+                            if old_dir != "." else posixpath.normpath(cand))
+                if resolved in file_map:
+                    target = file_map[resolved]
+                    if not Path(arg).suffix:
+                        target = _latex_stem(target)
+                    return (posixpath.relpath(target, new_dir)
+                            if new_dir != "." else target)
+            return None
 
         def cmd_repl(m):
             arg = m.group(3)
+            cmd = m.group("cmd")
             # \bibliography{refs,intro} and \addbibresource{refs,intro} carry
             # a comma-separated list; looking the whole string up left both
             # keys pointing at names the renamed tree no longer has.
@@ -1928,14 +2007,65 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
             # \includegraphics{plot} means the PLOTTED file (`plot.pdf`), never
             # the standalone source (`plot.tex`) that happens to share its stem:
             # a source and a target of one stem must not compete for one key.
-            table = (stems_target if m.group("cmd") == "includegraphics"
-                     else (stems_source or stems))
+            if cmd == "includegraphics":
+                table = stems_target
+            elif cmd == "usepackage":
+                table = stems_sty
+            elif cmd == "documentclass":
+                table = stems_cls
+            elif cmd == "bibliographystyle":
+                table = stems_bst
+            else:
+                table = stems_source or stems
             mapped = [table.get(piece.strip(), piece) for piece in pieces]
+            if mapped == pieces and cmd in ("input", "include", "subfile"):
+                # The bare basename is ambiguous across directories; resolve
+                # the argument against THE REFERRING FILE'S directory.
+                mapped = []
+                for piece in pieces:
+                    resolved = _relative_input_target(piece.strip())
+                    mapped.append(resolved if resolved else piece)
             if mapped == pieces:
                 return m.group(0)
             return m.group(0).replace("{" + arg + "}", "{" + ",".join(mapped) + "}")
 
+        # `\import{dir/}{file}` and `\subimport{dir/}{file}` name ONE input in
+        # two arguments; rewriting either alone leaves a broken path (F14).
+        def import_repl(m):
+            cmd, arg_dir, arg_file = m.group("cmd"), m.group(3), m.group(4)
+            combined = posixpath.normpath(arg_dir + arg_file)
+            for o, n in file_map.items():
+                if _latex_stem(o) == combined:
+                    stem = _latex_stem(n)
+                    new_sub = posixpath.dirname(stem)
+                    return ("\\" + cmd + "{" + (new_sub + "/" if new_sub else "")
+                            + "}{" + posixpath.basename(stem) + "}")
+            return m.group(0)
+
+        text = re.sub(r"\\(?P<cmd>import|subimport)\b\*?(\s*\[[^\]]*\])?\s*"
+                      r"\{([^{}]*)\}\s*\{([^{}]*)\}",
+                      import_repl, text)
         text = cmd_pat.sub(cmd_repl, text)
+
+    # A renamed Python module keeps its import graph only if the import site is
+    # rewritten too: `helper.py` -> `f2.py` left `import helper` broken (F15).
+    if Path(old_rel).suffix.lower() == ".py":
+        _py_mods = {}
+        for o, n in file_map.items():
+            if Path(o).suffix.lower() == ".py":
+                _py_mods[_latex_stem(posixpath.basename(o))] = \
+                    _latex_stem(posixpath.basename(n))
+
+        def _py_import(m):
+            mod = m.group(2)
+            head = _py_mods.get(mod.split(".", 1)[0])
+            if not head:
+                return m.group(0)
+            tail = mod.split(".", 1)[1] if "." in mod else ""
+            return m.group(1) + head + (("." + tail) if tail else "")
+
+        text = re.sub(r"(?m)^(\s*(?:from|import)\s+)([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)",
+                      _py_import, text)
     if dir_map:
         def one(mm):
             d = mm.group(1).rstrip("/")
@@ -1967,6 +2097,8 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
             pos = j
         out.append(text[pos:])
         text = "".join(out)
+    for _i, _url in enumerate(_urls):
+        text = text.replace("\ue000%d\ue001" % _i, _url)
     return text
 
 
@@ -1989,6 +2121,107 @@ def _rels_part_base_dir(name: str) -> str:
     """
     head, _sep, _tail = name.rpartition("_rels/")
     return head
+
+
+_WORD_NS = b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _ooxml_xml_utf8(payload: bytes) -> bytes:
+    """Decode an OOXML part that declares/uses UTF-16 into UTF-8 bytes.
+
+    ASCII regexes cannot see `<w:del>` in UTF-16 XML, so a UTF-16
+    word/document.xml kept its revisions and author names (F22). Re-emitting
+    UTF-8 (with a matching declaration) is a valid OOXML part.
+    """
+    text = None
+    if payload[:2] == b"\xff\xfe":
+        text = payload.decode("utf-16", "replace")
+    elif payload[:2] == b"\xfe\xff":
+        text = payload.decode("utf-16", "replace")
+    elif b"\x00" in payload[:200] and payload[:4].lower() == b"<\x00?\x00":
+        # UTF-16LE without BOM: the XML declaration is NUL-interleaved.
+        text = payload.decode("utf-16-le", "replace")
+    elif b"\x00" in payload[:200] and payload[:4].lower() == b"\x00<\x00?":
+        text = payload.decode("utf-16-be", "replace")
+    if text is None:
+        return payload
+    text = re.sub(r'(<\?xml[^>]*encoding=")[^"]+(")',
+                  r"\1UTF-8\2", text, count=1, flags=re.I)
+    return text.encode("utf-8", "replace")
+
+
+_WORD_NS_DECL_RE = re.compile(
+    rb"xmlns(?::(?P<prefix>[A-Za-z_][\w.-]*))?\s*=\s*(?P<q>[\"'])"
+    + re.escape(_WORD_NS) + rb"(?P=q)")
+
+
+def _normalize_word_prefix(payload: bytes) -> bytes:
+    """Rename a legal non-`w` Word namespace declaration to `w`.
+
+    OOXML binds the Word namespace to a PREFIX, and `a:del`/`a:t` is exactly as
+    valid as `w:del`/`w:t`. The sanitizer is byte-regex based, so normalizing
+    the prefix before the transforms makes namespace identity, not spelling,
+    the contract (F21).
+
+    XML allows either quote style and whitespace around `=`, and the Word
+    namespace may be the DEFAULT namespace (`<document xmlns="...">`). A
+    declaration the old double-quote-only pattern could not see left `a:del`,
+    `a:author` and `delText` in the judge view (R02).
+    """
+    m = _WORD_NS_DECL_RE.search(payload)
+    if not m:
+        return payload
+    prefix = m.group("prefix")
+    if prefix == b"w":
+        return payload
+    if prefix is not None:
+        out = re.sub(rb"(?<=[<\s/])" + re.escape(prefix) + rb":", b"w:", payload)
+        return _WORD_NS_DECL_RE.sub(
+            lambda mm: b"xmlns:w=" + mm.group("q") + _WORD_NS + mm.group("q"),
+            out, count=1)
+    # Default namespace: every unprefixed element in the part is WordprocessingML.
+    # Declare `w:` explicitly and qualify the element names (and the tracked
+    # attributes the sanitizer rewrites), or the byte transforms see nothing.
+    if re.search(rb"xmlns\s*=", _WORD_NS_DECL_RE.sub(b"", payload, count=1)):
+        return payload            # another default declaration: not resolvable here
+    out = _WORD_NS_DECL_RE.sub(
+        lambda mm: b"xmlns:w=" + mm.group("q") + _WORD_NS + mm.group("q"),
+        payload, count=1)
+    out = re.sub(rb"<(?P<close>/?)(?P<name>[A-Za-z_][\w.-]*)(?=[\s/>])",
+                 lambda mm: b"<" + mm.group("close") + b"w:" + mm.group("name"), out)
+    # Unqualified attributes (`author="..."` in a default-namespace part) are
+    # the same provenance fields; qualify them so the sanitizer rewrites them.
+    return re.sub(rb"(\s)(author|initials|date)=", rb"\1w:\2=", out)
+
+
+def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> bytes:
+    """Rewrite an OPC relationship that names a renamed PACKAGE file.
+
+    A DOCX hyperlink/linked file to `supplement.docx` must follow the renamed
+    package member; a remote URL must stay byte-identical (F18).
+    """
+    if not file_map or not name.lower().endswith(".rels"):
+        return payload
+    base_dir = _rels_part_base_dir(name.lower())
+
+    def _rel(m):
+        el = m.group(0)
+        tm = re.search(rb'Target="([^"]*)"', el)
+        if not tm:
+            return el
+        target = tm.group(1).decode("utf-8", "replace")
+        if re.match(r"(?i)^(?:[a-z][a-z0-9+.-]*:|#|\\\\|/)", target):
+            return el
+        new = file_map.get(target)
+        if new is None:
+            resolved = posixpath.normpath(posixpath.join(base_dir, target)).lstrip("/")
+            if resolved in file_map:
+                new = posixpath.relpath(file_map[resolved], base_dir or ".")
+        if new is None:
+            return el
+        return re.sub(rb'Target="[^"]*"', b'Target="' + new.encode("utf-8") + b'"', el)
+
+    return _RELS_ENTRY_RE.sub(_rel, payload)
 
 
 def _prune_dropped_part_references(payload: bytes, name: str, dropped: set,
@@ -2035,7 +2268,7 @@ def _prune_dropped_part_references(payload: bytes, name: str, dropped: set,
     return _RELS_ENTRY_RE.sub(_rel, payload)
 
 
-def _sanitize_ooxml_bytes(data: bytes) -> tuple:
+def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "") -> tuple:
     """(bytes, notes): strip provenance metadata and CANONICALIZE the archive.
 
     A judge must see submission CONTENT only. This removes, in order:
@@ -2121,6 +2354,14 @@ def _sanitize_ooxml_bytes(data: bytes) -> tuple:
                     return
                 new = stripped
 
+        # A deleted TABLE ROW is marked by `<w:trPr><w:del/></w:trPr>`, not by a
+        # `<w:del>` wrapper around its cells. Stripping only the marker kept
+        # every cell's text, resurrecting the row as accepted content (F19).
+        new = re.sub(
+            rb"<w:tr\b[^>]*>(?:(?!</w:tr>).)*?<w:trPr\b[^>]*>"
+            rb"(?:(?!</w:trPr>).)*?<w:del\b[^>]*/>"
+            rb"(?:(?!</w:trPr>).)*?</w:trPr>(?:(?!</w:tr>).)*?</w:tr>",
+            b"", new, flags=re.S)
         _drop_nested(b"del")
         _drop_nested(b"cellDel")
         _drop_nested(b"moveFrom")
@@ -2195,6 +2436,11 @@ def _sanitize_ooxml_bytes(data: bytes) -> tuple:
                            b"<root/>")
                 stripped += 1
             elif low.startswith(("word/", "xl/", "ppt/")) and low.endswith(".xml"):
+                # UTF-16 and a non-`w` namespace prefix are both legal OOXML;
+                # normalize them so the byte transforms see the elements (F21,
+                # F22).
+                payload = _ooxml_xml_utf8(payload)
+                payload = _normalize_word_prefix(payload)
                 payload = _accept_changes(payload)
                 new = re.sub(rb'((?:w|w15|w16):(?:author|initials))="[^"]*"', rb'\1="author"',
                              payload)
@@ -2203,12 +2449,24 @@ def _sanitize_ooxml_bytes(data: bytes) -> tuple:
                 if new != payload:
                     stripped += 1
                 payload = new
+                # Spreadsheet comments/persons carry an `<author>` ELEMENT,
+                # not a w:author attribute; blank it too (F20).
+                if low.startswith(("xl/comments", "xl/threadedcomments", "xl/persons/")):
+                    payload = _blank_xml_elements(
+                        payload, (b"author", b"personDisplayName"), b"author")
+                    stripped += 1
                 # the pipeline's own hand-off marker prefix must not identify a
                 # package as "revised by the pipeline"; the payload stays.
                 payload = payload.replace(PLACEHOLDER_TOKEN.encode(), b"[TO BE COMPLETED")
             elif low.endswith((".xml", ".rels")):
+                payload = _ooxml_xml_utf8(payload)
+                payload = _normalize_word_prefix(payload)
                 payload = _accept_changes(payload)
                 if low.endswith(".rels"):
+                    # A DOCX hyperlink/linked file that names a renamed package
+                    # member must follow the rename; a remote URL must not
+                    # (F18).
+                    payload = _rewrite_rels_package_targets(payload, name, file_map or {})
                     # A relationship TARGET that names an absolute local path
                     # (the venue's Word template attaches
                     # `file:///C:\Users\<someone>\...\*.dotx`, and a package may
@@ -2341,13 +2599,18 @@ def _transform_view_file(old_rel: str, src: Path, file_map: dict):
         # The sanitized bytes do not depend on the view seed: the same figure or
         # document appears in many views, so cache by content (bounded).
         kind = "ooxml" if ext in VIEW_OOXML_EXTS else "pdf"
-        key = (kind, hashlib.sha256(raw).hexdigest())
+        # The sanitized OOXML bytes depend on the package's rename map (a
+        # relationship target follows it), so content alone is not the cache
+        # key (F18).
+        _map_key = (hashlib.sha256(repr(sorted(file_map.items())).encode("utf-8")).hexdigest()
+                    if kind == "ooxml" else "")
+        key = (kind, hashlib.sha256(raw).hexdigest(), _map_key)
         with _VIEW_EXPECT_LOCK:
             hit = _VIEW_SANITIZE_CACHE.get(key)
         if hit is not None:
             return hit[0], hit[1]
-        data, notes = (_sanitize_ooxml_bytes(raw) if kind == "ooxml"
-                       else _sanitize_pdf_bytes(raw))
+        data, notes = (_sanitize_ooxml_bytes(raw, file_map=file_map, old_rel=old_rel)
+                       if kind == "ooxml" else _sanitize_pdf_bytes(raw))
         if (len(raw) <= _VIEW_SANITIZE_MAX_FILE
                 and len(_VIEW_SANITIZE_CACHE) < _VIEW_SANITIZE_MAX_ENTRIES
                 and _VIEW_SANITIZE_TOTAL["bytes"] + len(data) <= _VIEW_SANITIZE_MAX_TOTAL):
@@ -2367,7 +2630,10 @@ def expected_view_digest(ctx: Ctx, r: int, vid: str, view_seed: str) -> list:
     by the SOURCE content (so a corpus change is still detected).
     """
     files = corpus_files_for_view(ctx, r, vid)
-    src_key = tuple(sorted(sha256_files([p for _rel, p in files])))
+    # The transform depends on each file's RELATIVE PATH (reference rewriting
+    # resolves against it), not only on its bytes: a rename with identical
+    # content must not reuse the old expected view (F10).
+    src_key = tuple(sorted((rel, sha256_file(p)) for rel, p in files))
     key = (int(r), str(vid), str(view_seed), src_key)
     with _VIEW_EXPECT_LOCK:
         hit = _VIEW_EXPECT_CACHE.get(key)
@@ -2434,10 +2700,21 @@ def build_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
     files = corpus_files_for_view(ctx, r, vid)
     _dir_names, file_map = _view_layout(files, r, vid, view_seed)
     dst.mkdir(parents=True, exist_ok=True)
+    _transform_warnings = []
     for rel, src in files:
         out = dst / file_map[rel]
         out.parent.mkdir(parents=True, exist_ok=True)
         data, _notes = _transform_view_file(rel, src, file_map)
+        for _note in _notes or []:
+            # A sanitizer note that says metadata was LEFT IN PLACE is an
+            # unresolved anonymity gap. It used to be discarded here, so the
+            # documented limitation never reached the stage/decision record
+            # (F23).
+            _low = str(_note).lower()
+            if any(_m in _low for _m in ("left as is", "left as-is", "uncompressed",
+                                         "compressed/unparsable", "not stripped",
+                                         "could not be blanked", "budget")):
+                _transform_warnings.append(f"{file_map[rel]}: {_note}"[:400])
         if data is None:
             shutil.copyfile(src, out)                 # content only: no metadata
         else:
@@ -2446,6 +2723,22 @@ def build_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
             os.chmod(out, 0o644)
         except OSError:
             pass
+    if _transform_warnings:
+        # Persist OUTSIDE the judge view: the gap is a pipeline record, never a
+        # hint the judge can read.
+        _key = "%d:%s:%s" % (int(r), vid,
+                             hashlib.sha256(str(view_seed).encode("utf-8")).hexdigest()[:12])
+        _state = getattr(ctx, "state", None)
+        if isinstance(_state, dict):
+            _state.setdefault("view_transform_warnings", {})[_key] = _transform_warnings[:50]
+            if hasattr(ctx, "save_state"):
+                try:
+                    ctx.save_state()
+                except Exception:                                # noqa: BLE001
+                    pass
+        print("  [judge-view] WARNING: %d file(s) could not be fully sanitized in %s/%s "
+              "(recorded in state.json view_transform_warnings)"
+              % (len(_transform_warnings), vid, _key))
     for sub in [dst, *sorted(dst.rglob("*"))]:
         if sub.is_dir():
             try:
