@@ -14,6 +14,11 @@ What this suite pins:
   * `medium` keeps every rule but pages the elaborative ones: each stage prompt
     is materially smaller, the paged text really ships in the sandbox
     (`INSTRUCTIONS/PROFILE_RULES.md`), and the stage contract is stated inline.
+  * `medium` is NORMATIVELY EQUIVALENT to `high` (AGENTS.md rule 12): the prompt
+    plus the paged file carry every rule line `high` inlines, the paged file
+    invents no rule text, the sections are in the prompt's pointer order, the
+    profile contract asserts no model/window property, and the contract is
+    followed by the contradiction rule it defers to.
   * `--no-guided-review` plans NO guided review, runs the probe as the only
     finding source, synthesizes the frozen review view with the missing pass
     recorded as a NAMED GAP, and tells the audit/revise sessions so.
@@ -26,6 +31,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -101,8 +107,19 @@ def render_prompts() -> dict:
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
     import render_stage_prompts
-    sb = (WS / "tmp" / "render-sandbox" / "r1_guided_review").resolve()
-    return render_stage_prompts.render(WS, sandbox=sb)
+    return render_stage_prompts.render(WS, sandbox=_render_sandbox("profile_golden_"))
+
+
+def _render_sandbox(prefix: str) -> Path:
+    """A PRIVATE render sandbox for one check.
+
+    The full suite runs suites in parallel and re-runs a load-flaky one alone; a
+    fixed checkout path let one render's `rmtree` delete the `INSTRUCTIONS/` of
+    another render between its mkdir and its atomic write.  The sandbox path is
+    normalised to `<SANDBOX>` before hashing, so a unique path cannot perturb a
+    golden.
+    """
+    return (Path(tempfile.mkdtemp(prefix=prefix)) / "r1_guided_review").resolve()
 
 
 def test_high_profile_is_the_old_pipeline() -> None:
@@ -124,9 +141,7 @@ def test_medium_profile_pages_the_elaborations() -> None:
     """`medium` is materially smaller, ships the paged rules, states the contract."""
     P = pipeline_module()
     prof = P.load_venue_profile("generic")
-    sb = (WS / "tmp" / "render-sandbox" / "r2_guided_review").resolve()
-    import shutil
-    shutil.rmtree(sb, ignore_errors=True)
+    sb = _render_sandbox("profile_medium_")
     (sb / "base").mkdir(parents=True)
     calls = {
         "review": lambda p: P.review_prompt(sb, "r1_guided_review", 1, venue=prof, execution_profile=p),
@@ -163,6 +178,94 @@ def test_medium_profile_pages_the_elaborations() -> None:
           "INSTRUCTIONS/PROFILE_RULES.md" in review)
     # The paging must not be a no-op: the pointers replaced real text.
     check("medium: the prompt carries PROFILE RULES pointers", "[PROFILE RULES —" in review)
+
+
+def _rule_lines(text: str) -> list:
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
+def _joined_block_line(line: str, pool: str) -> bool:
+    """Is `line` two adjacent blocks of `high` joined without a newline?
+
+    The high prompt is a concatenation of blocks, and a few boundaries have no
+    separator: one of its LINES can then be the tail of one block followed by
+    the head of the next.  That is a formatting artifact of `high`, not a lost
+    rule, and the medium render separates the two at the pointer/file boundary
+    -- so the line counts as preserved when BOTH joined parts are present.
+    """
+    for i in range(8, len(line) - 7):
+        if line[:i] in pool and line[i:] in pool:
+            return True
+    return False
+
+
+def _pointer_titles(text: str, contract: str) -> list:
+    """The pointer's section titles, in prompt order (the contract's example
+    pointer is not one of them)."""
+    body = text[len(contract):] if text.startswith(contract) else text
+    out = []
+    for title in re.findall(r"\[PROFILE RULES — ([^:]+): ", body):
+        if title not in out:
+            out.append(title)
+    return out
+
+
+def test_medium_matches_high_rules() -> None:
+    """AGENTS.md rule 12: the paged run carries exactly the inlined run's rules."""
+    print("\n== rule 12: medium is normatively equivalent to high ==")
+    P = pipeline_module()
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import render_stage_prompts
+    sb = _render_sandbox("profile_equiv_")
+    high = render_prompts()                       # the eleven `high` prompts
+    medium = render_stage_prompts.render_with_rules(WS, "medium", sandbox=sb)
+    contract = P.MEDIUM_PROFILE_CONTRACT
+    contract_lines = set(_rule_lines(contract))
+    header_lines = set(_rule_lines(P.PROFILE_RULES_HEADER))
+    problems = []
+    for name, entry in medium.items():
+        med, rules = entry["text"], entry["rules"]
+        h = high.get(name, "")
+        pool = med + "\n" + rules
+        lost = [ln for ln in _rule_lines(h)
+                if ln not in pool and not _joined_block_line(ln, pool)]
+        if lost:
+            problems.append(f"{name}: rule line lost {lost[0][:70]!r}")
+        invented = [ln for ln in _rule_lines(rules)
+                    if ln not in h and ln not in header_lines
+                    and not ln.startswith("_Stage: ") and not ln.startswith("#")]
+        if invented:
+            problems.append(f"{name}: paged file invents {invented[0][:70]!r}")
+        added = [ln for ln in _rule_lines(med)
+                 if ln not in h and ln not in contract_lines
+                 and "[PROFILE RULES — " not in ln]
+        if added:
+            problems.append(f"{name}: prompt adds {added[0][:70]!r}")
+        titles = _pointer_titles(med, contract)
+        heads = re.findall(r"(?m)^## (.+)$", rules)
+        if titles != heads:
+            problems.append(f"{name}: section order {titles[:3]} != {heads[:3]}")
+    check("rule 12: every high rule line is carried by medium or its paged file",
+          not problems, "; ".join(problems[:3]))
+
+    flat = " ".join(contract.split())
+    check("rule 12: the profile asserts no model/window property",
+          "LIMITED context window" not in contract and "small window" not in contract
+          and "paged run" in contract)
+    check("rule 12: the profile says it is operating guidance, not a rule",
+          "restates no rule" in flat)
+    check("rule 12: the profile defers to the stage contract and the contradiction rule",
+          "SUBORDINATE to the stage contract" in flat
+          and "CONTRADICTION RULE below decides" in flat
+          and "still binds you in full" in flat)
+    header_flat = " ".join(P.PROFILE_RULES_HEADER.split())
+    check("rule 12: the paged header says the text is moved, not rewritten",
+          "MOVES the rule text" in header_flat and "does not summarise" in header_flat)
+    review = medium["review"]["text"]
+    check("rule 12: the contract precedes the contradiction rule it defers to",
+          review.find("EXECUTION PROFILE: medium")
+          < review.find("BEFORE YOU READ THE INSTRUCTIONS BELOW"))
 
 
 def test_config_records_the_policy() -> None:
@@ -332,6 +435,7 @@ def test_medium_end_to_end() -> None:
 if __name__ == "__main__":
     test_high_profile_is_the_old_pipeline()
     test_medium_profile_pages_the_elaborations()
+    test_medium_matches_high_rules()
     test_config_records_the_policy()
     test_plan_drops_the_guided_review()
     test_setup_refuses_a_round_with_no_finding_source()

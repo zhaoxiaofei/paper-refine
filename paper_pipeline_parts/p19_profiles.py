@@ -12,13 +12,14 @@
 #
 # 1. `--execution-profile high|medium`
 #
-#    The pipeline was written for a frontier model with a very large context
-#    window.  A medium model (a single-GPU 27B deployment, ~100k tokens or less)
-#    does not fail on the manuscript: it fails on the INSTRUCTION PAYLOAD.  Every
-#    session is handed ~115 KB of stage prompt before it reads one word of the
-#    paper, and the same ~115 KB is re-sent on every step of an agent loop.  The
-#    observed cost of a short manuscript was 1,589 model calls and 110.8M prompt
-#    tokens (median call ~72k prompt tokens).
+#    Every stage prompt inlines a large, elaborative rule payload.  That payload
+#    is cheap on a frontier model with a very large context window and expensive
+#    on a deployment whose per-call budget is small: a single-GPU 27B model
+#    (~100k tokens) does not fail on the manuscript, it fails on the INSTRUCTION
+#    PAYLOAD.  Every session is handed ~115 KB of stage prompt before it reads one
+#    word of the paper, and the same ~115 KB is re-sent on every step of an agent
+#    loop.  The observed cost of a short manuscript was 1,589 model calls and
+#    110.8M prompt tokens (median call ~72k prompt tokens).
 #
 #    `high` (the default) is the pipeline exactly as it was: every rule is
 #    inlined in every session, and `--execution-profile high` is byte-identical to
@@ -33,6 +34,21 @@
 #    authoritative, and a session consults a section with a bounded read when its
 #    stage needs it.  The postchecks are unchanged, so coverage is unchanged --
 #    the difference is where the instructions live, not what they demand.
+#
+#    The profile is a PAYLOAD choice, not a model-class claim: it is valid for
+#    any model whose per-call instruction budget makes inlining expensive (a
+#    small window, a harness-capped call, a cost/latency budget), and neither the
+#    contract nor the paged file asserts anything about the model or its window.
+#    `medium` and `high` are NORMATIVELY EQUIVALENT (AGENTS.md rule 12): every
+#    rule block `high` inlines is carried verbatim by the medium prompt or by
+#    its paged file, in prompt order; the only profile-only text is this
+#    profile's own operating guidance (the capacity contract, the read policy
+#    and the pointer sentences), it declares itself subordinate to the stage
+#    contract and to the contradiction rule, and it can never add a rule, relax
+#    one, or assert a property of the run.  The paged file is written in the
+#    order the pointers occur in the prompt, so a session that reads it in full
+#    reads the same rules in the same sequence `high` inlines; the tests carry
+#    the equivalence check (`.paper_test/test_execution_profile.py`).
 #
 # 2. `--guided-review on|off` (and `--no-guided-review`)
 #
@@ -72,6 +88,13 @@ prompt points at it.  The prompt carries your stage contract, your deliverable
 and the completion marker; this file carries the long rule sections the prompt
 used to paste inline.
 
+Every section below is the EXACT text `--execution-profile high` inlines at the
+same position of the same stage prompt.  This profile MOVES the rule text into
+this file; it does not summarise, shorten, merge, reorder or extend a rule, and
+the sections are written in the order their pointers occur in your prompt.  If a
+section ever seems to disagree with your stage contract, the prompt's
+CONTRADICTION RULE decides -- never this header and never the read policy.
+
 READ POLICY (this is the point of the file — do not read it cover to cover):
 
   * Before you start, read the section your stage needs for the first item you
@@ -90,22 +113,26 @@ rule your prompt names is still required.
 #: The compact contract `medium` puts at the top of every stage prompt.
 MEDIUM_PROFILE_CONTRACT = """=== EXECUTION PROFILE: medium — READ THIS FIRST ===
 
-This run was set up for a model with a LIMITED context window.  The pipeline
-therefore states the stage contract inline and pages the long rule sections to
-`INSTRUCTIONS/PROFILE_RULES.md` (see the pointers below).  Working rules for
-this profile — they are the same contract, restated for a small window:
+This run states the stage contract inline and PAGES the long rule sections to
+`INSTRUCTIONS/PROFILE_RULES.md` (see the pointers below), so the instruction
+payload of every model call stays bounded.  This block is operating guidance for
+a paged run: it restates no rule and it changes none.
 
-  1. WORK IN BOUNDED STEPS. Read the passages you need, never the whole corpus
-     "for context".  `grep -n` to locate, `sed -n` to read at most ~200 lines.
+  1. WORK IN BOUNDED STEPS. Locate with `grep -n`, read with `sed -n` in slices
+     of at most about 200 lines, and do not read extra material merely "for
+     context".  This is guidance on HOW to read, never a limit on WHAT you must
+     read: a stage instruction that requires reading a whole file, package or
+     donor set (for example the rewrite's whole-base read or the integrator's
+     whole-donor read) still binds you in full.
   2. WRITE INCREMENTALLY. Create each deliverable file as soon as you have its
      first row and append to it; do not hold the whole result until the end.
-     A stage that runs out of window with nothing on disk has produced nothing.
+     A stage that runs out of context with nothing on disk has produced nothing.
   3. DO NOT RE-READ what you have already read or quoted: cite it from your own
      notes/artifacts.  Two identical reads are one wasted step.
   4. THE DELIVERABLES ARE THE STAGE. Your prompt names them and
      `_pipeline_done.json` in the sandbox ROOT is the last thing you write.
      A stage that does all its analysis but cannot close its deliverables has
-     FAILED (this is the observed failure mode of limited-context models).
+     FAILED (this is the observed failure mode of a truncated session).
   5. THE PAGED RULES ARE BINDING. A pointer like
      `[PROFILE RULES — SECTION: see INSTRUCTIONS/PROFILE_RULES.md]` replaces
      rule text that this profile does not inline. Read the section your stage
@@ -114,6 +141,9 @@ this profile — they are the same contract, restated for a small window:
      rule still applies: this profile changes where the instructions live, not
      what they demand.
 
+This block is SUBORDINATE to the stage contract.  Where this block and the stage
+text seem to disagree, the CONTRADICTION RULE below decides, and a
+reading-economy hint never relaxes a stage obligation.
 """
 
 #: One stage's prompt pointer, substituted for a paged rule section.
@@ -224,7 +254,16 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     exact strings the builder just substituted (or appended).  Each one that
     occurs in `text` is replaced by a pointer to
     `INSTRUCTIONS/PROFILE_RULES.md`, and every such block is written to that
-    file under its own `## <section>` heading.
+    file under its own `## <section>` heading, in the order the pointers occur
+    in the prompt.
+
+    This is a MOVE, not a rewrite (AGENTS.md rule 12): a block's exact text is
+    written (a trailing-whitespace trim and the demotion of a level-2 heading
+    that would otherwise end the section are the only transformations), and the
+    prompt keeps a pointer in the block's own position.  The profile-only text
+    added by this function is exactly the capacity contract, the read policy and
+    the pointer sentences; it declares itself subordinate to the stage contract,
+    so the paged run and the inlined run resolve a conflict the same way.
 
     `high` pages nothing: the prompt is the pipeline's original text plus the
     contradiction rule, which every stage prompt carries under every profile
@@ -237,10 +276,11 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
 
     sb = Path(sandbox)
     # Longest first: a block that contains another must be replaced before the
-    # shorter one can eat a piece of it.
+    # shorter one can eat a piece of it.  This is the REPLACEMENT order only;
+    # the file is written in PROMPT order below.
     ordered = sorted(((t, b) for t, b in blocks if b and isinstance(b, str)),
                      key=lambda tb: -len(tb[1]))
-    sections = []
+    sections = []          # (title, body), in replacement order
     for title, body in ordered:
         if body not in text:
             continue
@@ -261,7 +301,17 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
             die(f"refusing to page the profile rules: {PROFILE_INSTRUCTIONS_DIR}/ became a "
                 f"symlink or a non-directory while preparing ({sb}).")
         parts = [PROFILE_RULES_HEADER, f"_Stage: {stage}_\n"]
-        for title, body in sections:
+        # PROMPT ORDER, not replacement order: a session that reads the file in
+        # full must meet the sections in the sequence the pointers occur, exactly
+        # as `high` inlines them, and any positional wording inside a moved block
+        # then points at the same neighbour it points at in `high`.  The pointer
+        # positions in the ASSEMBLED text are that order (they survive the
+        # replacement of the other blocks); the replacement order is only the
+        # longest-first order that keeps a nested block from being eaten.
+        def _pointer_pos(title: str) -> int:
+            return text.find(PROFILE_POINTER_TMPL.format(
+                section=title, rel=PROFILE_RULES_REL))
+        for title, body in sorted(sections, key=lambda tb: _pointer_pos(tb[0])):
             # A paged body may itself carry `## ` headings (the attached
             # review/revision brief starts with `## Phase 1` / `## Phase 2`).
             # Writing those unchanged made the pointer's section end at the
@@ -273,8 +323,10 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
             body = re.sub(r"(?m)^## (?=\S)", "### ", str(body))
             parts.append(f"\n## {title}\n\n{body.rstrip()}\n")
         write_text_atomic(sb / PROFILE_RULES_REL, "".join(parts))
-    # The contradiction rule leads every stage prompt (it names no stage, mode
-    # or bookkeeping file, so a judge's blinding is unaffected).
+    # The profile contract first (the capacity discipline is the profile's
+    # point), then the contradiction rule every stage prompt carries; the
+    # contract defers to it explicitly, so the profile block is governed by the
+    # same conflict-resolution order `high` uses (AGENTS.md rule 12).
     return _stage_contract_header(profile) + CONTRADICTION_RULE + text
 
 

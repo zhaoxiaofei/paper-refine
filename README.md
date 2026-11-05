@@ -905,7 +905,8 @@ checklist pass; ON by default; OFF runs the cold-start review alone and records 
 as a named
 gap, see "The GUIDED review" below), `--execution-profile {high,medium}` (the instruction
 profile: `high` is the pipeline unchanged, `medium` pages the elaborative rule sections out of each
-stage prompt into `INSTRUCTIONS/PROFILE_RULES.md` — see "Execution profiles" below),
+stage prompt into `INSTRUCTIONS/PROFILE_RULES.md`; the two profiles are normatively equivalent —
+same rules, tested — see "Execution profiles" below),
 `--enable-insertions|--disable-insertions` and
 `--enable-deletions|--disable-deletions` (`setup` records the policy; `run`/`run-decide`
 may override it for one invocation; both are ENABLED by default, the historical
@@ -2294,11 +2295,14 @@ the round it produces is comparable only with another run of the same flag.
 
 ## Execution profiles (`--execution-profile high|medium`)
 
-The pipeline was written for a frontier model with a very large context window. A medium model (a
-single-GPU 27B deployment, ~100k tokens or less) does not fail on the manuscript — it fails on the
-INSTRUCTION PAYLOAD. Every session is handed ~110 KB of stage prompt before it reads one word of
-the paper, and an agent loop re-sends that prompt on every step. Measured on one 18.9 KB manuscript:
-1,589 model calls and 110.8 M prompt tokens, median call ~72k prompt tokens.
+The profile was added for a single-GPU 27B deployment (~100k tokens or less), where the failure is
+not the manuscript but the INSTRUCTION PAYLOAD. Every session is handed ~110 KB of stage prompt
+before it reads one word of the paper, and an agent loop re-sends that prompt on every step.
+Measured on one 18.9 KB manuscript: 1,589 model calls and 110.8 M prompt tokens, median call ~72k
+prompt tokens. It is a **payload** choice, not a model-class claim: it is valid for any model or
+harness whose per-call instruction budget makes inlining expensive (a small window, a harness-capped
+call, a cost or latency budget), and neither the profile contract nor the paged file asserts what
+model or window it runs on.
 
 `--execution-profile {high,medium}` (default `high`) selects the instruction profile. It is NOT a
 reasoning-effort setting (`PAPER_QWEN_REASONING_EFFORT` is a different axis) and it changes no
@@ -2312,9 +2316,23 @@ postcheck.
   long rule sections it used to paste are written once to `INSTRUCTIONS/PROFILE_RULES.md` in the
   session sandbox and referenced by a pointer. The prompt opens with the medium capacity contract
   (bounded reads, incremental writes, no re-reading, close the deliverables first). Nothing is
-  dropped, summarised or weakened: the same bytes ship in the root, the prompt states that the
-  paged sections are mandatory and authoritative, and the postchecks are unchanged — the difference
-  is WHERE the instructions live, not what they demand.
+  dropped, summarised or weakened, and nothing is added that changes a mandate: the same bytes ship
+  in the root, the prompt states that the paged sections are mandatory and authoritative, and the
+  postchecks are unchanged — the difference is WHERE the instructions live, not what they demand.
+  The profile-only text (the capacity contract, the read policy and the pointer sentences) is
+  operating guidance that declares itself SUBORDINATE to the stage contract and to the
+  contradiction rule; a reading-economy hint never overrides a stage instruction to read a whole
+  file, package or donor set.
+
+**`medium` is normatively equivalent to `high`** (AGENTS.md rule 12), and the equivalence is tested,
+not assumed. The paged file carries the exact rule text `high` inlines, in the order the pointers
+occur in the prompt, so a session that reads it in full reads the same rules in the same sequence.
+For every stage prompt the suite checks that no rule line is lost, that the paged file invents no
+rule text, that the section order equals the pointer order, that the profile text carries no false
+run property and declares its subordination, and that the contract precedes the contradiction rule
+it defers to. Byte equality of the two prompts is NOT the invariant — a pointer, a heading and the
+read policy are the profile's own text — and `high`'s byte-identity with the pre-profile pipeline
+stays a separate guarantee pinned by its goldens.
 
 Measured effect (every stage prompt, rendered from the same checkout; the split and
 formatting-writing review variants track `review`). Reproduce with
@@ -2323,15 +2341,15 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 112 KB | 44 KB | 60% |
-| cold_start_review | 56 KB | 20 KB | 64% |
+| review | 112 KB | 45 KB | 60% |
+| cold_start_review | 56 KB | 21 KB | 63% |
 | audit | 83 KB | 40 KB | 52% |
 | revise | 111 KB | 57 KB | 48% |
 | integrate | 110 KB | 57 KB | 48% |
-| rewrite | 103 KB | 53 KB | 49% |
-| judge | 96 KB | 66 KB | 32% |
-| revision_audit | 24 KB | 10 KB | 57% |
-| revision_repair | 21 KB | 6 KB | 67% |
+| rewrite | 103 KB | 53 KB | 48% |
+| judge | 96 KB | 66 KB | 31% |
+| revision_audit | 24 KB | 11 KB | 55% |
+| revision_repair | 21 KB | 7 KB | 65% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
