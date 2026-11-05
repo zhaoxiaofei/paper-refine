@@ -54,8 +54,8 @@ GOLDEN = {
     "integrate": "dec483fab0d026fb",
     "rewrite": "c24f83c01c050f89",
     "judge": "1fec29314e18c908",
-    "revision_audit": "63c8f3a6d65509f4",
-    "revision_repair": "21f75bd003d5ccdd",
+    "revision_audit": "f912e5754ae0323c",
+    "revision_repair": "b42d5991b1503e43",
 }
 
 

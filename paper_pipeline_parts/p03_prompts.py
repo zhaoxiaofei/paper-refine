@@ -3998,7 +3998,10 @@ DELETED-PARAGRAPH AUDIT — mandatory, and it is not satisfied by the plan alone
 `revision_audit/DELETED_PARAGRAPHS.md` lists every base prose paragraph whose normalised text is
 absent from `revised/`. A moved, merged or lightly reworded paragraph appears there too: decide
 whether every fact survived, not merely whether the bytes moved. Edit that file IN PLACE and put one
-disposition in the last cell of EVERY row:
+disposition in the last cell of EVERY row. The other cells are the seed's IDENTITY of the paragraph
+(the orchestrator re-reads them to prove every seeded row survived); keep them byte-identical, pipe
+escapes (`\|`) included, and never shorten or re-summarise a paragraph cell. A table-heavy paragraph
+is seeded truncated to a fixed character budget: keep that truncated text exactly as written.
   * `OK — <why no fact is lost>` for a duplicate, artifact or obsolete paragraph, or for a paragraph
     whose every fact, number, definition and claim survives at a NAMED location in `revised/`
     (`OK — merged into Results paragraph 3; all values survive`). Do not write a bare `OK` or repeat
@@ -4079,6 +4082,11 @@ with a `rows` list (an empty plan's ledger is `{"rows": []}`):
 Apply only `confirmed` rows. A rejected row gets its exact contradicting evidence in `reason`; do not
 apply it, and do not invent a different repair. A row you cannot check is `rejected` with the missing
 check named. Never accept a plan row merely because the auditor wrote it.
+`before` and `after` are QUOTES of the applied text, not a summary of the edit: copy the exact text
+from `revised/` as it stood before the edit and as it stands after it (for a pure insertion leave
+`before` empty and quote the added text as `after`; for a pure deletion leave `after` empty). The
+orchestrator proves the actual text change sits inside those quotes, so a paraphrase is reported as
+an unplanned edit and fails the repair.
 
 Then: update `revised/CHANGELOG.md`, `revised/REVISION_REPORT.md`, the stage's hand-off report
 (`revised/MANUAL_STEPS.md`, or `revised/README-AUTHOR-TO-COMPLETE.md` under the readme policy) and

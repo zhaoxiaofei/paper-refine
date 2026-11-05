@@ -1266,7 +1266,7 @@ def _md_cell(text, limit: int = 160) -> str:
     an unescaped `|` would split a markdown table cell and a newline would break
     the row, so both are neutralized here -- the manifest.json keeps the raw text.
     """
-    return (str(text or "").replace("|", "\\|").replace("\r", " ").replace("\n", " "))[:limit]
+    return md_table_cell(text, limit)
 
 
 def tracking_readme(manifest: dict) -> str:

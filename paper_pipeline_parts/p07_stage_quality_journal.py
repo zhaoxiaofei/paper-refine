@@ -4520,6 +4520,28 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None) -> list:
     return rows
 
 
+def _deletion_audit_identity(value) -> str:
+    """The identity form shared by the seeded cell and the audit's row check.
+
+    One paragraph is written to the seed table, the auditor re-emits the table
+    with its dispositions, and `deletion_audit_problems` proves the seeded
+    paragraph text survived. That proof compares the two with THIS function, on
+    purpose: the check must accept a re-emitted row exactly when the auditor
+    kept the seeded paragraph, never because both sides were mangled alike.
+
+    Normalise (collapse whitespace, undo the markdown pipe escape) and truncate
+    BEFORE escaping the cell. Truncating the ESCAPED text cut inside the extra
+    backslashes, so the cell decoded to fewer than 1200 real characters: a row
+    the auditor copied verbatim could never match the un-truncated expectation
+    (`no longer carries N seeded paragraph row(s)` on an untouched row). A cut
+    inside a `\\|` also left a dangling backslash which escaped the following
+    cell separator -- for a table-heavy paragraph the disposition column itself
+    disappeared from the seeded row, inviting the auditor to repair the row in
+    the one way the identity check then read as a rewrite.
+    """
+    return re.sub(r"\s+", " ", str(value or "").replace("\\|", "|")).strip()[:1200]
+
+
 def deletion_audit_markdown(rows: list) -> str:
     """The seeded table the revision auditor must dispose."""
     lines = [
@@ -4535,8 +4557,8 @@ def deletion_audit_markdown(rows: list) -> str:
     if not rows:
         lines.append("| - | — | — | no base prose paragraph was removed | OK — nothing removed |")
     for i, row in enumerate(rows, 1):
-        para = str(row.get("paragraph") or "").replace("|", "\\|")[:1200]
-        doc = str(row.get("document") or "").replace("|", "\\|")
+        para = md_table_cell(_deletion_audit_identity(row.get("paragraph")))
+        doc = md_table_cell(row.get("document") or "")
         lines.append(f"| {i} | {doc} | {int(row.get('line') or 0)} | {para} |  |")
     lines += [
         "",
@@ -5038,9 +5060,11 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
     if not p.is_file():
         return [f"{p.name} is missing: the deletion audit was not written"]
 
-    def _norm_para(value) -> str:
-        return re.sub(r"\s+", " ", str(value or "").replace("\\|", "|")).strip()[:1200]
-
+    # The SAME identity function the seed cell was written with: comparing the
+    # seeded paragraph with a re-emitted row is a round-trip, and a different
+    # normalisation on each side can only report a kept row as dropped (or a
+    # dropped row as kept).
+    _norm_para = _deletion_audit_identity
     problems, seen_rows = [], 0
     seen_paragraphs = set()
     check_plan = plan_ids is not None
@@ -5049,7 +5073,7 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
         if not block["rows"]:
             continue
         seen_rows += len(block["rows"])
-        seen_paragraphs.update(_norm_para(row.get("paragraph"))
+        seen_paragraphs.update(_deletion_audit_identity(row.get("paragraph"))
                                for row in block["rows"]
                                if str(row.get("paragraph") or "").strip())
         if not any("disposition" in str(h) for h in block["header"]):

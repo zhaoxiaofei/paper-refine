@@ -1548,6 +1548,38 @@ def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
     _atomic_write_bytes(tmp, path, do, encoding=encoding)
 
 
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Write raw bytes atomically, replacing any entry (never writing through
+    a symlink). The counterpart of `write_text_atomic` for content the caller
+    must restore EXACTLY: an auxiliary session overwrites a file it shares with
+    its parent stage, and only the byte image round-trips for certain."""
+    path = Path(path)
+    _refuse_symlinked_parent(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tmp_path_for(path)
+
+    def do(f) -> None:
+        f.write(bytes(data or b""))
+
+    _atomic_write_bytes(tmp, path, do, binary=True)
+
+
+def md_table_cell(value, limit: int = None) -> str:
+    """One Markdown table cell: neutralise pipes/newlines, optionally cap it.
+
+    Truncate BEFORE escaping. Cutting the ESCAPED text can end a cell with the
+    lone `\\` of a split `\\|`; that backslash then escapes the separator the
+    row adds AFTER the cell, so the next column's value lands in this one and a
+    positional reader (a seeded-disposition check, a human) sees a short row
+    and an empty last cell. A cap is a display budget, not a byte-identity
+    contract, so spending one character on the escape is the right trade.
+    """
+    text = str(value or "").replace("\r", " ").replace("\n", " ")
+    if limit is not None:
+        text = text[:max(0, int(limit))]
+    return text.replace("|", "\\|")
+
+
 def append_text_no_follow(path: Path, text: str, encoding: str = "utf-8") -> None:
     """Append to a log without following a symlink planted at its path.
 
@@ -6664,7 +6696,7 @@ def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
     ]
     rows = info.get("rows") or []
     for i, r in enumerate(rows, 1):
-        evidence = str(r.get("evidence", "")).replace("|", "\\|")[:140]
+        evidence = md_table_cell(r.get("evidence", ""), 140)
         lines.append(f"| {i} | {r['rule']} | {r.get('tier') or 'advisory'} | {r['severity']} | "
                      f"{r['location']} | {evidence} | {r['fix']} |  |")
     if not rows:
@@ -7066,8 +7098,8 @@ def _evidence_artifact_table(rows: list, columns: list, empty_note: str) -> str:
     out = ["| # | " + " | ".join(columns) + " | disposition |",
            "|---|" + "---|" * (len(columns) + 1)]
     for i, r in enumerate(rows, 1):
-        cells = " | ".join(str(r.get(c, "")).replace("|", "\\|")[:140] for c in columns)
-        disposition = str(r.get("disposition") or "").replace("|", "\\|")
+        cells = " | ".join(md_table_cell(r.get(c, ""), 140) for c in columns)
+        disposition = md_table_cell(r.get("disposition") or "")
         out.append(f"| {i} | {cells} | {disposition} |")
     if not rows:
         out.append("| - | " + " | ".join("—" for _ in columns) + f" | {empty_note} |")
@@ -8129,7 +8161,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
             lines += ["| rule | file | the two statements |", "|---|---|---|"]
             for r in contr_rows[:20]:
                 lines.append(f"| {r.get('rule')} | {r.get('file')} | "
-                             + str(r.get("evidence", "")).replace("|", "\\|")[:200] + " |")
+                             + md_table_cell(r.get("evidence", ""), 200) + " |")
         else:
             lines.append(f"(the check could not run: {contr.get('error')})")
     decl_ev = ev.get("submission_declaration") or {}

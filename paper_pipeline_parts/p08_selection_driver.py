@@ -2412,14 +2412,18 @@ def _revision_repair_ledger(sb: Path, rows: list, with_ids: bool = False):
             # applied text (`before`/`after`); accepting only id/verdict/reason
             # let a confirmed row stand for an arbitrary whole-file rewrite
             # (F14). A pure addition has an empty `before` but still needs the
-            # quoted `after` text.
+            # quoted `after` text; a pure deletion is the mirror image and keeps
+            # its quoted `before` (the span check pairs it with the empty
+            # remainder, exactly as it pairs an insertion), so only a row with
+            # NEITHER quote is rejected.
             if all(key in plan_row for key in _REPAIR_DESCRIBED_KEYS):
                 if "before" not in row or "after" not in row:
                     return _done(f"REPAIR_LEDGER row {rid} carries no applied text "
                                  f"(expected `before` and `after` quotes)", {}, set())
-                if not str(row.get("after") or "").strip():
-                    return _done(f"REPAIR_LEDGER row {rid} carries an empty `after` quote "
-                                 f"for a confirmed repair", {}, set())
+                if not str(row.get("before") or "").strip() \
+                        and not str(row.get("after") or "").strip():
+                    return _done(f"REPAIR_LEDGER row {rid} carries neither a `before` nor "
+                                 f"an `after` quote for a confirmed repair", {}, set())
     missing = [rid for rid in plan_ids if rid not in seen]
     if missing:
         return _done(f"REPAIR_LEDGER does not re-validate planned row(s) "
@@ -2582,19 +2586,60 @@ def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
 # The bounded repair is documented to update its own ledger/report/changelog as
 # it applies the plan; those files are bookkeeping, not unplanned manuscript
 # edits, so the application audit below allows them. The hand-off report is
-# MANUAL_STEPS.md, or AUTHOR_TO_COMPLETE_README under the readme policy.
+# MANUAL_STEPS.md, or AUTHOR_TO_COMPLETE_README under the readme policy. The
+# classified TODO CSV is DERIVED from that report by the orchestrator
+# (`manual_todo_gate`), so a repair that mirrors the new row into it (as several
+# sessions do) is updating the same bookkeeping, not an unplanned manuscript
+# edit; the postcheck regenerates it from the markdown either way.
 REPAIR_BOOKKEEPING = {"REPAIR_LEDGER.json", "REPAIR_LEDGER.md", "CHANGELOG.md",
                       "REVISION_REPORT.md", "revision_report.json", "MANUAL_STEPS.md",
-                      AUTHOR_TO_COMPLETE_README}
+                      "MANUAL_TODO.csv", AUTHOR_TO_COMPLETE_README}
 
 
-def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: set) -> list:
+def _repair_bookkeeping_rel(rel: str) -> bool:
+    """True for a package-relative path the bounded repair may change freely.
+
+    The application audit exists to bound MANUSCRIPT edits ("applies only the
+    confirmed rows"). Three classes of path are not manuscript edits:
+
+      * the repair's own bookkeeping -- its ledger/changelog/report/hand-off
+        report and the derived TODO CSV. This is the SAME class the corpus walk
+        already excludes (`is_bookkeeping_name`), so an audit cannot disagree
+        with the corpus about what is content. A hand-off report is prose, so a
+        ledger `before`/`after` quote of it is a summary in practice; the
+        file-level bound is the documented bound for bookkeeping.
+      * stage scratch under `work/` at ANY depth (`CORPUS_EXCLUDE_TOP`): it
+        never enters the corpus, the version token, the pin or the judged
+        package. A repair that re-renders the manuscript it just edited
+        (`work/render/*.md`, `.html`, `.pdf`) is updating a derived view, and
+        that re-render is not an unplanned manuscript edit.
+    """
+    parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p and p != "."]
+    if not parts:
+        return False
+    if any(part in CORPUS_EXCLUDE_TOP for part in parts[:-1]):
+        return True
+    name = parts[-1]
+    return (name in REPAIR_BOOKKEEPING
+            or is_bookkeeping_name(name)
+            or is_author_to_complete_readme_name(name))
+
+
+def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: set,
+                               with_reasons: bool = False):
     """Files changed by the bounded repair that no CONFIRMED plan row covers.
 
     `revised_prerepair` is snapshotted just before the repair session, so the
     run can prove the documented guarantee ("applies only the confirmed rows").
     Before this check, a repair could rewrite any file under revised/ (or reject
     every row) and the postcheck re-hashed and accepted the result.
+
+    With `with_reasons=True` the result is `{package-relative path: why}` in
+    sorted key order; the default is the plain sorted path list every caller
+    and test compares. The reasons exist because a span violation happens
+    INSIDE a file a confirmed row names: reporting that as "no CONFIRMED plan
+    row covers it" sent the operator looking for a missing plan row that was
+    there all along.
     """
     allowed = set()
     for row in rows:
@@ -2606,7 +2651,7 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     after = (hash_manifest(cur, on_error="<unreadable>") or {}).get("files") or {}
     ledger = _repair_ledger_entries(cur)
     plan_by_id = {row["id"]: row for row in rows}
-    bad = set()
+    bad = {}
     # A CONFIRMED repair whose file is byte-identical to the pre-repair copy
     # was accepted without being applied. Equality used to short-circuit every
     # postcondition check (F06): if the promised `after` is absent while the
@@ -2614,7 +2659,7 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     for rid in sorted(confirmed_ids):
         row = plan_by_id.get(rid) or {}
         rel = strip_leading_dot_slash(str(row.get("file") or ""))
-        if not rel or rel in REPAIR_BOOKKEEPING or before.get(rel) != after.get(rel):
+        if not rel or _repair_bookkeeping_rel(rel) or before.get(rel) != after.get(rel):
             continue
         entry = ledger.get(rid) or {}
         _before_q = _repair_norm(entry.get("before") or row.get("wrong") or "")
@@ -2626,18 +2671,19 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
             continue
         _tn = _repair_norm(_text)
         if _before_q in _tn and _after_q not in _tn:
-            bad.add(rel)
+            bad.setdefault(rel, "the confirmed row is a no-op: its promised `after` "
+                                "text is absent and its `before` text is still present")
     for rel in sorted(set(before) | set(after)):
         if before.get(rel) == after.get(rel):
             continue
-        if rel in REPAIR_BOOKKEEPING:
+        if _repair_bookkeeping_rel(rel):
             continue
         # EXACT file match: a confirmed row names a file, never a directory.
         # The old prefix match let one row ("figures") legitimize arbitrary
         # edits across the whole subtree.
         if rel in allowed:
             continue
-        bad.add(rel)
+        bad.setdefault(rel, "changed without a confirmed plan row naming it")
     # A confirmed row whose path is now a symlink is a write-through, not an
     # edit: hash_manifest skips symlinks, so the pre/post manifests cannot see
     # it. A plan row that was absent at audit time can be turned into a link
@@ -2645,7 +2691,8 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     # change.
     for rel in sorted(allowed):
         if (cur / rel).is_symlink():
-            bad.add(rel)
+            bad.setdefault(rel, "the confirmed row's path is a symlink "
+                                "(a write-through, not an edit)")
     # A NEW symlink is invisible to both manifests (`hash_manifest` skips
     # links), and the loop above only inspects the confirmed plan's paths. A
     # repair could therefore create `revised/evil.md -> /etc/hostname` and the
@@ -2672,20 +2719,22 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
                     continue
             except OSError:
                 pass
-        bad.add(rel)
+        bad.setdefault(rel, "a new or retargeted symlink under revised/")
     # The file-level bound is not enough for a DESCRIBED plan row: the ledger's
     # quoted `before`/`after` text must cover the actual text change, or a
     # confirmed row still authorizes a whole-file rewrite (F14). Opaque/binary
     # files keep the documented file-level bound because there is no text diff.
     # Rows are grouped by FILE: two confirmed rows may legitimately change two
-    # different paragraphs of one file (F17).
+    # different paragraphs of one file (F17). Bookkeeping/scratch is excluded
+    # for the same reason as above: its prose (a hand-off report entry, a
+    # regenerated render) is not bound by a manuscript span quote.
     quotes_by_file = {}
     for rid in sorted(confirmed_ids):
         row = plan_by_id.get(rid) or {}
         if not all(key in row for key in _REPAIR_DESCRIBED_KEYS):
             continue
         rel = strip_leading_dot_slash(str(row.get("file") or ""))
-        if not rel or rel in bad:
+        if not rel or rel in bad or _repair_bookkeeping_rel(rel):
             continue
         entry = ledger.get(rid) or {}
         quotes_by_file.setdefault(rel, []).append(
@@ -2693,7 +2742,10 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
              _repair_norm(entry.get("after", ""))))
     for rel, quotes in sorted(quotes_by_file.items()):
         if _repair_spans_cover(pre, cur, rel, quotes):
-            bad.add(rel)
+            bad.setdefault(rel, "the applied text is outside the confirmed row's "
+                                "quoted `before`/`after`")
+    if with_reasons:
+        return dict(sorted(bad.items()))
     return sorted(bad)
 
 
@@ -2750,13 +2802,44 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
     are part of the accepted revise attempt, so the attempt's start (and the
     history row `postcheck` later writes) must keep the revise session's own
     values, and the audit/repair durations live in their own records.
+
+    The PARENT's completion marker is restored after the aux session. The
+    sandbox root has one `_pipeline_done.json` (`MARKER_FILE`) and the aux
+    prompts tell their session to write it too, with its OWN stage
+    (`revision_audit`) or, at times, with the run id instead of the stage. The
+    revise postcheck re-run after the chain reads that file and validated the
+    AUX stage against `revise`, so a successful audit/repair turned the
+    already-done revise into a failure ("marker stage mismatch: expected
+    'revise', got 'revision_audit'") -- whose retry burned the revise attempt
+    and masked the audit's real result. Restoring the bytes the revise attempt
+    earned keeps the completion signal the parent stage's own; the aux
+    session's acceptance comes from its deliverable (`REPAIR_PLAN.json`, the
+    disposed deletion table, the repair ledger), not from re-labelling the
+    parent's marker.
     """
     started = rec.get("last_attempt_started")
+    marker = sb / MARKER_FILE
+    saved_marker = None
+    if marker.is_file():
+        try:
+            saved_marker = marker.read_bytes()
+        except OSError:
+            saved_marker = None
     try:
         return _execute_attempt_in(sb, rec, cmd, timeout, prompt_file, log_name, False)
     finally:
         if started is not None:
             rec["last_attempt_started"] = started
+        try:
+            if saved_marker is not None:
+                write_bytes_atomic(marker, saved_marker)
+            elif marker.is_file():
+                # No parent marker existed to keep: the aux session's marker is
+                # not this stage's completion signal, so it must not linger as
+                # one for a later postcheck.
+                marker.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
@@ -3000,12 +3083,14 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                     unplanned = ["revised_prerepair/ (baseline digest changed)"]
                 else:
                     unplanned = _revised_repair_violations(pre, sb / REVISED_DIR, rows,
-                                                           confirmed_ids)
+                                                           confirmed_ids, with_reasons=True)
                 if unplanned:
                     repair_rec["status"] = "failed"
                     repair_rec["error"] = (
-                        "the bounded repair changed file(s) no CONFIRMED plan row covers: "
-                        + ", ".join(unplanned[:6]))
+                        "the bounded repair changed file(s) outside what its CONFIRMED "
+                        "plan rows cover: "
+                        + "; ".join(f"{_rel} ({_why})" if _why else _rel
+                                    for _rel, _why in list(unplanned.items())[:6]))
                 else:
                     repair_rec["ledger"] = counts
     rec["revision_repair"] = repair_rec
