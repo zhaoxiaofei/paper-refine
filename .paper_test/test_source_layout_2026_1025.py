@@ -191,6 +191,30 @@ def test_operational_contract():
     check("AGENTS.md limits the language/format exception to the role's own candidate",
           "in-role mechanical language/format pass" in agents
           and "may not change a claim, fact" in agents)
+    check("AGENTS.md scopes the source-hierarchy agreement rule to the session's mandate",
+          "where a session's mandate reaches the change" in flat_agents
+          and "not an independent obligation to edit a conflict outside a session's "
+              "admitted scope" in flat_agents)
+    check("AGENTS.md makes the mechanical language pass an express exception",
+          "express exception to the previous paragraph's leave-the-target-unchanged "
+          "sentence" in flat_agents)
+    check("AGENTS.md treats a gap record as coverage, not as a finding",
+          "A gap record (`unable — <gap>`, rule 1's guided-review-off case) is a "
+          "coverage row, not a finding" in flat_agents)
+    check("AGENTS.md defines own/peer and keeps the label away from the judge",
+          "`own` is a comparison's `introduced` row" in flat_agents
+          and "`peer` is its `resolved` row" in flat_agents
+          and "the judge never sees another session's findings" in flat_agents)
+    check("AGENTS.md scopes the candidate digest to the judged corpus",
+          "The candidate digest covers the judged corpus" in flat_agents
+          and "The assembled journal submission is a derived, narrower view" in flat_agents)
+    check("AGENTS.md does not claim final_clean_version is always written",
+          "written whenever a publishable champion corpus exists" in flat_agents
+          and "When there is no publishable champion corpus" in flat_agents)
+    check("AGENTS.md normalizes rule 12's two transformations before comparing lines",
+          "The equivalence checks apply those two changes before comparing lines" in flat_agents
+          and "after those two permitted transformations" in flat_agents
+          and "one-level demotion of a level-2 Markdown heading" in flat_agents)
 
 
 def main() -> int:

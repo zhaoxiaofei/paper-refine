@@ -210,7 +210,7 @@ Everything lives under the root you passed to `setup`:
 | `reports/round<r>_judge_conflicts.md` (+ `.json`) | the round's cross-judge conflicts (opposite scores, a claim one judge files as `resolved` and another as `introduced`, different numbers for the same fact, clean-vs-findings check dispositions), each a REQUIRED MANUAL CHECK; the cumulative `reports/JUDGE_CONFLICTS_TODO.md` collects every round's open items |
 | `reports/round<r>_review_findings.csv` | the round's review findings (id, check, category, severity, location, evidence, explanation), one row each |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
-| `final_clean_version_<root name>/` | the champion corpus, byte-identical to the judged tree (names preserved) and ready as the next run's `--source`; built whenever a champion/pin exists, certified or not. When no winner/pin exists, the corpus is empty or the digest does not match the pin, nothing is published and `final_clean_version.readme.md` records the skip reason |
+| `final_clean_version_<root name>/` | the champion corpus, byte-identical to the judged tree (names preserved) and ready as the next run's `--source`; built whenever a publishable champion corpus exists (a champion or pin on disk, a non-empty corpus, and — when the pin records a digest — a matching corpus digest), certified or not. Its bytes are the candidate digest's corpus (including `code/` and the evidence areas it carries); `journal_submission/` is a derived, narrower view and is not the pin. When there is no such corpus — no winner/pin, an empty corpus, or a digest that does not match the pin — nothing is published and `final_clean_version.readme.md` records the skip reason |
 | `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, the M19 LENGTH status against the relaxed caps (with the numbers), and the reuse hint |
 | `redlines/` | the pipeline's tracked-changes `.docx` per candidate and source pair (`from-base/`, `from-original/`, `from-setup-source/`) |
 | `tracking/` | one difference-tracking copy per baseline (`*.tracking-original.*`, `*.tracking-a1.*`, `*.tracking-w<k>.*`, `*.tracking-winner<r>.*`, or the matching `*.logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
@@ -2280,7 +2280,9 @@ is written where every downstream session reads it:
 
 * `guided_review/findings.json` in each auditor/reviser sandbox carries `guided_review: off`, the
   `named_gap` sentence, and one `unable -- <gap>` coverage row per check id the guided review
-  would have carried (the file is synthesized by `synthesize_frozen_review`);
+  would have carried (the file is synthesized by `synthesize_frozen_review`); those are coverage
+  rows, not findings — the cold-start `X-9xx` rows remain the frozen finding list, and no session
+  disposes or resolves a gap row;
 * the audit and revise prompts open with the "THIS ROUND HAS NO GUIDED REVIEW" block, so no
   session mistakes the cold-start review's silence for coverage;
 * the cold-start review's prompt states that its `coverage.md` is the round's ONLY coverage record;
@@ -2327,10 +2329,12 @@ postcheck.
   edit, and write-economy guidance never demands a format-invalid partial deliverable.
 
 **`medium` is normatively equivalent to `high`** (AGENTS.md rule 12), and the equivalence is tested,
-not assumed. The paged file carries the blocks byte-for-byte (only a heading level may be demoted
-so it cannot end a section), in the order their pointers occur in the prompt, so a session that
-reads it in full reads the same rules in the same sequence. For every stage prompt the suite checks
-that no rule line is lost, that expanding the pointers in place reproduces `high`'s rule sequence,
+not assumed. The paged file carries the blocks byte-for-byte (only a level-2 heading may be demoted
+one level so it cannot end a section), in the order their pointers occur in the prompt, so a session that
+reads it in full reads the same rules in the same sequence. For every stage prompt the suite checks,
+after the two permitted transformations, that no rule line is lost (a heading promotion or a
+two-level demotion is still a lost line), that expanding the pointers in place reproduces `high`'s
+rule sequence,
 that the paged file invents no rule text, that the section order equals the pointer order, that the
 profile text carries no false run property and declares its subordination, and that the contract
 precedes the contradiction rule it defers to. Byte equality of the two prompts is NOT the invariant
@@ -2977,7 +2981,10 @@ session's opponent comparisons counts once). The table separates `own` (the
 rows a version's own sweep sessions filed) from `peer` (the rows the other
 versions' comparisons filed against it) -- the panel's scrutiny check, since
 the two sources have different depth -- and normalizes by the sessions that
-could mention the version, which is stable as the field size changes. Since the
+could mention the version, which is stable as the field size changes. The
+orchestrator assigns the label from each comparison's target/opponent roles
+after the sheets exist; it is not provenance shown to the judge, and the judge
+never sees another session's findings. Since the
 2026-10-01 calibration it is also the selection's **leading ranking signal**:
 the `run` command accumulates the reported defect counts over the
 canonical severity_tier_category order (fatal, critical, major, minor -- the

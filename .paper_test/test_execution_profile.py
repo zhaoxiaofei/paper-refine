@@ -15,8 +15,9 @@ What this suite pins:
     is materially smaller, the paged text really ships in the sandbox
     (`INSTRUCTIONS/PROFILE_RULES.md`), and the stage contract is stated inline.
   * `medium` is NORMATIVELY EQUIVALENT to `high` (AGENTS.md rule 12): the prompt
-    plus the paged file carry every rule line `high` inlines, expanding the
-    pointers in place reproduces `high`'s rule sequence, the paged file
+    plus the paged file carry every rule line `high` inlines after the two
+    permitted transformations, expanding the pointers in place reproduces
+    `high`'s rule sequence, the paged file
     invents no rule text, the sections are in the prompt's pointer order, the
     profile contract asserts no model/window property, and the contract is
     followed by the contradiction rule it defers to.
@@ -185,6 +186,32 @@ def _rule_lines(text: str) -> list:
     return [ln.strip() for ln in text.splitlines() if ln.strip()]
 
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+
+
+def _line_present(line: str, pool_lines: set) -> bool:
+    """True when a `high` line survives the two transformations rule 12 permits.
+
+    The comparison is after a trailing-whitespace trim.  A level-2 Markdown
+    heading also survives when the pool carries the SAME heading text at level 3
+    -- the one-level demotion `page_stage_prompt` performs so an embedded
+    heading cannot end its section.  A heading promotion, a two-level demotion,
+    a different heading text, or any other edit is still a lost line.
+    """
+    line = line.strip()
+    if line in pool_lines:
+        return True
+    m = _HEADING_RE.match(line)
+    if not m or len(m.group(1)) != 2:
+        return False
+    text = m.group(2).strip()
+    for cand in pool_lines:
+        cm = _HEADING_RE.match(cand)
+        if cm and cm.group(2).strip() == text and len(cm.group(1)) == 3:
+            return True
+    return False
+
+
 def _joined_block_line(line: str, pool: str) -> bool:
     """Is `line` two adjacent blocks of `high` joined without a newline?
 
@@ -274,8 +301,10 @@ def test_medium_matches_high_rules() -> None:
         med, rules = entry["text"], entry["rules"]
         h = high.get(name, "")
         pool = med + "\n" + rules
+        pool_lines = set(_rule_lines(pool))
         lost = [ln for ln in _rule_lines(h)
-                if ln not in pool and not _joined_block_line(ln, pool)]
+                if not _line_present(ln, pool_lines)
+                and not _joined_block_line(ln, pool)]
         if lost:
             problems.append(f"{name}: rule line lost {lost[0][:70]!r}")
         invented = [ln for ln in _rule_lines(rules)
@@ -301,6 +330,14 @@ def test_medium_matches_high_rules() -> None:
           not problems, "; ".join(problems[:3]))
     check("rule 12: expanding the paged pointers reproduces the high rule sequence",
           not sequence_problems, ", ".join(sequence_problems))
+    check("rule 12: a permitted heading demotion is not a lost line",
+          _line_present("## Phase 1", {"### Phase 1"}))
+    check("rule 12: a heading promotion is still a lost line",
+          not _line_present("### Heading", {"## Heading"}))
+    check("rule 12: a two-level heading demotion is still a lost line",
+          not _line_present("## Heading", {"#### Heading"}))
+    check("rule 12: a trailing-whitespace trim is not a lost line",
+          _line_present("rule text   ", {"rule text"}))
 
     flat = " ".join(contract.split())
     check("rule 12: the profile asserts no model/window property",
