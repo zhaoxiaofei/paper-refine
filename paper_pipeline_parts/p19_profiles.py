@@ -42,13 +42,14 @@
 #    `medium` and `high` are NORMATIVELY EQUIVALENT (AGENTS.md rule 12): every
 #    rule block `high` inlines is carried verbatim by the medium prompt or by
 #    its paged file, in prompt order; the only profile-only text is this
-#    profile's own operating guidance (the capacity contract, the read policy
-#    and the pointer sentences), it declares itself subordinate to the stage
-#    contract and to the contradiction rule, and it can never add a rule, relax
-#    one, or assert a property of the run.  The paged file is written in the
-#    order the pointers occur in the prompt, so a session that reads it in full
-#    reads the same rules in the same sequence `high` inlines; the tests carry
-#    the equivalence check (`.paper_test/test_execution_profile.py`).
+#    profile's own operating guidance (the capacity contract, the read policy,
+#    the pointer sentences and the subordination declaration), it declares itself
+#    subordinate to the stage contract and to the contradiction rule, and it can
+#    never add a rule, relax one, or assert a property of the run.  The paged
+#    file is written in the order the pointers occur in the prompt, so a session
+#    that reads it in full reads the same rules in the same sequence `high`
+#    inlines; the tests carry the equivalence check
+#    (`.paper_test/test_execution_profile.py`).
 #
 # 2. `--guided-review on|off` (and `--no-guided-review`)
 #
@@ -270,9 +271,9 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     pointer in the block's own position, so expanding the pointers in place
     reconstructs the `high` prompt's rule sequence exactly.  The profile-only
     text added by this function is exactly the capacity contract, the read
-    policy and the pointer sentences; it declares itself subordinate to the
-    stage contract, so the paged run and the inlined run resolve a conflict
-    the same way.
+    policy, the pointer sentences and the subordination declaration; it declares
+    itself subordinate to the stage contract, so the paged run and the inlined
+    run resolve a conflict the same way.
 
     `high` pages nothing: the prompt is the pipeline's original text plus the
     contradiction rule, which every stage prompt carries under every profile

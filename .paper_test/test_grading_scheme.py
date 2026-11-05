@@ -499,7 +499,8 @@ check("D4 the score model documents the contract, the rules and the tie-breaks",
           "when the cleanest ranked version reaches `tiebreak_defect_floor` or every "
           "cell is used), ascending",
           "-median", "-mean", "IQR", "digest",
-          "the incumbent rule overrides on an exact (median, mean, IQR) tie"]
+          "the incumbent rule is applied before the prefix and digest on an exact "
+          "(median, mean, IQR) tie"]
       and "critical_remaining" not in " ".join(str(x) for x in sm.get("tiebreaks") or [])
       and any("critical_remaining" in str(x)
               for x in sm.get("reported_but_not_ranked") or [])

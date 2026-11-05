@@ -216,11 +216,11 @@ Everything lives under the root you passed to `setup`:
 | `tracking/` | one difference-tracking copy per baseline (`*.tracking-original.*`, `*.tracking-a1.*`, `*.tracking-w<k>.*`, `*.tracking-winner<r>.*`, or the matching `*.logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
 | `pdfs/` | the compiled/converted PDFs per version (LaTeX via `latexmk`, DOCX via Word/MCP) -- persistent: `prune` never touches them |
 
-The selection rule is one incumbent guard plus one ordered default key. The
-default key is the round's reported **defect prefix** (fewer defects wins) →
-**median** → **mean** → **IQR** → content **digest**. If the key's leader is not
-the incumbent and that leader ties the incumbent exactly on (median, mean, IQR),
-the incumbent is kept; otherwise the key's leader wins. The prefix comes from the
+The selection rule is one incumbent guard plus one ordered default key. Retention
+is applied first: if the key's leader is not the incumbent and ties it exactly on
+(median, mean, IQR), the incumbent is kept. Otherwise the default key decides:
+**defect prefix** (fewer defects wins) → **median** → **mean** → **IQR** → content
+**digest**. The prefix comes from the
 blind panel's own issue ledger; the panel statistics sit below it. See *How a
 round is decided* below for the rationale and the gates.
 
@@ -240,7 +240,10 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 
 * `certified: true` — every gate passed (complete panel, the champion
   re-derives from the sheets, the digests, and the incumbent base's digest,
-  evidence unchanged, the enabled gates clean) and the answer is final;
+  evidence unchanged, the enabled gates clean) and the answer is final.
+  Certification is a verdict on the decision's integrity, not a claim that the
+  package is clean: a `--no-guided-review` round carries its named gap in the
+  verdict and is never reported as clean;
 * `provisional: true` — only some rounds are complete; the champion is the last
   completed round's. `decide --require-complete` makes that an exit 4;
 * a `blockers` entry — the champion is **NOT certified**; `decide` exits 5.
@@ -2153,8 +2156,8 @@ revisers. It never edits a package; its product is the decision record
   reviewer closed as `OK` is re-checked against its own bar. This build's
   AUDIT role files no new findings: a real defect the closure hid is recorded
   in `audit/UNRESOLVED.md` with its location and evidence, as an observation
-  for the next review (no tier until that review files it on the shared
-  scale), so the frozen list the revisers see is never silently extended;
+  for the next review (no tier until that review re-derives it and files the
+  defect as a finding on the shared scale), so the frozen list the revisers see is never silently extended;
 * the revisers consume the **audited** list (frozen − drops) and the drops stay
   visible to the human in `audit/audit.json`, so a drop is always re-checkable
   and reversible;
@@ -2322,7 +2325,8 @@ postcheck.
   dropped, summarised or weakened, and nothing is added that changes a mandate: the same bytes ship
   in the root, the prompt states that the paged sections are mandatory and authoritative, and the
   postchecks are unchanged — the difference is WHERE the instructions live, not what they demand.
-  The profile-only text (the capacity contract, the read policy and the pointer sentences) is
+  The profile-only text (the capacity contract, the read policy, the pointer sentences and the
+  subordination statement) is
   operating guidance that declares itself SUBORDINATE to the stage contract and to the
   contradiction rule; a reading-economy hint never overrides a stage instruction to read a whole
   file, package or donor set, or the re-validation read that re-opens a cited location before an
@@ -2456,7 +2460,7 @@ The guided-review/audit/revise path now carries them explicitly:
   document, an unfilled architecture table); the attack files no new finding in
   this build, so a real defect the closure hid is recorded in
   `audit/UNRESOLVED.md` with its location and evidence for the next review
-  (no tier until that review files it);
+  (no tier until that review re-derives it and files the defect as a finding);
 * the reviser resolves M25–M29 by aligning the EDITABLE surface corpus-wide
   (rule E11), and J5 licenses **scoped restructuring** inside the finding's
   declared scope under a content freeze, a numbering check and one
@@ -2563,7 +2567,8 @@ when the frozen review carries probe rows, `audit/PROBE_AUDIT.md` must dispose
 each probe (`stands` / `needs-evidence`); this build's auditor files no `AU-*`
 rows, so a real anomalous value or label a probe closure hid is recorded in
 `audit/UNRESOLVED.md` (with the closure and its evidence; no tier until the
-next review files it) as an observation for the next review instead of being
+next review re-derives it and files the defect as a finding) as an observation
+for the next review instead of being
 promoted into the frozen list.
 
 **The discovery class reaches its two missing consumers — the integrator by
@@ -2925,9 +2930,9 @@ count at that prefix LEADS the ranking -- the number of defects the panel
 attributed to a version is the most direct improvement signal, while the flat
 median is coarse on a -4..+4 integer scale), then `-median`, then `-mean`, `IQR`,
 the provenance-free content digest; the run id is only a deterministic sort
-fallback, never a champion input. If the key's leader is not the incumbent and
-that leader ties the incumbent exactly on (median, mean, IQR), the incumbent is
-kept and the prefix and digest do not retire it; otherwise the key's leader wins. No cross-session deduplication is applied by default
+fallback, never a champion input. Retention is applied first: if the key's leader
+is not the incumbent and that leader ties the incumbent exactly on (median, mean,
+IQR), the incumbent is kept; otherwise the key's leader wins. No cross-session deduplication is applied by default
 (`dedup_mode` `off`): the counts are the mentions each judge sheet filed (a
 repeated row inside one sheet counts once), and the peer/own split plus the
 exposure-normalized rates stay in the census for inspection. The OPT-IN

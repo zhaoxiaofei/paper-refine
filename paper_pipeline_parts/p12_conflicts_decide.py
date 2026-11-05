@@ -1308,7 +1308,8 @@ def score_model_doc(ctx=None) -> dict:
                       "peer then own; the walk stops when the cleanest ranked version reaches "
                       "`tiebreak_defect_floor` or every cell is used), ascending",
                       "-median", "-mean", "IQR", "digest",
-                      "the incumbent rule overrides on an exact (median, mean, IQR) tie"],
+                      "the incumbent rule is applied before the prefix and digest on an exact "
+                      "(median, mean, IQR) tie"],
         "tiebreak_notes": "median/mean/IQR are PANEL statistics (verifiable); the cumulative "
                           "counts come from the panel's own ledger rows: each cell is the "
                           "count of one (severity, tier, source) combination "
@@ -8400,8 +8401,8 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              "the configured floor or every cell is used; fewer defects first), then `-median`, "
              "`-mean`, `IQR`, the CONTENT DIGEST (provenance-free: a "
              "perfect tie must never be decided by the arm's name) and only after that the id. "
-             "An exact (median, mean, IQR) tie still keeps the incumbent base -- that rule "
-             "overrides the prefix. `critical_remaining`/`writing_remaining` are reported and "
+             "An exact (median, mean, IQR) tie is applied as retention BEFORE the prefix "
+             "and digest. `critical_remaining`/`writing_remaining` are reported and "
              "cross-checked (self-reported marker values, +inf when absent) but are NOT ranking "
              "keys. "
              "`vs_base` -- the panel's own head-to-head median against the round's incumbent -- is "

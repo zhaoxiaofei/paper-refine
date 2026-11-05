@@ -1505,8 +1505,8 @@ treated as unfinished).
   orchestrator verifies base/, non_revised/ and guided_review/ are byte-identical after you.
 * This audit adds no findings. A defect you notice outside the frozen list is an OBSERVATION in
   `audit/UNRESOLVED.md` (location + re-runnable evidence), never an `AU-` row; the next review
-  files it on the shared scale. An observation must name one instance, not aggregate ("several
-  sentences are long" is not an observation).
+  re-derives it and files the underlying defect as a finding on the shared scale. An observation
+  must name one instance, not aggregate ("several sentences are long" is not an observation).
 * A `drop` of a category-2 (writing quality, logic, repetition) or category-4 finding needs your
   own evidence for WHY it is not a defect: quote the text and show that the reading is CORRECT as
   written -- it is not worse than the alternative on any shared prose criterion (precision, idiom,

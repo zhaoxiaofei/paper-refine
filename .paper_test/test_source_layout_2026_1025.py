@@ -201,9 +201,14 @@ def test_operational_contract():
     check("AGENTS.md treats a gap record as coverage, not as a finding",
           "A gap record (`unable — <gap>`, rule 1's guided-review-off case) is a "
           "coverage row, not a finding" in flat_agents)
-    check("AGENTS.md defines own/peer and keeps the label away from the judge",
-          "`own` is a comparison's `introduced` row" in flat_agents
-          and "`peer` is its `resolved` row" in flat_agents
+    check("AGENTS.md defines own/peer by the version whose defect the row names",
+          "A comparison's `introduced` row names the TARGET version's defect" in flat_agents
+          and "its `resolved` row names the OPPONENT version's defect" in flat_agents
+          and "never against the other side" in flat_agents
+          and "`own` is such a row filed where that version was the comparison's target"
+              in flat_agents
+          and "`peer` is such a row filed where that version was the comparison's opponent"
+              in flat_agents
           and "the judge never sees another session's findings" in flat_agents)
     check("AGENTS.md scopes the candidate digest to the judged corpus",
           "The candidate digest covers the judged corpus" in flat_agents
@@ -215,6 +220,43 @@ def test_operational_contract():
           "The equivalence checks apply those two changes before comparing lines" in flat_agents
           and "after those two permitted transformations" in flat_agents
           and "one-level demotion of a level-2 Markdown heading" in flat_agents)
+    check("AGENTS.md keeps raw data off the editable-surface list",
+          "only a lower surface that is editable changes" in flat_agents
+          and "raw data is a read-only source, so the editable surfaces are the levels below it"
+              in flat_agents
+          and "only an editable lower surface changes, highest to lowest: code, then raw data"
+              not in flat_agents)
+    check("AGENTS.md keeps an audit observation off the shared scale",
+          "it carries no tier and is not on the shared scale" in flat_agents
+          and "may re-derive an observation and file the underlying defect as a finding"
+              in flat_agents
+          and "file an observation on the shared scale" not in flat_agents)
+    check("AGENTS.md conditions the judged bytes on whether bounded repair ran",
+          "The panel runs after bounded repair when a bounded repair runs" in flat_agents
+          and "when no bounded repair runs, the arm’s revised version is its final candidate"
+              in flat_agents
+          and "The pre-repair package is not scored" not in flat_agents)
+    check("AGENTS.md applies retention before the order key",
+          "The champion decision applies retention before the order key" in flat_agents
+          and "this retention overrides the prefix and the digest" not in flat_agents)
+    check("AGENTS.md ranges the review over the ENTIRE round corpus",
+          "take the ENTIRE round corpus as their object" in flat_agents
+          and "the analysis code when the corpus carries it" in flat_agents
+          and "take the ENTIRE submission package as their object" not in flat_agents)
+    check("AGENTS.md keeps external citations outside the dangling-path rule",
+          "may refer by path only to content the submission itself carries" in flat_agents
+          and "A citation of external literature, a public dataset or a DOI is not such a path"
+              in flat_agents)
+    check("AGENTS.md separates certification from a clean report and names the guided-review gap",
+          "Certification is a verdict on the integrity of that decision, not a claim that the "
+          "package is clean" in flat_agents
+          and "no output calls such a round clean" in flat_agents
+          and "A post-repair verification record that leaves an unrepaired defect is reported"
+              in flat_agents)
+    check("AGENTS.md counts the subordination statement as profile-only text",
+          "the subordination statement the next bullet requires" in flat_agents
+          and "this statement is part of the profile-only text named in the preceding bullet"
+              in flat_agents)
 
 
 def main() -> int:
