@@ -255,6 +255,11 @@ def test_medium_matches_high_rules() -> None:
           and "paged run" in contract)
     check("rule 12: the profile says it is operating guidance, not a rule",
           "restates no rule" in flat)
+    check("rule 12: the write guidance follows the deliverable's own format",
+          "valid document at every write" in flat and "malformed file" in flat)
+    check("rule 12: the no-re-read guidance is scoped to context reads",
+          "FOR CONTEXT" in flat and "re-validation" in flat
+          and "re-opens the cited location" in flat)
     check("rule 12: the profile defers to the stage contract and the contradiction rule",
           "SUBORDINATE to the stage contract" in flat
           and "CONTRADICTION RULE below decides" in flat

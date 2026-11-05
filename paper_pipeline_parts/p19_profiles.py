@@ -124,11 +124,18 @@ a paged run: it restates no rule and it changes none.
      read: a stage instruction that requires reading a whole file, package or
      donor set (for example the rewrite's whole-base read or the integrator's
      whole-donor read) still binds you in full.
-  2. WRITE INCREMENTALLY. Create each deliverable file as soon as you have its
-     first row and append to it; do not hold the whole result until the end.
-     A stage that runs out of context with nothing on disk has produced nothing.
-  3. DO NOT RE-READ what you have already read or quoted: cite it from your own
-     notes/artifacts.  Two identical reads are one wasted step.
+  2. WRITE INCREMENTALLY, IN THE DELIVERABLE'S OWN FORMAT. Create each
+     deliverable file as soon as you have its first row and keep it up to date,
+     so a session that runs out of context still leaves work on disk.  A growing
+     table, log or notes file may be appended to; a JSON document must stay ONE
+     valid document at every write (keep it valid, or write it whole when
+     complete), because the postcheck rejects a malformed file and a partial
+     append is not a deliverable.
+  3. DO NOT RE-READ material you already have FOR CONTEXT: cite it from your own
+     notes/artifacts; two identical context reads are one wasted step.  This is a
+     reading-economy hint, never a limit on the stage's own re-validation: the
+     step that re-opens the cited location before applying a finding or porting a
+     donor item still binds you.
   4. THE DELIVERABLES ARE THE STAGE. Your prompt names them and
      `_pipeline_done.json` in the sandbox ROOT is the last thing you write.
      A stage that does all its analysis but cannot close its deliverables has

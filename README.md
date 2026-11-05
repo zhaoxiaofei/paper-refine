@@ -2315,14 +2315,16 @@ postcheck.
   the stage contract, the finding schema, the deliverable list and the completion marker, and the
   long rule sections it used to paste are written once to `INSTRUCTIONS/PROFILE_RULES.md` in the
   session sandbox and referenced by a pointer. The prompt opens with the medium capacity contract
-  (bounded reads, incremental writes, no re-reading, close the deliverables first). Nothing is
+  (bounded reads, format-aware incremental writes, no re-reading for context, close the
+  deliverables first). Nothing is
   dropped, summarised or weakened, and nothing is added that changes a mandate: the same bytes ship
   in the root, the prompt states that the paged sections are mandatory and authoritative, and the
   postchecks are unchanged — the difference is WHERE the instructions live, not what they demand.
   The profile-only text (the capacity contract, the read policy and the pointer sentences) is
   operating guidance that declares itself SUBORDINATE to the stage contract and to the
   contradiction rule; a reading-economy hint never overrides a stage instruction to read a whole
-  file, package or donor set.
+  file, package or donor set, or the re-validation read that re-opens a cited location before an
+  edit, and write-economy guidance never demands a format-invalid partial deliverable.
 
 **`medium` is normatively equivalent to `high`** (AGENTS.md rule 12), and the equivalence is tested,
 not assumed. The paged file carries the exact rule text `high` inlines, in the order the pointers
@@ -2341,15 +2343,15 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 112 KB | 45 KB | 60% |
-| cold_start_review | 56 KB | 21 KB | 63% |
-| audit | 83 KB | 40 KB | 52% |
-| revise | 111 KB | 57 KB | 48% |
-| integrate | 110 KB | 57 KB | 48% |
+| review | 112 KB | 45 KB | 59% |
+| cold_start_review | 56 KB | 21 KB | 62% |
+| audit | 83 KB | 41 KB | 51% |
+| revise | 111 KB | 58 KB | 48% |
+| integrate | 110 KB | 58 KB | 47% |
 | rewrite | 103 KB | 53 KB | 48% |
-| judge | 96 KB | 66 KB | 31% |
-| revision_audit | 24 KB | 11 KB | 55% |
-| revision_repair | 21 KB | 7 KB | 65% |
+| judge | 96 KB | 67 KB | 31% |
+| revision_audit | 24 KB | 11 KB | 53% |
+| revision_repair | 21 KB | 7 KB | 63% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
