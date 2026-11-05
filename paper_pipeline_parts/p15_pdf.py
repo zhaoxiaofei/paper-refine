@@ -148,6 +148,14 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                     # (correct, only slower), never a silently missing file.
                     shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True,
                                     symlinks=False)
+        # The package may itself ship a PDF named like the compiled output (a
+        # previous render). Leaving it in the build copy meant a compiler that
+        # exited 0 WITHOUT writing anything still looked successful: the stale
+        # bytes passed the is_file()/size test and were copied to out_pdf. The
+        # build copy starts from a fresh output path; only THIS invocation can
+        # produce the PDF that is reported.
+        with contextlib.suppress(OSError):
+            (work / rel).with_suffix(".pdf").unlink()
         argv = [exe, "-pdf", "-interaction=nonstopmode", "-halt-on-error", Path(rel).name]
         # latexmk spawns pdflatex/bibtex children. Starting it in its own
         # process group and killing the GROUP on timeout stops those children

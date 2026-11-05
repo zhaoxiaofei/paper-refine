@@ -417,18 +417,20 @@ CSV.
 
 When the round ran an auditor, the reviser consumes the AUDITED list: the
 auditor's `audit/audit.json` disposes every frozen finding (confirm, or drop
-with evidence) and may add `AU-*` findings. Rules:
+with evidence). The auditor GENERATES NO NEW FINDING: it does not add `AU-*`
+rows. Rules:
 
-* the ledger still gets one row per **effective** finding id (frozen minus drops
-  plus additions); `audit/audit.json` is the record of why an id is not yours;
+* the ledger still gets one row per **effective** finding id (frozen minus
+  drops); `audit/audit.json` is the record of why an id is not yours;
 * a DROPPED finding is not yours to re-litigate. If you believe the audit's
   evidence is wrong, re-open it explicitly: state the new evidence in the
   ledger row's rationale (a quote, a file:line, or a re-derivation) — never
   silently reinstate the finding;
-* every `AU-*` finding is a NORMAL finding: resolve it or hand it over with a
-  reason, exactly like an `F-*` row;
-* the auditor never edits the package, so any edit its finding requires is
-  yours, and it goes through the same E1/E5 rules (guided, tracked auxiliary,
+* an observation the auditor records outside the frozen list is NOT a finding
+  and is not yours to resolve: route it to the next finding-generating review,
+  or record it as a manual item when it needs an author decision;
+* the auditor never edits the package, so any edit a confirmed finding requires
+  is yours, and it goes through the same E1/E5 rules (guided, tracked auxiliary,
   ledgered).
 
 ## E9 — The L1–L11 language pass (every package-producing stage)
@@ -466,12 +468,14 @@ records it for the finding-generating role or as a manual item and does not edit
 L4 and L7-L11 are the language/format steps this pass owns.
 
 PARAGRAPH AND SECTION SHAPE — the same rule at two levels of the outline: a container that
-  divides at all divides into more than one part. A narrative paragraph carries a claim plus its
-  support, so a paragraph built from ONE sentence reads as an accident (FMT-T9k, finding-tier):
-  merge the sentence into the paragraph it belongs to, or give the claim its support. A section
-  that divides at all holds two or more subsections, so a section holding exactly ONE subsection
-  is FMT-T10f: promote the lone subsection into its parent, or add the sibling the section is
-  missing. End-matter statements, acronym lists, captions and table cells are exempt by
+  divides at all divides into more than one part. A paragraph built from ONE sentence reads as
+  an accident (FMT-T9k, finding-tier): merge the sentence into the paragraph it belongs to when
+  the surrounding text already carries its support; if the support would have to be NEW content,
+  do not invent it — record the gap for the finding-generating role (or the manual list) and
+  leave the sentence. A section holding exactly ONE subsection is FMT-T10f: promote the lone
+  subsection into its parent. Adding a sibling subsection is a structural addition: apply it
+  only when a frozen finding authorises that exact change; otherwise record the gap and do not
+  add content. End-matter statements, acronym lists, captions and table cells are exempt by
   construction.
 
 ## E9b — The whitespace/grammar/typography sweep (every package-producing stage)

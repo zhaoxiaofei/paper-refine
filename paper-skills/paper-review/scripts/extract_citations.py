@@ -34,6 +34,7 @@ stdlib-only. Usage:
 import argparse
 import json
 import os
+import posixpath
 import re
 import sys
 from collections import Counter, defaultdict
@@ -783,7 +784,7 @@ def main():
     tex_roots = {f for f, src in tex_sources.items()
                  if re.search(r"\\documentclass\b", src)}
     root_closures = {}
-    for _root in tex_roots:
+    for _root in sorted(tex_roots):
         seen, queue = set(), [_root]
         while queue:
             cur = queue.pop()
@@ -795,38 +796,71 @@ def main():
                     if _dep not in seen:
                         queue.append(_dep)
         root_closures[_root] = seen
-    file_root = {}
-    for _root, _files in root_closures.items():
-        for _f in _files:
-            file_root.setdefault(_f, _root)
+    # A file can be reached from MORE THAN ONE compile root (a shared \input
+    # fragment). One root chosen by set order made the orphan result depend on
+    # PYTHONHASHSEED and left the other compile context unreported; keep every
+    # root and emit context-qualified dispositions in deterministic order.
+    file_roots = defaultdict(set)
+    for _root in sorted(root_closures):
+        for _f in root_closures[_root]:
+            file_roots[_f].add(_root)
+
+    def _flat_stem(name: str) -> str:
+        """Corpus name without the suffix `convert_corpus` appended."""
+        return re.sub(r"\.(?:tex|ltx|bib)\.txt$", "", str(name or ""))
+
+    def _flat_dir(name: str) -> str:
+        return "__".join(_flat_stem(name).split("__")[:-1])
 
     # A `.bib` file belongs to the compile root that names it with
     # `\bibliography`/`\addbibresource`; its keys resolve there. Unioning every
     # `.bib` key in the package let one unrelated bibliography satisfy a cite
-    # in another document (F44/R06).
+    # in another document (F44/R06). The reference must also keep its DIRECTORY
+    # component: `left/refs` and `right/refs` are different bibliographies even
+    # though both end in `refs`.
     bib_refs = {}
     for _f, _src in tex_sources.items():
         refs = set()
         for _m in re.finditer(r"\\(?:bibliography|addbibresource)\s*"
                               r"(?:\[[^\]]*\])?\s*\{([^{}]+)\}", _src):
             for _item in _m.group(1).split(","):
-                _target = _item.strip().replace("\\", "/").rsplit("/", 1)[-1]
+                _target = _item.strip().replace("\\", "/")
+                while _target.startswith("./"):
+                    _target = _target[2:]
                 _target = re.sub(r"\.bib$", "", _target)
                 if _target:
                     refs.add(_target)
         bib_refs[_f] = refs
-    bib_files_by_stem = defaultdict(set)
+    bib_files_by_flat = defaultdict(set)
     for _bib_file in {b["file"] for b in bib_entries}:
-        bib_files_by_stem[
-            re.sub(r"\.bib\.txt$", "", _bib_file).split("__")[-1]].add(_bib_file)
+        bib_files_by_flat[_flat_stem(_bib_file)].add(_bib_file)
 
-    def _tex_space_for(f):
-        root = file_root.get(f)
-        files = root_closures.get(root, {f}) if root else {f}
+    def _bib_files_for(root_dir: str, ref: str) -> set:
+        """The .bib file(s) a reference names, resolved at the compile root."""
+        target = str(ref or "").strip().replace("\\", "/")
+        if not target:
+            return set()
+        # LaTeX/BibTeX run from the compile ROOT's working directory. A
+        # bibliography command in an included fragment is still resolved
+        # there, not in the fragment's own directory. Normalise `.` and `..`
+        # before matching the flattened corpus name, and never match a target
+        # that escapes the submission tree.
+        root_path = str(root_dir or "").replace("__", "/")
+        joined = posixpath.normpath(posixpath.join(root_path, target))
+        if joined in ("", ".", "..") or joined.startswith("../") or joined.startswith("/"):
+            return set()
+        key = joined.replace("/", "__")
+        return set(bib_files_by_flat.get(key, set()))
+
+    def _tex_space_for(f, root):
+        files = root_closures.get(root, {f}) if root is not None else {f}
+        # The compile working directory: the root's own directory, or the
+        # referring file's directory when no \documentclass root exists.
+        root_dir = _flat_dir(root) if root is not None else _flat_dir(f)
         bib_files = set()
         for _f in files:
             for _name in bib_refs.get(_f, ()):
-                bib_files |= bib_files_by_stem.get(_name, set())
+                bib_files |= _bib_files_for(root_dir, _name)
         return ({b["key"] for b in tex_bibitems if b["file"] in files}
                 | {b["key"] for b in bib_entries if b["file"] in bib_files})
     tex_cited_by_file = defaultdict(list)
@@ -835,14 +869,23 @@ def main():
     for f, keys in nocite_keys.items():
         tex_cited_by_file[f].extend(keys)
     for f in sorted(nocite_all_files):
-        tex_cited_by_file[f].extend(sorted(_tex_space_for(f)))
+        roots = sorted(file_roots.get(f) or ())
+        keys = set()
+        for root in (roots or [None]):
+            keys |= _tex_space_for(f, root)
+        tex_cited_by_file[f].extend(sorted(keys))
     all_tex_cited = {k for keys in tex_cited_by_file.values() for k in keys}
     tex_orphans_by_file = {}
     if tex_key_space:
-        for f, keys in tex_cited_by_file.items():
-            orphans = sorted({k for k in keys if k not in _tex_space_for(f)})
-            if orphans:
-                tex_orphans_by_file[f] = orphans
+        for f in sorted(tex_cited_by_file):
+            keys = tex_cited_by_file[f]
+            contexts = sorted(file_roots.get(f) or ()) or [None]
+            for root in contexts:
+                orphans = sorted({k for k in keys if k not in _tex_space_for(f, root)})
+                if not orphans:
+                    continue
+                label = f if len(contexts) == 1 else "%s [root %s]" % (f, root)
+                tex_orphans_by_file[label] = orphans
     tex_orphans = sorted({k for keys in tex_orphans_by_file.values() for k in keys})
     tex_uncited = sorted({b["key"] for b in tex_bibitems} - all_tex_cited)
     # \cite keys with no list in the corpus at all: the reference list was not

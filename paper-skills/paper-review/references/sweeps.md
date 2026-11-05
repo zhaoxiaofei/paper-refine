@@ -64,14 +64,18 @@ only in the factual ones. The SAME four rungs grade a factual error, a broken co
 content, a prose failure and a formatting break; what differs is only which class the row is
 filed under:
 - **Fatal** — the artifact or the claim is unusable: a deliverable that cannot be opened or read,
-  a rendering with no readable text, a fabricated result or citation presented as established.
-  Anything that makes the submission (or the conclusion it exists to support) unusable AND that
-  has no usable copy elsewhere in the package: a broken render beside an intact editable source
-  is a packaging/completeness item, never a fatal one.
+  a rendering with no readable text, a fabricated result or citation that is presented as
+  established AND that the submission's conclusion rests on. Anything that makes the submission
+  (or the conclusion it exists to support) unusable AND that has no usable copy elsewhere in the
+  package: a broken render beside an intact editable source is a packaging/completeness item,
+  never a fatal one.
 - **Critical** — the error changes a conclusion, contradicts the data, or is a category
-  impossibility (a fabricated number or citation, a claim the data refute, a wrong species or
-  kind); anything that could trigger rejection or a correction later. A factual error is NOT
-  automatically Critical: the rung comes from what the error CHANGES.
+  impossibility (a fabricated number or citation whose reach is LOCAL -- it does not underwrite
+  the paper's conclusion and is not presented as established evidence for it -- a claim the data
+  refute, a wrong species or kind); anything that could trigger rejection or a correction later.
+  A factual error is NOT automatically Critical: the rung comes from what the error CHANGES. The
+  decisive test for a fabrication is what depends on it: a localized fabrication is Critical; the
+  same fabrication carrying the conclusion is Fatal.
 - **Major** — the error changes a reported fact, attribute, comparison or sample set, but not the
   paper's conclusion (a wrong age band, sex, unit or cohort label is the typical case; an
   editor/reviewer/copyeditor would flag it), or a prose/formatting failure a reader must work
@@ -736,8 +740,9 @@ index you summed.
 sum | table | agrees?
 
 **Finding rules (one per instance):**
-- prose total ≠ column sum (including when a placeholder cell makes the sum
-  impossible)
+- prose total ≠ column sum, only when the sum CAN be computed. A placeholder or
+  missing cell makes the total `unable to reconcile` -- it does not prove the
+  published total is numerically wrong; file the missing-cell defect separately
 - n = statement conflicts with cohort size stated elsewhere or with table row
   count
 - sample/patient counts differ across abstract/results/legends/SI

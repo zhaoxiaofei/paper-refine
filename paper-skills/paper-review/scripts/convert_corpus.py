@@ -69,6 +69,24 @@ EDITABLE_EXTS = {".doc", ".docx", ".tex", ".ltx", ".bib", ".md", ".txt", ".xlsx"
 BINARY_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".gif", ".svg", ".eps", ".zip",
                ".gz", ".tar", ".xlsx.lock", ".py", ".r", ".ipynb", ".xls", ".pptx", ".docx~"}
 
+# A corpus text name is one filesystem component: NAME_MAX is 255 BYTES, not
+# characters. Reserve room for the collision suffix (".__" + 8 hex) and ".txt"
+# so even a name that later collides stays within the limit.
+NAME_MAX_BYTES = 255
+_CORPUS_NAME_RESERVE = len(".__12345678") + len(".txt")
+
+
+def _bounded_corpus_stem(stem: str, rel: str) -> tuple:
+    """Return (stem, truncated) with a generated name that always fits NAME_MAX."""
+    encoded = stem.encode("utf-8")
+    budget = NAME_MAX_BYTES - _CORPUS_NAME_RESERVE
+    if len(encoded) <= budget:
+        return stem, False
+    digest = hashlib.sha256(rel.encode("utf-8")).hexdigest()[:8]
+    suffix = ".__" + digest
+    budget -= len(suffix.encode("utf-8"))
+    return encoded[:budget].decode("utf-8", "ignore") + suffix, True
+
 ROLE_PATTERNS = [
     ("title page", re.compile(r"title|titlepage|first_page", re.I)),
     ("abstract", re.compile(r"abstract", re.I)),
@@ -493,6 +511,17 @@ def _xlsx_cell_value(attrs, body, shared):
         return _xlsx_unescape(_html_unescape(tm.group(1)))
     vm = re.search(r"<v(?:\s[^>]*)?>(.*?)</v>", body, re.S)
     if not vm:
+        # A FORMULA cell without a cached result (the producer did not
+        # recalculate before saving) used to become an empty string -- exactly
+        # the same as a genuinely blank cell. Keep the formula in the corpus and
+        # mark its value unavailable until calculated.
+        fm = re.search(r"<f(?:\s[^>]*)?>(.*?)</f>", body, re.S)
+        if fm:
+            formula = _xlsx_unescape(_html_unescape(fm.group(1))).strip().lstrip("=")
+            return ("[uncached formula: =%s]" % formula) if formula \
+                else "[uncached formula]"
+        if "<f" in body:
+            return "[uncached formula]"       # a shared/array formula with no text
         return ""
     v = _html_unescape(vm.group(1))
     if re.search(r't="s"', attrs or "") and v.strip().isdigit():
@@ -591,6 +620,12 @@ def xlsx_to_text(path: str) -> tuple:
 # ------------------------------------------------------------------- generic
 
 def plain_copy(path: str) -> tuple:
+    # A FIFO (or device/socket) passes os.walk's name-only enumeration and then
+    # BLOCKS in open() until a writer appears; a submission carrying one used to
+    # hang conversion before the review could start. Require a regular file
+    # before opening (the enumeration applies the same test and reports it).
+    if not os.path.isfile(path):
+        return "", ["unreadable — not a regular file"]
     try:
         raw = open(path, "rb").read()
     except OSError as e:
@@ -604,7 +639,12 @@ def plain_copy(path: str) -> tuple:
     # in place it glues an invisible character to the first heading ("\ufeffAbstract"),
     # so the abstract row silently disappears from every downstream sweep.
     if raw.startswith(b"\xef\xbb\xbf"):
-        return raw.decode("utf-8-sig", errors="replace"), []
+        try:
+            return raw.decode("utf-8-sig"), []
+        except UnicodeDecodeError as e:
+            return raw.decode("utf-8-sig", errors="replace"), [
+                "decoding gap — invalid UTF-8 at byte %d: %s; U+FFFD was substituted, so "
+                "this text is lossy" % (e.start, e.reason)]
     for bom, enc in ((b"\xff\xfe\x00\x00", "utf-32"), (b"\x00\x00\xfe\xff", "utf-32"),
                      (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16")):
         if raw.startswith(bom):
@@ -612,7 +652,15 @@ def plain_copy(path: str) -> tuple:
                 return raw.decode(enc), []
             except UnicodeDecodeError as e:
                 return "", ["unable — %s decode failed: %s" % (enc, e)]
-    return raw.decode("utf-8", errors="replace"), []
+    try:
+        return raw.decode("utf-8"), []
+    except UnicodeDecodeError as e:
+        # Never substitute silently: the converter reports "converted" and the
+        # damaged value then reaches a numeric/text sweep as the authors' own
+        # evidence. Record the byte and the reason in the inventory.
+        return raw.decode("utf-8", errors="replace"), [
+            "decoding gap — invalid UTF-8 at byte %d: %s; U+FFFD was substituted, so this "
+            "text is lossy" % (e.start, e.reason)]
 
 
 RTF_META_WORDS = {"fonttbl", "colortbl", "stylesheet", "info", "pict", "object",
@@ -816,6 +864,10 @@ def convert_one(path: str, rel: str) -> dict:
         # converted" warning never counts it and an unreadable file looks like a
         # legitimately empty editable one.
         status = "converted" if text else ("converted-empty" if not notes else "failed")
+        if any(n.startswith("decoding gap") for n in notes):
+            # Readable, but with substituted bytes: the inventory must show a
+            # partial conversion, never a clean one.
+            status = "converted-partial"
     elif ext == ".rtf":
         text, notes = rtf_to_text(path)
         # An unreadable file is a FAILED conversion: rtf_to_text returns an
@@ -897,6 +949,7 @@ def main():
 
     files = []
     skipped_links = []
+    skipped_special = []
     for root, dirs, names in os.walk(sub):
         kept_dirs = []
         for d in sorted(dirs):
@@ -927,12 +980,23 @@ def main():
                 continue
             if is_disabled_evidence_rel(rel):
                 continue
+            if not os.path.isfile(p):
+                # A FIFO/socket/device is not package content: opening it can
+                # block forever (a FIFO with no writer hangs conversion before
+                # the review starts) and it cannot be converted meaningfully.
+                skipped_special.append(rel)
+                continue
             files.append(rel)
     if skipped_links:
         print("WARNING: skipped %d symlink(s) in SUBMISSION_DIR (a link is not package "
               "content and its target may be outside the submission): %s"
               % (len(skipped_links), ", ".join(sorted(skipped_links)[:5])
                  + (" ..." if len(skipped_links) > 5 else "")))
+    if skipped_special:
+        print("WARNING: skipped %d non-regular file(s) in SUBMISSION_DIR (a FIFO/device "
+              "cannot be read as package content): %s"
+              % (len(skipped_special), ", ".join(sorted(skipped_special)[:5])
+                 + (" ..." if len(skipped_special) > 5 else "")))
     if not files:
         print("ERROR: SUBMISSION_DIR %s is empty. Stop and ask the user." % sub)
         sys.exit(2)
@@ -997,12 +1061,31 @@ def main():
         else:
             entry["area"] = "submission"
             entry["role"] = guess_role(rel)
+            # `converted-partial` is a COMMENT on how clean the text extraction
+            # was, never a change of the document's kind: a plain-text manuscript
+            # with one invalid byte is still an editable source (the decoding-gap
+            # note says what was substituted). Excluding it here silently turned
+            # every such document read-only in the inventory, and the review then
+            # routed its findings to manual items although the file is editable.
+            # The non-editable partial conversions (`pdf`) never reach this test
+            # because their extension is not in EDITABLE_EXTS.
             entry["editable"] = os.path.splitext(rel)[1].lower() in EDITABLE_EXTS and \
-                entry["status"] in ("converted", "converted-empty")
+                entry["status"] in ("converted", "converted-empty", "converted-partial")
         entry["size_bytes"] = os.path.getsize(p)
         inventory.append(entry)
         if entry["status"] in ("converted", "converted-empty", "converted-partial"):
             stem = rel.replace(os.sep, "__")
+            # A nested path can flatten PAST the filesystem's NAME_MAX (a
+            # 203-character basename in a 100-character directory is a valid
+            # nested path but a 305-character single component, and open() then
+            # fails with ENAMETOOLONG). Cap the generated component by UTF-8
+            # BYTES and keep a digest of the full path; the inventory still
+            # records the original.
+            stem, truncated = _bounded_corpus_stem(stem, rel)
+            if truncated:
+                entry["notes"].append(
+                    "corpus text name truncated to fit the filesystem limit; the inventory "
+                    "records the original path")
             if entry["area"] in EVIDENCE_DIRNAMES:
                 out_txt = os.path.join(evidence_dir, stem + ".txt")
                 used_names = evidence_names

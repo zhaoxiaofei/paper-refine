@@ -1018,6 +1018,20 @@ def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total, rel: str
         # with a verdict (and its rationale). `{"F-001": "", "F-002": "fixed"}`
         # named every id and passed with no verdict on any of them.
         disposed = ledger_disposed_ids(ledger, frozen_ids)
+        verdicts = _ledger_verdict_map(ledger, frozen_ids)
+        conflicts = {i: sorted(vs) for i, vs in verdicts.items() if len(vs) > 1}
+        if conflicts:
+            # `disposed` is a SET: a ledger with `fixed` AND `discarded` rows for
+            # F-001 collapsed to one id and passed. The reviser would carry two
+            # contradictory dispositions for the same finding.
+            detail = "; ".join(f"{i}: {', '.join(vs)}"
+                               for i, vs in sorted(conflicts.items())[:6])
+            errs.append(
+                f"{pkg_rel} records CONFLICTING dispositions for "
+                f"{len(conflicts)} finding id(s): {detail}"
+                + (" ..." if len(conflicts) > 6 else "")
+                + " -- one row per finding id, with one verdict; resolve the "
+                  "contradiction before the ledger can pass")
         undisposed = [i for i in frozen_ids if i in named and i not in disposed]
         if undisposed:
             errs.append(
@@ -1122,22 +1136,17 @@ def _ledger_row_verdict(row) -> str:
     return ""
 
 
-def ledger_disposed_ids(ledger, wanted=()) -> set:
-    """Finding ids a ledger disposes.
+def _ledger_verdict_map(ledger, wanted=()) -> dict:
+    """{finding id: set of documented verdicts} for a revision ledger.
 
-    `ledger_named_ids()` answers "does the payload mention the id?" -- a bare
-    mapping value, an id list or an id-only row all passed, so a ledger
-    `{"F-001": "", "F-002": null}` satisfied the contract with no verdict at
-    all. This reader requires a VERDICT for every structured row: an object whose
-    id field equals the frozen id, or a mapping entry `{"F-001": {...verdict...}}`,
-    and the verdict must be a documented one (`_ledger_row_verdict`). The one
-    non-row shape it accepts is the documented plain ID LIST (`["F-001", ...]`):
-    the prompt fixes the row contract but not the container's name, and real
-    ledgers have used an id list as their container. Such a list proves no id was
-    dropped; it does not pretend to record a per-row verdict.
+    One id may legitimately appear in several containers of the same payload,
+    but two rows that dispose it DIFFERENTLY are a contradiction, not one
+    disposition. The plain ID LIST shape is kept (it proves no id was dropped,
+    with an empty verdict set); a mapping key whose value is a bare string/null
+    is still not a disposal.
     """
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
-    out = set()
+    found = {}
 
     def row_id(row: dict):
         for key in ("id", "finding", "finding_id", "frozen_id"):
@@ -1151,8 +1160,9 @@ def ledger_disposed_ids(ledger, wanted=()) -> set:
             return
         if isinstance(node, dict):
             rid = row_id(node) or keyed_id
-            if (not want or rid in want) and _ledger_row_verdict(node):
-                out.add(rid)
+            verdict = _ledger_row_verdict(node)
+            if (not want or rid in want) and verdict:
+                found.setdefault(rid, set()).add(verdict)
             for key, value in node.items():
                 if isinstance(value, (dict, list, tuple)):
                     visit(value, depth + 1, key.strip() if isinstance(key, str) else "")
@@ -1167,10 +1177,27 @@ def ledger_disposed_ids(ledger, wanted=()) -> set:
                     # unsupported shape this gate REJECTS is a mapping key whose
                     # value is a bare string/null (`{"F-001": ""}`): that reads
                     # as a row and records no verdict.
-                    out.add(item.strip())
+                    found.setdefault(item.strip(), set())
 
     visit(ledger, 0)
-    return out
+    return found
+
+
+def ledger_disposed_ids(ledger, wanted=()) -> set:
+    """Finding ids a ledger disposes.
+
+    `ledger_named_ids()` answers "does the payload mention the id?" -- a bare
+    mapping value, an id list or an id-only row all passed, so a ledger
+    `{"F-001": "", "F-002": null}` satisfied the contract with no verdict at
+    all. This reader requires a VERDICT for every structured row: an object whose
+    id field equals the frozen id, or a mapping entry `{"F-001": {...verdict...}}`,
+    and the verdict must be a documented one (`_ledger_row_verdict`). The one
+    non-row shape it accepts is the documented plain ID LIST (`["F-001", ...]`):
+    the prompt fixes the row contract but not the container's name, and real
+    ledgers have used an id list as their container. Such a list proves no id was
+    dropped; it does not pretend to record a per-row verdict.
+    """
+    return set(_ledger_verdict_map(ledger, wanted))
 
 
 # ---------------------------------------------------------------------
@@ -6421,9 +6448,24 @@ def resume_prompt(rec: dict, problems: list, reason: str, used: int,
     """
     manual_target = handoff_target(author_to_complete)
     listed = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(problems)) or "  (none recorded)"
+    is_judge = str(rec.get("kind") or "") == "judge"
+    # The judge is blind by design: its initial prompt carries no round, and its
+    # postcheck accepts `scores.json` alone. The generic continuation revealed
+    # the round and called the marker the ONLY signal -- two contradictions with
+    # the prompt it resumes.
+    where = (f"Run: {rec['id']}   stage: judge\n" if is_judge else
+             f"Run: {rec['id']}   stage: {rec.get('kind')}   round: {rec.get('round')}\n")
+    signal = (
+        "  * `scores.json` IS this run's completion signal: keep it in the sandbox root, "
+        "parsing as JSON and carrying this run's run_id/target_id. Verify the sheet, then write "
+        f"the completion marker `{MARKER_FILE}` LAST; the judge postcheck accepts the sheet "
+        "alone.\n"
+        if is_judge else
+        f"  * Write the completion marker `{MARKER_FILE}` LAST, when the package and its "
+        "bookkeeping are actually done. It is the only completion signal this pipeline accepts.\n")
     return with_context_budget((CONTRADICTION_RULE +
         "CONTINUATION - YOUR OWN SESSION STOPPED BEFORE IT FINISHED.\n\n"
-        f"Run: {rec['id']}   stage: {rec.get('kind')}   round: {rec.get('round')}\n"
+        f"{where}"
         f"This is continuation {used + 1} of at most {RESUME_ATTEMPT_LIMIT} for this session.\n"
         "Your working directory is the same sandbox you were in, holding exactly the files you "
         "left; nothing was rebuilt and nothing was thrown away. Your context -- the packages you "
@@ -6439,8 +6481,7 @@ def resume_prompt(rec: dict, problems: list, reason: str, used: int,
         "manual steps).\n"
         "  * The stage's contract is in `PROMPT.md` in this sandbox -- re-read the part you need "
         "instead of reconstructing it from memory.\n"
-        f"  * Write the completion marker `{MARKER_FILE}` LAST, when the package and its "
-        "bookkeeping are actually done. It is the only completion signal this pipeline accepts.\n"
+        f"{signal}"
         "  * If something cannot be finished honestly, use the pipeline's escape: write "
         "`unable — manual verification required: <what the author must check>` in the ledger / "
         f"language pass / visual record, record the item in {manual_target}, and say so in the "

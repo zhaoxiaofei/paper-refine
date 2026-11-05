@@ -71,17 +71,23 @@ def test_contract_v4():
             check(f"a {tier} {sev.upper()} row derives {want:+d} and passes",
                   not e and np.derived_comparison_score(c) == want, f"{str(e[:1])[:120]}")
     # the deciding tier, and ONLY it, is what the magnitude is bounded by
-    five = [row("consistency", "minor") for _ in range(5)]
+    # Distinct defect INSTANCES: the ledger's one-row-per-instance rule makes
+    # two rows with identical evidence one item, so each fixture row names its
+    # own occurrence (the rung bound is what this block tests, not dedup).
+    five = [row("consistency", "minor", evidence=f"loc: unit fixture {i}")
+            for i in range(5)]
     check("five minor consistency rows derive +2 (a MINOR run reaches 'better', never 'clearly')",
           np.derived_comparison_score(comp(2, five)) == 2)
-    three_major = [row("correctness", "major"), row("correctness", "major")]
+    three_major = [row("correctness", "major", evidence=f"loc: unit fixture {i}")
+                   for i in range(2)]
     check("two MAJOR correctness rows derive +3 ('clearly better' needs a MAJOR, not a CRITICAL)",
           np.derived_comparison_score(comp(3, three_major, basis="correctness")) == 3)
     for rows, want, basis in ((five, 2, "consistency"), (three_major, 3, "correctness")):
         errs, _ = np.judge_basis_problems(comp(want, rows, basis=basis), "c[0]", strict=True)
         check(f"the derivation and the rung rules AGREE on a {want:+d} sheet",
               not any("DERIVED" in x or "no ledger item" in x for x in errs), str(errs[:1]))
-    fmt3 = [row("formatting", "minor") for _ in range(3)]
+    fmt3 = [row("formatting", "minor", evidence=f"loc: unit fixture {i}")
+            for i in range(3)]
     check("three formatting minor rows derive +2 (the same rung bound applies to every tier)",
           np.derived_comparison_score(comp(2, fmt3, basis="formatting")) == 2)
     wr = [row("writing", "minor")]

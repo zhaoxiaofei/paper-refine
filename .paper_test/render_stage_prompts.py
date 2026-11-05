@@ -12,6 +12,10 @@ Run it against a baseline checkout (e.g. `git archive HEAD | tar -x -C
 <dir>`) and against the working tree, then compare the two --dump directories.
 The checkout's ABSOLUTE PATH is normalised out before hashing, because several
 prompt blocks embed the pipeline's own path.
+
+The four OPTIONAL-TOOL probes are pinned (see `pin_optional_tool_probes`), so a
+hash pins the PROMPT text and not the machine's PATH, MCP config or home
+directory: the same values reproduce with and without `zot`/`docx` installed.
 """
 from __future__ import annotations
 
@@ -23,17 +27,37 @@ import tempfile
 from pathlib import Path
 
 
-def render(checkout: Path, execution_profile: str = "high") -> dict:
+def pin_optional_tool_probes(P) -> None:
+    """Fix the environment-dependent prompt probes to a bare machine.
+
+    The stage prompts embed the result of four probes of the DEVELOPER's box:
+    the optional `docx`/`zot` CLIs on PATH, the `zot` credential profile in the
+    home directory, and the visual renderers found on PATH / in the Codex MCP
+    config. A frozen hash must pin the PROMPT, not the box it was captured on,
+    so every probe is pinned to the documented NO-OPTIONAL-TOOLING machine: no
+    docx, no zot, no zot profile, no visual renderer.
+    """
+    P.docx_cli_available = lambda: False
+    P.zot_cli_available = lambda: False
+    P.zotero_remote_hint = lambda: P.ZOT_REMOTE_HINT_UNKNOWN
+    P.probe_available = lambda spec: False
+    # `visual_tools_summary()` caches its first answer in this module global.
+    P._VISUAL_TOOLS_CACHE = None
+
+
+def render(checkout: Path, execution_profile: str = "high", sandbox=None) -> dict:
     sys.path.insert(0, str(checkout))
     for mod in list(sys.modules):
         if mod == "paper_pipeline":
             del sys.modules[mod]
     P = importlib.import_module("paper_pipeline")
+    pin_optional_tool_probes(P)
     prof = P.load_venue_profile("generic")
     # A FIXED sandbox path: every prompt embeds it, so two renders of two
     # checkouts must agree on it or the comparison measures the temp dir.
-    sb = Path(os.environ.get("PAPER_RENDER_SANDBOX")
-              or (checkout.parent / "pr-render-sandbox" / "r1_guided_review"))
+    sb = Path(sandbox) if sandbox is not None else Path(
+        os.environ.get("PAPER_RENDER_SANDBOX")
+        or (checkout.parent / "pr-render-sandbox" / "r1_guided_review"))
     sb = sb.resolve()
     if sb.exists():
         import shutil

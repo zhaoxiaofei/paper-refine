@@ -45,15 +45,15 @@ FAILS = []
 #     python .paper_test/render_stage_prompts.py .
 # and paste the hashes here in the SAME commit that changes the prompts.
 GOLDEN = {
-    "review": "a489033b09e23381",
-    "review_split_a": "b1618afba435583c",
-    "review_scoped": "b198f1fbd794329d",
-    "cold_start_review": "6798e3207312ca53",
-    "audit": "9be364698f975ad0",
-    "revise": "1085468ca3043da2",
-    "integrate": "186d5f5d18a01561",
-    "rewrite": "9641fb9b989be72d",
-    "judge": "afcb3fc461b9ae52",
+    "review": "cce3b6e14fd5e665",
+    "review_split_a": "b3af0fa1ebeeb3c9",
+    "review_scoped": "65438987b95fbad4",
+    "cold_start_review": "471538d332a6c3f5",
+    "audit": "c13a7549c81e4780",
+    "revise": "c6015480999ed527",
+    "integrate": "dec483fab0d026fb",
+    "rewrite": "c24f83c01c050f89",
+    "judge": "1fec29314e18c908",
     "revision_audit": "63c8f3a6d65509f4",
     "revision_repair": "21f75bd003d5ccdd",
 }
@@ -91,32 +91,18 @@ def pipeline_module():
 
 
 def render_prompts() -> dict:
-    """Every stage prompt, path-normalised exactly as the golden capture was."""
-    P = pipeline_module()
-    prof = P.load_venue_profile("generic")
+    """Every stage prompt, path-normalised exactly as the golden capture was.
+
+    The renderer pins the four optional-tool probes (docx/zot on PATH, the zot
+    profile, the visual renderers), so the hashes pin the PROMPT text and not
+    this box's PATH or home directory: the same eleven values reproduce with
+    and without `zot`/`docx` installed.
+    """
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import render_stage_prompts
     sb = (WS / "tmp" / "render-sandbox" / "r1_guided_review").resolve()
-    import shutil
-    shutil.rmtree(sb, ignore_errors=True)
-    (sb / "base").mkdir(parents=True)
-    (sb / "base" / "manuscript.md").write_text("# m\n\ntext.\n", encoding="utf-8")
-    out = {
-        "review": P.review_prompt(sb, "r1_guided_review", 1, venue=prof, scope="full"),
-        "review_split_a": P.review_prompt(sb, "r1_guided_review", 1, venue=prof, split="a"),
-        "review_scoped": P.review_prompt(sb, "r1_guided_review", 1, venue=prof,
-                                         scope="formatting-writing"),
-        "cold_start_review": P.cold_start_review_prompt(sb, "r1_cold_start_review", 1, venue=prof),
-        "audit": P.audit_prompt(sb, "r1_audit", 1, venue=prof),
-        "revise": P.revise_prompt(sb, "r1_a2_revise", 1, venue=prof, audit=True),
-        "integrate": P.integrate_prompt(sb, "r1_i1", 1, "v1", ["v2", "v3"], venue=prof),
-        "rewrite": P.rewrite_prompt(sb, "r1_w1", 1, venue=prof),
-        "judge": P.judge_prompt(sb, "judge_x_j1", 1, "v1", 1, 2, [], venue=prof),
-        "revision_audit": P.revision_audit_prompt(sb, "r1_revision_audit", 1),
-        "revision_repair": P.revision_repair_prompt(sb, "r1_repair", 1, 3),
-    }
-    # The sandbox path first (it lives UNDER the checkout), then the checkout,
-    # exactly the normalisation the golden capture used.
-    return {name: t.replace(str(sb), "<SANDBOX>").replace(str(WS.resolve()), "<CHECKOUT>")
-            for name, t in out.items()}
+    return render_stage_prompts.render(WS, sandbox=sb)
 
 
 def test_high_profile_is_the_old_pipeline() -> None:

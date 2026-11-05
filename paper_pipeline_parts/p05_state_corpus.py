@@ -2058,11 +2058,30 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
 
         def _py_import(m):
             mod = m.group(2)
-            head = _py_mods.get(mod.split(".", 1)[0])
+            old_head = mod.split(".", 1)[0]
+            head = _py_mods.get(old_head)
             if not head:
                 return m.group(0)
             tail = mod.split(".", 1)[1] if "." in mod else ""
-            return m.group(1) + head + (("." + tail) if tail else "")
+            rewritten = head + (("." + tail) if tail else "")
+            # `import helper` binds the name `helper`; renaming only the module
+            # token left every later `helper.value` a NameError, so a judge view
+            # could lose executable evidence on one side only. Keep the binding:
+            # a single import gets an assignment on the next line (`import f2`
+            # then `helper = f2`; this also preserves the top-level binding for
+            # `import helper.sub`), a multi-name import (`, other`) keeps it with
+            # an `as helper` alias. `from <mod> import ...` binds the imported
+            # names, so it needs neither; an explicit `as` already names the
+            # binding.
+            rest = m.string[m.end():]
+            first_line = rest.split("\n", 1)[0]
+            if m.group(1).strip() == "import" and not re.match(r"\s+as\s+", rest):
+                if "," in first_line:
+                    rewritten += " as " + old_head
+                else:
+                    indent = m.group(1)[:len(m.group(1)) - len(m.group(1).lstrip())]
+                    rewritten += "\n" + indent + old_head + " = " + head
+            return m.group(1) + rewritten
 
         text = re.sub(r"(?m)^(\s*(?:from|import)\s+)([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)",
                       _py_import, text)
@@ -3855,6 +3874,15 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
         for key in ("location", "evidence", "explanation"):
             if not str(f.get(key) or "").strip():
                 errs.append(f"{COLD_START_FINDINGS_REL} {fid}: no {key}")
+        if not str(f.get("check") or "").strip():
+            # The documented shape carries a short class label; the downstream
+            # disposition needs it to say WHICH check the observation belongs to.
+            errs.append(f"{COLD_START_FINDINGS_REL} {fid}: no check (the short class label "
+                        f"the prompt's shape requires)")
+        status = str(f.get("status") or "").strip().lower()
+        if status not in ("resolvable", "unresolvable"):
+            errs.append(f"{COLD_START_FINDINGS_REL} {fid}: status {f.get('status')!r} is not "
+                        f"`resolvable` or `unresolvable`")
         if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
             errs.append(f"{COLD_START_FINDINGS_REL} {fid}: severity {f.get('severity')!r} is not one "
                         f"of {'/'.join(s.capitalize() for s in DISCOVERY_SEVERITIES)}")

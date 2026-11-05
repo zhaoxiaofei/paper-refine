@@ -5353,12 +5353,16 @@ defect the same way; only the deliverable differs):
  * Severity has FOUR RUNGS, and it is a DISTANCE FROM CORRECT in EVERY class -- correctness,
    preservation, completeness, consistency, prose and formatting alike. FATAL = the artifact or
     the claim is unusable (a deliverable that cannot be opened or read, a rendering with no
-    readable text, a fabricated result presented as established) AND no usable copy of that
-    content ships elsewhere in the package (a broken render beside an intact editable source is a
-    packaging/completeness item, not a fatal one); CRITICAL = the error changes a
-    conclusion, contradicts the data, or is a category impossibility (a fabricated number or
-    citation, a claim the data refute, a wrong species or kind); MAJOR = the error changes a
-    reported fact, attribute, comparison or sample set, but not the paper's conclusion (a wrong age
+    readable text, a fabricated result or citation that is presented as established AND that the
+    submission's conclusion rests on) AND no usable copy of that content ships elsewhere in the
+    package (a broken render beside an intact editable source is a packaging/completeness item,
+    not a fatal one); CRITICAL = the error changes a conclusion, contradicts the data, or is a
+    category impossibility (a fabricated number or citation whose reach is LOCAL -- it does not
+    underwrite the paper's conclusion, so the fabrication is Critical, not Fatal -- a claim the
+    data refute, a wrong species or kind); the decisive test for a fabrication is what depends on
+    it: a localized fabrication is Critical, the same fabrication carrying the conclusion is
+    Fatal; MAJOR = the error changes a reported fact, attribute, comparison or sample set, but
+    not the paper's conclusion (a wrong age
     band, sex, unit or cohort label is the typical case), or a prose/formatting failure a reader
     must work around -- a slip that RECURS through a paragraph or section, or that leaves a scope's
     topic unclear, is MAJOR rather than several more MINOR rows, because the structural level a
@@ -5610,8 +5614,10 @@ def _discovery_dropped_note(dropped) -> str:
     rows = "; ".join(f"{i} -- {why or 'no reason recorded'}" for i, why in dropped)
     return (f"\n  * {len(dropped)} of these id(s) were DROPPED when the list was disposed (a "
             f"dropped finding is not in force; no version was asked to fix it): {rows}. Do not "
-            f"port or reconcile anything FOR a dropped id -- record it as "
-            f"`dropped -- not in force` if the ledger needs a row for it.")
+            f"port or apply anything FOR a dropped id, but the ledger still has to ACCOUNT for "
+            f"it: write one explicit `dropped -- not in force` row per dropped id in "
+            f"`integrated/DIFF_LEDGER.md`, so every frozen X id is reconciled, a dropped one "
+            f"included.")
 
 
 def judge_discovery_block() -> str:

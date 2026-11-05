@@ -6,6 +6,7 @@
 // process can then overwrite the output while a retry is using it. Spawning in
 // a new process group lets the timeout kill the group, not just the wrapper.
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 
 export function runFile(file, args, options = {}) {
   const { timeout = 0, maxBuffer = 4 * 1024 * 1024, ...spawnOptions } = options;
@@ -35,10 +36,18 @@ export function runFile(file, args, options = {}) {
     // identical to mcp-docx-converter/run-child.mjs: the two servers ship the
     // same runner.
     const budget = { stdout: 0, stderr: 0 };
+    // A Buffer chunk is not a character: a multibyte UTF-8 sequence can be
+    // split across two 'data' events, and `String(chunk)` then decodes each
+    // half to U+FFFD. Decode each stream with a StringDecoder (which buffers an
+    // incomplete sequence) and count the RAW bytes against the budget. Kept
+    // identical to mcp-docx-converter/run-child.mjs.
+    const decoders = {
+      stdout: new StringDecoder('utf8'),
+      stderr: new StringDecoder('utf8'),
+    };
     const append = (stream, chunk) => {
       if (overflow) return;
-      const text = String(chunk);
-      const bytes = Buffer.byteLength(text, 'utf8');
+      const bytes = chunk.length;
       if (budget[stream] + bytes > maxBuffer) {
         overflow = `Command output exceeded the ${maxBuffer}-byte buffer and its process `
                  + `group was killed: ${file}`;
@@ -46,6 +55,7 @@ export function runFile(file, args, options = {}) {
         return;
       }
       budget[stream] += bytes;
+      const text = decoders[stream].write(chunk);
       if (stream === 'stdout') stdout += text;
       else stderr += text;
     };
@@ -65,6 +75,13 @@ export function runFile(file, args, options = {}) {
     };
     child.on('error', (error) => finish(error));
     child.on('close', (code, signal) => {
+      // Flush a trailing partial sequence (a decoder may still hold bytes).
+      for (const stream of ['stdout', 'stderr']) {
+        const tail = decoders[stream].end();
+        if (!tail) continue;
+        if (stream === 'stdout') stdout += tail;
+        else stderr += tail;
+      }
       const detail = overflow
         ? overflow
         : timedOut

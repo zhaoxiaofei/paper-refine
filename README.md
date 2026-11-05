@@ -1990,8 +1990,8 @@ found in the cover letter, the main text and the supplementary alike:
 | `FMT-T9g` | a LaTeX value+unit outside siunitx (`\qty{}{}` / `\SI{}{}`, `\num{}` for bare numbers; both spellings accepted) | finding; `\code{}`, verbatim, URLs, `\cite`, cross-references, inline math and generated tables are exempt |
 | `FMT-T9i` | a mega-paragraph (a paragraph over the venue's declared `style_limits.paragraph_words`, in the body narrative) | finding only when the profile states the cap: split it at the natural boundary. With no profile cap the scan records an advisory policy gap and files no finding. Methods enumerations, tables, references and LEGENDS are exempt — a legend is one paragraph by the caption rule (`FMT-T2c`), and its length is the venue's own word-budget question (M18) |
 | `FMT-T9j` | two term families competing for one concept (CN/CNV/CNA, simulate/emulate) | finding: fix one term per concept in `GLOSSARY.md` |
-| `FMT-T9k` | a narrative paragraph built from ONE sentence (the paragraph-level "lone division"; 5–45 words, body/abstract) | finding: merge the sentence into the paragraph it belongs to, or give the claim its support — a paragraph carries a claim plus its support. Captions/legends, end-matter sections (funding, ethics, availability, acronym lists), statement shapes, keywords and table cells are exempt by construction |
-| `FMT-T10f` | a heading whose section holds exactly ONE subsection (the same "lone division" one level up) | finding: promote the lone subsection into its parent, or add the sibling the section is missing |
+| `FMT-T9k` | a narrative paragraph built from ONE sentence (the paragraph-level "lone division"; 5–45 words, body/abstract) | finding: merge the sentence into the paragraph it belongs to when the surrounding text already carries its support; if the support would have to be NEW content, do not invent it — record the gap for the finding-generating role. Captions/legends, end-matter sections (funding, ethics, availability, acronym lists), statement shapes, keywords and table cells are exempt by construction |
+| `FMT-T10f` | a heading whose section holds exactly ONE subsection (the same "lone division" one level up) | finding: promote the lone subsection into its parent; adding a sibling subsection is a structural addition, so apply it only when a frozen finding authorises that exact change — otherwise record the gap and do not add content |
 | `FMT-T8a` | a document mixes citation formats (`(Author et al., 2015, Nature Methods)` vs `(Author et al., Nature Methods, 2015)` vs `(Author et al., 2015)`) | report; with `citation_journal_names="drop"` (default) the redundant journal segment is deleted, leaving one author-year format. Reported only when an odd form cannot be matched safely |
 | `FMT-T8b` | nested parentheses (`(… (BAF))`) | finding-tier — moving the inner item out is a wording decision the revision stage makes; mathematical calls like `T(·,·)` are excluded |
 | `FMT-T8c` | a distinctive term repeated in one short passage (`Nature Biotechnology` four times in one cover letter) | finding-tier redundancy: a proper name ≥3× in one paragraph *and* ≥4× in the document, or a long content word ≥5× in one paragraph, must be varied or dropped — a writing-quality defect does not need a journal rule to exist. Deliberately narrow: proper names (2–3 capitalized words, no document-structure word) and single long content words |
@@ -2324,11 +2324,11 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
 | review | 112 KB | 44 KB | 60% |
-| cold_start_review | 56 KB | 20 KB | 63% |
+| cold_start_review | 56 KB | 20 KB | 64% |
 | audit | 83 KB | 40 KB | 52% |
-| revise | 110 KB | 57 KB | 48% |
-| integrate | 109 KB | 57 KB | 48% |
-| rewrite | 102 KB | 53 KB | 48% |
+| revise | 111 KB | 57 KB | 48% |
+| integrate | 110 KB | 57 KB | 48% |
+| rewrite | 103 KB | 53 KB | 49% |
 | judge | 96 KB | 66 KB | 32% |
 | revision_audit | 24 KB | 10 KB | 58% |
 | revision_repair | 20 KB | 6 KB | 68% |
@@ -2771,10 +2771,12 @@ definition (`paper-skills/paper-revise/references/ledger.md`):
 Severity is shared too (FATAL / CRITICAL / MAJOR / MINOR, four rungs) and is a **distance from
 correct** in every class — a detail that changes nothing a reader depends on is Minor, a changed
 reported fact/attribute/comparison (or prose/formatting a reader must work around) is Major, a
-conclusion-changing, data-contradicting or category-impossible error is Critical, and an artifact
-or claim that is unusable (a deliverable that cannot be opened or read, a fabricated result
-presented as established) is Fatal; a factual error is not automatically Critical, and prose or
-formatting is not automatically Minor. An
+conclusion-changing, data-contradicting or category-impossible error is Critical (a fabricated
+number or citation whose reach is local — it does not underwrite the paper's conclusion — is
+Critical), and an artifact or claim that is unusable (a deliverable that cannot be opened or read,
+a fabricated result or citation presented as established *and* that the conclusion rests on) is
+Fatal; a factual error is not automatically Critical, and prose or formatting is not automatically
+Minor. An
 improvement claim must name the class and the concrete item behind it -- a difference that cannot be
 named in this vocabulary is cosmetic and scores 0. What differs between sessions
 is the *deliverable*, not the vocabulary: an identification session reports
@@ -3440,7 +3442,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 181 suites (a few
+any failure. They are independent, so run them in parallel — 182 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

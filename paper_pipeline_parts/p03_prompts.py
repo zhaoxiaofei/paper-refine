@@ -2084,12 +2084,14 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
        business: the format scan and the orchestrator's normalizer own them, so never rewrite text
        for them here
   PARAGRAPH AND SECTION SHAPE — the same rule at two levels of the outline: a container that
-  divides at all divides into more than one part. A narrative paragraph carries a claim plus its
-  support, so a paragraph built from ONE sentence reads as an accident (FMT-T9k, finding-tier):
-  merge the sentence into the paragraph it belongs to, or give the claim its support. A section
-  that divides at all holds two or more subsections, so a section holding exactly ONE subsection
-  is FMT-T10f: promote the lone subsection into its parent, or add the sibling the section is
-  missing. End-matter statements, acronym lists, captions and table cells are exempt by
+  divides at all divides into more than one part. A paragraph built from ONE sentence reads as
+  an accident (FMT-T9k, finding-tier): merge the sentence into the paragraph it belongs to when
+  the surrounding text already carries its support; if the support would have to be NEW content,
+  do not invent it — record the gap for the finding-generating role (or the manual list) and
+  leave the sentence. A section holding exactly ONE subsection is FMT-T10f: promote the lone
+  subsection into its parent. Adding a sibling subsection is a structural addition: apply it
+  only when a frozen finding authorises that exact change; otherwise record the gap and do not
+  add content. End-matter statements, acronym lists, captions and table cells are exempt by
   construction.
   ONE worse word is one row: each step fixes every instance it finds, not only a recurring one, and
   a difference is a change only when one side is WORSE on the step's own criterion -- two equally
@@ -2507,10 +2509,12 @@ tier the damage happens to live in.
 SEVERITY HAS FOUR RUNGS, AND IT IS A DISTANCE FROM CORRECT IN EVERY TIER -- correctness,
 preservation, completeness, consistency, writing and formatting alike: FATAL = the artifact or the
 claim is unusable (a deliverable that cannot be opened or read, a rendering with no readable text,
-a fabricated result presented as established) AND no usable copy of that content ships elsewhere
-in the package; CRITICAL = the error changes a conclusion,
-contradicts the data, or is a category impossibility; MAJOR = the error changes a reported
-fact/attribute/comparison without changing the conclusion, or a prose/formatting failure a reader
+a fabricated result or citation that is presented as established AND that the conclusion rests on)
+AND no usable copy of that content ships elsewhere in the package; CRITICAL = the error changes a
+conclusion, contradicts the data, or is a category impossibility (a fabricated number or citation
+whose reach is LOCAL -- the same fabrication carrying the conclusion is Fatal); MAJOR = the error
+changes a reported fact/attribute/comparison without changing the conclusion, or a prose/formatting
+failure a reader
 must work around (a slip that recurs through a paragraph or section is MAJOR, not several more
 MINOR rows: the structural level a defect reaches is part of its distance from correct); MINOR = a
 detail that changes nothing a reader depends on (terminology, missing

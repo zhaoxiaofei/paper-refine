@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import math
 import re
 import statistics
@@ -98,6 +99,13 @@ def parse_score(value: str | None) -> float | None:
 
 
 def is_head_dump(path: Path) -> bool:
+    """A non-CSV file is a ``head`` listing when it carries a marker and a
+    header with the fields the collector actually reads.
+
+    The detector used to require the literal ``opponent_label``, while
+    ``opponent_of()`` reads ``opponent_id``: a dump with every consumed field
+    except ``opponent_label`` was treated as a plain CSV and scored zero rows.
+    """
     if path.suffix.lower() == ".csv":
         return False
     try:
@@ -105,13 +113,56 @@ def is_head_dump(path: Path) -> bool:
             chunk = handle.read(8000)
     except OSError:
         return False
-    return "==>" in chunk and "opponent_label" in chunk
+    if "==>" not in chunk:
+        return False
+    in_block = False
+    for line in chunk.splitlines():
+        if HEAD_MARKER.match(line.strip()):
+            in_block = True
+            continue
+        if not in_block or not line.strip() or "," not in line:
+            continue
+        try:
+            fields = {str(f).strip().lower() for f in next(csv.reader([line]))}
+        except (csv.Error, StopIteration):
+            continue
+        if "opponent_id" in fields or "opponent_label" in fields:
+            return True
+        # The first CSV row after a marker is the header; a data row that does
+        # not name the consumed fields does not make this a head dump.
+        in_block = False
+    return False
+
+
+def _csv_quotes_open(line: str, in_quotes: bool) -> bool:
+    """Track an open quoted CSV field across one physical line.
+
+    A marker-shaped line INSIDE a quoted ``reason`` is field text, not a block
+    boundary. Doubled quotes inside a quoted field are escaped quotes.
+    """
+    i = 0
+    while i < len(line):
+        if line[i] == '"':
+            if in_quotes and i + 1 < len(line) and line[i + 1] == '"':
+                i += 2
+                continue
+            in_quotes = not in_quotes
+        i += 1
+    return in_quotes
 
 
 def iter_head_dump(path: Path):
-    """Yield (virtual csv path, text) blocks from a ``head`` listing."""
+    """Yield (virtual csv path, text) blocks from a ``head`` listing.
+
+    Every physical line between markers is preserved (blank lines and embedded
+    newlines included), and a marker is recognized only BETWEEN CSV records: a
+    marker-shaped line inside an open quoted field stays field text. The
+    reconstructed block is therefore the original CSV text, not a
+    newline-free approximation of it.
+    """
     current: str | None = None
     buffer: list[str] = []
+    in_quotes = False
 
     def flush():
         if current and buffer:
@@ -121,21 +172,25 @@ def iter_head_dump(path: Path):
         for raw in handle:
             line = raw.rstrip("\n")
             marker = HEAD_MARKER.match(line.strip())
-            if marker:
+            if marker and not in_quotes:
                 yield from flush()
                 current = marker.group(1)
                 buffer = []
                 continue
             if current is None:
                 continue
-            if not line.strip():
+            if not in_quotes and not line.strip():
+                # A blank line between records is record separation; a blank
+                # line inside a quoted field is evidence and must be kept.
                 continue
             # Drop a trailing shell prompt that ``head`` sessions sometimes append.
             # A CSV row can legitimately end in "$" (for example in a free-text
             # reason column); prompt lines carry no comma-separated fields.
-            if "," not in line and (line.startswith("(base) ") or line.endswith("$")):
+            if not in_quotes and "," not in line \
+                    and (line.startswith("(base) ") or line.endswith("$")):
                 continue
             buffer.append(line)
+            in_quotes = _csv_quotes_open(line, in_quotes)
     yield from flush()
 
 
@@ -178,7 +233,10 @@ def read_rows(path: Path, inline: str | None) -> list[dict[str, str]]:
     if inline is None:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             return list(csv.DictReader(handle))
-    return list(csv.DictReader(inline.splitlines()))
+    # `splitlines()` fed newline-free fragments to DictReader, so a quoted
+    # multiline `reason` (and its blank lines) was joined into one string. The
+    # StringIO keeps the records' own line breaks.
+    return list(csv.DictReader(io.StringIO(inline)))
 
 
 def opponent_of(row: dict[str, str]) -> str:
@@ -433,6 +491,19 @@ def directed_score_note(cubes, how: str) -> str:
     return text
 
 
+def _string_label_cell(sheet, row: int, col: int, value):
+    """Write an UNTRUSTED label as an explicit string cell.
+
+    openpyxl guesses a formula when a value starts with `=`, so a member id
+    of `=1+1` from the score CSV was written as data_type `f` and evaluated
+    on open. Labels and ids are external data: pin the cell type.
+    """
+    cell = sheet.cell(row, col)
+    cell.value = str(value)
+    cell.data_type = "s"
+    return cell
+
+
 def add_description_sheet(workbook, cubes, index_rows, how: str) -> None:
     """First sheet: how the score sheets are built and how to read a cell."""
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -521,7 +592,8 @@ def add_description_sheet(workbook, cubes, index_rows, how: str) -> None:
             n_pairs,
         )
         for col, value in enumerate(values, start=1):
-            cell = sheet.cell(row, col, value)
+            cell = (_string_label_cell(sheet, row, col, value)
+                    if col <= 2 else sheet.cell(row, col, value))
             cell.font = body_font
             cell.alignment = Alignment(horizontal="left", vertical="center")
             cell.border = thin
@@ -543,6 +615,8 @@ def write_workbook(cubes, notes, output: Path, how: str) -> None:
     from openpyxl.formatting.rule import ColorScaleRule
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
+
+    string_label_cell = _string_label_cell
 
     workbook = Workbook()
     default = workbook.active
@@ -597,7 +671,7 @@ def write_workbook(cubes, notes, output: Path, how: str) -> None:
             corner.fill = header_fill
             corner.border = thin
             for col_index, version in enumerate(versions, start=2):
-                cell = sheet.cell(header_row, col_index, version)
+                cell = string_label_cell(sheet, header_row, col_index, version)
                 cell.font = header_font
                 cell.fill = header_fill
                 cell.alignment = center
@@ -607,7 +681,7 @@ def write_workbook(cubes, notes, output: Path, how: str) -> None:
             numeric_cells = []
             magnitudes: list[float] = []
             for version in versions:
-                label_cell = sheet.cell(row_cursor, 1, version)
+                label_cell = string_label_cell(sheet, row_cursor, 1, version)
                 label_cell.font = label_font
                 label_cell.fill = label_fill
                 label_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)

@@ -1550,26 +1550,58 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
                                "from_a": len(a_items), "from_b": len(b_kept),
                                "deduped_b": deduped,
                                "id_remap": remap, "coverage_conflicts": sorted(set(conflicts))}}
-    write_json_atomic(b_sb / GUIDED_REVIEW_DIR / "findings.json", merged)
-    # The discovery round's findings travel with the frozen list too.
-    extra = []
-    for sb in (a_sb, b_sb):
+    # The discovery round's findings travel with the frozen list too. Each part
+    # numbers its own discovery rows from X-001, so a collision has to be
+    # namespaced exactly like the F-* ids above: two distinct observations under
+    # one X id cannot be addressed independently downstream.
+    a_extra, b_extra = [], []
+    coverage_a, coverage_b = [], []
+    for sb, findings_out, coverage_out in (
+            (a_sb, a_extra, coverage_a), (b_sb, b_extra, coverage_b)):
         doc = read_json(sb / GUIDED_REVIEW_DIR / "round2" / "findings_extra.json",
                         revive=False, lenient=True) or {}
-        extra += [f for f in (doc.get("findings") or []) if isinstance(f, dict)]
+        findings_out += [dict(f) for f in (doc.get("findings") or []) if isinstance(f, dict)]
+        coverage_out += [row for row in (doc.get("coverage") or []) if isinstance(row, dict)]
+    used_x = {str(f.get("id")) for f in a_extra + b_extra if str(f.get("id") or "")}
+    x_remap = {}
+    for f in b_extra:
+        fid = str(f.get("id") or "")
+        if fid and fid in {str(x.get("id")) for x in a_extra}:
+            n = 1
+            while True:
+                cand = f"X-{n:03d}" if n < 1000 else f"X-{n}"
+                if not (900 <= n <= 999) and cand not in used_x:
+                    break
+                n += 1
+            x_remap[fid] = cand
+            f["id"] = cand
+            used_x.add(cand)
+
+    def _rewrite_x(value):
+        if isinstance(value, str):
+            for old, new in x_remap.items():
+                value = re.sub(r"(?<![A-Za-z0-9])" + re.escape(old) + r"(?![0-9])",
+                               new, value)
+            return value
+        if isinstance(value, list):
+            return [_rewrite_x(v) for v in value]
+        if isinstance(value, dict):
+            return {k: _rewrite_x(v) for k, v in value.items()}
+        return value
+
+    extra = a_extra + [_rewrite_x(f) for f in b_extra]
     if extra:
         # Keep each side's D4 coverage list: rewriting the file with an EMPTY
         # coverage dropped part B's own D4 record from the merged artifact the
         # reviser and the archived ledger read.
         coverage = []
-        for sb in (a_sb, b_sb):
-            doc = read_json(sb / GUIDED_REVIEW_DIR / "round2" / "findings_extra.json",
-                            revive=False, lenient=True) or {}
-            for row in (doc.get("coverage") or []):
-                if row not in coverage:
-                    coverage.append(row)
+        for row in coverage_a + [_rewrite_x(r) for r in coverage_b]:
+            if row not in coverage:
+                coverage.append(row)
         write_json_atomic(b_sb / GUIDED_REVIEW_DIR / "round2" / "findings_extra.json",
                           {"findings": extra, "coverage": coverage})
+    merged["split_review"]["x_id_remap"] = x_remap
+    write_json_atomic(b_sb / GUIDED_REVIEW_DIR / "findings.json", merged)
     return merged["split_review"]
 
 
@@ -1900,6 +1932,18 @@ def _norm_basis_item(item):
     return tier, severity, evidence
 
 
+def _basis_row_key(side, tier, severity, evidence, check) -> tuple:
+    """One ledger item's identity for duplicate detection.
+
+    A defect INSTANCE is (side, tier, severity, check, normalized evidence). Two
+    copies of the same row identified this way are one item: counting them twice
+    doubled a comparison's arithmetic before the cross-sheet census could dedup
+    anything (the census only runs after the per-comparison score is derived).
+    """
+    return (str(side), str(tier), str(severity), str(check or ""),
+            " ".join(str(evidence or "").split()).lower())
+
+
 def ledger_items(comp: dict):
     """[(side, tier, severity, evidence, check_id, ai_suspicion)] for a comparison.
 
@@ -1908,10 +1952,15 @@ def ledger_items(comp: dict):
     side it was filed on, its normalized tier and severity, the evidence, the
     frozen check id it cites (FMT-*/Q1-Q12 mapped onto their owners, "" when the
     cell is absent) and whether it is a speculative-AI row (`J4` + "possible AI").
+
+    An EXACT duplicate row (same side, tier, severity, CANONICAL check and
+    evidence) is one defect instance and is emitted once. `judge_basis_problems`
+    reports the duplicate as a contract problem; the derivation must not count
+    it twice.
     """
     if not isinstance(comp, dict):
         return None
-    out = []
+    out, seen = [], set()
     for side in ("resolved", "introduced"):
         raw = comp.get(side)
         if not isinstance(raw, list):
@@ -1921,6 +1970,13 @@ def ledger_items(comp: dict):
             if norm is None:
                 return None
             cid = _norm_check_id(item.get("check")) if isinstance(item, dict) else ""
+            # The key uses the FROZEN spelling, exactly like the validator in
+            # `judge_basis_problems`: the documented padded spelling `M01` and
+            # the frozen `M1` name ONE check, so they name one defect instance.
+            key = _basis_row_key(side, norm[0], norm[1], norm[2], _frozen_check_id(cid))
+            if key in seen:
+                continue
+            seen.add(key)
             out.append((side, norm[0], norm[1], norm[2], cid,
                         bool(cid == "J4"
                              and norm[2].strip().lower().startswith("possible ai"))))
@@ -2567,6 +2623,7 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
     elif basis and basis not in BASIS_VALUES:
         emit(f"{prefix}{where}.basis {basis!r} is not one of {'/'.join(BASIS_VALUES)}")
     items, bad = [], []
+    seen_rows = set()
     for side in ("resolved", "introduced"):
         raw = comp.get(side)
         if raw is None:
@@ -2582,10 +2639,19 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
             if norm is None:
                 bad.append(f"{side}[{k}]")
                 continue
+            cid = _frozen_check_id(item.get("check")) if isinstance(item, dict) else ""
+            row_key = _basis_row_key(side, norm[0], norm[1], norm[2], cid)
+            if row_key in seen_rows:
+                # One ledger item per defect instance: an identical row supplied
+                # twice used to add its weight twice before the cross-sheet census
+                # could dedup (the comparison's own score is derived first).
+                emit(f"{prefix}{where}.{side}[{k}] duplicates an earlier ledger row "
+                     f"(same tier/severity/check/evidence); a defect instance is counted once")
+                continue
+            seen_rows.add(row_key)
             if len(norm[2].split()) > EVIDENCE_MAX_WORDS:
                 out_w.append(f"{where}.{side}[{k}].evidence is {len(norm[2].split())} words "
                              f"(schema: <={EVIDENCE_MAX_WORDS})")
-            cid = _frozen_check_id(item.get("check")) if isinstance(item, dict) else ""
             if cid in LENGTH_GUARD_CHECKS and (norm[0] != "formatting" or norm[1] != "minor"):
                 emit(f"{prefix}{where}.{side}[{k}]: a length/caption row (`{cid}`) is a "
                      f"formatting-tier MINOR row -- length may enter a comparison by at most +-1 "
@@ -3158,12 +3224,30 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
         (sb / "feedback" / "previous_responses" / "files").mkdir(parents=True, exist_ok=True)
         (sb / "feedback" / "previous_responses" / "text").mkdir(parents=True, exist_ok=True)
     seed, unparsed, labels, llm_labels = [], [], [], []
+    staged, used_names = {}, {}
     streams = ([(path, label, "human", sb / "feedback") for path, label in files]
                + [(path, label, "llm", sb / "feedback" / "llm") for path, label in llm_files]
                + [(path, label, "previous", sb / "feedback" / "previous_responses")
                   for path, label in previous])
     for path, label, origin, parent in streams:
-        safe = label.replace("/", "__")
+        # `a/b.txt` and `a__b.txt` used to flatten to the SAME staged name, so
+        # the second copy silently deleted and replaced the first (and the seed
+        # still named both source paths). Keep the readable flattened name for
+        # the first path and add a stable digest for a genuine collision; the
+        # `staged` map is recorded in the seed so the ledger check resolves a
+        # source to the file that was actually staged.
+        base = label.replace("/", "__")
+        safe = base
+        used = used_names.setdefault(origin, {})
+        if safe in used and used[safe] != label:
+            digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:8]
+            safe = f"{base}.__{digest}"
+            n = 2
+            while safe in used and used[safe] != label:
+                safe = f"{base}.__{digest}.{n}"
+                n += 1
+        used[safe] = label
+        staged[label] = safe
         if origin == "human":
             labels.append(label)
         elif origin == "llm":
@@ -3191,6 +3275,7 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
     original_submission = _stage_original_submission(ctx, sb)
     write_json_atomic(sb / "feedback" / "CONCERN_SEED.json",
                       {"files": labels, "llm_files": llm_labels,
+                       "staged": staged,
                        "candidates": seed, "unparsed": unparsed,
                        "previous_responses": [label for _p, label in previous],
                        "original_submission": original_submission,
@@ -3205,7 +3290,7 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
 JOURNAL_LEDGER_SCHEMA = """{
   "journal_from": "<the journal the feedback came from>",
   "target_journal": "<the journal this revision is for>",
-  "mode": "<transfer|resubmit|major|minor>",
+  "mode": "<transfer|resubmit|major|minor|llm>",
   "source_files": ["<the feedback file names you read>"],
   "concerns": [
     {"id": "R1-1",
@@ -3818,59 +3903,108 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
                     f"deliverable (one row per distinct concern), and an empty ledger would "
                     f"silently answer nothing")
         return data
-    def _stream_text(dirs) -> str:
-        parts = []
-        for tdir in dirs:
-            if tdir.is_dir():
-                for p in sorted(tdir.glob("*.txt")):
-                    text_part = read_text_bounded(p)
-                    if text_part is not None:
-                        parts.append(_norm_ws(text_part))
-        return " \n ".join(parts)
-
-    def _source_tokens(label: str) -> set:
-        """Every spelling a ledger `source` may use for one staged feedback file.
-
-        The session is handed the CORPUS-RELATIVE label (`human_review_feedback/
-        editor_letter.txt`, the name CONCERN_SEED.json records), while the file is
-        staged under the flattened `human_review_feedback__editor_letter.txt`
-        (`_write_journal_feedback_inputs` replaces `/` with `__`). A ledger may
-        cite the label, its basename or the staged name; all three name the same
-        stream, so all three must bind.
-        """
-        lab = str(label or "").strip().lower()
-        if not lab:
-            return set()
-        safe = lab.replace("/", "__")
-        base = lab.rsplit("/", 1)[-1]
-        stem = base.rsplit(".", 1)[0] if "." in base else base
-        return {lab, safe, base, stem, safe.rsplit(".", 1)[0]}
-
-    def _staged_sources(d: Path, labels) -> set:
-        """The `source` spellings that name a file ACTUALLY staged in `d`."""
-        tokens = set()
-        for label in labels or ():
-            lab = str(label or "").strip()
-            if lab and (d / lab.replace("/", "__")).is_file():
-                tokens |= _source_tokens(lab)
-        if d.is_dir():
-            for p in d.iterdir():
-                if p.is_file() and p.name:
-                    tokens |= _source_tokens(p.name)
-        return {t for t in tokens if t}
-
     seed = read_json(sb / "feedback" / "CONCERN_SEED.json", revive=False, lenient=True)
     seed = seed if isinstance(seed, dict) else {}
+    staged_map = seed.get("staged") if isinstance(seed.get("staged"), dict) else {}
 
     def _seed_labels(key: str) -> list:
         raw = seed.get(key)
         return [str(x) for x in raw if isinstance(x, str)] if isinstance(raw, list) else []
 
-    human_hay = _stream_text([sb / "feedback" / "text"])
-    llm_hay = _stream_text([sb / "feedback" / "llm" / "text"])
-    haystack = " \n ".join(x for x in (human_hay, llm_hay) if x)
-    human_sources = _staged_sources(sb / "feedback" / "files", _seed_labels("files"))
-    llm_sources = _staged_sources(sb / "feedback" / "llm" / "files", _seed_labels("llm_files"))
+    def _staged_name(label: str) -> str:
+        """The basename `_write_journal_feedback_inputs` actually staged.
+
+        Older roots (and test fixtures) carry no `staged` map: their label is
+        flattened with `/` -> `__`, the pre-collision behaviour.
+        """
+        lab = str(label or "").strip()
+        solved = staged_map.get(lab)
+        return solved if isinstance(solved, str) and solved else lab.replace("/", "__")
+
+    def _label_aliases(label: str) -> dict:
+        """The spellings a ledger `source` may use for one staged feedback file.
+
+        The session is handed the CORPUS-RELATIVE label (`human_review_feedback/
+        editor_letter.txt`, the name CONCERN_SEED.json records), while the file is
+        staged under its flattened name. A ledger may cite the label, its
+        basename, its stem or the staged name -- all name ONE file. Matching is
+        EQUALITY (or a path suffix), never a substring: a fabricated source and a
+        one-letter stem used to match any label.
+
+        The spellings are split into STRONG (`label`, staged name, converted
+        `<staged>.txt`) and WEAK (basename, stem): a strong match must not be
+        widened by a same-basename sibling, or a quote taken from `b/report.txt`
+        would satisfy a concern whose `source` is `a/report.txt`.
+        """
+        lab = str(label or "").strip().lower()
+        if not lab:
+            return {"strong": set(), "weak": set()}
+        safe = _staged_name(label).lower()
+        base = lab.rsplit("/", 1)[-1]
+        stem = base.rsplit(".", 1)[0] if "." in base else base
+        safe_stem = safe.rsplit(".", 1)[0] if "." in safe else safe
+        # `_write_journal_feedback_inputs` writes the converted text as
+        # `<staged>.txt`; a session may cite that converted name (the stub's
+        # concern rows do), and it still names the same source file.
+        return {"strong": {lab, safe, safe + ".txt"},
+                "weak": {base, stem, safe_stem}}
+
+    def _staged_labels(d: Path, labels) -> list:
+        """The labels whose files are ACTUALLY staged under `d`, deterministic."""
+        if not d.is_dir():
+            return []
+        actual = {p.name for p in d.iterdir() if p.is_file()}
+        out, known_labels, known_names = [], set(), set()
+        for label in labels or ():
+            lab = str(label or "").strip()
+            if lab and lab not in known_labels and _staged_name(lab) in actual:
+                out.append(lab)
+                known_labels.add(lab)
+                known_names.add(_staged_name(lab))
+        # A root whose seed predates the `staged` map (or a fixture that writes
+        # the staged files directly): the staged name is the label.
+        for name in sorted(actual):
+            if name not in known_names:
+                out.append(name)
+                known_names.add(name)
+        return out
+
+    def _label_text(label: str, llm: bool) -> str:
+        """The converted text of ONE staged feedback file ("" when absent)."""
+        safe = _staged_name(label)
+        tdir = sb / "feedback" / ("llm/text" if llm else "text")
+        for cand in (tdir / (safe + ".txt"), tdir / safe):
+            if cand.is_file():
+                text_part = read_text_bounded(cand)
+                if text_part is not None:
+                    return _norm_ws(text_part)
+        return ""
+
+    def _named_labels(source: str, labels) -> list:
+        """The staged labels a ledger `source` names.
+
+        A STRONG spelling (the corpus label, the staged name or the converted
+        `<staged>.txt`) decides on its own: when it matches, a same-basename
+        sibling must not bind as well, or a quote from `b/report.txt` would
+        satisfy a concern whose source is `a/report.txt`. The basename/stem
+        forms are the fallback for a ledger that cites less than the full path.
+        """
+        src = str(source or "").strip().lower()
+        if not src:
+            return []
+        strong, weak = [], []
+        for label in labels:
+            aliases = _label_aliases(label)
+            if src in aliases["strong"] or any(
+                    src.endswith("/" + a) for a in aliases["strong"] if a):
+                strong.append(label)
+            elif src in aliases["weak"] or any(
+                    src.endswith("/" + a) for a in aliases["weak"] if a):
+                weak.append(label)
+        return strong or weak
+
+    human_labels = _staged_labels(sb / "feedback" / "files", _seed_labels("files"))
+    llm_labels = _staged_labels(sb / "feedback" / "llm" / "files", _seed_labels("llm_files"))
     seen = set()
     for i, row in enumerate(rows, 1):
         if not isinstance(row, dict):
@@ -3895,21 +4029,19 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
         if not author:
             errs.append(f"concern {cid}: the `author` cell is empty (name the reviewer or "
                         f"'LLM review (pre-filtered)')")
+        human_hits = _named_labels(source, human_labels)
+        llm_hits = _named_labels(source, llm_labels)
         stream = ""
-        if source:
-            src_l = source.lower()
-            in_human = any(tok in src_l for tok in human_sources)
-            in_llm = any(tok in src_l for tok in llm_sources)
-            if in_llm and not in_human:
-                stream = "llm"
-            elif in_human and not in_llm:
-                stream = "human"
-            elif in_human and in_llm:
-                stream = "both"
-            else:
-                errs.append(f"concern {cid}: source {source!r} does not name any file staged "
-                            f"under feedback/files/ or feedback/llm/files/ (name the feedback "
-                            f"file the quote comes from)")
+        if human_hits and llm_hits:
+            stream = "both"
+        elif human_hits:
+            stream = "human"
+        elif llm_hits:
+            stream = "llm"
+        elif source:
+            errs.append(f"concern {cid}: source {source!r} does not name any file staged "
+                        f"under feedback/files/ or feedback/llm/files/ (name the feedback "
+                        f"file the quote comes from)")
         quote = _norm_ws(row.get("quote"))
         if len(quote) < 8:
             errs.append(f"concern {cid}: quote is missing/too short (a verbatim <=300-char "
@@ -3917,16 +4049,25 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
         elif len(quote) > 300:
             errs.append(f"concern {cid}: quote is {len(quote)} characters; the ledger's limit "
                         f"is <=300 characters after whitespace normalisation")
-        else:
-            named = {"human": human_hay, "llm": llm_hay, "both": haystack}.get(stream, haystack)
-            if quote not in named:
-                where = {"human": "feedback/text/ (the human feedback)",
-                         "llm": "feedback/llm/text/ (the LLM review)",
-                         "both": "feedback/text/ or feedback/llm/text/"}.get(
-                             stream, "any feedback/text/ or feedback/llm/text/")
-                errs.append(f"concern {cid}: the quote is not verbatim in {where} -- the stream "
-                            f"its `source` names (checked whitespace-normalised); a paraphrase "
-                            f"or a quote from the other stream fails here")
+        elif stream:
+            # Bind the quote to the FILE the row names, not to the whole stream:
+            # a row citing a.txt with a sentence that appears only in b.txt used
+            # to pass because both were concatenated into one haystack.
+            texts = []
+            if stream in ("human", "both"):
+                texts += [_label_text(label, False) for label in human_hits]
+            if stream in ("llm", "both"):
+                texts += [_label_text(label, True) for label in llm_hits]
+            named = " \n ".join(text for text in texts if text)
+            where = {"human": "the human feedback file",
+                     "llm": "the LLM review file",
+                     "both": "the feedback file(s)"}[stream]
+            cited = ", ".join(human_hits + llm_hits)
+            if not named or quote not in named:
+                errs.append(f"concern {cid}: the quote is not verbatim in {where} its `source` "
+                            f"names ({cited!r}) -- checked whitespace-normalised against that "
+                            f"file alone; a paraphrase, a quote from another file in the same "
+                            f"stream, or a quote from the other stream fails here")
         action = str(row.get("action") or "").strip()
         if action not in JOURNAL_CONCERN_ACTIONS:
             errs.append(f"concern {cid}: action {action!r} is not one of "
@@ -4951,15 +5092,38 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
     return problems
 
 
+def _markdown_outside_fences(text: str) -> str:
+    """`text` with fenced code blocks removed.
+
+    A response letter may show a code sample; a `## <id>` heading or a
+    `**Comment:**` line inside it is an EXAMPLE, not a response section or a
+    reviewer quotation. Splitting the raw letter counted both. Fences are the
+    Markdown triple-backtick/tilde form; the closing fence must use the same
+    character and be at least as long as the opening.
+    """
+    out, fence = [], None
+    for line in str(text or "").splitlines():
+        m = re.match(r"[ \t]*(`{3,}|~{3,})", line)
+        if fence is None:
+            if m:
+                fence = m.group(1)
+                continue
+            out.append(line)
+        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+            fence = None
+    return "\n".join(out)
+
+
 def response_comment_quotes(letter: str) -> dict:
     """{concern id: the verbatim `**Comment:**` quotation in that block}.
 
     The response letter is agent-written prose; one `## <id>` block per concern
     carries a `**Comment:** "..."` line (the prompt's shape). A block with no
-    Comment line has no entry, so the postcheck can demand one (F60).
+    Comment line has no entry, so the postcheck can demand one (F60). Fenced
+    examples are not blocks: a code sample must not satisfy the gate.
     """
     out = {}
-    for part in re.split(r"(?m)^##\s+", letter or "")[1:]:
+    for part in re.split(r"(?m)^##\s+", _markdown_outside_fences(letter))[1:]:
         m = re.match(r"([A-Za-z0-9_.\-]+)", part)
         if not m:
             continue
@@ -4979,11 +5143,23 @@ def response_comment_is_verbatim(comment: str, concern_quote: str) -> bool:
     accepted a quote with invented reviewer words appended (the true quote stayed
     a substring); only the comment being contained in the already-verified
     concern quote proves every word came from the reviewer. A shorter excerpt is
-    still allowed.
+    still allowed, but the match is CASE-SENSITIVE and must fall on word
+    boundaries: `US` is not `us`, and `valid` is not a quotation of `invalid`.
     """
-    c_norm = " ".join(str(comment or "").split()).lower()
-    q_norm = " ".join(str(concern_quote or "").split()).lower()
-    return bool(c_norm) and c_norm in q_norm
+    c_norm = " ".join(str(comment or "").split())
+    q_norm = " ".join(str(concern_quote or "").split())
+    if not c_norm:
+        return False
+    pos = q_norm.find(c_norm)
+    while pos >= 0:
+        before = q_norm[pos - 1] if pos else ""
+        end = pos + len(c_norm)
+        after = q_norm[end] if end < len(q_norm) else ""
+        if not (before.isalnum() or before == "_") \
+                and not (after.isalnum() or after == "_"):
+            return True
+        pos = q_norm.find(c_norm, pos + 1)
+    return False
 
 
 def response_heading_occurrences(pid: str, blob: str) -> int:
@@ -4992,11 +5168,16 @@ def response_heading_occurrences(pid: str, blob: str) -> int:
     `_finding_id_occurrences` counted every mention, so a legitimate
     cross-reference in another block ("we also address R1-2") made the referenced
     concern look duplicated and failed its block. The prompt's contract is one
-    HEADING per concern, so only headings are counted here.
+    HEADING per concern, so only headings are counted here. The heading's id is
+    parsed as a COMPLETE token: `R1-1-extra` is a different concern, not a
+    second `R1-1` block, and fenced examples are not headings.
     """
-    return len(re.findall(
-        r"(?m)^\s{0,3}#{1,6}\s*" + re.escape(pid) + r"(?![A-Za-z0-9])",
-        str(blob or "")))
+    count = 0
+    for m in re.finditer(r"(?m)^\s{0,3}#{1,6}\s*([A-Za-z0-9_.\-]+)",
+                         _markdown_outside_fences(blob)):
+        if m.group(1) == str(pid):
+            count += 1
+    return count
 
 
 def postcheck_response(ctx: Ctx, rec: dict):
@@ -5109,7 +5290,10 @@ def postcheck_response(ctx: Ctx, rec: dict):
             elif Path(f).is_absolute() or ".." in Path(f).parts:
                 errs.append(f"response row {cid!r}: change file {f!r} is not a package-relative "
                             f"path (absolute and parent-relative paths can leave the package)")
-            elif not (target / f).exists():
+            elif not (target / f).is_file():
+                # `exists()` is also true for a DIRECTORY: `figures/` passed the
+                # change-path gate with no document behind the claim. The prompt
+                # requires every path to name a file.
                 errs.append(f"response row {cid!r}: change file {f!r} does not exist in the "
                             f"package -- the letter must not cite a file the revision does not "
                             f"carry")
@@ -5132,7 +5316,7 @@ def postcheck_response(ctx: Ctx, rec: dict):
                 errs.append(f"response row {cid!r}: new-data file {f!r} is not a "
                             f"package-relative path (absolute and parent-relative paths can "
                             f"leave the package)")
-            elif not (target / f).exists():
+            elif not (target / f).is_file():
                 errs.append(f"response row {cid!r}: new-data file {f!r} does not exist in the "
                             f"package")
         src_row = ledger_rows.get(cid) or {}
