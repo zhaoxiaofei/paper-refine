@@ -548,6 +548,11 @@ def _census_for(vid, agg) -> dict:
     return ((agg or {}).get("issue_census") or {}).get(str(vid)) or {}
 
 
+def _census_row(vid, census) -> dict:
+    """One version's census row out of a bare `{vid: row}` map."""
+    return ((census or {}).get(str(vid)) or {})
+
+
 def issue_matrix_and_cumulative(census, versions) -> tuple:
     """(cell names, per-version counts per cell, per-version prefix sums).
 
@@ -560,7 +565,7 @@ def issue_matrix_and_cumulative(census, versions) -> tuple:
     names = tiebreak_cell_names()
     matrix = {}
     for vid in versions:
-        tiers = (_census_for(vid, {"issue_census": census}).get("tiers") or {})
+        tiers = (_census_row(vid, census).get("tiers") or {})
         row = []
         for name, tier, src in specs:
             sevs = ((tiers.get(tier) or {}).get("severities") or {})
@@ -613,7 +618,12 @@ def census_prefix_total(agg: dict, sel: dict, vid: str):
 
 def champion_issue_summary(vid, agg) -> dict:
     """Per severity: counts and rates (for the report/trace)."""
-    tiers = (_census_for(vid, agg).get("tiers") or {})
+    return _issue_summary_from_census(vid, (agg or {}).get("issue_census") or {})
+
+
+def _issue_summary_from_census(vid, census) -> dict:
+    """`champion_issue_summary` over a bare `{vid: row}` census map (no `agg`)."""
+    tiers = (_census_row(vid, census).get("tiers") or {})
     out = {}
     for sev in ("critical", "fatal", "major", "minor"):
         own = sum(int((((tiers.get(t) or {}).get("severities") or {})
@@ -705,22 +715,17 @@ def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None) -> t
     return agg, sel
 
 
-def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
-    """D5: rank the fresh candidates AND the round's own base.
+def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
+                   floor: int, round_no: int) -> dict:
+    """Rank the round's candidates from RECORDED inputs only (Rule 6's purity).
 
-    The fresh arms are this round's pool (M rewritten candidates w1..wM and N
-    reviewed-and-revised candidates a2..a{1+N}) plus the K integrated candidates
-    i1..iK. The round's base A1_r is content-identical to one field member
-    (the pristine original in round 1, the previous round's pinned champion
-    later on), whose judges produced a full row for it; that row enters the
-    ranking as the base. Two consequences, both intended:
-
-      * a version the panel ranks BELOW the version the round started from can
-        no longer be crowned (the round would otherwise take a step backwards
-        even though the field still holds the incumbent), and
-      * when the base wins, the round honestly reports "no demonstrable,
-        non-regressing progress" and keeps the incumbent's content, exactly as
-        the no-eligible-candidate fallback always did.
+    Every input is plain data: the panel's per-version statistics (`stats`), the
+    round's fresh-arm ids (`candidates`), the field member whose content IS the
+    round's base (`base_rep`), the panel's issue census (`census`) and the defect
+    floor the round was decided with (`floor`). This function reads no `ctx`, no
+    live config and no file, so re-deriving a past round reproduces its champion
+    from the recorded inputs: a later config edit cannot move a past pin (F18
+    and F19 were exactly that class of bug).
 
     Eligibility: a complete panel is required for every row, and a FRESH arm
     must additionally clear the anti-regression gate against the pristine
@@ -728,13 +733,12 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
     to stop a NEW regression, and the no-progress fallback crowns the base even
     when nothing clears the gate, so the base is judged on its panel alone.
 
-    Caption length and hand-off placeholders are ADVISORY: they are reported in
-    the trace and the report and can never make a row ineligible.
+    The returned `ranking` rows carry the core columns only. `select_champion`
+    adds the REPORTED-only tiebreak inputs (critical_remaining /
+    writing_remaining / manual_steps), which never rank.
     """
-    stats = agg["stats"]
     trace = []
-    base_rep = agg.get("base_rep")
-    candidates = round_candidate_ids_run(ctx, r)
+    candidates = list(candidates or [])
     missing = [c for c in candidates if c not in stats]
     if missing:
         trace.append(f"candidate(s) {missing} are not field members this round (their content was "
@@ -747,7 +751,7 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
     # own, so nothing is silently lost from the ranking.
     if base_rep:
         contenders.append((A1_ID, base_rep, True))
-        trace.append(f"the round's base A1_{r} is content-identical to field member "
+        trace.append(f"the round's base A1_{round_no} is content-identical to field member "
                      f"{base_rep!r}; that member's row is the base's row and competes, so the "
                      f"round can never crown a version the panel ranks below the version it "
                      f"started from")
@@ -796,16 +800,13 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
     for cid in eligible:
         row_id = base_rep if cid == A1_ID and base_rep else cid
         st = stats[row_id]
-        crit, writing, manual = candidate_tiebreak_inputs(ctx, r, cid)
         rows.append({"id": cid, "rep": row_id, "is_base": bool(cid == A1_ID and base_rep),
                      "n": st["n"], "median": st["median"], "mean": st["mean"],
                      "iqr": st["iqr"], "vs_original": st["vs_original"],
                      "vs_base": st["vs_base"],
                      "digest": st.get("digest"),
-                     "critical_remaining": crit, "writing_remaining": writing,
-                     "manual_steps": manual,
                      "author_placeholders": st.get("author_placeholders"),
-                     "issues": champion_issue_summary(row_id, agg),
+                     "issues": _issue_summary_from_census(row_id, census),
                      "captions": st.get("caption_note")})
     # The adaptive defect prefix (the ranking's LEADING comparator): walk the
     # canonical severity_tier_category order, accumulate the reported counts for
@@ -813,19 +814,9 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
     # the FEWEST defects reaches the configured floor (or when every cell is
     # used). The ordered per-cell census at that prefix leads the sort key (each
     # cell a separate rung); the median (then the mean, IQR and digest) is
-    # the tie-break below it. `floor` is the value the round was DECIDED with
-    # when a decision is re-derived; reading the mutable config here changed a
-    # past round's ranking key after `set-tiebreak-defect-floor` (F18).
-    if floor is None:
-        floor = tiebreak_defect_floor_of(ctx)
-    else:
-        try:
-            floor = max(0, int(floor))
-        except (TypeError, ValueError):
-            floor = tiebreak_defect_floor_of(ctx)
+    # the tie-break below it.
     rep_ids = sorted({str(t["rep"]) for t in rows})
-    cell_names, _matrix, cumulative = issue_matrix_and_cumulative(
-        (agg or {}).get("issue_census") or {}, rep_ids)
+    cell_names, _matrix, cumulative = issue_matrix_and_cumulative(census, rep_ids)
     prefix_cells = tiebreak_prefix_cells(cumulative, rep_ids, floor)
     for t in rows:
         t["defect_prefix_total"] = (cumulative[str(t["rep"])][prefix_cells - 1]
@@ -903,25 +894,79 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
                  "enough that one outlier session flips the sign statistic, so the decision stays "
                  "on the field-wide list. MANUAL_STEPS.md is reported but never ranked on; "
                  "missing counts sentinel = +inf")
-    for i, t in enumerate(rows, 1):
-        trace.append(f"  {i}. {t['id']}: median={t['median']:g} mean={t['mean']:.3f} "
-                     f"vs_original={_g(t['vs_original'])} vs_base={_g(t['vs_base'])} "
-                     f"defects@{prefix_cells}={t['defect_prefix_total']} "
-                     + "(cf/maj/min peer+own="
-                     + "/".join(f"{t['issues'][g]['peer']}+{t['issues'][g]['own']}"
-                                for g in ("fatal", "critical", "major", "minor"))
-                     + ") "
-                     f"iqr={t['iqr']:g} critical_remaining={t['critical_remaining']} "
-                     f"writing_remaining={t['writing_remaining']} "
-                     f"manual_steps={t['manual_steps']} "
-                     f"placeholders={t['author_placeholders'] or 0} "
-                     f"n={t['n']} digest={str(t.get('digest') or 'n/a')[:12]} "
-                     f"[{t.get('captions')}]")
     return {"champion": champ_row["id"], "champion_rep": champ_row["rep"],
             "base_rep": base_rep, "eligible": eligible, "ranking": rows, "trace": trace,
             "tiebreak": {"floor": floor, "cells_used": prefix_cells,
                          "cell_order": cell_names[:prefix_cells],
                          "cells_total": len(cell_names)}}
+
+
+def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
+    """D5: rank the round's fresh candidates AND its own base.
+
+    The ranking itself is `derive_ranking`, a pure function of the round's
+    recorded inputs (Rule 6's purity requirement). This adapter only resolves the ROUND'S structural inputs
+    from `ctx` -- which fresh arms exist and which floor the round was decided
+    with -- and attaches the REPORTED-only tiebreak inputs; it never decides the
+    order.
+
+    The fresh arms are this round's pool (M rewritten candidates w1..wM and N
+    reviewed-and-revised candidates a2..a{1+N}) plus the K integrated candidates
+    i1..iK. The round's base A1_r is content-identical to one field member
+    (the pristine original in round 1, the previous round's pinned champion
+    later on), whose judges produced a full row for it; that row enters the
+    ranking as the base. Two consequences, both intended:
+
+      * a version the panel ranks BELOW the version the round started from can
+        no longer be crowned (the round would otherwise take a step backwards
+        even though the field still holds the incumbent), and
+      * when the base wins, the round honestly reports "no demonstrable,
+        non-regressing progress" and keeps the incumbent's content, exactly as
+        the no-eligible-candidate fallback always did.
+
+    Caption length and hand-off placeholders are ADVISORY: they are reported in
+    the trace and the report and can never make a row ineligible.
+    """
+    stats = agg["stats"]
+    base_rep = agg.get("base_rep")
+    candidates = round_candidate_ids_run(ctx, r)
+    # `floor` is the value the round was DECIDED with when a decision is
+    # re-derived; reading the mutable config here changed a past round's ranking
+    # key after `set-tiebreak-defect-floor` (F18).
+    if floor is None:
+        floor = tiebreak_defect_floor_of(ctx)
+    else:
+        try:
+            floor = max(0, int(floor))
+        except (TypeError, ValueError):
+            floor = tiebreak_defect_floor_of(ctx)
+    sel = derive_ranking(stats, candidates, base_rep,
+                         (agg or {}).get("issue_census") or {}, floor, r)
+    for t in sel["ranking"]:
+        crit, writing, manual = candidate_tiebreak_inputs(ctx, r, t["id"])
+        t["critical_remaining"] = crit
+        t["writing_remaining"] = writing
+        t["manual_steps"] = manual
+    # The per-row trace is built AFTER the enrichment: these three values are
+    # reported there, and none of them ranks.
+    if sel["ranking"]:
+        prefix_cells = int((sel.get("tiebreak") or {}).get("cells_used") or 0)
+        for i, t in enumerate(sel["ranking"], 1):
+            sel["trace"].append(
+                f"  {i}. {t['id']}: median={t['median']:g} mean={t['mean']:.3f} "
+                f"vs_original={_g(t['vs_original'])} vs_base={_g(t['vs_base'])} "
+                f"defects@{prefix_cells}={t['defect_prefix_total']} "
+                + "(cf/maj/min peer+own="
+                + "/".join(f"{t['issues'][g]['peer']}+{t['issues'][g]['own']}"
+                           for g in ("fatal", "critical", "major", "minor"))
+                + ") "
+                f"iqr={t['iqr']:g} critical_remaining={t['critical_remaining']} "
+                f"writing_remaining={t['writing_remaining']} "
+                f"manual_steps={t['manual_steps']} "
+                f"placeholders={t['author_placeholders'] or 0} "
+                f"n={t['n']} digest={str(t.get('digest') or 'n/a')[:12]} "
+                f"[{t.get('captions')}]")
+    return sel
 
 
 def _g(v) -> str:
