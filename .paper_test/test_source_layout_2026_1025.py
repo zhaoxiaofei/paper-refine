@@ -178,7 +178,8 @@ def test_operational_contract():
           "violation of any rule is a bug" in flat_agents)
     check("AGENTS.md requires setup to freeze every runtime file into --root",
           "A root runs a frozen copy" in flat_agents
-          and "must copy every file the running project executes or reads by path" in flat_agents)
+          and "must copy every maintained-checkout runtime asset the running project "
+              "executes or reads by path" in flat_agents)
     check("AGENTS.md separates finding generation from finding-consuming repair",
           "Rule 1A. **Detection and repair are separate.**" in agents
           and "Rule 1B. **Every finding-consuming session independently re-verifies" in agents

@@ -264,13 +264,15 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     file under its own `## <section>` heading, in the order the pointers occur
     in the prompt.
 
-    This is a MOVE, not a rewrite (AGENTS.md rule 12): a block's exact text is
-    written (a trailing-whitespace trim and the demotion of a level-2 heading
-    that would otherwise end the section are the only transformations), and the
-    prompt keeps a pointer in the block's own position.  The profile-only text
-    added by this function is exactly the capacity contract, the read policy and
-    the pointer sentences; it declares itself subordinate to the stage contract,
-    so the paged run and the inlined run resolve a conflict the same way.
+    This is a MOVE, not a rewrite (AGENTS.md rule 12): each block's text is
+    written byte-for-byte, and the only transformation is the demotion of a
+    level-2 heading that would otherwise end the section; the prompt keeps a
+    pointer in the block's own position, so expanding the pointers in place
+    reconstructs the `high` prompt's rule sequence exactly.  The profile-only
+    text added by this function is exactly the capacity contract, the read
+    policy and the pointer sentences; it declares itself subordinate to the
+    stage contract, so the paged run and the inlined run resolve a conflict
+    the same way.
 
     `high` pages nothing: the prompt is the pipeline's original text plus the
     contradiction rule, which every stage prompt carries under every profile
@@ -328,7 +330,12 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
             # in PROFILE_RULES.md are then the section titles the pointer
             # names.
             body = re.sub(r"(?m)^## (?=\S)", "### ", str(body))
-            parts.append(f"\n## {title}\n\n{body.rstrip()}\n")
+            # The EXACT block text, including its trailing newline: the
+            # expansion test in `.paper_test/test_execution_profile.py`
+            # re-inserts each section at its pointer and must reproduce the
+            # high prompt's rule sequence (AGENTS.md rule 12); trimming the
+            # block here would join it to the next block on expansion.
+            parts.append(f"\n## {title}\n\n{body}\n")
         write_text_atomic(sb / PROFILE_RULES_REL, "".join(parts))
     # The profile contract first (the capacity discipline is the profile's
     # point), then the contradiction rule every stage prompt carries; the

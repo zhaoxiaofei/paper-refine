@@ -405,7 +405,8 @@ DEFAULTS = {
 # THE EXECUTION PROFILE (see p19_profiles.py). `high` is the pipeline as it has
 # always been: every rule inlined in every session. `medium` keeps every rule but
 # pages the elaborative ones out of the prompts into
-# `INSTRUCTIONS/PROFILE_RULES.md`, for a model with a limited context window.
+# `INSTRUCTIONS/PROFILE_RULES.md`, to bound the per-call instruction payload; it
+# is a payload choice, not a claim about the model (AGENTS.md rule 12).
 # The constants live here because the CLI (p17) resolves its defaults at load
 # time, before the profile module's own part is executed.
 EXECUTION_PROFILES = ("high", "medium")

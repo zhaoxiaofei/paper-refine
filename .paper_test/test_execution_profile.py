@@ -15,7 +15,8 @@ What this suite pins:
     is materially smaller, the paged text really ships in the sandbox
     (`INSTRUCTIONS/PROFILE_RULES.md`), and the stage contract is stated inline.
   * `medium` is NORMATIVELY EQUIVALENT to `high` (AGENTS.md rule 12): the prompt
-    plus the paged file carry every rule line `high` inlines, the paged file
+    plus the paged file carry every rule line `high` inlines, expanding the
+    pointers in place reproduces `high`'s rule sequence, the paged file
     invents no rule text, the sections are in the prompt's pointer order, the
     profile contract asserts no model/window property, and the contract is
     followed by the contradiction rule it defers to.
@@ -210,6 +211,51 @@ def _pointer_titles(text: str, contract: str) -> list:
     return out
 
 
+def _paged_sections(rules: str) -> dict:
+    """`{title: exact body}` for the sections `page_stage_prompt` wrote.
+
+    The writer emits, for each section, `"\n## <title>\n\n" + body + "\n"`; a
+    non-last section therefore ends with the body's own trailing newline plus
+    the writer's newline and the next section's separator.  Removing exactly
+    those structural newlines recovers the block byte-for-byte, including the
+    trailing newline it carries inline -- which is what makes the in-place
+    expansion below reproduce the `high` prompt (AGENTS.md rule 12).
+    """
+    parts = re.split(r"(?m)^## ", rules)[1:]
+    out = {}
+    for i, part in enumerate(parts):
+        title, _, rest = part.partition("\n")
+        body = rest[1:] if rest.startswith("\n") else rest
+        structural = 1 if i == len(parts) - 1 else 2
+        if body.endswith("\n" * structural):
+            body = body[:-structural]
+        out[title.strip()] = body
+    return out
+
+
+def _expand_medium(text: str, rules: str, P) -> str:
+    """The medium prompt with each pointer replaced in place by its section."""
+    for title, body in _paged_sections(rules).items():
+        text = text.replace(P.PROFILE_POINTER_TMPL.format(
+            section=title, rel=P.PROFILE_RULES_REL), body)
+    return text
+
+
+def _rule_sequence(text: str) -> list:
+    """The rule lines in order, heading level and blank lines normalised.
+
+    The paged body demotes an embedded level-2 heading so it cannot end its
+    section; the sequence comparison is about the rules and their order, not
+    the heading level or the blank lines between blocks.
+    """
+    out = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*#{1,6}\s+", "", line).strip()
+        if line:
+            out.append(line)
+    return out
+
+
 def test_medium_matches_high_rules() -> None:
     """AGENTS.md rule 12: the paged run carries exactly the inlined run's rules."""
     print("\n== rule 12: medium is normatively equivalent to high ==")
@@ -223,7 +269,7 @@ def test_medium_matches_high_rules() -> None:
     contract = P.MEDIUM_PROFILE_CONTRACT
     contract_lines = set(_rule_lines(contract))
     header_lines = set(_rule_lines(P.PROFILE_RULES_HEADER))
-    problems = []
+    problems, sequence_problems = [], []
     for name, entry in medium.items():
         med, rules = entry["text"], entry["rules"]
         h = high.get(name, "")
@@ -246,8 +292,15 @@ def test_medium_matches_high_rules() -> None:
         heads = re.findall(r"(?m)^## (.+)$", rules)
         if titles != heads:
             problems.append(f"{name}: section order {titles[:3]} != {heads[:3]}")
+        expanded = _expand_medium(med, rules, P)
+        if expanded.startswith(contract):
+            expanded = expanded[len(contract):]
+        if _rule_sequence(expanded) != _rule_sequence(h):
+            sequence_problems.append(name)
     check("rule 12: every high rule line is carried by medium or its paged file",
           not problems, "; ".join(problems[:3]))
+    check("rule 12: expanding the paged pointers reproduces the high rule sequence",
+          not sequence_problems, ", ".join(sequence_problems))
 
     flat = " ".join(contract.split())
     check("rule 12: the profile asserts no model/window property",

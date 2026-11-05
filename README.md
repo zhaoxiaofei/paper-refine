@@ -2327,14 +2327,15 @@ postcheck.
   edit, and write-economy guidance never demands a format-invalid partial deliverable.
 
 **`medium` is normatively equivalent to `high`** (AGENTS.md rule 12), and the equivalence is tested,
-not assumed. The paged file carries the exact rule text `high` inlines, in the order the pointers
-occur in the prompt, so a session that reads it in full reads the same rules in the same sequence.
-For every stage prompt the suite checks that no rule line is lost, that the paged file invents no
-rule text, that the section order equals the pointer order, that the profile text carries no false
-run property and declares its subordination, and that the contract precedes the contradiction rule
-it defers to. Byte equality of the two prompts is NOT the invariant — a pointer, a heading and the
-read policy are the profile's own text — and `high`'s byte-identity with the pre-profile pipeline
-stays a separate guarantee pinned by its goldens.
+not assumed. The paged file carries the blocks byte-for-byte (only a heading level may be demoted
+so it cannot end a section), in the order their pointers occur in the prompt, so a session that
+reads it in full reads the same rules in the same sequence. For every stage prompt the suite checks
+that no rule line is lost, that expanding the pointers in place reproduces `high`'s rule sequence,
+that the paged file invents no rule text, that the section order equals the pointer order, that the
+profile text carries no false run property and declares its subordination, and that the contract
+precedes the contradiction rule it defers to. Byte equality of the two prompts is NOT the invariant
+— a pointer, a heading and the read policy are the profile's own text — and `high`'s byte-identity
+with the pre-profile pipeline stays a separate guarantee pinned by its goldens.
 
 Measured effect (every stage prompt, rendered from the same checkout; the split and
 formatting-writing review variants track `review`). Reproduce with
