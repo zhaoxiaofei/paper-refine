@@ -62,6 +62,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+import xml.etree.ElementTree as _ET
 from html import unescape as _html_unescape
 
 EDITABLE_EXTS = {".doc", ".docx", ".tex", ".ltx", ".bib", ".md", ".txt", ".xlsx", ".csv",
@@ -256,6 +257,20 @@ def _docx_part(z, name: str):
     return data
 
 
+def _xml_well_formed(raw):
+    """None when `raw` parses as one XML document, else the parse error text.
+
+    Accepts the DECODED text as well as bytes: `docx_part_to_lines` works on
+    the text `_docx_xml_text` produced, so a part whose stale encoding
+    declaration disagrees with its BOM is readable, not malformed (F25).
+    """
+    try:
+        _ET.fromstring(raw)
+        return None
+    except _ET.ParseError as e:
+        return str(e)
+
+
 def _docx_xml_text(raw: bytes) -> str:
     """Decode a DOCX part using its BOM/declaration, not an assumed UTF-8."""
     if raw[:2] == b"\xff\xfe" or raw[:2] == b"\xfe\xff":
@@ -392,9 +407,14 @@ def docx_to_text(path: str) -> tuple:
             return "", ["docx-unreadable: word/document.xml is over the size/"
                         "entity budget and was refused"]
         body = _docx_xml_text(raw)
-        lines, part_notes = docx_part_to_lines(body)
-        out_lines.extend(lines)
-        notes.extend(part_notes)
+        malformed = _xml_well_formed(body)
+        if malformed:
+            notes.append("docx-part-unreadable: word/document.xml is not well-formed "
+                         "XML (%s); its text was not extracted" % malformed)
+        else:
+            lines, part_notes = docx_part_to_lines(body)
+            out_lines.extend(lines)
+            notes.extend(part_notes)
         names = z.namelist()
         extra_parts = []
         for pattern, kind in ((r"word/header\d*\.xml$", "HEADER"),
@@ -409,6 +429,11 @@ def docx_to_text(path: str) -> tuple:
                              % (kind.lower(), name))
                 continue
             xml = _docx_xml_text(raw)
+            malformed = _xml_well_formed(xml)
+            if malformed:
+                notes.append("docx-part-unreadable: %s is not well-formed XML (%s); "
+                             "its text was not extracted" % (name, malformed))
+                continue
             part_lines, part_notes = docx_part_to_lines(xml)
             if part_lines:
                 # lowercase marker: an all-caps marker would itself be inventoried as an acronym.
@@ -524,6 +549,16 @@ def _xlsx_cell_value(attrs, body, shared):
             return "[uncached formula]"       # a shared/array formula with no text
         return ""
     v = _html_unescape(vm.group(1))
+    if not v.strip() and re.search(r"<f(?=\s|>)", body, re.S) \
+            and not re.search(r't="(?:str|inlineStr)"', attrs or ""):
+        # `<f>1+1</f><v></v>` is an UNEVALUATED formula, not a cached empty
+        # result. A genuinely cached empty text result carries t="str".
+        fm = re.search(r"<f(?:\s[^>]*)?>(.*?)</f>", body, re.S)
+        if fm is not None:
+            formula = _xlsx_unescape(_html_unescape(fm.group(1))).strip().lstrip("=")
+            return ("[uncached formula: =%s]" % formula) if formula \
+                else "[uncached formula]"
+        return "[uncached formula]"
     if re.search(r't="s"', attrs or "") and v.strip().isdigit():
         idx = int(v)
         if 0 <= idx < len(shared):
@@ -610,7 +645,7 @@ def xlsx_to_text(path: str) -> tuple:
                 for _row_idx, cells in sorted(rows, key=lambda r: r[0]):
                     lines.append(" | ".join(cells.get(c, "") for c in range(1, max_col + 1)))
             if not resolved:
-                notes.append("xlsx: no worksheet parts found")
+                notes.append("xlsx-unreadable: no workbook/worksheet parts found")
             return "\n".join(lines), notes
     except Exception as e:
         notes.append("xlsx-unreadable: %s" % e)
@@ -678,6 +713,11 @@ def rtf_to_text(path: str) -> tuple:
             raw = f.read()
     except Exception as e:
         return "", ["rtf-unreadable: %s" % e]
+    if not raw.lstrip("\ufeff \t\r\n").startswith("{\\rtf"):
+        # A wrong file type named .rtf used to disappear as a readable-but-empty
+        # RTF with a generic success note. Require the RTF header.
+        return "", ["rtf-unreadable: the file does not start with an RTF header "
+                    "(expected '{\\rtf'); '.rtf' is only a suffix, not a format check"]
     out, i, depth, skip_depth = [], 0, 0, None
     pending_high = None
     # RTF state is GROUP-scoped: `\ucN` changes how many fallback characters
@@ -894,6 +934,10 @@ def convert_one(path: str, rel: str) -> dict:
         # `converted-empty` (F29).
         status = "converted" if text else (
             "converted-empty" if not any("unreadable" in n for n in notes) else "failed")
+        if any(n.startswith("docx-part-unreadable") for n in notes):
+            # Some text may have come from other parts, but a malformed body is
+            # a PARTIAL conversion, never a clean one.
+            status = "converted-partial" if text else "failed"
     elif ext == ".xlsx":
         text, notes = xlsx_to_text(path)
         status = "converted" if text else ("converted-empty"

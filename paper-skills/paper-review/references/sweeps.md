@@ -441,7 +441,9 @@ enumerated entry by entry (wrapped continuations are merged), so "listed but
 never cited" is auditable for author-year styles too; the artifact prints the
 reference-list region it read, with the boundary reason. LaTeX call-outs are
 KEYS: `\cite{a,b}` is resolved against the document's own `\bibitem` entries
-and the package's `.bib` entries (a `\nocite{a}` counts as cited but is not an
+and the `.bib` files loaded by that document's compile-root closure (a
+bibliography that belongs only to an unrelated supplement does not resolve a
+main-paper key) (a `\nocite{a}` counts as cited but is not an
 in-text call-out), and when the corpus carries `\cite` keys but no key list at
 all the LaTeX checks are reported `unable`, never as an empty "none".
 
@@ -1265,9 +1267,15 @@ not yet deposited) · an availability statement WEAKER than the verified reality
 which is the same defect read in the other direction: data described as
 "available upon request" (or "not yet deposited") while the corpus's accession,
 repository URL or the pipeline's own `IDENTIFIERS.md` lookup shows a public,
-resolving deposit; a "restricted" claim contradicted by the locator class. The
+resolving deposit whose access conditions are unambiguously open AND whose
+deposited version covers the data the statement claims; a "restricted" claim
+contradicted by the locator class. The
 statement and the locator must agree in BOTH directions, and an
-`absent`/`found` verdict from `work/IDENTIFIERS.md` is the evidence either way.
+`absent`/`found` verdict from `work/IDENTIFIERS.md` is evidence in one direction
+only: `absent` supports the weaker wording; `found` establishes that a locator
+RESOLVES, not that the deposit is publicly downloadable or that it carries the
+claimed version. Verify access conditions and coverage before calling an
+"available upon request" statement inaccurate.
 
 ## M23 — Supplementary parity sweep
 
@@ -1386,8 +1394,10 @@ excerpt | disposition.
 **Finding rules (one finding per deviating occurrence, never per family).**
 The variant that is not the authoritative form is the finding (`consistency`;
 `correctness` when the variant is a different term of art or changes a claim's
-meaning). The family's own first use and quoted titles/proper names are never
-findings. A family with both variants present and no decidable authority is
+meaning). Quoted titles and proper names are never findings. The family's own first
+use is only an authority cue when no stronger basis decides the family: when a
+stated venue rule (or a different corpus majority) establishes another form,
+the first use is a deviating occurrence like every other. A family with both variants present and no decidable authority is
 `guideline-dependent` (name the venue rule if the profile states one);
 never guess a spelling into a claim. The revision stage resolves the finding
 by substitution (never by re-wording the sentence around it) and re-runs this

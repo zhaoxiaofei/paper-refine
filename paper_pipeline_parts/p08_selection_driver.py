@@ -2489,6 +2489,19 @@ def _repair_norm(text) -> str:
     return " ".join(str(text or "").split())
 
 
+def _repair_text_norm(rel: str, text) -> str:
+    """Comparison form for a repair span.
+
+    `.py` indentation is syntax: collapsing all whitespace would hide an
+    indentation-only control-flow change. Compare source-code files line by
+    line (trailing whitespace still tolerated), and keep the collapsing form
+    for prose.
+    """
+    if str(rel or "").lower().endswith(".py"):
+        return "\n".join(line.rstrip() for line in str(text or "").splitlines())
+    return _repair_norm(text)
+
+
 def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
     """Why `rel`'s actual text change is outside the confirmed rows' spans, or None.
 
@@ -2513,11 +2526,12 @@ def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
         return None                     # opaque/binary, or no textual change
     # Compare NORMALIZED text and anchor every changed span to a concrete
     # occurrence of the quoted text.
-    pre_n = _repair_norm(pre_text)
-    cur_n = _repair_norm(cur_text)
+    pre_n = _repair_text_norm(rel, pre_text)
+    cur_n = _repair_text_norm(rel, cur_text)
     if pre_n == cur_n:
         return None
-    quote_ns = [(_repair_norm(b), _repair_norm(a)) for b, a in quotes]
+    quote_ns = [(_repair_text_norm(rel, b), _repair_text_norm(rel, a))
+                for b, a in quotes]
 
     def _occurrences(hay: str, needle: str) -> list:
         if not needle:
@@ -2614,7 +2628,7 @@ def _repair_bookkeeping_rel(rel: str) -> bool:
         (`work/render/*.md`, `.html`, `.pdf`) is updating a derived view, and
         that re-render is not an unplanned manuscript edit.
     """
-    parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p and p != "."]
+    parts = [p for p in str(rel or "").split("/") if p and p != "."]
     if not parts:
         return False
     if any(part in CORPUS_EXCLUDE_TOP for part in parts[:-1]):
@@ -2678,6 +2692,15 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
             continue
         if _repair_bookkeeping_rel(rel):
             continue
+        # A replacement row authorizes an EDIT of its file, not its removal.
+        # `_repair_spans_cover` treats a missing postimage as opaque, and the
+        # file-level check used to accept it because the path was in `allowed`;
+        # a whole document could therefore disappear inside a described plan.
+        if (rel in allowed and before.get(rel) is not None
+                and after.get(rel) is None):
+            bad.setdefault(rel, "the confirmed row's file was deleted; a replacement "
+                                "row does not authorize removing the file")
+            continue
         # EXACT file match: a confirmed row names a file, never a directory.
         # The old prefix match let one row ("figures") legitimize arbitrary
         # edits across the whole subtree.
@@ -2738,12 +2761,32 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
             continue
         entry = ledger.get(rid) or {}
         quotes_by_file.setdefault(rel, []).append(
-            (_repair_norm(entry.get("before", "")),
-             _repair_norm(entry.get("after", ""))))
+            (_repair_text_norm(rel, entry.get("before", "")),
+             _repair_text_norm(rel, entry.get("after", ""))))
     for rel, quotes in sorted(quotes_by_file.items()):
         if _repair_spans_cover(pre, cur, rel, quotes):
             bad.setdefault(rel, "the applied text is outside the confirmed row's "
                                 "quoted `before`/`after`")
+            continue
+        # A described plan row names a LOCALIZED wrong/correct value. Quotes that
+        # are the whole pre- and post-file authorize any change in the file (the
+        # diff is trivially "inside" them); bind a non-empty plan change to
+        # something narrower than the entire document.
+        pre_text = _repair_file_text(pre / rel)
+        cur_text = _repair_file_text(cur / rel)
+        if pre_text is None or cur_text is None:
+            continue
+        pre_n = _repair_text_norm(rel, pre_text)
+        cur_n = _repair_text_norm(rel, cur_text)
+        described = [plan_by_id[rid] for rid in sorted(confirmed_ids)
+                     if strip_leading_dot_slash(str((plan_by_id.get(rid) or {}).get("file") or "")) == rel
+                     and all(key in (plan_by_id.get(rid) or {}) for key in _REPAIR_DESCRIBED_KEYS)]
+        if any(_repair_text_norm(rel, row.get("wrong") or "")
+               and len(_repair_text_norm(rel, row.get("wrong") or "")) < len(pre_n)
+               and entry[0] == pre_n and entry[1] == cur_n
+               for row, entry in zip(described, quotes)):
+            bad.setdefault(rel, "the confirmed row's quotes cover the whole file, not "
+                                "the plan's localized wrong/correct change")
     if with_reasons:
         return dict(sorted(bad.items()))
     return sorted(bad)
@@ -2825,21 +2868,45 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
             saved_marker = marker.read_bytes()
         except OSError:
             saved_marker = None
+    result = None
     try:
-        return _execute_attempt_in(sb, rec, cmd, timeout, prompt_file, log_name, False)
+        result = _execute_attempt_in(sb, rec, cmd, timeout, prompt_file, log_name, False)
+        return result
     finally:
         if started is not None:
             rec["last_attempt_started"] = started
+        restore_error = ""
         try:
             if saved_marker is not None:
                 write_bytes_atomic(marker, saved_marker)
-            elif marker.is_file():
+            elif marker.exists() or marker.is_symlink():
                 # No parent marker existed to keep: the aux session's marker is
                 # not this stage's completion signal, so it must not linger as
                 # one for a later postcheck.
-                marker.unlink(missing_ok=True)
-        except OSError:
-            pass
+                if marker.is_dir() and not marker.is_symlink():
+                    shutil.rmtree(marker)
+                else:
+                    marker.unlink(missing_ok=True)
+        except OSError as exc:
+            # A session can leave a DIRECTORY at the marker path (or otherwise
+            # make os.replace fail). The old bare `pass` returned success with
+            # the parent marker gone. Remove the obstacle, retry once, and if it
+            # still cannot be restored, fail the auxiliary result instead of
+            # silently losing the accepted stage's completion signal.
+            try:
+                if marker.is_dir() and not marker.is_symlink():
+                    shutil.rmtree(marker)
+                elif marker.exists() or marker.is_symlink():
+                    marker.unlink()
+                if saved_marker is not None:
+                    write_bytes_atomic(marker, saved_marker)
+            except OSError:
+                restore_error = (f"could not restore the parent completion marker after the "
+                                 f"auxiliary session: {exc}")
+        if restore_error and isinstance(result, dict):
+            result["rc"] = result.get("rc") or 1
+            prior = str(result.get("error") or "")
+            result["error"] = (prior + "; " if prior else "") + restore_error
 
 
 def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
@@ -2887,13 +2954,37 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                                      else "failed")
             ctx.save_state()
             return
-        # Audit done, repair unfinished: clear the stale chain artifacts so the
-        # re-run cannot reuse a plan/ledger/snapshot from the interrupted pass.
+        # Audit done, repair unfinished: the interrupted pass may have left
+        # PARTIAL edits in revised/. The pre-repair snapshot is the only trusted
+        # baseline; restore it before re-auditing rather than deleting the
+        # rollback image and auditing (and accepting) the half-edited package.
         _sb = ctx.sandbox_of(rec)
+        _pre = _sb / "revised_prerepair"
+        if _pre.is_dir():
+            _expected_pre = rec.get("revision_prerepair_digest")
+            _actual_pre = manifest_digest(
+                hash_manifest(_pre, on_error="<unreadable>", follow_dir_links=True))
+            if not _expected_pre or _actual_pre != _expected_pre:
+                rec["status"] = "failed"
+                rec["last_error"] = ("the interrupted repair's baseline "
+                                     "revised_prerepair/ cannot be trusted (digest missing or "
+                                     "changed); refusing to re-audit the partially edited package")
+                ctx.save_state()
+                print(f"  [revision-audit] {rec['id']}: FAILED — {rec['last_error']}")
+                return
+            shutil.rmtree(_sb / REVISED_DIR, ignore_errors=True)
+            shutil.copytree(_pre, _sb / REVISED_DIR)
+        elif rec.get("revision_prerepair_digest"):
+            rec["status"] = "failed"
+            rec["last_error"] = ("the interrupted repair's baseline revised_prerepair/ is "
+                                 "missing; refusing to re-audit a partially edited package")
+            ctx.save_state()
+            print(f"  [revision-audit] {rec['id']}: FAILED — {rec['last_error']}")
+            return
         for _rel in ("revision_audit/REPAIR_PLAN.json", "revision_audit/REPAIR_PLAN.md",
                      "revised/REPAIR_LEDGER.json", "revised/REPAIR_LEDGER.md"):
             (_sb / _rel).unlink(missing_ok=True)
-        shutil.rmtree(_sb / "revised_prerepair", ignore_errors=True)
+        shutil.rmtree(_pre, ignore_errors=True)
         rec.pop("revision_audit", None)
         rec.pop("revision_repair", None)
         rec.pop("revision_chain", None)
@@ -2986,7 +3077,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     deletion_problems = deletion_audit_problems(
         sb, expected_rows=len(_deleted_rows),
         expected_paragraphs=[r.get("paragraph") for r in _deleted_rows],
-        plan_ids=_plan_ids)
+        plan_ids=_plan_ids, expected_occurrences=_deleted_rows)
     audit_rec = {"status": "failed", "rows": 0,
                  "duration": round(res.get("dur") or 0.0, 1),
                  "deleted_paragraphs": len(_deleted_rows),
@@ -3002,8 +3093,9 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     else:
         audit_rec["status"] = "done"
         audit_rec["rows"] = len(rows)
+    readonly_after = _readonly_snapshot() if audit_rec["status"] == "done" else {}
     _changed_areas = ([name for name in _guarded_dirs
-                       if _readonly_snapshot().get(name) != readonly_before.get(name)]
+                       if readonly_after.get(name) != readonly_before.get(name)]
                       if audit_rec["status"] == "done" else [])
     if _changed_areas:
         audit_rec["status"] = "failed"
@@ -3080,7 +3172,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                         "the repair; the applied-change audit is untrustworthy")
                     rec["revision_repair"] = repair_rec
                     ctx.save_state()
-                    unplanned = ["revised_prerepair/ (baseline digest changed)"]
+                    unplanned = {"revised_prerepair/": "baseline digest changed"}
                 else:
                     unplanned = _revised_repair_violations(pre, sb / REVISED_DIR, rows,
                                                            confirmed_ids, with_reasons=True)

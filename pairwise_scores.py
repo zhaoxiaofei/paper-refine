@@ -139,14 +139,31 @@ def _csv_quotes_open(line: str, in_quotes: bool) -> bool:
 
     A marker-shaped line INSIDE a quoted ``reason`` is field text, not a block
     boundary. Doubled quotes inside a quoted field are escaped quotes.
+
+    A quote only OPENS a field at the start of that field. Toggling on every
+    quote treated a literal `"` inside an unquoted reason as an opening quote,
+    so the rest of the dump (including later file markers) looked quoted and
+    whole score blocks disappeared.
     """
     i = 0
+    field_start = True
     while i < len(line):
-        if line[i] == '"':
-            if in_quotes and i + 1 < len(line) and line[i + 1] == '"':
-                i += 2
-                continue
-            in_quotes = not in_quotes
+        ch = line[i]
+        if in_quotes:
+            if ch == '"':
+                if i + 1 < len(line) and line[i + 1] == '"':
+                    i += 2              # escaped quote inside the field
+                    continue
+                in_quotes = False
+                field_start = False
+            i += 1
+            continue
+        if ch == ",":
+            field_start = True
+        elif ch == '"' and field_start:
+            in_quotes = True
+        elif ch != " ":
+            field_start = False
         i += 1
     return in_quotes
 

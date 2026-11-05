@@ -348,7 +348,7 @@ def test_p1_prompt_states_the_contract():
     print("\n== P1: the prompts state what the checks enforce ==")
     src = " ".join(PROMPTS.read_text(encoding="utf-8").split())
     check("the audit prompt says to keep the seeded identity cells",
-          "keep them byte-identical" in src and "pipe escapes (`\\|`) included" in src)
+          "keep them byte-identical" in src and "pipe escapes (`\\\\|`) included" in src)
     check("the repair prompt says before/after are verbatim quotes",
           "are QUOTES of the applied text, not a summary" in src)
 

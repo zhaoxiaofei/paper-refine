@@ -453,6 +453,29 @@ def _stub_concerns(sb: Path) -> list:
     return rows
 
 
+def _write_seed_coverage(sb: Path, rows: list) -> None:
+    """The seed-block coverage table a real concerns session must also write."""
+    import json as _json
+    seed_path = sb / "feedback" / "CONCERN_SEED.json"
+    if not seed_path.is_file():
+        return
+    try:
+        seed = _json.loads(seed_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    ids = [str(c.get("seed_id")) for c in (seed.get("candidates") or [])
+           if isinstance(c, dict) and c.get("seed_id")]
+    if not ids:
+        return
+    concern_ids = ", ".join(str(r.get("id")) for r in rows) or "—"
+    lines = ["| seed id | concern ids | disposition |", "|---|---|---|"]
+    for sid in ids:
+        lines.append(f"| {sid} | {concern_ids} | enumerated — stub maps every block |")
+    out = sb / "concerns"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "SEED_COVERAGE.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def do_feedback(sb: Path, name: str, round_no: int) -> int:
     """Stub of the journal feedback enumeration (modes 1-2)."""
     rows = _stub_concerns(sb)
@@ -467,6 +490,7 @@ def do_feedback(sb: Path, name: str, round_no: int) -> int:
         + "\n".join(f"| {r['id']} | {r['source']} | {r['author']} | {r['action']} | "
                     f"{r['disposition']} | {r['quote']} | {r['summary']} | — |" for r in rows)
         + "\n", encoding="utf-8")
+    _write_seed_coverage(sb, rows)
     write_json(sb / "_pipeline_done.json", {
         "stage": "feedback", "run_id": name, "round": round_no, "status": "complete",
         "error": None, "summary": {"concerns": len(rows)}})
@@ -487,6 +511,7 @@ def do_concerns(sb: Path, name: str, round_no: int) -> int:
         + "\n".join(f"| {r['id']} | {r['source']} | {r['author']} | {r['action']} | "
                     f"{r['disposition']} | {r['quote']} | {r['summary']} | — |" for r in rows)
         + "\n", encoding="utf-8")
+    _write_seed_coverage(sb, rows)
     rev = sb / "guided_review"
     (rev / "artifacts").mkdir(parents=True, exist_ok=True)
     findings = [{"id": r["id"], "location": "base", "category": 0, "check": "JF",
@@ -860,7 +885,7 @@ def do_integration(sb: Path, name: str, round_no: int) -> int:
         rows.append(f"| {cid} | (discovery) | frozen_discovery/findings_extra.json | small | "
                     f"— | — | keep-self | rejected | stub: discovery reconciliation (no donor "
                     f"carries a differing fix) | none | integrated/work/diffs/D-000.md | "
-                    f"preserves {cid} |")
+                    f"NO-DONOR-FIX: preserves {cid} |")
     (out / "DIFF_LEDGER.md").write_text(
         "# diff ledger (stub integration)\n\n"
         "| id | donor | location | size | donor says | self says | verdict | "

@@ -857,6 +857,10 @@ def postcheck_audit(ctx: Ctx, rec: dict):
     errs, warns = [], []
     marker = marker_json(sb, rec["kind"])
     _marker_checks(rec, marker, "audit", errs, warns, sb=sb)
+    _unresolved = sb / "audit" / "UNRESOLVED.md"
+    if _unresolved.is_symlink() or (_unresolved.exists() and not _unresolved.is_file()):
+        errs.append("audit/UNRESOLVED.md is a symlink or not a regular file: the next review "
+                    "would copy the link target's bytes as the audit's observations")
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     frozen = _frozen_review_findings(sb)
@@ -935,6 +939,14 @@ def postcheck_review(ctx: Ctx, rec: dict):
                 # tells it to reconcile every concern; skipping the coverage
                 # check let a session silently drop the whole ledger and pass.
                 errs.extend(journal_review_coverage_problems(ctx, rec, sb, fj))
+            # The prior-audit record is the previous auditor's handoff: every
+            # observation line must get exactly one visible disposition. The
+            # staged file was hash-checked but never bound to an output, so a
+            # review could ignore the entire handoff and still pass (PR151-012).
+            # Under a split, only part B holds the merged frozen list; A's rows
+            # are checked there after the merge below.
+            if review_split_of(ctx) == "off":
+                errs.extend(prior_audit_disposition_problems(sb, fj))
     # DISPOSITION QUALITY: the reviewer's own decision tables. Recorded always;
     # it FAILS the attempt only under `setup --strict-artifacts on`, and
     # `decide --residual-gate` refuses to certify a run that carries it.
@@ -985,6 +997,10 @@ def postcheck_review(ctx: Ctx, rec: dict):
             if missing:
                 errs.append(f"the split-review merge lost {len(missing)} finding id(s) from "
                             f"session A: {', '.join(missing[:5])}")
+            _merged_fj = read_json(sb / GUIDED_REVIEW_DIR / "findings.json",
+                                   revive=False, lenient=True)
+            if isinstance(_merged_fj, dict):
+                errs.extend(prior_audit_disposition_problems(sb, _merged_fj))
             print(f"[review] split merge: {m['from_a']} finding(s) from session A + "
                   f"{m['from_b']} from session B -> {len(merged_ids)} frozen id(s)"
                   + (f"; id remap {m['id_remap']}" if m["id_remap"] else ""))
@@ -1499,10 +1515,16 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
     seen = {str(f.get("id")) for f in a_items}
 
     def _dedup_key(row: dict) -> tuple:
-        """(location, evidence prefix): the same defect found by both sessions."""
+        """(check, location, evidence prefix): the same defect found by both sessions.
+
+        The check/class label is part of the identity: two distinct defect classes
+        can quote the same sentence at the same location, and collapsing them by
+        (location, evidence) alone would hand the reviser only one of them.
+        """
         loc = " ".join(str(row.get("location") or "").lower().split())
         ev = " ".join(str(row.get("evidence") or row.get("quote") or "").lower().split())
-        return loc, ev[:80]
+        check = " ".join(str(row.get("check") or "").lower().split())
+        return check, loc, ev[:80]
 
     a_keys = {_dedup_key(f) for f in a_items}
     remap = {}
@@ -1534,6 +1556,16 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
             check = str(row.get("check") or "")
             if check in have:
                 conflicts.append(check)
+                # Part A may mark a check "out of scope -- session B" because B
+                # owns it (the split prompt invites that row). Keeping A's row
+                # verbatim would then hide B's actual examination of the check.
+                idx = next((i for i, r in enumerate(coverage)
+                            if str(r.get("check") or "") == check), None)
+                if idx is not None:
+                    old_disp = str(coverage[idx].get("disposition") or "").lower()
+                    new_disp = str(row.get("disposition") or "").lower()
+                    if old_disp.startswith("out of scope") and not new_disp.startswith("out of scope"):
+                        coverage[idx] = row
                 continue
             have.add(check)
             coverage.append(row)
@@ -1575,27 +1607,26 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
                 n += 1
             x_remap[fid] = cand
             f["id"] = cand
+            # Typed id-bearing fields (never prose): a `check` cell that names
+            # another finding is a reference and must follow the rename.
+            if str(f.get("check") or "") == fid:
+                f["check"] = cand
             used_x.add(cand)
 
-    def _rewrite_x(value):
-        if isinstance(value, str):
-            for old, new in x_remap.items():
-                value = re.sub(r"(?<![A-Za-z0-9])" + re.escape(old) + r"(?![0-9])",
-                               new, value)
-            return value
-        if isinstance(value, list):
-            return [_rewrite_x(v) for v in value]
-        if isinstance(value, dict):
-            return {k: _rewrite_x(v) for k, v in value.items()}
-        return value
-
-    extra = a_extra + [_rewrite_x(f) for f in b_extra]
-    if extra:
-        # Keep each side's D4 coverage list: rewriting the file with an EMPTY
-        # coverage dropped part B's own D4 record from the merged artifact the
-        # reviser and the archived ledger read.
+    # Only the typed `id` field is remapped. Evidence, locations and the
+    # manuscript's own identifiers may legitimately contain an X-NNN-looking
+    # token (a sample id, a filename); rewriting those strings corrupts exactly
+    # the evidence a read-only re-verification must re-open.
+    extra = a_extra + b_extra
+    for _row in coverage_b:
+        if str(_row.get("check") or "") in x_remap:
+            _row["check"] = x_remap[str(_row["check"])]
+    if extra or coverage_a or coverage_b:
+        # Keep each side's D4 coverage list even when both sides are clean: an
+        # empty findings list is a legal clean run, and part A's coverage must
+        # not disappear just because there were no findings to merge.
         coverage = []
-        for row in coverage_a + [_rewrite_x(r) for r in coverage_b]:
+        for row in coverage_a + coverage_b:
             if row not in coverage:
                 coverage.append(row)
         write_json_atomic(b_sb / GUIDED_REVIEW_DIR / "round2" / "findings_extra.json",
@@ -2553,10 +2584,39 @@ def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
             out_w.append(f"{where}.checks names {cid!r}, which is not a frozen check id of this "
                          f"round; it is ignored")
             continue
+        if text.startswith("clean"):
+            tail = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
+            basis = re.search(r"(?i)\bbasis\s*:\s*(.*)$", tail)
+            reason = basis.group(1) if basis else tail
+            if not _coverage_reason_named(reason):
+                emit(f"{where}.checks[{cid!r}] = {raw_val!r} states no basis; `clean` means "
+                     f"'examined, nothing found', so add the one-line basis "
+                     f"(e.g. 'clean -- M3 sweep row: no change')")
         if text.startswith("unable") and len(text.split()) < 3:
             emit(f"{where}.checks[{cid!r}] = {raw_val!r} states no reason; `unable` means "
                  f"'examined, could not be judged', so say why (the keyword plus at least two "
                  f"words, e.g. 'unable -- the figure is image-only')")
+        if text.startswith("findings"):
+            ledger_rows = [row for row in (list(comp.get("resolved") or [])
+                                           + list(comp.get("introduced") or []))
+                           if isinstance(row, dict)]
+            if not ledger_rows:
+                emit(f"{where}.checks[{cid!r}] = {raw_val!r} claims findings but both "
+                     f"`resolved` and `introduced` are empty; the items it examined must "
+                     f"appear in one of those ledgers (or the disposition is `clean`/`unable`)")
+            else:
+                row_checks = {_frozen_check_id(row.get("check")) for row in ledger_rows}
+                named = any(
+                    bool(str(row.get("check") or "").strip()) and re.search(
+                        r"(?i)(?<![a-z0-9_-])"
+                        + re.escape(str(row.get("check")).strip())
+                        + r"(?![a-z0-9_-])", text)
+                    for row in ledger_rows)
+                if cid not in row_checks and not named:
+                    emit(f"{where}.checks[{cid!r}] = {raw_val!r} claims findings but no "
+                         f"`resolved`/`introduced` row names {cid!r} in its `check` cell "
+                         f"(or in this disposition); bind the row this check reports, or "
+                         f"use `clean`/`unable`")
         have[cid] = text
     missing = [c for c in JUDGE_COVERAGE_CHECKS if c not in have]
     if missing:
@@ -3238,6 +3298,17 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
         # source to the file that was actually staged.
         base = label.replace("/", "__")
         safe = base
+        # A label is a corpus-relative path whose COMPONENTS are each legal, but
+        # flattening them into one component can exceed NAME_MAX (255 bytes) and
+        # shutil.copy2 then raises ENAMETOOLONG before the session starts. Bound
+        # the staged component in BYTES, leaving room for the converted-text
+        # ".txt" suffix, and keep a content-derived digest so two labels that
+        # truncate to the same head stay distinct.
+        _name_budget = 255 - len(".txt") - 24
+        if len(safe.encode("utf-8")) > _name_budget:
+            _digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:12]
+            _head = safe.encode("utf-8")[:_name_budget - len(_digest) - 3]
+            safe = _head.decode("utf-8", "ignore") + ".__" + _digest
         used = used_names.setdefault(origin, {})
         if safe in used and used[safe] != label:
             digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:8]
@@ -3269,8 +3340,15 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
             write_text_atomic(parent / "text" / (safe + ".txt"), text)
             if origin != "previous":
                 for row in seed_concern_candidates(text):
-                    seed.append(dict(row, source=label, origin=origin))
+                    seed.append(dict(row, source=label, origin=origin,
+                                     seed_id=f"S{len(seed) + 1:03d}"))
         else:
+            # Restaging a label with an empty/unreadable replacement must not
+            # leave the PREVIOUS conversion behind: the quote validator resolves
+            # a label to feedback/text/<safe>.txt, so a stale copy would let a
+            # superseded letter's quote support the new ledger.
+            with contextlib.suppress(OSError):
+                (parent / "text" / (safe + ".txt")).unlink()
             unparsed.append(f"{label}: {note or 'no text extracted'}")
     original_submission = _stage_original_submission(ctx, sb)
     write_json_atomic(sb / "feedback" / "CONCERN_SEED.json",
@@ -3321,7 +3399,7 @@ def materialize_feedback(ctx: Ctx, r: int) -> dict:
     _journal_stage_base(ctx, sb, r)
     (sb / "concerns").mkdir(exist_ok=True)
     seed = _write_journal_feedback_inputs(ctx, sb)
-    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
@@ -3350,7 +3428,7 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
     (sb / GUIDED_REVIEW_DIR).mkdir(exist_ok=True)
     (sb / GUIDED_REVIEW_DIR / "artifacts").mkdir(parents=True, exist_ok=True)
     seed = _write_journal_feedback_inputs(ctx, sb)
-    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
@@ -3374,6 +3452,92 @@ def _journal_concern_source(ctx: Ctx, r: int) -> Path:
     rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
     _require_done(ctx, rid, "the concern ledger is the input of this stage")
     return ctx.sandbox_of(ctx.run(rid))
+
+
+def _response_file_text(path: Path):
+    """Extracted text of one package file, or None when the format is not read."""
+    if not path.is_file():
+        return None
+    ext = path.suffix.lower()
+    if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".csv"):
+        text = read_text_bounded(path)
+        return text
+    if ext == ".docx":
+        paras = _docx_paragraphs(path)
+        return "\n".join(paras or ()) if paras else None
+    return None
+
+
+def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
+    """Verify each change's quoted before/after against the two packages.
+
+    `before` must occur (whitespace-normalised) in `previous_package/<file>` when
+    that pre-revision package is staged; `after` must occur in the target file.
+    The `after` check does not depend on the `before` check: when the pre-revision
+    package is unavailable the `before` span cannot be verified, but the revised
+    text is still present in `target/` and must be quoted exactly. Short values
+    (fewer than four words) are labels, not spans, and binary formats the
+    extractor cannot read are skipped rather than guessed at. This is the binding
+    the map schema promised and no validator performed: a real path with invented
+    hunk contents used to pass an addressed response (PR151-036).
+    """
+    problems = []
+    prev = sb / "previous_package"
+    prev_available = prev.is_dir()
+    norm = lambda x: " ".join(str(x or "").split()).strip().strip("\"'“”‘’")
+    for row in rows:
+        cid = str(row.get("id") or "")
+        for c in row.get("changes") or ():
+            if not isinstance(c, dict):
+                continue
+            if str(c.get("operation") or "edit").strip().lower() != "edit":
+                continue
+            f = str(c.get("file") or "").strip()
+            if not f:
+                continue
+            before, after = norm(c.get("before")), norm(c.get("after"))
+            if len(before.split()) >= 4 and prev_available:
+                ptext = _response_file_text(prev / f)
+                if ptext is not None and before not in norm(ptext):
+                    problems.append(
+                        f"response row {cid!r}: the change's `before` span is not present in "
+                        f"previous_package/{f}; quote the pre-revision text verbatim (no "
+                        f"ellipsis, no summary)")
+            if len(after.split()) >= 4:
+                ttext = _response_file_text(target / f)
+                if ttext is not None and after not in norm(ttext):
+                    problems.append(
+                        f"response row {cid!r}: the change's `after` span is not present in "
+                        f"target/{f}; quote the revised text verbatim (no ellipsis, no "
+                        f"summary)")
+    return problems
+
+
+def _response_preimage_dirs(ctx: Ctx, rec: dict, sb: Path) -> list:
+    """Read-only pre-revision package(s) a `remove` change can be verified against.
+
+    A whole-file deletion cannot be cited under the live target/ existence rule:
+    the file is gone by design. The preimage is the package the revision started
+    from (the scoped revise arm's base/) and, when the corpus carries it, the
+    reviewer-visible `feedback/original_submission/`. Either is read-only
+    evidence, never a change target (PR151-069).
+    """
+    dirs = []
+    pkg = str(rec.get("package_run_id") or "").strip()
+    if pkg:
+        try:
+            pkg_rec = ctx.run(pkg)
+            if pkg_rec is not None:
+                for name in ("base", "revised_prerepair"):
+                    cand = ctx.sandbox_of(pkg_rec) / name
+                    if cand.is_dir():
+                        dirs.append(cand)
+        except Exception:                                            # noqa: BLE001
+            pass
+    original = sb / "feedback" / "original_submission"
+    if original.is_dir():
+        dirs.append(original)
+    return dirs
 
 
 def materialize_response(ctx: Ctx, r: int, target: Path = None,
@@ -3416,9 +3580,25 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
     # verified against a truncated package and the truncation was hashed into
     # the run's input manifest (see ensure_copy's own docstring).
     ensure_copy(target, sb / "target", exclude_top=("work",), skip_aux=True)
+    # The PRE-REVISION package the response's `before` spans must come from.
+    # The map's before/after were accepted as prose with no package behind them,
+    # so an invented hunk passed an addressed row (PR151-036). The scoped revise
+    # arm's base/ is that package; a resubmit has the reviewer-visible
+    # original_submission/ instead. Read-only, never a change target.
+    _prev = None
+    if journal_is_scoped(ctx):
+        _rev_rec = ctx.run(rid_for_fresh(r, revise_vid(1)))
+        if _rev_rec is not None:
+            _cand = ctx.sandbox_of(_rev_rec) / "base"
+            if _cand.is_dir():
+                _prev = _cand
+    if _prev is None and (sb / "feedback" / "original_submission").is_dir():
+        _prev = sb / "feedback" / "original_submission"
+    if _prev is not None:
+        ensure_copy(_prev, sb / "previous_package")
     (sb / "response").mkdir(exist_ok=True)
     ledger = journal_concern_ledger(src_sb)
-    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
@@ -3435,6 +3615,8 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
     if (sb / "feedback").is_dir():
         rec["inputs_manifest"]["feedback"] = hash_manifest(sb / "feedback",
                                                           follow_dir_links=True)
+    if (sb / "previous_package").is_dir():
+        rec["inputs_manifest"]["previous_package"] = hash_manifest(sb / "previous_package")
     return rec
 
 
@@ -3463,7 +3645,7 @@ def _journal_seed_text(ctx: Ctx, sb: Path) -> str:
     def _line(r: dict) -> str:
         tag = (" (LLM review, false positives pre-filtered)"
                if str(r.get("origin") or "") == "llm" else "")
-        return (f"- [{str(r.get('source') or '')}]{tag} "
+        return (f"- [{str(r.get('seed_id') or '')}] [{str(r.get('source') or '')}]{tag} "
                 f"{str(r.get('heading') or '')[:110]}: "
                 f"{str(r.get('excerpt') or '')[:280]}")
 
@@ -3533,6 +3715,16 @@ the LLM review both raise is still ONE row whose `source` names both.
 
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
+
+SEED COVERAGE — write `concerns/SEED_COVERAGE.md` with ONE row per seed id above:
+  | seed id | concern ids | disposition |
+  |---|---|---|
+  | S001 | R1-1, R1-2 | enumerated |
+  | S002 | — | skipped — the reviewer thanks the authors (no demand) |
+Every seed id appears exactly once. `concern ids` are ledger ids (comma-separated);
+a block with no demand is `skipped — <a real reason of at least three words>`. The
+orchestrator refuses the run if a seeded block is missing, appears twice, is skipped
+without a reason, or names a concern that does not exist.
 
 THE LEDGER IS THE DELIVERABLE (one row per distinct concern):
   * A reviewer paragraph that raises three separate demands is three rows; the
@@ -3622,6 +3814,16 @@ demand the letter and the LLM review both raise is ONE row naming both sources.
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
 
+SEED COVERAGE — write `concerns/SEED_COVERAGE.md` with ONE row per seed id above:
+  | seed id | concern ids | disposition |
+  |---|---|---|
+  | S001 | R1-1, R1-2 | enumerated |
+  | S002 | — | skipped — the reviewer thanks the authors (no demand) |
+Every seed id appears exactly once. `concern ids` are ledger ids (comma-separated);
+a block with no demand is `skipped — <a real reason of at least three words>`. The
+orchestrator refuses the run if a seeded block is missing, appears twice, is skipped
+without a reason, or names a concern that does not exist.
+
 THE LEDGER (one row per distinct concern; same shape as modes 1-2):
 {JOURNAL_LEDGER_SCHEMA}
 Write the ledger to BOTH canonical paths (the same rows):
@@ -3702,6 +3904,11 @@ WHAT YOU READ:
   * target/   — the FINAL package ({target_label}); every change you claim must
     exist here. revision_report.json and DIFF_LEDGER.md name what changed and
     where — use them, never your memory.
+  * previous_package/ — when present, the READ-ONLY package the revision started
+    from (the scoped revision's base/, or the reviewer-visible original
+    submission for a resubmit). Use it ONLY to check a `before` span; it is not
+    the current submission, never a `changes` target, and never quoted as the
+    authors' current prose.
   * concerns/JF_concerns.json — the concern ledger; the letter covers EVERY id
     exactly once: {', '.join(ids) if ids else '(none)'}
   * feedback/text/ — the reviewers' own wording (quote verbatim; never invent a
@@ -3729,17 +3936,33 @@ WRITE:
                    "response": "<one sentence>",
                    "changes": [{{"file": "<package-relative path>",
                                  "location": "<section/line>",
+                                 "operation": "edit|remove",
                                  "before": "...", "after": "..."}}],
                    "new_data": ["<package-relative file the response cites>"]}}]}}
     ONE row per concern id, the same ids as the ledger, no extras.
 
 ABSOLUTE RULES:
   * every changes[].file and new_data[] path must EXIST in target/ (checked
-    mechanically): never cite a figure, table or file that is not in the package;
+    mechanically) -- except a change with `"operation": "remove"`: a whole-file
+    deletion is cited by its PRE-REVISION path, it must be ABSENT from target/,
+    and the orchestrator verifies it against the pre-revision package when one
+    is staged. Never cite a figure, table or file that is not in the package;
 {code_rule}  * status "addressed"/"partially-addressed" needs at least one change or one
     new data file; status "already-addressed" is only for a concern the ledger
     already marks `already-addressed` (name the location in `response`, cite no
     change); status "planned" claims nothing done yet;
+  * a reviewer asking you to REMOVE a whole file or document is answered with a
+    change whose `"operation"` is `"remove"`: `file` is the path the file had
+    BEFORE the revision, `before` quotes its preimage (or names its role and
+    content), `after` is empty, and the file must no longer exist in target/.
+    The letter's `**Changes:**` line uses the same pre-revision path; do not
+    pretend the deleted file is still shipped, and do not cite it as new data;
+  * `"before"` and `"after"` are VERBATIM CONTIGUOUS SPANS, not summaries: when
+    each is four or more words, `before` must occur in
+    `previous_package/<file>` (when that package is staged) and `after` must
+    occur in `target/<file>`. No ellipsis, no paraphrase, no joined fragments.
+    Omit a side only for a pure insertion (`before` empty) or a pure deletion
+    (`after` empty); use `"operation": "remove"` for a whole-file removal;
   * never fabricate a result, a number or a reviewer sentence;
   * the letter is a submission document but NOT manuscript text: write it here
     in response/ and never edit the package.
@@ -3869,9 +4092,15 @@ This from-scratch rewrite is for a real submission attempt (mode {mode}, option
 {sources} -- as external prose; never copy a reviewer's or the LLM review's
 sentence into the manuscript. A concern's source never changes its standing:
 every `to-fix`/`manual` row must be answered.
-  * The rewritten manuscript must demonstrably answer every concern whose
-    `disposition` is `to-fix` or `manual`; list the per-concern handling in
-    REWRITE_REPORT.md (concern id -> what the rewrite does, or why it is manual).
+  * Answer every concern whose `disposition` is `to-fix` or `manual` INSIDE the
+    rewrite role's fact-preserving surface: restructure, clarify, foreground the
+    evidence already in the corpus, and remove ambiguity. A concern that needs a
+    new fact, number, citation, analysis or other content change is not answered
+    by rephrasing: record it in REWRITE_REPORT.md as
+    `substantive — routed to the revise arm` (and in the problems-surfaced
+    record); the independent revise arm applies it. List the per-concern
+    handling in REWRITE_REPORT.md (concern id -> what the rewrite does, or why
+    it is manual/substantive).
   * A `manual` concern (a new experiment) is never faked: state the plan in
     MANUAL_STEPS.md and keep the claim honest.
   * When `feedback/original_submission/` exists it is the version the reviewers
@@ -4029,11 +4258,40 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
         if not author:
             errs.append(f"concern {cid}: the `author` cell is empty (name the reviewer or "
                         f"'LLM review (pre-filtered)')")
+        def _strong_labels(src: str, labels) -> list:
+            """A STRONG alias hit only; a cross-stream weak suffix is not one."""
+            low = str(src or "").strip().lower()
+            if not low:
+                return []
+            out = []
+            for label in labels:
+                aliases = _label_aliases(label)
+                if low in aliases["strong"] or any(
+                        low.endswith("/" + a) for a in aliases["strong"] if a):
+                    out.append(label)
+            return out
+
         human_hits = _named_labels(source, human_labels)
         llm_hits = _named_labels(source, llm_labels)
+        human_strong = _strong_labels(source, human_labels)
+        llm_strong = _strong_labels(source, llm_labels)
         stream = ""
-        if human_hits and llm_hits:
+        if human_strong and llm_strong:
             stream = "both"
+            human_hits, llm_hits = human_strong, llm_strong
+        elif human_strong:
+            stream = "human"
+            human_hits, llm_hits = human_strong, []
+        elif llm_strong:
+            stream = "llm"
+            human_hits, llm_hits = [], llm_strong
+        elif human_hits and llm_hits:
+            # No exact spelling on either side: an ambiguous bare basename must
+            # not silently bind one concern to BOTH streams (a quote from the
+            # model file then satisfied a human-labelled row).
+            errs.append(f"concern {cid}: source {source!r} is ambiguous -- it names "
+                        f"{', '.join(human_hits + llm_hits)}; cite the stream's own path")
+            stream = ""
         elif human_hits:
             stream = "human"
         elif llm_hits:
@@ -4063,11 +4321,26 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
                      "llm": "the LLM review file",
                      "both": "the feedback file(s)"}[stream]
             cited = ", ".join(human_hits + llm_hits)
-            if not named or quote not in named:
+
+            def _boundary_match(needle: str, hay: str) -> bool:
+                """A verbatim span must not start/end inside a word."""
+                pos = hay.find(needle)
+                while pos >= 0:
+                    before = hay[pos - 1] if pos else ""
+                    end = pos + len(needle)
+                    after = hay[end] if end < len(hay) else ""
+                    if not (before.isalnum() or before == "_") \
+                            and not (after.isalnum() or after == "_"):
+                        return True
+                    pos = hay.find(needle, pos + 1)
+                return False
+
+            if not named or not _boundary_match(quote, named):
                 errs.append(f"concern {cid}: the quote is not verbatim in {where} its `source` "
-                            f"names ({cited!r}) -- checked whitespace-normalised against that "
-                            f"file alone; a paraphrase, a quote from another file in the same "
-                            f"stream, or a quote from the other stream fails here")
+                            f"names ({cited!r}) -- checked whitespace-normalised, on word "
+                            f"boundaries, against that file alone; a mid-word fragment, a "
+                            f"paraphrase, a quote from another file in the same stream, or a "
+                            f"quote from the other stream fails here")
         action = str(row.get("action") or "").strip()
         if action not in JOURNAL_CONCERN_ACTIONS:
             errs.append(f"concern {cid}: action {action!r} is not one of "
@@ -4085,11 +4358,85 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
                         f"steps the authors must take / why the point does not apply)")
         if not str(row.get("summary") or "").strip():
             errs.append(f"concern {cid}: summary is empty")
+    errs.extend(journal_seed_coverage_problems(sb, seed, rows))
     if not (sb / JOURNAL_CONCERNS_MD_REL).is_file():
         warns.append(f"{JOURNAL_CONCERNS_MD_REL} is missing (the human-readable ledger table)")
     data["_to_fix"] = sum(1 for r in rows if isinstance(r, dict)
                           and str(r.get("disposition")) in ("to-fix", "manual"))
     return data
+
+
+SEED_COVERAGE_REL = "concerns/SEED_COVERAGE.md"
+
+
+def journal_seed_coverage_problems(sb: Path, seed: dict, rows: list) -> list:
+    """One disposition per mechanical feedback candidate (seed block).
+
+    The ledger checks each row it is GIVEN but never proved that every seed block
+    was considered: a single valid item passed a letter with several demands
+    (PR151-035). The session now records a coverage table (`S001...`, the ids the
+    prompt shows) mapping each block to the concern rows it produced, or saying
+    why it produced none. The parse is lenient about cell wording but strict
+    about the seed-id set and about every named concern id existing.
+    """
+    candidates = [c for c in (seed.get("candidates") or []) if isinstance(c, dict)]
+    seed_ids = [str(c.get("seed_id") or "").strip() for c in candidates]
+    seed_ids = [x for x in seed_ids if x]
+    if not seed_ids:
+        return []
+    p = Path(sb) / SEED_COVERAGE_REL
+    if not p.is_file():
+        return [f"{SEED_COVERAGE_REL} is missing: the feedback split {len(seed_ids)} candidate "
+                f"block(s) and EACH needs a disposition row (its concern ids, or why it "
+                f"produced none) -- one valid concern row does not prove the rest were read"]
+    blocks = parse_markdown_blocks(p)
+    if not blocks:
+        return [f"{SEED_COVERAGE_REL} carries no table"]
+    known = set(seed_ids)
+    ledger_ids = {str(r.get("id")) for r in rows if isinstance(r, dict)}
+    seen, problems = set(), []
+    for block in blocks:
+        header = [str(h).strip().lower() for h in block.get("header") or []]
+        if not any("seed" in h for h in header):
+            continue
+        for row in block.get("rows") or []:
+            sid = str(row.get("seed id") or row.get("seed") or "").strip()
+            if not sid:
+                problems.append(f"{SEED_COVERAGE_REL}: a coverage row has no seed id")
+                continue
+            if sid in seen:
+                problems.append(f"{SEED_COVERAGE_REL}: seed id {sid!r} appears twice")
+            seen.add(sid)
+            if sid not in known:
+                problems.append(f"{SEED_COVERAGE_REL}: {sid!r} is not a seeded candidate id")
+                continue
+            raw_ids = str(row.get("concern ids") or row.get("concerns") or "").strip()
+            ids = [x.strip() for x in re.split(r"[,;]", raw_ids) if x.strip()
+                   and x.strip().lower() not in ("—", "-", "none", "n/a")]
+            disposition = str(row.get("disposition") or "").strip()
+            low = disposition.lower()
+            if low.startswith(("no concern", "skipped", "not-a-concern", "no demand")):
+                reason = re.split(r"[—–:\-]", disposition, maxsplit=1)
+                words = re.findall(r"\S+", reason[1] if len(reason) > 1 else "")
+                if len(words) < 3:
+                    problems.append(f"{SEED_COVERAGE_REL}: {sid} is skipped without a real "
+                                    f"reason (at least three words after the dash)")
+                if ids:
+                    problems.append(f"{SEED_COVERAGE_REL}: {sid} is skipped but names "
+                                    f"concern ids {', '.join(ids)}")
+            elif ids:
+                unknown = [x for x in ids if x not in ledger_ids]
+                if unknown:
+                    problems.append(f"{SEED_COVERAGE_REL}: {sid} names concern id(s) "
+                                    f"{', '.join(unknown)} that the ledger does not carry")
+            else:
+                problems.append(f"{SEED_COVERAGE_REL}: {sid} names neither a concern id nor "
+                                f"a skip disposition")
+    missing = [x for x in seed_ids if x not in seen]
+    if missing:
+        problems.append(f"{SEED_COVERAGE_REL} does not dispose {len(missing)} seeded "
+                        f"candidate(s): {', '.join(missing[:8])}")
+    return problems
 
 
 def feedback_files_problems(sb: Path) -> list:
@@ -4539,7 +4886,31 @@ def _deletion_audit_identity(value) -> str:
     disappeared from the seeded row, inviting the auditor to repair the row in
     the one way the identity check then read as a rewrite.
     """
-    return re.sub(r"\s+", " ", str(value or "").replace("\\|", "|")).strip()[:1200]
+    # The identity is the paragraph's TEXT, not its Markdown encoding: the
+    # cell splitter decodes `\\|` before this runs, and unescaping here too
+    # would rewrite a paragraph that genuinely contains a literal backslash-
+    # pipe. The old `.replace("\\|", "|")` on the RAW value did exactly that
+    # and left the seed cell double-escaped (`\\\\|`), which the splitter read
+    # as a backslash plus a cell separator (PR151-008).
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:1200]
+
+
+def _deletion_audit_ref(index: int, row) -> str:
+    """One stable occurrence id for a seeded deletion row.
+
+    The displayed paragraph cell is capped at 1,200 characters, so two distinct
+    paragraphs that share that prefix are indistinguishable by the cell alone.
+    The id binds the occurrence (document, line, FULL paragraph text) and is
+    what the acceptance check compares; the paragraph cell stays display-only
+    (PR151-007).
+    """
+    document = str((row or {}).get("document") or "")
+    line = str((row or {}).get("line") or "")
+    paragraph = str((row or {}).get("paragraph") or "")
+    digest = hashlib.sha1(
+        (document + "\0" + line + "\0" + paragraph).encode("utf-8", "surrogatepass")
+    ).hexdigest()[:12]
+    return f"D{int(index) + 1}-{digest}"
 
 
 def deletion_audit_markdown(rows: list) -> str:
@@ -4556,10 +4927,11 @@ def deletion_audit_markdown(rows: list) -> str:
     ]
     if not rows:
         lines.append("| - | — | — | no base prose paragraph was removed | OK — nothing removed |")
-    for i, row in enumerate(rows, 1):
+    for i, row in enumerate(rows):
         para = md_table_cell(_deletion_audit_identity(row.get("paragraph")))
         doc = md_table_cell(row.get("document") or "")
-        lines.append(f"| {i} | {doc} | {int(row.get('line') or 0)} | {para} |  |")
+        ref = md_table_cell(_deletion_audit_ref(i, row))
+        lines.append(f"| {ref} | {doc} | {int(row.get('line') or 0)} | {para} |  |")
     lines += [
         "",
         "_Dispose EVERY row in the last column: `OK — <why no fact is lost>` for a",
@@ -5043,7 +5415,8 @@ def _deletion_disposition_ok(value) -> bool:
 
 
 def deletion_audit_problems(sb: Path, expected_rows: int = None,
-                            expected_paragraphs=None, plan_ids=None) -> list:
+                            expected_paragraphs=None, plan_ids=None,
+                            expected_occurrences=None) -> list:
     """Problems with the revision audit's deleted-paragraph dispositions.
 
     `expected_rows` is the seed's row count: an audit that deletes rows instead
@@ -5054,7 +5427,10 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
     in the bounded-repair plan; otherwise the audit records a removal and asks
     for no repair. `expected_paragraphs` makes the row check identity-based:
     replacing a seed row with a different row while keeping the count must not
-    pass either.
+    pass either. `expected_occurrences` (the seed's rows) additionally binds
+    every disposition to one stable occurrence id: two paragraphs that share
+    their first 1,200 characters are distinct ids, so re-emitting one of them
+    twice cannot cover both (PR151-007).
     """
     p = Path(sb) / "revision_audit" / "DELETED_PARAGRAPHS.md"
     if not p.is_file():
@@ -5067,6 +5443,9 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
     _norm_para = _deletion_audit_identity
     problems, seen_rows = [], 0
     seen_paragraphs = set()
+    seen_refs = {}
+    expected_refs = [_deletion_audit_ref(i, row)
+                     for i, row in enumerate(expected_occurrences or ())]
     check_plan = plan_ids is not None
     plan_ids = {str(x).strip().upper() for x in (plan_ids or ()) if str(x).strip()}
     for block in parse_markdown_blocks(p):
@@ -5076,6 +5455,10 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
         seen_paragraphs.update(_deletion_audit_identity(row.get("paragraph"))
                                for row in block["rows"]
                                if str(row.get("paragraph") or "").strip())
+        for row in block["rows"]:
+            ref = str(row.get("#") or "").strip()
+            if ref:
+                seen_refs[ref] = seen_refs.get(ref, 0) + 1
         if not any("disposition" in str(h) for h in block["header"]):
             problems.append(f"{p.name} has a table with no disposition column; "
                             f"re-emit the seeded table with its last column intact")
@@ -5113,6 +5496,19 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
             problems.append(f"{p.name} no longer carries {len(missing)} seeded paragraph "
                             f"row(s) (e.g. {missing[0][:90]!r}): a row was replaced or "
                             f"dropped instead of disposed")
+    if expected_refs:
+        missing_refs = [r for r in expected_refs if not seen_refs.get(r)]
+        duplicated = [r for r in expected_refs if seen_refs.get(r, 0) > 1]
+        if missing_refs:
+            problems.append(
+                f"{p.name} no longer carries {len(missing_refs)} seeded row id(s) "
+                f"(e.g. {missing_refs[0]!r}): every seeded occurrence needs its own "
+                f"disposed row; a duplicate of another row does not cover it")
+        if duplicated:
+            problems.append(
+                f"{p.name} disposes seeded row id(s) {len(duplicated)} time(s) instead of "
+                f"once (e.g. {duplicated[0]!r}): one paragraph cannot be disposed twice "
+                f"in place of a distinct one")
     return problems
 
 
@@ -5125,16 +5521,24 @@ def _markdown_outside_fences(text: str) -> str:
     Markdown triple-backtick/tilde form; the closing fence must use the same
     character and be at least as long as the opening.
     """
+    # HTML comments are invisible to a Markdown renderer: a letter that is
+    # entirely an HTML comment used to satisfy the heading/Comment checks.
+    text = re.sub(r"<!--.*?-->", "", str(text or ""), flags=re.S)
     out, fence = [], None
-    for line in str(text or "").splitlines():
+    for line in text.splitlines():
         m = re.match(r"[ \t]*(`{3,}|~{3,})", line)
         if fence is None:
             if m:
                 fence = m.group(1)
                 continue
             out.append(line)
-        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
-            fence = None
+        else:
+            # Only a bare closing fence closes: a fence-like line with trailing
+            # text is CONTENT, not the end of the block.
+            close = re.fullmatch(r"[ \t]*(`{3,}|~{3,})[ \t]*", line)
+            if (close and close.group(1)[0] == fence[0]
+                    and len(close.group(1)) >= len(fence)):
+                fence = None
     return "\n".join(out)
 
 
@@ -5151,12 +5555,47 @@ def response_comment_quotes(letter: str) -> dict:
         m = re.match(r"([A-Za-z0-9_.\-]+)", part)
         if not m:
             continue
-        cm = re.search(r"(?m)^\s*\*\*Comment:\*\*\s*(.+)$", part)
-        if not cm:
+        comments = re.findall(r"(?m)^\s*\*\*Comment:\*\*\s*(.+)$", part)
+        if len(comments) != 1:
+            # Two Comment lines: the parser used to keep the first and never
+            # check the second, so an invented reviewer quotation could ship.
+            # Treat the block as having no valid Comment; the postcheck fails it.
             continue
-        quote = cm.group(1).strip().strip("\"'“”‘’").strip()
+        quote = comments[0].strip().strip("\"'“”‘’").strip()
         if quote:
             out[m.group(1)] = quote
+    return out
+
+
+def response_letter_change_paths(letter: str) -> dict:
+    """{concern id: [file paths cited by its `**Changes:**` lines]}.
+
+    The letter and `response_map.json` are independent outputs: the postcheck
+    validates the map's paths, so a letter could claim a change the map never
+    records and still pass. This parser supplies the LEFT side of the binding;
+    the postcheck requires every path the letter cites to be one the same
+    concern's validated map row carries (PR151-033). The parser is deliberately
+    conservative: an unparseable Changes line is left to the human review rather
+    than failed on a path guess, and fenced examples are not blocks.
+    """
+    out = {}
+    for part in re.split(r"(?m)^##\s+", _markdown_outside_fences(letter))[1:]:
+        m = re.match(r"([A-Za-z0-9_.\-]+)", part)
+        if not m:
+            continue
+        paths = []
+        for line in re.findall(r"(?m)^\s*\*\*Changes:\*\*\s*(.+)$", part):
+            payload = line.strip().strip("<>").strip()
+            pm = re.match(r"([^:\s]+):", payload)
+            if pm:
+                candidate = pm.group(1).strip("<>`'\"")
+            else:
+                candidate = payload.split()[0].strip("<>`'\"") if payload.split() else ""
+            if candidate and ("/" in candidate or "." in candidate) \
+                    and not candidate.startswith(("http:", "https:")):
+                paths.append(candidate)
+        if paths:
+            out[m.group(1)] = paths
     return out
 
 
@@ -5245,6 +5684,7 @@ def postcheck_response(ctx: Ctx, rec: dict):
             errs.append(f"{JOURNAL_RESPONSE_MD_REL} is EMPTY: the response to "
                         f"reviewers must carry one block per concern")
     comment_quotes = response_comment_quotes(letter)
+    letter_changes = response_letter_change_paths(letter)
     data = read_json(sb / JOURNAL_RESPONSE_MAP_REL, revive=False, lenient=True)
     if not isinstance(data, dict):
         errs.append(f"{JOURNAL_RESPONSE_MAP_REL} is missing/unparsable (the letter's "
@@ -5283,7 +5723,11 @@ def postcheck_response(ctx: Ctx, rec: dict):
                         f"verbatim quotation")
         elif concern_quote and comment:
             c_norm = " ".join(comment.split()).lower()
-            if len(re.findall(r"\S+", c_norm)) < 4:
+            # A four-word floor is guidance for an EXCERPT. The complete verified
+            # quote may itself be shorter ("Fix units."), and it cannot be
+            # expanded without inventing reviewer words.
+            _full_quote = (" ".join(concern_quote.split()).lower() == c_norm)
+            if len(re.findall(r"\S+", c_norm)) < 4 and not _full_quote:
                 errs.append(f"response {cid!r}: the Comment quotation is shorter than 4 words "
                             f"({comment!r}); quote the reviewer's own wording, not a label")
             elif not response_comment_is_verbatim(comment, concern_quote):
@@ -5292,8 +5736,38 @@ def postcheck_response(ctx: Ctx, rec: dict):
                             f"it may be a shorter excerpt but must add no words")
         changes = [c for c in (row.get("changes") or []) if isinstance(c, dict)]
         new_data = [str(x) for x in (row.get("new_data") or []) if str(x).strip()]
+        # Bind the letter's own `**Changes:**` claims to the same row's validated
+        # map entries. One direction only: every path the letter cites must be a
+        # path this row records. (A map entry the letter omits is a wording
+        # omission, not a false claim, and the response text may legitimately
+        # summarize several entries in one line.)
+        _letter_paths = letter_changes.get(cid) or []
+        _map_paths = {str(c.get("file") or "").strip() for c in changes
+                      if str(c.get("file") or "").strip()} | set(new_data)
+        for _lp in _letter_paths:
+            if _lp not in _map_paths:
+                errs.append(
+                    f"response {cid!r}: the letter's `**Changes:**` line cites {_lp!r}, "
+                    f"but {JOURNAL_RESPONSE_MAP_REL} records no change or new-data file "
+                    f"with that path for this concern (the letter may not claim a change "
+                    f"the machine-readable map does not carry)")
+        if status == "planned" and _letter_paths:
+            errs.append(
+                f"response {cid!r}: the letter lists completed `**Changes:**` although the "
+                f"row status is 'planned' (a planned answer claims nothing done yet)")
+        # The package may DECLARE a narrower submitted set in its own README.
+        # Response checking used to validate only existence in target/, so a
+        # cited file that publication later strips passed the letter gate and
+        # shipped as a dangling reference (rule 9).
+        _decl = declared_submission_set(target)
+        _declared = set(_decl.get("files") or ()) if _decl.get("declared") else set()
         for c in changes:
             f = str(c.get("file") or "").strip()
+            operation = str(c.get("operation") or "edit").strip().lower()
+            if operation not in ("edit", "remove"):
+                errs.append(f"response row {cid!r}: change operation {operation!r} is not "
+                            f"`edit` or `remove`")
+                operation = "edit"
             if not f:
                 errs.append(f"response row {cid!r}: a change entry names no file")
             elif not submit_code_of(ctx) and is_code_rel(f):
@@ -5314,6 +5788,20 @@ def postcheck_response(ctx: Ctx, rec: dict):
             elif Path(f).is_absolute() or ".." in Path(f).parts:
                 errs.append(f"response row {cid!r}: change file {f!r} is not a package-relative "
                             f"path (absolute and parent-relative paths can leave the package)")
+            elif operation == "remove":
+                # A justified whole-file deletion: the file is GONE from target/
+                # by design, so the existence rule must not demand it there.
+                # The removal is verified against the pre-revision package when
+                # one is staged, and the file must not still be shipped.
+                if (target / f).is_file():
+                    errs.append(f"response row {cid!r}: change {f!r} is recorded as "
+                                f"`remove`, but the package still carries it")
+                else:
+                    preimages = _response_preimage_dirs(ctx, rec, sb)
+                    if preimages and not any((d / f).is_file() for d in preimages):
+                        errs.append(f"response row {cid!r}: change {f!r} is recorded as "
+                                    f"`remove`, but no pre-revision package staged here "
+                                    f"carries that file (name the file the revision removed)")
             elif not (target / f).is_file():
                 # `exists()` is also true for a DIRECTORY: `figures/` passed the
                 # change-path gate with no document behind the claim. The prompt
@@ -5321,6 +5809,10 @@ def postcheck_response(ctx: Ctx, rec: dict):
                 errs.append(f"response row {cid!r}: change file {f!r} does not exist in the "
                             f"package -- the letter must not cite a file the revision does not "
                             f"carry")
+            elif _declared and f not in _declared:
+                errs.append(f"response row {cid!r}: change file {f!r} is not in the package's "
+                            f"DECLARED submitted set, so the assembled submission will not "
+                            f"carry the file the letter cites")
         for f in new_data:
             if not submit_code_of(ctx) and is_code_rel(f):
                 errs.append(f"response row {cid!r}: new-data file {f!r} points into {CODE_DIR}/, "
@@ -5343,6 +5835,10 @@ def postcheck_response(ctx: Ctx, rec: dict):
             elif not (target / f).is_file():
                 errs.append(f"response row {cid!r}: new-data file {f!r} does not exist in the "
                             f"package")
+            elif _declared and f not in _declared:
+                errs.append(f"response row {cid!r}: new-data file {f!r} is not in the package's "
+                            f"DECLARED submitted set, so the assembled submission will not "
+                            f"carry the file the letter cites")
         src_row = ledger_rows.get(cid) or {}
         if status == "already-addressed" \
                 and str(src_row.get("disposition") or "") != "already-addressed":
@@ -5368,6 +5864,7 @@ def postcheck_response(ctx: Ctx, rec: dict):
                 # letter is prose, not a second block.
                 errs.append(f"response letter carries {mentions} `## {cid}` headings: "
                             f"exactly one block per concern is required")
+    errs.extend(_response_change_span_problems(sb, target, rows))
     # Like every sibling postcheck: the response session must not rewrite the
     # read-only package copy its letter is verified against (target/), or the
     # change citations can "exist" in a package that was never checked.

@@ -18,6 +18,16 @@ if [[ ! -f "$DOCX" ]]; then
     echo "Error: file not found: $DOCX" >&2
     exit 1
 fi
+# The documented input is a .docx. Without this guard a regular sample.txt is
+# accepted, sample.pdf is derived and deleted as "stale output" before Word is
+# even asked to open a non-Word file.
+case "${DOCX,,}" in
+    *.docx) ;;
+    *)
+        echo "Error: input is not a .docx file: $DOCX" >&2
+        exit 2
+        ;;
+esac
 
 # Resolve symlinks ONCE: Word writes the PDF next to the REAL file, so the
 # stale-output cleanup and the verification must use the same resolved path
@@ -27,6 +37,13 @@ if ! DOCX_REAL="$(realpath -- "$DOCX" 2>/dev/null)"; then
     echo "Error: cannot resolve the path: $DOCX" >&2
     exit 1
 fi
+case "${DOCX_REAL,,}" in
+    *.docx) ;;
+    *)
+        echo "Error: input resolves to a non-.docx file: $DOCX" >&2
+        exit 2
+        ;;
+esac
 
 # Check for PowerShell (works in WSL and Git Bash)
 if ! command -v powershell.exe >/dev/null 2>&1; then

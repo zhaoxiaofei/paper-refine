@@ -373,12 +373,16 @@ def test_pipeline_rules():
     check("R01 a table after a deleted paragraph keeps the base order",
           tags == ["p", "p", "tbl"], str(tags))
     used = [f"X-{i}" for i in range(901, 1000)]
+    out, _remap = pp.cold_start_findings_for_merge(used, [{"id": "X-950"}])
+    check("G-003 the 100th probe id moves to the four-digit block",
+          out[0]["id"] == "X-9001", str(out))
+    used_all = used + [f"X-{i}" for i in range(9001, 10000)]
     try:
-        pp.cold_start_findings_for_merge(used, [{"id": "X-950"}])
-        check("G-003 an exhausted probe block refuses to emit X-1000", False)
+        pp.cold_start_findings_for_merge(used_all, [{"id": "X-950"}])
+        check("G-003 both probe blocks exhausted -> named refusal", False)
     except RuntimeError as e:
-        check("G-003 an exhausted probe block refuses to emit X-1000",
-              "X-901..X-999" in str(e), str(e))
+        check("G-003 both probe blocks exhausted -> named refusal",
+              "X-9001..X-9999" in str(e), str(e))
     new = {"defect_prefix_census": [0, 5], "defect_prefix_total": 5}
     old = {"defect_prefix_census": [1, 0], "defect_prefix_total": 1}
     check("G-004 the no-progress key is the ordered census, not the total",

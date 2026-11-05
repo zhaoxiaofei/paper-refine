@@ -234,6 +234,16 @@ def test_mcp_validates_the_path_it_processes():
         if not shutil.which("node"):
             skip("the compare server validates path.resolve()", "node is not on PATH")
             return
+        # The server's own imports are a setup prerequisite, not a containment
+        # result. A fresh checkout without node_modules starts node and then
+        # dies with ERR_MODULE_NOT_FOUND, which this test used to report as a
+        # path-containment regression.
+        if not (WS / "mcp-docx-compare" / "node_modules"
+                / "@modelcontextprotocol" / "server").exists():
+            skip("the compare server validates path.resolve()",
+                 "the locked Node dependencies are not installed "
+                 "(run `npm ci` in mcp-docx-compare/)")
+            return
         rep = pp.mcp_stdio_tool_call(
             {"command": "node", "args": [str(WS / "mcp-docx-compare" / "index.js")]},
             pp.DOCX_COMPARE_MCP_TOOL,

@@ -50,6 +50,11 @@ Columns: `original path | revised path | action | rename applied | notes`
 
 Columns: `edit ID (E-001…) | finding ID(s) | file | location | verbatim before text | intended after text | type (fix / clarification / scaffold) | propagation required Y/N`
 
+A pure INSERTION (including a `scaffold`) has no replaced text: leave the
+before-text cell empty and quote the exact insertion ANCHOR (the neighbouring
+text the new content goes before/after). Every other edit still quotes the
+before-text exactly.
+
 Sequenced per R3: (i) Critical factual/ethical/completeness → (ii)
 consistency propagation → (iii) logic/clarity/repetition → (iv)
 grammar/terminology → (v) formatting. If the before-text cannot be quoted
@@ -75,9 +80,10 @@ before validation.
 ## A7 — DIFF LOG
 
 Per revised file: hunks vs original (unified diff), each hunk mapped to an
-edit ID. **An unmapped hunk is a violation: revert it or record an explicit
-justification.** This is the locality proof — "only the intended sentences
-changed".
+edit ID. A mechanical converter/format/rename hunk that no finding names gets
+a `MECHANICAL-<n>` id in the same log, with its operation named. **An unmapped
+hunk is a violation: map it (finding id or `MECHANICAL-<n>`) or revert it.**
+This is the locality proof — "only the intended sentences changed".
 
 **Improvement rows (`I-xxx`).** An edit that repairs a defect the frozen review
 did NOT name is legal when it is recorded, not hidden: give it an `I-xxx` id, the

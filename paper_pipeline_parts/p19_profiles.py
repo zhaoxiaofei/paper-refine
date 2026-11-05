@@ -137,10 +137,9 @@ a paged run: it restates no rule and it changes none.
      reading-economy hint, never a limit on the stage's own re-validation: the
      step that re-opens the cited location before applying a finding or porting a
      donor item still binds you.
-  4. THE DELIVERABLES ARE THE STAGE. Your prompt names them and
-     `_pipeline_done.json` in the sandbox ROOT is the last thing you write.
-     A stage that does all its analysis but cannot close its deliverables has
-     FAILED (this is the observed failure mode of a truncated session).
+  4. THE DELIVERABLES ARE THE STAGE. Your prompt names them; a stage that does
+     all its analysis but cannot close its deliverables has FAILED (this is the
+     observed failure mode of a truncated session).
   5. THE PAGED RULES ARE BINDING. A pointer like
      `[PROFILE RULES — SECTION: see INSTRUCTIONS/PROFILE_RULES.md]` replaces
      rule text that this profile does not inline. Read the section your stage

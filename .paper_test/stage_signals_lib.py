@@ -808,7 +808,8 @@ def judge_sheet(check_id, score=1, tier="writing", severity="minor"):
                                            "evidence": "the sentence repeats itself",
                                            "check": check_id}],
                              "introduced": [],
-                             "checks": {c: "clean" for c in nb.JUDGE_COVERAGE_CHECKS}}]}
+                             "checks": {c: "clean -- test fixture: examined, nothing found"
+                                        for c in nb.JUDGE_COVERAGE_CHECKS}}]}
 
 
 def test_judge_check_ids_the_prompt_names_are_accepted():

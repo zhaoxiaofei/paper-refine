@@ -1611,8 +1611,12 @@ difference you find into exactly one class:
                                                            severity. Dropping a NAMEABLE difference is
                                                            itself a `consistency`-tier defect, and the
                                                            comparison sessions count it as one.
+  (f) the donor and the base fixed the same place and neither fix is demonstrably better under
+      the source hierarchy                                    -> KEEP THE BASE (keep-self) and
+                                                                 record the equivalence in `why`
 When several donors (or a donor and the base) fixed the same place differently and none is clearly
-better under the hierarchy, PREFER THE BASE's version and record the alternatives in the ledger.
+better under the hierarchy, PREFER THE BASE's version, classify it as (f), and record the
+alternatives in the ledger.
 Two ported fixes that contradict each other are a CONFLICT: resolve it by the source hierarchy,
 never by choosing the more recently read donor, and record the resolution.
 
@@ -1672,7 +1676,7 @@ revised.
 === LEDGER (required) ===
 
 Write integrated/DIFF_LEDGER.md with one row per (a)/(b) item and a row for every difference you
-deliberately did not port, each carrying: diff id, the DONOR it came from, class (a)-(e), file +
+deliberately did not port, each carrying: diff id, the DONOR it came from, class (a)-(f), file +
 section/location, what the base has, what the donor has, the decision (PORTED / KEPT-BASE /
 IGNORED / LEFT-SHARED), and the hierarchy-based justification (one line). EVERY donor must appear
 in the ledger; a donor that contributed nothing gets an explicit "no ported difference" row, so the
@@ -2281,8 +2285,11 @@ alone. Compliant packages carry ONE content-hash version token in the version sl
 their package and nothing about how it was produced; a LEGACY package may still carry a
 letter/digit token ("-b", "_v2") or a collision "_revN" suffix. A filename difference is therefore
 NOT missing content and must not be scored as one, as long as the content survives. DO score as
-defects: references that still point at old names, duplicate pre/post-rename siblings inside one
-package, and a renamed file whose content was lost or truncated.
+defects: a file's own TEXT (prose, caption, legend, table cell) still naming an old file name or
+label that the same package no longer carries, duplicate pre/post-rename siblings inside one
+package, and a renamed file whose content was lost or truncated. Score such a stale reference from
+the package's visible text; a path that merely FAILS TO RESOLVE is not evidence (see the next
+paragraph).
 
 FILE PATHS ARE ANONYMIZED PLACEHOLDERS. Every file you can see was copied into this sandbox under
 an opaque name: directories are "d01", "d02", ... and files are "f0001", "f0002", ... with the
@@ -2303,10 +2310,16 @@ package was produced, how many processing steps it went through, or how heavily 
   * document references INSIDE a file (a LaTeX \\includegraphics{...}, a \\input, a
     \\addbibresource, a build script, a hyperlink to a sibling file) have been REWRITTEN to the
     anonymous names, so a LaTeX/TeX package can be compiled and rendered as-is inside this sandbox
-    and you may do that for the visual pass. A reference the rewriter missed (an unusual command, a
-    path built at run time) is a PACKAGING ARTIFACT of the anonymization, not a defect of the
-    version: never report it as a missing file, a broken reference or a completeness problem. The
-    orchestrator verifies the real file set mechanically (names and bytes) outside your sandbox;
+    and you may do that for the visual pass. A relative target that does not resolve in your
+    sandbox has TWO possible causes (an already-broken link in the version, or a PACKAGING ARTIFACT
+    of the anonymization -- a reference the rewriter missed), and nothing in the blinded view
+    tells them apart. It is therefore NEVER
+    itself a scored defect: never report it as a missing file, a broken reference or a
+    completeness problem. Score a stale reference only from the package's own visible text (a
+    prose/caption/legend/table mention of an old name or label, above); when the text does not
+    decide it, record the unresolved path as a named LIMITATION in your discovery file and award
+    no row for it. The orchestrator verifies the real file set mechanically (names and bytes)
+    outside your sandbox;
   * never infer (or let influence a score) which process produced a package from a name, a path
     shape or a token level -- judge content only.
 
@@ -2366,8 +2379,9 @@ only.
                             CRITICAL defect the opponent leaves entirely unresolved (or the
                             opponent introduces one), and no higher-priority tier offsets it
   +3  clearly better      — the decisive difference includes a MAJOR defect resolved that the
-                            opponent still carries, with no regression introduced in exchange;
-                            the deciding tier's net reaches +3
+                            opponent still carries; the deciding tier's net reaches +3 under the
+                            arithmetic below (a countervailing introduced MINOR row can take a
+                            +4 run to +3; it does not cancel the MAJOR backing)
   +2  better              — a real net advantage in the deciding tier (a run of MINOR rows reaches
                             +2 and no further): more/larger real defects resolved than introduced
   +1  slightly better     — a small but REAL net advantage (never a cosmetic one)
@@ -2531,10 +2545,12 @@ cannot be "clearly better".
   correctness  >  preservation  >  completeness  >  consistency  >  writing  >  formatting
 
 An error of fact/DOI/citation/number/premise outranks a regression against the original (deleted
-claims, softened or WEAKENED claims and limitations, broken cross-references or numbering), which
+claims or limitations, dropped content, broken cross-references or numbering), which
 outranks missing or unneeded information, which outranks the same thing said/spelled/numbered two
 ways or a convention applied unevenly, which outranks prose whose meaning survives, which
-outranks purely mechanical layout. The order is LEXICOGRAPHIC: the first tier in which the two
+outranks purely mechanical layout. A claim whose STRENGTH changed (a supported claim weakened, or
+an unsupported claim strengthened) is a correctness row, not preservation: the claim-calibration
+rule below governs both directions. The order is LEXICOGRAPHIC: the first tier in which the two
 versions differ decides the comparison, and no lower tier can offset it. When sources in a package
 disagree, the higher-priority source wins, in this order:
   @@SOURCE_HIERARCHY@@
@@ -2993,7 +3009,7 @@ PRIOR_FAILURE_NONE = """=== FIRST ATTEMPT ===
 (No previous attempt of this run failed; there is no earlier failure to avoid.)"""
 
 
-def prior_failure_text(rec: dict, limit: int = 16000) -> str:
+def prior_failure_text(rec: dict, limit: int = 16000, archive_pointer: str = "") -> str:
     """EVERY failure of the previous attempt, verbatim, for the regenerated prompt.
 
     A retry re-runs a full agent session, so the one thing the new session must
@@ -3038,14 +3054,46 @@ def prior_failure_text(rec: dict, limit: int = 16000) -> str:
                      "repeating an approach: the sibling path above is outside your sandbox.")
     note = "\n".join(parts)
     if len(note) > limit:
-        return (note[:limit] + "\n... [truncated HERE only: the complete list is in state.json -> "
-                               "attempts_log, in the run log under reports/ and in the attempt's "
-                               "preserved sandbox]")
+        # The pointer goes FIRST and the cut falls on a line boundary: a prefix
+        # that ends inside an error hid the saved-attempt pointer itself and
+        # promised "fix ALL" while withholding the tail (PR151-072). The caller
+        # that stages the sandbox writes the UNTRUNCATED list there.
+        pointer = ((f"The COMPLETE previous-attempt failure list is {archive_pointer} "
+                    f"(read it before doing anything else).\n") if archive_pointer else
+                   "The complete list is in state.json -> attempts_log and in the run log "
+                   "under reports/.\n")
+        budget = max(0, limit - len(pointer) - 80)
+        cut = note.rfind("\n", 0, budget)
+        if cut < budget // 2:
+            cut = budget
+        return (pointer + note[:cut]
+                + "\n... [inline list cut at the display budget; the complete list is "
+                  "the pointer named above]")
     return note
 
 
-def prior_failure_block(rec: dict) -> str:
-    note = prior_failure_text(rec)
+def prior_failure_block(rec: dict, sb: Path = None) -> str:
+    # Archive the COMPLETE failure record inside the session's own sandbox: the
+    # prompt's display budget must never cut an actionable tail, and a stage may
+    # be forbidden to read the root's state.json/reports from inside the sandbox.
+    if sb is not None:
+        full = prior_failure_text(rec, limit=10 ** 9)
+        if full:
+            rel = "PREVIOUS_ATTEMPT_ERRORS.md"
+            try:
+                write_text_atomic(
+                    Path(sb) / rel,
+                    "# COMPLETE previous-attempt failure record\n\n"
+                    "This is the UNTRUNCATED list the prompt's display budget may show only in "
+                    "part. Every item here is a failure of the previous attempt of THIS run; "
+                    "fix all of them before writing the completion marker.\n\n" + full + "\n")
+                note = prior_failure_text(rec, archive_pointer=f"./{rel}")
+            except OSError:
+                note = prior_failure_text(rec)
+        else:
+            note = ""
+    else:
+        note = prior_failure_text(rec)
     if not note:
         return PRIOR_FAILURE_NONE
     log = rec.get("attempts_log") or []
@@ -3176,15 +3224,20 @@ PRIOR_AUDIT_RULE = """PRIOR-AUDIT OBSERVATIONS (read-only):
   * `prior_audit/UNRESOLVED.md` is the previous round auditor's unresolved-observations record:
     one line per observation, with its location and re-runnable evidence. It is NOT a scored
     finding, it is not in `prior_round/findings.json`, and no reviser has acted on it.
-  * Read it before your sweeps. For each observation, check the cited location in the current
+  * `prior_audit/OBSERVATIONS.md` is the orchestration's indexed view of the SAME lines: one
+    stable id (`AU-OBS-001`, `AU-OBS-002`, ...) per observation, in file order. Cite the id;
+    it is how the orchestrator proves every observation was disposed exactly once.
+  * Read both before your sweeps. For each observation, check the cited location in the current
     base/ corpus and give it exactly one disposition visible in your review artifacts:
       - STILL A REAL DEFECT -> file it as a normal finding on this round's scale (rule 8), with
-        the observation's evidence and a note "from prior audit observation";
+        the observation's evidence and the exact note "from prior audit observation <id>"
+        in the finding's explanation field;
       - NOT REPRODUCIBLE (fixed, or the quoted text/location is gone) -> record
-        "prior audit observation: not reproducible in base/" in the summary note of
-        findings.md.
+        "prior <id>: not reproducible in base/" in the summary note of findings.md.
     Do not skip an observation because the auditor did not classify it; do not file it as a
-    finding without re-checking the evidence."""
+    finding without re-checking the evidence. The orchestrator refuses the review when an id has
+    no disposition, more than one disposition, or a disposition naming an id that is not in the
+    staged record."""
 
 
 def review_prompt(sandbox: Path, run_id: str, r: int,
@@ -3268,10 +3321,14 @@ the surface, and the revisers may not change a claim here."""
     for token, _title, value in blocks:
         text = text.replace(token, value)
     text = text.replace("@@RUN_ID@@", run_id)
-    text = text.replace("@@SANDBOX@@", str(sandbox.resolve()))
+    # Hold the literal, operator-supplied values until every global placeholder
+    # pass is complete: a legitimate sandbox name containing `@@ROUND@@`, or a
+    # retry diagnostic containing `@@CAPTION_LIMIT@@`, must not be rewritten by
+    # the passes that follow its insertion.
+    text = text.replace("@@SANDBOX@@", _LITERAL_SANDBOX)
     text = text.replace("@@ROUND@@", str(int(r)))
     text = text.replace("@@PRIOR_ROUND@@", prior)
-    text = text.replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
+    text = text.replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE)
     text = apply_rewrite_parity(text, "review")
     text = apply_hierarchy_reconcile(text, "review")
     text = apply_evidence_integrity(text, "review")
@@ -3283,6 +3340,8 @@ the surface, and the revisers may not change a claim here."""
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(GUIDED_REVIEW_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("guided_review", run_id, r))
+    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
+    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     text = text + shared + split_block + scope_block + attached_head(prof) + "\n" \
         + attached_phase1(prof) + REVIEW_TAIL + journal_block + venue_norm
     pageable = [(title, value) for _token, title, value in blocks]
@@ -3298,7 +3357,9 @@ REVALIDATION_RULE = """BEFORE YOU APPLY EACH FINDING — RE-VALIDATE IT (paper-r
 
 The finding list you receive is a set of CLAIMS, not instructions. For every finding, before any
 edit: re-read the cited location in `base/` and check the claim against the source hierarchy
-(rule 2: code, raw data, figures, tables, main text, supplementary text). Record one ledger row
+(rule 2: code, raw data, figures, tables, main text, supplementary text); RE-RUN or re-observe the
+evidence the finding cites; RE-READ every result artifact it names; and compare the claimed
+behaviour with the documented or tested behaviour where that is the standard. Record one ledger row
 per finding with `revalidated: confirmed` or `revalidated: rejected` and, for a rejection, the
 exact evidence that contradicts the finding. Apply ONLY confirmed findings. A rejected finding is
 carried as `unable — <reason>` in the ledger and is never silently skipped; a finding you cannot
@@ -3346,7 +3407,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
 """ if audit else "")
     text = (REVISE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@REVISE_INDEX@@", str(int(index)))
             .replace("@@REVISE_TOTAL@@", str(int(total)))
@@ -3361,7 +3422,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@ZOTERO_CLI_RULE@@",
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_REVISED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
-            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
+            .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
                                      prefer_rewrite)
     text = apply_rewrite_parity(text, "revise")
@@ -3377,6 +3438,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVISED_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r))
+    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
+    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     shared = shared_blocks()
     text = page_stage_prompt(sandbox, REVALIDATION_RULE + text + shared
                              + attached_head(prof) + "\n" + ATTACHED_PHASE2
@@ -3554,8 +3617,10 @@ Layout (paths relative to the sandbox root):
     "status": "resolvable" | "unresolvable",
     "verifier": { ... }}                            // OPTIONAL, as above
 
-   THE ID BLOCK IS RESERVED: use X-901, X-902, ... (X-9xx only). X-001... belongs to another
-   session's discovery round; a finding outside X-9xx is rejected by the orchestrator. The
+   THE ID BLOCK IS RESERVED: use X-901, X-902, ... up to X-999; if you have more than 99
+   findings continue with X-9001, X-9002, ... up to X-9999 (the four-digit 9xxx block). X-001...
+   belongs to another session's discovery round; a finding outside those two blocks is rejected
+   by the orchestrator. The
    top level also carries `"checked": [{"area": "...", "examined": N, "findings": N}, ...]`
    — one entry per area you examined. An EMPTY findings list is legal exactly when `checked`
    documents what was examined; a missing findings file or a missing/empty `coverage.md` is
@@ -3629,8 +3694,8 @@ the package's own file names included.
     script, a non-zero exit, an empty output, a timeout) — a computation the cold-start review
 cannot
     reproduce is a correctness blocker, not a finding;
-  * a finding outside the X-9xx block, or missing location / evidence / explanation / category /
-    severity;
+  * a finding outside the X-9xx/X-9xxx blocks (X-901..X-999, X-9001..X-9999), or missing
+    location / evidence / explanation / category / severity;
   * a missing findings file, or a missing/empty `coverage.md`;
   * reading or writing outside this sandbox.
 
@@ -3653,7 +3718,7 @@ COLD_START_TAIL = """
 === END-OF-PROMPT REMINDER ===
 
 You are the COLD-START REVIEW, not the reviewer and not the reviser: survey the corpus, dispose every
-candidate, file every defect you find as an X-9xx finding (with a re-runnable verifier wherever
+candidate, file every defect you find as an X-9xx/X-9xxx finding (with a re-runnable verifier wherever
 a computation can show it), account for every area you examined in coverage.md, and change
 nothing. Finish by running the pre-flight check, then write `_pipeline_done.json`
 (stage="cold_start_review")
@@ -3915,6 +3980,13 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
 
 
 # Readable aliases for the structural summary in the specification.
+# Literal-value holds used while a prompt still contains global `@@...@@`
+# placeholders. They are restored at the end of the builder, so an
+# operator-supplied path or diagnostic that happens to contain a placeholder is
+# never reinterpreted as template syntax.
+_LITERAL_SANDBOX = "\x00PIPELINE_LITERAL_SANDBOX\x00"
+_LITERAL_PRIOR_FAILURE = "\x00PIPELINE_LITERAL_PRIOR_FAILURE\x00"
+
 REVIEW_PROMPT = review_prompt
 REWRITE_PROMPT = rewrite_prompt
 REVISE_PROMPT = revise_prompt
@@ -3948,7 +4020,7 @@ Inputs (paths relative to the sandbox root):
   base/                    the round's base (read-only)
   revised/                 the revision under audit (read-only to you)
   guided_review/findings.json     the frozen review findings (plus guided_review/round2/findings_extra.json when
-                           the discovery round ran; the cold-start review's X-9xx rows are
+                           the discovery round ran; the cold-start review's X-9xx/X-9xxx rows are
                            merged there too)
   audit/audit.json, audit/AUDIT.md   the review auditor's dispositions, when present
   revised/CHANGELOG.md, revised/REVISION_REPORT.md, revised/revision_report.json,
@@ -4000,7 +4072,7 @@ absent from `revised/`. A moved, merged or lightly reworded paragraph appears th
 whether every fact survived, not merely whether the bytes moved. Edit that file IN PLACE and put one
 disposition in the last cell of EVERY row. The other cells are the seed's IDENTITY of the paragraph
 (the orchestrator re-reads them to prove every seeded row survived); keep them byte-identical, pipe
-escapes (`\|`) included, and never shorten or re-summarise a paragraph cell. A table-heavy paragraph
+escapes (`\\|`) included, and never shorten or re-summarise a paragraph cell. A table-heavy paragraph
 is seeded truncated to a fixed character budget: keep that truncated text exactly as written.
   * `OK — <why no fact is lost>` for a duplicate, artifact or obsolete paragraph, or for a paragraph
     whose every fact, number, definition and claim survives at a NAMED location in `revised/`
@@ -4049,9 +4121,13 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@ROUND@@", str(int(r))))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
                                      prefer_rewrite)
-    # The audit is a full session like the guided-review/revise ones: it gets the
-    # shared decision rules, the source hierarchy and the context-budget rule.
-    shared = shared_blocks()
+    # The audit is a full session: it gets the shared decision rules, the source
+    # hierarchy and the context-budget rule -- but NOT the general review's
+    # adopted-sweeps checklist. This role's object is the REVISION's own delta
+    # ("do not re-review the submission and run no discovery hunt"), so the
+    # M1-M36/J1-J5 worklist is a conflicting second mandate rather than useful
+    # shared vocabulary (PR151-081).
+    shared = shared_blocks(include_checks=False)
     text = apply_hierarchy_reconcile(text + shared, "revise")
     text = with_context_budget(text)
     text = apply_author_to_complete_prompt(text)
@@ -4075,7 +4151,9 @@ and do not re-audit.
 
 RE-VALIDATE EVERY PLANNED REPAIR BEFORE YOU APPLY IT. The plan is a set of CLAIMS, not instructions.
 For each row: re-read the cited location in `revised/`, compare it with `base/` and the source
-hierarchy the row names, and record in `revised/REPAIR_LEDGER.json` (and `.md`) as ONE document
+hierarchy the row names, RE-RUN or re-observe the evidence the row cites (and re-read each result
+artifact it names) rather than inheriting the auditor's verdict, and record in
+`revised/REPAIR_LEDGER.json` (and `.md`) as ONE document
 with a `rows` list (an empty plan's ledger is `{"rows": []}`):
   {"rows": [{"id": "RP-001", "verdict": "confirmed|rejected", "reason": "...", "before": "...",
              "after": "...", "files": ["..."], "basis": "..."}]}

@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import zipfile
@@ -566,13 +567,39 @@ def test_repair_r01_r04() -> None:
           rep_err.get("ok") is True
           and any("stderr" in w for w in (rep_err.get("warnings") or [])), rep_err)
 
-    class _SlowQueue(queue.Queue):
+    class _CapQueue(queue.Queue):
+        """Deterministic flood fixture: the SECOND get waits for the CAP event.
+
+        The old fixture slept 50 ms per get and hoped the producer outran the
+        consumer before the 2 s protocol timeout; under load either side could
+        win. Here the queue itself refuses the put that would cross the same
+        8 MB budget and records it, and the tools/call read waits for that
+        event, so the flood is observed without a timing race.
+        """
+        _CAP = 8 << 20
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._queued = 0
+            self._flood = threading.Event()
+            self._gets = 0
+
+        def put_nowait(self, item):
+            n = len(item) if isinstance(item, str) else 0
+            if self._queued + n > self._CAP:
+                self._flood.set()
+                raise queue.Full
+            super().put_nowait(item)
+            self._queued += n
+
         def get(self, block=True, timeout=None):
-            time.sleep(0.05)
+            self._gets += 1
+            if self._gets >= 2:
+                self._flood.wait(timeout=5)
             return super().get(block=block, timeout=timeout)
 
     real_queue = pp.queue.Queue
-    pp.queue.Queue = _SlowQueue
+    pp.queue.Queue = _CapQueue
     try:
         rep_queue = pp.mcp_stdio_tool_call(
             {"command": sys.executable, "args": [str(srv), "stdout"]},

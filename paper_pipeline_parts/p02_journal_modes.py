@@ -5673,6 +5673,15 @@ when the category splits), cited by its id in the row's `check` cell:
   * both carry it at DIFFERENT rungs                         -> two rows, each at its own rung
     (a distance, not a swap);
   * both carry it at the same rung, or neither does          -> no row for it.
+
+BOTH SIDES MUST BE DECIDABLE FOR THE CLASS. Absence is evidence only when the side that does not
+carry the class PROBED the same candidate and disposed it `clean -- checked: <locations>`. If
+either side's row is a limitation ("could not probe", "not readable", "not applicable"), the pair
+is `unknown` for that class: write `unknown -- counterpart undecidable: <why>` in BOTH discovery
+files and award NO row. Never read an unprobed, unreadable or limited class as the other side
+being clean: a limitation is not a finding, but it is not evidence of absence either. Every
+limitation that leaves a pairwise class undecided stays visible in the discovery files and in the
+sheet's trace, so a relative score is never presented as measured when one side was not examined.
 The `checks` coverage map stays the frozen M/J ids: your discovery findings are YOUR OWN
 instrument, recorded in the files above and in the ledger rows -- never a frozen check id. Do NOT
 propose new sweeps (there is no adoption path from this sandbox)."""

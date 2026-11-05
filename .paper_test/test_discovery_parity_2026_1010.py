@@ -401,11 +401,12 @@ def test_integration_ledger():
     tmp = scratch("disc_p4_")
     ledger = tmp / "integrated" / "DIFF_LEDGER.md"
     write(ledger, "| id | donor | finding effect |\n|---|---|---|\n"
-                  "| D-001 | a2 | preserves X-001 |\n| X-002 | (discovery) | preserves X-002 |\n")
-    check("P4a a ledger that names every id reconciles",
+                  "| D-001 | a2 | KEPT-BASE: preserves X-001 |\n"
+                  "| X-002 | (discovery) | KEPT-BASE: preserves X-002 |\n")
+    check("P4a a ledger row with a decision for every id reconciles",
           nb.discovery_ledger_reconciliation_problems(ledger, ["X-001", "X-002"]) == [])
     write(ledger, "| id | donor | finding effect |\n|---|---|---|\n"
-                  "| D-001 | a2 | preserves X-001 |\n")
+                  "| D-001 | a2 | KEPT-BASE: preserves X-001 |\n")
     probs = nb.discovery_ledger_reconciliation_problems(ledger, ["X-001", "X-002"])
     check("P4b an unreconciled id is reported with its id",
           len(probs) == 1 and "X-002" in probs[0], str(probs))

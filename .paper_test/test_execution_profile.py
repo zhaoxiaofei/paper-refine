@@ -56,14 +56,14 @@ GOLDEN = {
     "review": "cce3b6e14fd5e665",
     "review_split_a": "b3af0fa1ebeeb3c9",
     "review_scoped": "65438987b95fbad4",
-    "cold_start_review": "471538d332a6c3f5",
+    "cold_start_review": "1cc395a3e919caef",
     "audit": "ccb47b201b449f7c",
-    "revise": "c6015480999ed527",
-    "integrate": "dec483fab0d026fb",
+    "revise": "781f871ec5938dc8",
+    "integrate": "45cc1d696a044ad4",
     "rewrite": "c24f83c01c050f89",
-    "judge": "1fec29314e18c908",
-    "revision_audit": "f912e5754ae0323c",
-    "revision_repair": "b42d5991b1503e43",
+    "judge": "1d33876a527ef07b",
+    "revision_audit": "03142a83775fa2c6",
+    "revision_repair": "547b6e25bf4f1260",
 }
 
 

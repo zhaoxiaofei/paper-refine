@@ -782,9 +782,29 @@ def seed_discovery_findings(ctx: Ctx, r: int, sb: Path) -> dict:
     return seed
 
 
+_DISCOVERY_DECISIONS_RE = re.compile(
+    r"\b(?:PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED)\b", re.I)
+
+
 def discovery_ledger_missing(ledger_text: str, ids) -> list:
-    """The discovery ids an integration ledger never names (whole-token match)."""
-    return [str(i) for i in (ids or ()) if not _finding_id_mentioned(str(i), ledger_text or "")]
+    """The discovery ids an integration ledger never DISPOSES OF in a row.
+
+    A whole-token mention is not a reconciliation: the sentence "No disposition
+    is recorded for X-004" used to satisfy the gate while documenting the
+    opposite, and a table row with an empty/placeholder decision cell was
+    accepted for the same reason. Require the id on a line that also carries one
+    of the ledger's decision words (PORTED / KEPT-BASE / NO-DONOR-FIX / IGNORED /
+    LEFT-SHARED).
+    """
+    lines = str(ledger_text or "").splitlines()
+    missing = []
+    for pid in (str(i) for i in (ids or ())):
+        disposed = any(_finding_id_mentioned(pid, line)
+                       and _DISCOVERY_DECISIONS_RE.search(line)
+                       for line in lines)
+        if not disposed:
+            missing.append(pid)
+    return missing
 
 
 def discovery_ledger_reconciliation_problems(ledger: Path, ids) -> list:
@@ -2980,6 +3000,179 @@ def resync_sweeps_appendix(sweeps_path: Path, sweeps_text: str) -> str:
                  + lines[stop:])
     write_text_atomic(prompt, "\n".join(new_lines) + "\n")
     return f"re-synced the sweeps appendix in {prompt}"
+
+
+PRIOR_AUDIT_ID_RE = re.compile(r"\bAU-OBS-\d{3,}\b")
+
+
+def prior_audit_observation_lines(text: str) -> list:
+    """The observation lines of `prior_audit/UNRESOLVED.md`, in file order.
+
+    The recorded format is ONE line per observation (location + re-runnable
+    evidence). Headings, blank lines, table separators and fenced blocks are
+    structure, not observations; a leading list marker or number is stripped so
+    the same observation yields the same text across rounds.
+    """
+    rows, fence = [], None
+    for line in str(text or "").splitlines():
+        s = line.strip()
+        m = re.match(r"^(`{3,}|~{3,})", s)
+        if fence is not None:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+            continue
+        if m:
+            fence = m.group(1)
+            continue
+        if not s or s.startswith("#") or set(s) <= set("-:| "):
+            continue
+        if s.startswith("|"):
+            continue
+        s = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", s).strip()
+        if s:
+            rows.append(s)
+    return rows
+
+
+def prior_audit_observation_ids(sb: Path) -> list:
+    """[(id, observation)] for the staged prior-audit record ([] when absent)."""
+    p = Path(sb) / "prior_audit" / "UNRESOLVED.md"
+    if not p.is_file() or p.is_symlink():
+        return []
+    text = read_text_bounded(p)
+    if text is None:
+        return []
+    return [(f"AU-OBS-{i:03d}", line)
+            for i, line in enumerate(prior_audit_observation_lines(text), 1)]
+
+
+def prior_audit_disposition_problems(sb: Path, fj) -> list:
+    """One supported disposition per staged prior-audit observation.
+
+    The prior-audit rule tells the review to dispose every observation either as
+    a finding carrying "from prior audit observation <id>" in its explanation or
+    as "prior <id>: not reproducible in base/" in the summary note of
+    findings.md. Nothing used to bind the staged record to either output, so a
+    review could ignore the whole handoff and still pass (PR151-012).
+    """
+    observations = prior_audit_observation_ids(sb)
+    if not observations:
+        return []
+    known = {oid for oid, _line in observations}
+    findings = (fj.get("findings") if isinstance(fj, dict) else None) or []
+    explanations = "\n".join(str(f.get("explanation") or "") for f in findings
+                             if isinstance(f, dict))
+    md_text = ""
+    md = Path(sb) / FINDINGS_MD_REL
+    if md.is_file():
+        md_text = read_text_bounded(md) or ""
+    seen = {oid: 0 for oid in known}
+    for m in re.finditer(r"from\s+prior\s+audit\s+observation\s+(AU-OBS-\d{3,})",
+                         explanations, re.I):
+        oid = m.group(1).upper()
+        if oid in seen:
+            seen[oid] += 1
+    for m in re.finditer(r"prior\s+(AU-OBS-\d{3,})\s*:\s*not reproducible in base/",
+                         md_text, re.I):
+        oid = m.group(1).upper()
+        if oid in seen:
+            seen[oid] += 1
+    problems = []
+    missing = [oid for oid, _line in observations if not seen[oid]]
+    duplicated = [oid for oid, _line in observations if seen[oid] > 1]
+    if missing:
+        first = next(line for oid, line in observations if oid == missing[0])
+        problems.append(
+            f"{len(missing)} prior-audit observation(s) have no disposition: "
+            f"{', '.join(missing[:6])} (first: {first[:120]!r}). Re-check each cited "
+            f"location against base/ and either file it as a finding whose explanation says "
+            f"\"from prior audit observation <id>\" or record \"prior <id>: not reproducible "
+            f"in base/\" in the summary note of {FINDINGS_MD_REL}.")
+    if duplicated:
+        problems.append(
+            f"prior-audit observation(s) {', '.join(duplicated[:6])} carry more than one "
+            f"disposition: exactly one of the two supported forms is required per id")
+    referenced = set()
+    for blob in (explanations, md_text):
+        referenced.update(x.upper() for x in
+                          re.findall(r"\bAU-OBS-\d{3,}\b", blob, re.I))
+    unknown = sorted(referenced - known)
+    if unknown:
+        problems.append(
+            f"the review names prior-audit observation id(s) not present in "
+            f"prior_audit/UNRESOLVED.md: {', '.join(unknown[:6])}")
+    return problems
+
+
+def _validate_llm_conflicts(conflicts: list, opinions: list) -> tuple:
+    """(kept, rejected) -- bind every LLM conflict to the actual panel.
+
+    The prompt demands the exact compared pair, exact judge run ids and the
+    sheets' own words, but the normalizer never had the opinions to check them,
+    so a fabricated blocker about a version/judge that never existed reached the
+    manual TODO as if a judge had said it (PR151-037). A conflict is kept only
+    when its pair, its judge ids and every quoted span are found in the round's
+    own opinions; otherwise it is dropped WITH A REASON (the mechanical
+    conflicts remain the answer, and the drop is recorded on the run).
+    """
+    if not opinions:
+        return [], [{"reason": "no judge opinions to validate against"}]
+    norm = lambda x: " ".join(str(x or "").split())
+    pair_runs = {}
+    pair_text = {}
+    ids = set()
+    for o in opinions:
+        if not isinstance(o, dict):
+            continue
+        target, opponent = str(o.get("target") or ""), str(o.get("opponent") or "")
+        run = str(o.get("judge_run") or "")
+        ids.update(x for x in (target, opponent) if x)
+        if run:
+            ids.add(run)
+            pair_runs.setdefault((target, opponent), set()).add(run)
+            parts = [norm(o.get("reason")), norm(o.get("basis"))]
+            for key in ("resolved", "introduced"):
+                for item in o.get(key) or ():
+                    if isinstance(item, dict):
+                        parts += [norm(v) for v in item.values() if isinstance(v, str)]
+            # One judge run emits one opinion per opponent, all carrying the
+            # same `judge_run`; keying the searchable text by run alone made the
+            # LAST comparison overwrite the earlier ones (PR151-037). Bind the
+            # text to the exact directed pair the quote is attached to.
+            pair_text[(run, target, opponent)] = \
+                " || ".join(p for p in parts if p).lower()
+    kept, rejected = [], []
+    for c in conflicts:
+        member = str(c.get("member") or "").strip()
+        opponent = str(c.get("opponent") or "").strip()
+        judges = [str(j) for j in (c.get("judges") or []) if str(j).strip()]
+        why = ""
+        if not member or not opponent:
+            why = "no compared pair"
+        elif (member, opponent) not in pair_runs:
+            why = f"pair {member!r} vs {opponent!r} was never compared by the panel"
+        elif not judges:
+            why = "no judge run id"
+        elif any(j not in pair_runs[(member, opponent)] for j in judges):
+            why = "a named judge run did not score this pair"
+        else:
+            for e in c.get("evidence") or []:
+                run = str(e.get("judge_run") or "").strip()
+                text = norm(e.get("text"))
+                if not run or run not in judges:
+                    why = "a quote names no judge run of this conflict"
+                    break
+                if text and text.lower() not in pair_text.get(
+                        (run, member, opponent), ""):
+                    why = f"a quoted span is not in judge {run}'s sheet"
+                    break
+        if why:
+            rejected.append({"member": member, "opponent": opponent,
+                             "judges": judges, "reason": why,
+                             "summary": norm(c.get("summary"))[:200]})
+        else:
+            kept.append(c)
+    return kept, rejected
 
 
 def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
@@ -5448,19 +5641,28 @@ COVER_LETTER_OK_CLOSE_RE = re.compile(
 
 
 def _split_table_cells(text: str) -> list:
-    """Split one table line on its UNESCAPED pipes (a `\\|` is cell content).
+    """Split one table line on its UNESCAPED pipes and decode cell escapes.
 
-    The seeded tables escape a literal pipe inside a cell as `\\|` (figure
-    captions are full of them: "Fig. 1 \\| Strategies ..."), and splitting on
-    every pipe made those rows longer than their header -- which shifted every
-    later cell, so the disposition was read from the wrong column.
+    The seeded tables escape a literal backslash as `\\\\` and a literal pipe
+    as `\\|` (figure captions are full of pipes: "Fig. 1 \\| Strategies ...").
+    Decoding BOTH in one pass is what makes the writer's escaping reversible: a
+    cell that ends in a literal backslash followed by a pipe used to encode as
+    `\\\\|`, which this splitter read as an escaped backslash and then a
+    CELL SEPARATOR, so the row grew a column and every later cell (the
+    disposition included) moved one column right. Unknown escapes (`\\alpha`,
+    a LaTeX token) are left byte-identical, because the pre-escape tables and
+    interpolated LaTeX carry them unencoded.
     """
     cells, cur, i = [], [], 0
     while i < len(text):
         ch = text[i]
         if ch == "\\" and i + 1 < len(text):
-            cur.append(ch)
-            cur.append(text[i + 1])
+            nxt = text[i + 1]
+            if nxt in ("\\", "|"):
+                cur.append(nxt)
+            else:
+                cur.append(ch)
+                cur.append(nxt)
             i += 2
             continue
         if ch == "|":
@@ -5471,7 +5673,7 @@ def _split_table_cells(text: str) -> list:
         cur.append(ch)
         i += 1
     cells.append("".join(cur))
-    return [c.strip().replace("\\|", "|") for c in cells]
+    return [c.strip() for c in cells]
 
 
 def _table_line_cells(line: str) -> list:
@@ -7136,10 +7338,12 @@ Everything else must stay BYTE-IDENTICAL, above all:
   * The language pass ({pkg}/work/R6_language.md): one row per change PLUS one coverage row for
     each of the steps that changed nothing -- every step needs a row. Complete the pass the stage
     wrote; a stage that never wrote one has not finished and is re-run, not repaired.
-  * The visual record ({pkg}/VISUAL_CHECK.md): if the stage left one, render the package and LOOK
-    at the pages (write the renders under {pkg}/work/), then record what you saw -- or write the
-    honest negative ("the pages were NOT visually verified" plus the exact manual step). Never
-    claim an inspection you did not perform, and never create the file yourself.
+  * The visual record ({pkg}/VISUAL_CHECK.md): if the stage left one, render the package into a
+    SCRATCH directory under `/tmp` (this repair creates no files in the package; `{pkg}/work/`
+    is writable only where the render already exists), LOOK at the pages, then record what you
+    saw -- or write the honest negative ("the pages were NOT visually verified" plus the exact
+    manual step). Never claim an inspection you did not perform, and never create the record
+    file yourself.
   * The completion marker can only be CORRECTED, never created: if it exists, its `run_id`,
     `stage`, `round` and summary fields must name THIS run (and clear whatever the problems
     above name). A marker the stage never wrote means the run never finished -- that attempt

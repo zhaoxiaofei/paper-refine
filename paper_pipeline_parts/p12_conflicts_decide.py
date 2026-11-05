@@ -634,9 +634,13 @@ def run_judge_conflict_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
         info["ok"] = False
         return [], info
     conflicts = _normalize_llm_conflicts(data)
-    info["conflicts"] = len(conflicts)
+    kept, rejected = _validate_llm_conflicts(conflicts, payload.get("opinions") or [])
+    info["conflicts"] = len(kept)
+    info["rejected_conflicts"] = len(rejected)
+    if rejected:
+        info["rejected"] = rejected[:10]
     info["ok"] = True
-    return conflicts, info
+    return kept, info
 
 
 def judge_conflicts_markdown(data: dict) -> str:

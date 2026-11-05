@@ -2354,12 +2354,12 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 |---|---|---|---|
 | review | 112 KB | 45 KB | 59% |
 | cold_start_review | 56 KB | 21 KB | 62% |
-| audit | 83 KB | 41 KB | 51% |
+| audit | 83 KB | 40 KB | 51% |
 | revise | 111 KB | 58 KB | 48% |
 | integrate | 110 KB | 58 KB | 47% |
 | rewrite | 103 KB | 53 KB | 48% |
-| judge | 96 KB | 67 KB | 31% |
-| revision_audit | 24 KB | 11 KB | 53% |
+| judge | 98 KB | 68 KB | 30% |
+| revision_audit | 21 KB | 11 KB | 46% |
 | revision_repair | 21 KB | 7 KB | 63% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
@@ -3475,7 +3475,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 183 suites (a few
+any failure. They are independent, so run them in parallel — 185 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

@@ -18,7 +18,8 @@ Phase 2 sweeps.
 If PRIOR is missing, STOP and tell the user to run the standard review first.
 
 **Hard rules (unchanged):** identification only — never edit submission files;
-never invent; unresolvable → `unresolvable — manual verification required`;
+never invent; unresolvable → status exactly `unresolvable` (put the manual
+verification instruction in the manual-verification list, not in the enum cell);
 unverifiable guideline rule → `guideline-dependent`; no silent skips — every
 enumerated item gets a disposition; one finding per instance; prefer scripts
 over attention. The orchestrator verifies the phase's deliverables as a

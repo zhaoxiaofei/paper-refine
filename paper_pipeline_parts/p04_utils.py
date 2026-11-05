@@ -1574,10 +1574,18 @@ def md_table_cell(value, limit: int = None) -> str:
     and an empty last cell. A cap is a display budget, not a byte-identity
     contract, so spending one character on the escape is the right trade.
     """
-    text = str(value or "").replace("\r", " ").replace("\n", " ")
+    # Only None is "no value": a measured 0 or False is a real value and must
+    # not render as an empty cell (evidence tables carry Boolean over-limit flags
+    # and numeric counts).
+    text = ("" if value is None else str(value)).replace("\r", " ").replace("\n", " ")
     if limit is not None:
         text = text[:max(0, int(limit))]
-    return text.replace("|", "\\|")
+    # Escape the ESCAPE CHARACTER first: escaping only `|` turned a literal
+    # backslash before a pipe into `\\|`, which the cell splitter read as an
+    # escaped backslash followed by a real cell separator. The parser decodes
+    # `\\\\` and `\\|` in the same pass, so the pair is reversible and an
+    # unencoded LaTeX token (`\\alpha`) still survives byte-identically.
+    return text.replace("\\", "\\\\").replace("|", "\\|")
 
 
 def append_text_no_follow(path: Path, text: str, encoding: str = "utf-8") -> None:
@@ -4560,10 +4568,14 @@ WRITE (only inside out/):
      must keep the template's `[Content_Types].xml`, `word/styles.xml`,
      `word/theme/`, `word/fontTable.xml`, `word/numbering.xml`,
      `word/settings.xml`, every `word/header*.xml` and `word/footer*.xml` (with
-     their `_rels`) and every `word/media/*` file BYTE-IDENTICAL -- never rebuild
-     the package, never re-save it through a converter, and never regenerate the
-     styles. The checker compares those parts against the template: a rebuilt
-     package fails.
+     their `_rels`) and every PRE-EXISTING `word/media/*` file BYTE-IDENTICAL --
+     never rebuild the package, never re-save it through a converter, and never
+     regenerate the styles. The checker compares those parts against the
+     template: a rebuilt package fails. The ONE additive exception: a source
+     figure/table that the template does not already carry may be inserted by
+     ADDING its `word/media/*` part plus the minimal `word/_rels/document.xml.rels`
+     relationship and the `[Content_Types].xml` Default/Override entry it needs;
+     every existing entry in those two files stays byte-identical.
   1b. EDIT A PLACEHOLDER BY REPLACING ITS TEXT, NEVER ITS FORMATTING. The template
      is a fill-in form: each sample paragraph (title, author list, affiliation,
      correspondence block, keywords, abstract, headings, body text, bullet/

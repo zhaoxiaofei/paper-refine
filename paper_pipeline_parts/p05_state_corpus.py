@@ -173,8 +173,15 @@ COLD_START_SCRIPT_PREFIX = f"{COLD_START_DIR}/scripts/"
 # The reserved finding-id block: probe findings are X-9xx, so a collision with the
 # discovery round's own sequential X-0xx ids is impossible by construction (and
 # the merge still remaps defensively if a session ignores the block).
-COLD_START_ID_RE = re.compile(r"^X-9\d{2}$")
+# The block has TWO widths so the 100th independently evidenced finding still
+# has a documented, lossless id: X-901..X-999 first, then the four-digit
+# X-9001..X-9999 block (which can never collide with the discovery round's
+# X-001.. ids). The old three-digit regex made the 100th finding an exhausted
+# block and aborted a review that had done nothing wrong (PR151-078).
+COLD_START_ID_RE = re.compile(r"^X-(?:9\d{2}|9\d{3})$")
 COLD_START_FINDING_ID_BASE = 900
+COLD_START_ID_WIDE_BASE = 9000
+COLD_START_ID_MAX = 9999
 # Every DECLARED verifier is re-run at postcheck time. The timeout is per
 # script; the scripts are the session's own, offline and deterministic by
 # contract. The count and the aggregate wall-clock are ALSO bounded: one probe
@@ -2056,35 +2063,84 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
                 _py_mods[_latex_stem(posixpath.basename(o))] = \
                     _latex_stem(posixpath.basename(n))
 
-        def _py_import(m):
-            mod = m.group(2)
-            old_head = mod.split(".", 1)[0]
-            head = _py_mods.get(old_head)
-            if not head:
-                return m.group(0)
-            tail = mod.split(".", 1)[1] if "." in mod else ""
-            rewritten = head + (("." + tail) if tail else "")
-            # `import helper` binds the name `helper`; renaming only the module
-            # token left every later `helper.value` a NameError, so a judge view
-            # could lose executable evidence on one side only. Keep the binding:
-            # a single import gets an assignment on the next line (`import f2`
-            # then `helper = f2`; this also preserves the top-level binding for
-            # `import helper.sub`), a multi-name import (`, other`) keeps it with
-            # an `as helper` alias. `from <mod> import ...` binds the imported
-            # names, so it needs neither; an explicit `as` already names the
-            # binding.
-            rest = m.string[m.end():]
-            first_line = rest.split("\n", 1)[0]
-            if m.group(1).strip() == "import" and not re.match(r"\s+as\s+", rest):
-                if "," in first_line:
-                    rewritten += " as " + old_head
-                else:
-                    indent = m.group(1)[:len(m.group(1)) - len(m.group(1).lstrip())]
-                    rewritten += "\n" + indent + old_head + " = " + head
-            return m.group(1) + rewritten
+        def _rewrite_python_imports(source: str):
+            """Rewrite IMPORT STATEMENTS via the AST, preserving every binding.
 
-        text = re.sub(r"(?m)^(\s*(?:from|import)\s+)([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)",
-                      _py_import, text)
+            The old line-anchored regex saw only the first name of an
+            `import a, b` statement, missed `if True: import helper`, and — worse
+            — matched a line inside a triple-quoted STRING, editing program data
+            rather than code. An AST only reports real import nodes; a source
+            that does not parse is left byte-identical (a judge view must not
+            gain a semantic edit from the anonymizer's own guess).
+            """
+            try:
+                tree = ast.parse(source)
+            except (SyntaxError, ValueError):
+                return None
+            starts = [0]
+            for _line in source.splitlines(keepends=True):
+                starts.append(starts[-1] + len(_line))
+
+            def _pos(lineno, col):
+                return starts[lineno - 1] + col
+
+            edits = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    parts, changed = [], False
+                    for al in node.names:
+                        head = al.name.split(".", 1)[0]
+                        new_head = _py_mods.get(head)
+                        if not new_head:
+                            parts.append(al.name + ((" as " + al.asname)
+                                                    if al.asname else ""))
+                            continue
+                        changed = True
+                        new_name = new_head + al.name[len(head):]
+                        # Keep the original binding (`helper`, not just `f2`).
+                        parts.append(new_name + " as " + (al.asname or head))
+                    if changed:
+                        if (len(node.names) == 1 and node.col_offset == 0
+                                and not node.names[0].asname):
+                            # Top-level single import: the documented form is
+                            # `import f2` plus an explicit binding line, which
+                            # also keeps `helper.sub` usable as a root package.
+                            _head = node.names[0].name.split(".", 1)[0]
+                            replacement = (f"import {_py_mods[_head]}"
+                                           f"\n{_head} = {_py_mods[_head]}")
+                        else:
+                            replacement = "import " + ", ".join(parts)
+                        edits.append((_pos(node.lineno, node.col_offset),
+                                      _pos(node.end_lineno, node.end_col_offset),
+                                      replacement))
+                elif (isinstance(node, ast.ImportFrom) and node.module
+                      and not node.level):
+                    head = node.module.split(".", 1)[0]
+                    new_head = _py_mods.get(head)
+                    if not new_head:
+                        continue
+                    names = ", ".join(al.name + ((" as " + al.asname)
+                                                 if al.asname else "")
+                                      for al in node.names)
+                    edits.append((_pos(node.lineno, node.col_offset),
+                                  _pos(node.end_lineno, node.end_col_offset),
+                                  f"from {new_head + node.module[len(head):]} import {names}"))
+            if not edits:
+                return source
+            edits.sort()
+            out, last = [], 0
+            for start, end, replacement in edits:
+                if start < last:            # overlapping node (should not happen)
+                    continue
+                out.append(source[last:start])
+                out.append(replacement)
+                last = end
+            out.append(source[last:])
+            return "".join(out)
+
+        _py_rewritten = _rewrite_python_imports(text)
+        if _py_rewritten is not None:
+            text = _py_rewritten
     if dir_map:
         def one(mm):
             d = mm.group(1).rstrip("/")
@@ -3298,7 +3354,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
-    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     # Bind the sandbox to the policy its OWN prompt states: a resumed/retried
     # package is judged under the policy it was produced under, never under a
@@ -3393,11 +3449,37 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
         rmtree_force(prior_audit_dir, ignore_errors=True)
     if r > 1:
         audit_rec = ctx.run(rid_audit(r - 1))
-        if audit_rec is not None:
+        if audit_rec is not None and audit_rec.get("status") == "done":
             audit_obs = ctx.sandbox_of(audit_rec) / "audit" / "UNRESOLVED.md"
-            if audit_obs.is_file():
+            # `is_file()` follows a symlink, and copy2 then imports the target's
+            # bytes into the next review as if the accepted audit had written
+            # them. Only a regular observation file is a prior-audit artifact.
+            if audit_obs.is_file() and not audit_obs.is_symlink():
                 prior_audit_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(audit_obs, prior_audit_dir / "UNRESOLVED.md")
+                # The observations are prose lines with no ids, so a review could
+                # not name the one it disposed. Stage the SAME lines with stable
+                # ids (an indexed READ-ONLY view; UNRESOLVED.md stays verbatim)
+                # and let the postcheck require one disposition per id.
+                _obs_lines = prior_audit_observation_lines(
+                    read_text_bounded(prior_audit_dir / "UNRESOLVED.md") or "")
+                write_text_atomic(
+                    prior_audit_dir / "OBSERVATIONS.md",
+                    "\n".join([
+                        "# PRIOR-AUDIT OBSERVATIONS — stable ids (read-only)",
+                        "",
+                        "One row per observation line of `UNRESOLVED.md`, in the same order.",
+                        "Cite the id in the disposition: a finding's explanation says",
+                        "`from prior audit observation <id>`; a not-reproducible note says",
+                        "`prior <id>: not reproducible in base/`.",
+                        "",
+                        "| id | observation |",
+                        "|---|---|",
+                        *[f"| {oid} | {md_table_cell(line)} |"
+                          for oid, line in (
+                              (f"AU-OBS-{i:03d}", line)
+                              for i, line in enumerate(_obs_lines, 1))],
+                    ]) + "\n")
                 inputs["prior_audit"] = hash_manifest(prior_audit_dir)
     split_mode = review_split_of(ctx)
     review_a_findings = None
@@ -3420,7 +3502,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     # orchestrator writes the rows before the agent starts and the prompt asks
     # the agent to dispose every row and add the classes the scan cannot see.
     seed_evidence_pack(ctx, sb, sb / "base", "review")
-    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
@@ -3504,7 +3586,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "audit")
-    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
@@ -3763,7 +3845,7 @@ def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     (sb / COLD_START_DIR).mkdir(exist_ok=True)
     seed_cold_start_surfaces(ctx, sb, r)
-    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / PROMPT_FILE
     if not prompt.is_file():
         write_text_atomic(prompt, cold_start_review_prompt(sb, rid, r, prior_failure=note,
@@ -3845,19 +3927,35 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
             errs.append(f"{COLD_START_FINDINGS_REL}: a `checked` row has no 'area' name")
             continue
         area = str(c["area"]).strip()
+        _counts = {}
         for key in ("examined", "findings"):
-            try:
-                value = int(c.get(key))
-            except (TypeError, ValueError):
-                value = -1
-            if value < 0:
+            value = c.get(key)
+            # The artifact is agent-written JSON: a fraction, a string or a
+            # boolean is not a count. int(1.5) would silently truncate and
+            # int(True) would turn a malformed count into 1.
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 errs.append(f"{COLD_START_FINDINGS_REL}: checked area {area!r} carries no usable "
-                            f"{key!r} count")
+                            f"{key!r} count (a non-negative integer is required)")
+                continue
+            _counts[key] = value
+        if len(_counts) == 2 and _counts["findings"] > _counts["examined"]:
+            errs.append(f"{COLD_START_FINDINGS_REL}: checked area {area!r} reports "
+                        f"{_counts['findings']} findings from {_counts['examined']} examined "
+                        f"candidates")
     raw = doc.get("findings")
     if not isinstance(raw, list):
         errs.append(f"{COLD_START_FINDINGS_REL} carries no 'findings' list (an empty list is legal "
                     f"when `checked` documents the examination)")
         raw = []
+    if not raw:
+        _claimed = 0
+        for _c in checked:
+            if isinstance(_c, dict) and isinstance(_c.get("findings"), int) \
+                    and not isinstance(_c.get("findings"), bool):
+                _claimed += _c["findings"]
+        if _claimed:
+            errs.append(f"{COLD_START_FINDINGS_REL}: the `checked` rows report {_claimed} "
+                        f"finding(s) but the findings list is empty")
     findings, seen = [], set()
     for i, f in enumerate(raw):
         if not isinstance(f, dict):
@@ -3866,7 +3964,7 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
         fid = str(f.get("id") or "").strip()
         if not COLD_START_ID_RE.match(fid):
             errs.append(f"{COLD_START_FINDINGS_REL}: id {fid or '(none)'!r} is outside the reserved "
-                        f"probe block X-901...X-999")
+                        f"probe block X-901...X-999 and X-9001...X-9999")
             continue
         if fid in seen:
             errs.append(f"{COLD_START_FINDINGS_REL}: duplicate id {fid}")
@@ -3886,10 +3984,9 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
         if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
             errs.append(f"{COLD_START_FINDINGS_REL} {fid}: severity {f.get('severity')!r} is not one "
                         f"of {'/'.join(s.capitalize() for s in DISCOVERY_SEVERITIES)}")
-        try:
-            ok_cat = 0 <= int(f.get("category")) <= 5
-        except (TypeError, ValueError):
-            ok_cat = False
+        _cat = f.get("category")
+        ok_cat = (isinstance(_cat, int) and not isinstance(_cat, bool)
+                  and 0 <= _cat <= 5)
         if not ok_cat:
             errs.append(f"{COLD_START_FINDINGS_REL} {fid}: category {f.get('category')!r} is not an "
                         f"integer 0-5")
@@ -4184,15 +4281,21 @@ def cold_start_findings_for_merge(existing_ids, rows) -> tuple:
         new = fid
         if not DISCOVERY_X_ID_RE.match(new) or new in used:
             k = COLD_START_FINDING_ID_BASE + 1
-            while f"X-{k:03d}" in used:
+            while True:
+                cand = f"X-{k:03d}"
+                if COLD_START_ID_RE.match(cand) and cand not in used:
+                    break
                 k += 1
-            if k > COLD_START_FINDING_ID_BASE + 99:
-                # Fail closed: X-1000 is outside the reserved X-9xx block and
-                # no longer matches COLD_START_ID_RE, so every downstream probe-id
-                # check would misclassify it.
-                raise RuntimeError(
-                    "the reserved probe id block X-901..X-999 is exhausted: "
-                    "refusing to emit an id outside the probe block")
+                if k == 1000:
+                    k = COLD_START_ID_WIDE_BASE + 1
+                if k > COLD_START_ID_MAX:
+                    # Fail closed at the END of the extended block: an id
+                    # outside it would not match COLD_START_ID_RE, so every
+                    # downstream probe-id check would misclassify it.
+                    raise RuntimeError(
+                        "the reserved probe id blocks X-901..X-999 and "
+                        "X-9001..X-9999 are exhausted: refusing to emit an id "
+                        "outside the probe blocks")
             new = f"X-{k:03d}"
             remap[fid] = new
         used.add(new)
@@ -4361,7 +4464,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
-    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     _prefer_ok = prefer_rewrite_for_sandbox(ctx, ctx.run(rid), prompt)
@@ -4460,7 +4563,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     # donor may carry its fix; the ledger must reconcile every id (ported /
     # kept-base / no-donor-fix) or the round's revision work can be lost here.
     disc = seed_discovery_findings(ctx, r, sb)
-    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     _prefer_ok = prefer_rewrite_for_sandbox(ctx, ctx.run(rid), prompt)

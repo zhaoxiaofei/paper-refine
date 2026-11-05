@@ -1700,6 +1700,14 @@ def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
             .replace("@@VENUE@@", venue_id)
             .replace("@@ARTICLE_TYPE@@", article_type or "the venue's main research article"))
     if not want_download:
+        # The body sections below are replaced with an explicit SKIP, but the
+        # introduction used to keep commanding BOTH jobs. Generate it from the
+        # same flag so the prompt never asks for the download it skipped.
+        text = text.replace(
+            "=== TASK: create or update ONE venue profile, and download its recent exemplars ===",
+            "=== TASK: create or update ONE venue profile ===")
+        text = text.replace("Do BOTH jobs below, in order, and finish",
+                            "Do the PROFILE job below, and finish")
         head, _, _tail = text.partition("## 2. Official journal templates")
         text = (head + "## 2. Official journal templates (SKIPPED: `--no-download`)\n\n"
                 "Do NOT download anything for this request: the operator will supply the "
@@ -3320,6 +3328,11 @@ def cmd_run(args) -> None:
 
 
 def _cmd_run_locked(ctx: Ctx, args) -> None:
+    # Scalar CLI validation comes BEFORE backend discovery, root-state changes
+    # and other runtime checks: an invalid --timeout must produce its usage
+    # error (exit 2), not be masked by "agent executable not found" (exit 1).
+    if args.timeout is not None and args.timeout < 0:
+        die("--timeout must be a non-negative number of seconds", code=2)
     # The benchmark-only content-edit policy: a per-INVOCATION override of the
     # policy `setup` recorded. None means "use the root's config", so a plain
     # `run` cannot perturb a root it did not need to describe.
@@ -3525,10 +3538,6 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         print("[run] note: producers and judges use the same backend "
               f"({Path(str(cmd[0])).name}); this is recorded in decision.json "
               "(judge_provider) -- the panel is not an independent measure")
-    if args.timeout is not None and args.timeout < 0:
-        # A negative value is truthy, so the subprocess deadline was computed
-        # in the past and every attempt died as an immediate "timeout".
-        die("--timeout must be a non-negative number of seconds", code=2)
     timeout = args.timeout if args.timeout is not None else (0 if manual else DEFAULTS["timeout"])
     # ADOPTION comes after the command/timeout are known: an adopted run whose
     # postcheck fails on repairable bookkeeping gets its scoped repair session

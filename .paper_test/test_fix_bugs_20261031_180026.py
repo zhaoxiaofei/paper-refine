@@ -192,8 +192,12 @@ def test_f13() -> None:
     r = run(["sync-code", "--root", str(root)])
     after = stat.S_IMODE(shim.stat().st_mode)
     check("F13 sync-code succeeds", r.returncode == 0, (r.stderr or r.stdout)[-300:])
+    # The checkout's own mode is the source: a git-archive extracted under
+    # umask 0002 gives 0775, and sync-code correctly restores that. Requiring
+    # 0755 turned a correct restore into a false regression.
     check("F13 the executable bit is preserved after a content-identical copy",
-          before == 0o755 and after == 0o755, f"before={oct(before)} after={oct(after)}")
+          bool(before & 0o111) and after == before,
+          f"before={oct(before)} after={oct(after)}")
     check("F13 a mode-only drift is reported as changed",
           "copied: docx2pdf.sh" in (r.stdout + r.stderr), (r.stdout or "")[-200:])
 

@@ -149,12 +149,15 @@ goes to `MANUAL_STEPS.md`. Otherwise just report the gap. A data-availability st
 is not something to invent — it is something to scaffold.
 
 A data/code-availability statement is corrected in BOTH directions, and
-`work/IDENTIFIERS.md` is the evidence: when the pipeline's lookup RESOLVED the
-deposit (`found`), a statement weaker than that is an inaccurate claim —
-"available upon request" / "not yet deposited" is fixed by naming the verified
-locator, exactly as a "permanent archive" claim on a bare URL is fixed by
-softening it to what the locator supports. Only an `absent`/`error`/`skipped`
-verdict leaves the weaker wording in place (with the search evidence recorded).
+`work/IDENTIFIERS.md` is one input: when the pipeline's lookup RESOLVED the
+deposit (`found`) AND the record is verifiably open (no embargo/access control)
+AND its deposited version covers the data the statement claims, a statement
+weaker than that is an inaccurate claim — "available upon request" / "not yet
+deposited" is fixed by naming the verified locator, exactly as a "permanent
+archive" claim on a bare URL is fixed by softening it to what the locator
+supports. A resolving record alone does not prove either access or coverage.
+An `absent`/`error`/`skipped` verdict, or an unresolved access/version check,
+leaves the weaker wording in place (with the search evidence recorded).
 
 ## E4 — Plagiarism and AI-content findings
 
@@ -406,8 +409,10 @@ under the readme hand-off mode), with these four columns in order:
   reliable recommendation exists.
 
 Use unique `T-001`, `T-002`, … ids; put the location, current value, the
-`suggested: <value> (unverified)` when action 2 or 3, and the exact check in the
-description or a detail line below the table. Every legacy `priority=low`
+`suggested: <value> (unverified)` when action 2, and the exact check in the
+description or a detail line below the table. Action 3 has no reliable
+recommendation by definition, so it carries the precise check or decision the
+author must make, never an invented suggested value. Every legacy `priority=low`
 re-verification detail must also have a table row; prose-only items are not
 classified. The orchestrator writes `MANUAL_TODO.csv` from the table (four
 columns, same values) — the markdown is the source; do not hand-write a different
@@ -528,11 +533,27 @@ label spelling a term differently from the text) and `FMT-AV3` (a "shipped" or
 "deposited" claim with no locator) are reported, never edited: fix the artwork,
 the dpi export, or the availability sentence.
 
+TWO SCAN GATES, NOT ONE — the sweep has a pre-normalization and a
+post-normalization form, and a row reserved for the orchestrator is not a
+failure at the first gate:
+  * PRE-NORMALIZATION (your own scan, before fingerprinting): every mechanical
+    row this pass OWNS must be gone and no new editorial instance may appear.
+    The NORMALIZER-DEFERRED rows are EXPECTED here: `FMT-S8`, `FMT-S6`,
+    `FMT-P4`, `FMT-G1`, `FMT-IM1`, and any row the scanner marks as repaired by
+    normalization. Record them in `work/R6_language.md` as deferred (one line
+    each, rule id + location) instead of editing them — editing one is what the
+    first list above forbids.
+  * POST-NORMALIZATION (the fingerprinted/delivered package): every deferred
+    row must now be GONE (the normalizer ran) and no editorial instance may
+    remain. A deferred row still present at this gate is the defect; report it,
+    never hand-fix it.
 Re-run `python paper_docx_format.py scan <package dir> --policy
-format_policy.json` after the edits; the package you deliver must show no
-mechanical row and no new editorial instance. Record the pass in
-`work/R6_language.md` as its own steps (`W1 whitespace`, `W2 fonts/paragraphs`,
-`W3 headings`) with ONE row per edit and the usual coverage table.
+format_policy.json` at the PRE gate after the edits and use the orchestrator's
+post-normalization scan at the POST gate; the delivered package must show no
+mechanical row outside the named deferred set before normalization, and none at
+all after it. Record the pass in `work/R6_language.md` as its own steps
+(`W1 whitespace`, `W2 fonts/paragraphs`, `W3 headings`) with ONE row per edit,
+the deferred rows, and the usual coverage table.
 
 ## E10 — The integration difference ledger (one row per difference, both levels)
 

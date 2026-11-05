@@ -766,20 +766,49 @@ def main():
     tex_key_space = {b["key"] for b in tex_bibitems} | {b["key"] for b in bib_entries}
     # Each compile root owns its key space. The global union let a \bibitem in
     # an UNRELATED .tex certify a \cite in another document as resolved.
-    def _corpus_stem(name):
-        return re.sub(r"\.(?:tex|ltx)\.txt$", "", name).split("__")[-1]
+    def _flat_stem(name: str) -> str:
+        """Corpus name without the suffix `convert_corpus` appended."""
+        return re.sub(r"\.(?:tex|ltx|bib)\.txt$", "", str(name or ""))
 
-    files_by_stem = defaultdict(set)
-    for _f in tex_sources:
-        files_by_stem[_corpus_stem(_f)].add(_f)
+    def _flat_dir(name: str) -> str:
+        return "__".join(_flat_stem(name).split("__")[:-1])
+
+    files_by_flat = {_flat_stem(f): f for f in tex_sources}
+
+    def _resolve_tex_target(ref_file: str, target: str):
+        """Flattened corpus name a LaTeX input target names, or None.
+
+        Resolution is RELATIVE to the referring file (or, for `\\import`, to its
+        first argument), never "any file with this basename": a `left/shared`
+        fragment must not enter the right root's closure and certify a
+        citation its own root never loaded.
+        """
+        t = str(target or "").strip().replace("\\", "/")
+        if not t or t.startswith("/"):
+            return None
+        t = re.sub(r"\.(?:tex|ltx)$", "", t)
+        base = _flat_dir(ref_file)
+        joined = posixpath.normpath(posixpath.join(base.replace("__", "/"), t))
+        if joined in ("", ".", "..") or joined.startswith("../") or joined.startswith("/"):
+            return None
+        return joined.replace("/", "__")
+
     input_refs = {}
     for _f, _src in tex_sources.items():
         refs = set()
-        for _m in re.finditer(r"\\(?:input|include|subfile)\s*\{([^{}]+)\}", _src):
-            _target = _m.group(1).strip().replace("\\", "/").rsplit("/", 1)[-1]
-            _target = re.sub(r"\.(?:tex|ltx)$", "", _target)
-            if _target:
-                refs.add(_target)
+        for _m in re.finditer(r"\\(?:input|include|subfile)\s*\{([^{}]+)\}",
+                              _src):
+            _dep = _resolve_tex_target(_f, _m.group(1))
+            if _dep:
+                refs.add(_dep)
+        # `\import{dir/}{file}` and `\subimport{dir/}{file}` load one file
+        # through two arguments. The scanner used to ignore them entirely, so
+        # a key declared in an imported chapter was a false orphan.
+        for _m in re.finditer(r"\\(?:import|subimport)\b\*?(?:\s*\[[^\]]*\])?\s*"
+                              r"\{([^{}]*)\}\s*\{([^{}]*)\}", _src):
+            _dep = _resolve_tex_target(_f, _m.group(1) + _m.group(2))
+            if _dep:
+                refs.add(_dep)
         input_refs[_f] = refs
     tex_roots = {f for f, src in tex_sources.items()
                  if re.search(r"\\documentclass\b", src)}
@@ -792,9 +821,9 @@ def main():
                 continue
             seen.add(cur)
             for _name in input_refs.get(cur, ()):
-                for _dep in files_by_stem.get(_name, ()):
-                    if _dep not in seen:
-                        queue.append(_dep)
+                _dep = files_by_flat.get(_name)
+                if _dep and _dep not in seen:
+                    queue.append(_dep)
         root_closures[_root] = seen
     # A file can be reached from MORE THAN ONE compile root (a shared \input
     # fragment). One root chosen by set order made the orphan result depend on
@@ -804,13 +833,6 @@ def main():
     for _root in sorted(root_closures):
         for _f in root_closures[_root]:
             file_roots[_f].add(_root)
-
-    def _flat_stem(name: str) -> str:
-        """Corpus name without the suffix `convert_corpus` appended."""
-        return re.sub(r"\.(?:tex|ltx|bib)\.txt$", "", str(name or ""))
-
-    def _flat_dir(name: str) -> str:
-        return "__".join(_flat_stem(name).split("__")[:-1])
 
     # A `.bib` file belongs to the compile root that names it with
     # `\bibliography`/`\addbibresource`; its keys resolve there. Unioning every
@@ -868,19 +890,23 @@ def main():
         tex_cited_by_file[c["file"]].append(c["key"])
     for f, keys in nocite_keys.items():
         tex_cited_by_file[f].extend(keys)
-    for f in sorted(nocite_all_files):
-        roots = sorted(file_roots.get(f) or ())
-        keys = set()
-        for root in (roots or [None]):
-            keys |= _tex_space_for(f, root)
-        tex_cited_by_file[f].extend(sorted(keys))
     all_tex_cited = {k for keys in tex_cited_by_file.values() for k in keys}
+    for f in sorted(nocite_all_files):
+        # \nocite{*} cites the WHOLE bibliography of each compile context, not
+        # the union of every root's keys. Putting that union in the file's cited
+        # list made each root flag the other root's keys as orphans.
+        roots = sorted(file_roots.get(f) or ())
+        for root in (roots or [None]):
+            all_tex_cited |= _tex_space_for(f, root)
     tex_orphans_by_file = {}
     if tex_key_space:
         for f in sorted(tex_cited_by_file):
             keys = tex_cited_by_file[f]
             contexts = sorted(file_roots.get(f) or ()) or [None]
             for root in contexts:
+                if f in nocite_all_files:
+                    # The wildcard cites every key in THIS root's space.
+                    continue
                 orphans = sorted({k for k in keys if k not in _tex_space_for(f, root)})
                 if not orphans:
                     continue
