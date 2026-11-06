@@ -6021,24 +6021,29 @@ ZOTERO_STAGE_EDIT_DISABLED = """This run's policy does NOT allow citation-field 
 ZOTERO_STAGE_REVIEW = """YOUR STAGE IDENTIFIES, IT NEVER EDITS: check every citation the corpus makes (does
     the key resolve; does the cited work support the sentence; is support missing) and report each
     problem as a finding; an unreadable or incomplete live field goes to the manual-verification
-    list. A citation whose visible text has no live field behind it -- or a field left malformed
-    (unterminated, a stray field char, unparseable JSON, a duplicate citationID) -- is a finding of
-    its own: file it as a field-continuity/preservation defect with the exact location. Never
-    modify the manuscript and never write to the library."""
+    list. A citation that CARRIED a live field in the round's base package (`base/`) and now shows
+    only plain text -- unlinked or rebuilt from plain text -- or a field left malformed
+    (unterminated, a stray field char, unparseable JSON, a duplicate citationID), is a finding of
+    its own: file it as a field-continuity/preservation defect with the exact location. An
+    ORIGINALLY PLAIN citation -- a LaTeX or plain-text source, or any citation that never had a
+    live field in the base -- is NOT a field-continuity defect; do not demand a field the source
+    never carried. Never modify the manuscript and never write to the library."""
 ZOTERO_STAGE_REWRITE = """YOUR STAGE REWRITES FORM, NOT CONTENT: citations, keys and bibliographic entries
     survive unchanged; you may use the read routes to understand what a citation points at, and
     every citation problem you find is surfaced in REWRITE_REPORT.md ("PROBLEMS SURFACED"), never
-    fixed here. Rewriting form never means unlinking: every citation stays a LIVE field in your
-    rewritten document, with the same citationID and the whole begin -> instrText -> separate ->
-    result -> end sequence. If a paragraph you re-render loses its field runs (a text-only
-    rebuild), re-insert the complete field from the base package's own field data before saving;
-    never write to the library."""
+    fixed here. Rewriting form never means unlinking: every citation that WAS a live field in the
+    base stays a LIVE field in your rewritten document, with the same citationID and the whole
+    begin -> instrText -> separate -> result -> end sequence. If a paragraph you re-render loses
+    its field runs (a text-only rebuild), re-insert the complete field from the base package's own
+    field data before saving. An ORIGINALLY PLAIN citation stays plain: it has no field to
+    preserve, and inventing one is not a rewrite. Never write to the library."""
 ZOTERO_STAGE_JUDGE = """JUDGE SESSIONS ARE READ-ONLY: you may resolve a citation's metadata to check
     whether a candidate's claim matches its cited work, but you never edit a file and never write to
     the library. A citation you cannot check is unverified evidence in your reasoning (say so) --
     never an automatic defect. A candidate that dropped its baseline citations, left a field
-    malformed, or carries citation text without a live field IS a preservation defect: score it
-    under correctness/preservation and name the field/citation it affects."""
+    malformed, or replaced a BASELINE live field by plain text IS a preservation defect: score it
+    under correctness/preservation and name the field/citation it affects. An originally plain
+    citation -- one that never had a live field in the base -- is not a field-continuity defect."""
 
 ZOTERO_FIELD_CONTINUITY_RULE = """  * FIELD CONTINUITY (code-enforced): your version carries the base version's live fields forward.
     You may ADD a field, EDIT a field (rewriting the WHOLE complex field around the same

@@ -27,7 +27,11 @@ Each block pins one confirmed defect on the current tree:
     broken converter could be recorded `ok` and its garbage reused for every
     later run whose source digest was unchanged;
   * the M4 AUC pattern accepted only 0.x and 1.0, so an impossible `AUC = 1.2`
-    produced no occurrence at all and the inventory could not expose it.
+    produced no occurrence at all and the inventory could not expose it;
+  * the Zotero stage clauses called every citation without a live field a
+    preservation defect, so a LaTeX/plain-text corpus -- where citations never
+    have fields -- would be flagged (and scored) as if every citation were
+    unlinked; an originally plain citation is now explicitly exempt.
 """
 from __future__ import annotations
 
@@ -354,6 +358,51 @@ def test_auc_out_of_range_is_inventoried() -> None:
               str(auc.search(text).group(0)) if auc.search(text) else "")
 
 
+# ---------------------------------------------------------------------------
+# 9. A plain citation is not a lost live field.
+# ---------------------------------------------------------------------------
+def test_plain_citations_are_not_field_defects() -> None:
+    print()
+    print("== Zotero: an originally plain citation is not a field-continuity defect ==")
+    clauses = {
+        "review": pp.ZOTERO_STAGE_REVIEW,
+        "rewrite": pp.ZOTERO_STAGE_REWRITE,
+        "judge": pp.ZOTERO_STAGE_JUDGE,
+    }
+    for name, clause in clauses.items():
+        flat_clause = " ".join(clause.split())
+        check(f"{name}: the rule is scoped to a citation that carried a base field",
+              "base" in flat_clause.lower() and "live field" in flat_clause.lower(),
+              flat_clause[:160])
+        check(f"{name}: an originally plain citation is exempt",
+              "originally plain" in flat_clause.lower()
+              or "never had a live field" in flat_clause.lower(),
+              flat_clause[:160])
+
+    skill = (WS / "paper-skills" / "paper-review" / "SKILL.md").read_text(encoding="utf-8")
+    sweeps = (WS / "paper-skills" / "paper-review" / "references" / "sweeps.md").read_text(
+        encoding="utf-8")
+    for name, text in (("review SKILL", skill), ("review sweeps", sweeps)):
+        flat_text = " ".join(text.split()).lower()
+        check(f"{name}: the field-continuity rule requires a base field",
+              "carried a live field in the base" in flat_text)
+        check(f"{name}: an originally plain citation is exempt",
+              "originally plain" in flat_text
+              and "never had a live field" in flat_text)
+
+    # The rule must reach the generated review and judge prompts, not only the
+    # constants: a LaTeX/plain-text corpus has no live fields anywhere.
+    sb = scratch("zplain_")
+    review = " ".join(pp.review_prompt(sb, "r1_guided_review", 1).split()).lower()
+    judge = " ".join(pp.judge_prompt(sb, "judge_x_j1", 1, "v1", 1, 2, []).split()).lower()
+    check("review prompt: an originally plain citation is exempt",
+          "originally plain" in review and "never had a live field" in review,
+          review[:160])
+    check("judge prompt: an originally plain citation is exempt",
+          "originally plain" in judge or "never had a live field" in judge,
+          judge[:160])
+
+
 if __name__ == "__main__":
     test_judge_priority_uses_net_difference()
     test_reviser_does_not_reopen_dropped_findings()
@@ -363,6 +412,7 @@ if __name__ == "__main__":
     test_medium_auxiliary_sidecar_does_not_overwrite_reviser()
     test_pdf_signature_and_cache()
     test_auc_out_of_range_is_inventoried()
+    test_plain_citations_are_not_field_defects()
     print()
     if FAILS:
         print(f"FAILED: {len(FAILS)} check(s): " + ", ".join(FAILS))

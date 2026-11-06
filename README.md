@@ -2359,12 +2359,12 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 112 KB | 45 KB | 59% |
+| review | 112 KB | 45 KB | 60% |
 | cold_start_review | 57 KB | 22 KB | 61% |
 | audit | 83 KB | 41 KB | 51% |
 | revise | 111 KB | 58 KB | 48% |
 | integrate | 110 KB | 58 KB | 47% |
-| rewrite | 103 KB | 53 KB | 48% |
+| rewrite | 103 KB | 54 KB | 48% |
 | judge | 98 KB | 68 KB | 30% |
 | revision_audit | 21 KB | 11 KB | 45% |
 | revision_repair | 21 KB | 7 KB | 62% |
