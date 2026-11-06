@@ -1063,6 +1063,29 @@ def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total, rel: str
                   "(`confirmed` / `false-positive` / `clarification` / `manual-required` / "
                   "`not-found-in-source`) or final status (`fixed` / `fixed-with-caveat` / "
                   "`placeholder-inserted` / `discarded`) and a rationale")
+        repeated = {i: c for i, c in
+                    _ledger_row_counts(ledger, frozen_ids).items() if c > 1}
+        if repeated:
+            errs.append(
+                f"{pkg_rel} lists more than one authoritative row for "
+                f"{len(repeated)} finding id(s): "
+                + ", ".join(f"{i} ({c} rows)" for i, c in sorted(repeated.items())[:6])
+                + (" ..." if len(repeated) > 6 else "")
+                + " -- the ledger is ONE row per finding id; two rows with the same "
+                  "verdict and different rationales leave later consumers to choose "
+                  "which evidence is authoritative")
+        no_reverify = sorted(_ledger_rows_without_reverification(ledger, frozen_ids))
+        if no_reverify:
+            errs.append(
+                f"{pkg_rel} records a final disposition without a re-verification "
+                f"verdict for {len(no_reverify)} finding id(s): "
+                f"{', '.join(no_reverify[:6])}"
+                + (" ..." if len(no_reverify) > 6 else "")
+                + " -- Rule 1B requires the source re-check before any edit; the row's "
+                  "`verdict` column carries `confirmed` / `false-positive` / "
+                  "`clarification` / `manual-required` / `not-found-in-source` / "
+                  "`dropped-by-audit`, and the final edit outcome belongs in "
+                  "`final_status`")
     return errs, warns
 
 
@@ -1156,6 +1179,62 @@ def _ledger_row_verdict(row) -> str:
     return ""
 
 
+LEDGER_FINAL_RE = re.compile(
+    r"(?i)^(fixed(?:[\s_-]*with[\s_-]*caveat)?|clarification|"
+    r"placeholder[\s_-]*inserted|discarded|manual[\s_-]*required)\b")
+
+
+def _ledger_final_status(row) -> str:
+    """The row's final edit outcome, or "" (a different column from `verdict`)."""
+    for key in ("final_status", "final status", "status", "disposition"):
+        val = re.sub(r"\s+", " ", str((row or {}).get(key) or "").strip())
+        if not val:
+            continue
+        m = LEDGER_FINAL_RE.match(val)
+        if m:
+            return re.sub(r"[\s_]+", "-", m.group(1).lower())
+    return ""
+
+
+def _ledger_row_counts(ledger, wanted=()) -> dict:
+    """{finding id: number of ledger ROWS carrying a disposition for it}.
+
+    `ledger_disposed_ids` is a set, so two rows for one finding (`fixed` twice
+    with different rationales) collapsed to one disposal and passed (F-093).
+    Only structured rows count; a plain id-list element is a name, not a row.
+    """
+    want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
+    counts = {}
+
+    def row_id(row):
+        for key in ("id", "finding", "finding_id", "frozen_id"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ""
+
+    def visit(node, depth: int, keyed_id: str = ""):
+        if depth > LEDGER_SCAN_DEPTH:
+            return
+        if isinstance(node, dict):
+            rid = row_id(node) or keyed_id
+            if (not want or rid in want) and _ledger_row_verdict(node):
+                counts[rid] = counts.get(rid, 0) + 1
+            for key, value in node.items():
+                if isinstance(value, (dict, list, tuple)):
+                    visit(value, depth + 1,
+                          key.strip() if isinstance(key, str) else "")
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                if isinstance(item, (dict, list, tuple)):
+                    visit(item, depth + 1)
+                elif isinstance(item, str) and (not want or item.strip() in want):
+                    continue          # an id list names, it does not dispose
+
+    visit(ledger, 0)
+    return counts
+
+
 def _ledger_verdict_map(ledger, wanted=()) -> dict:
     """{finding id: set of documented verdicts} for a revision ledger.
 
@@ -1181,8 +1260,14 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
         if isinstance(node, dict):
             rid = row_id(node) or keyed_id
             verdict = _ledger_row_verdict(node)
+            # The final edit outcome is a SECOND disposition column, so one
+            # row's disposition is the (verdict, final) PAIR. `fixed` and
+            # `discarded` under one id are a contradiction even when the R1
+            # verdict agrees; two containers repeating the same pair are not.
+            final = _ledger_final_status(node)
             if (not want or rid in want) and verdict:
-                found.setdefault(rid, set()).add(verdict)
+                found.setdefault(rid, set()).add(
+                    verdict + (f" (final={final})" if final else ""))
             for key, value in node.items():
                 if isinstance(value, (dict, list, tuple)):
                     visit(value, depth + 1, key.strip() if isinstance(key, str) else "")
@@ -1201,6 +1286,58 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
 
     visit(ledger, 0)
     return found
+
+
+LEDGER_REVERIFY_RE = re.compile(
+    r"(?i)^(confirmed|false[\s_-]*positive|clarification|manual[\s_-]*required|"
+    r"not[\s_-]*found[\s_-]*in[\s_-]*source|dropped[\s_-]*by[\s_-]*audit)\b")
+
+
+def _ledger_rows_without_reverification(ledger, wanted=()) -> set:
+    """Finding ids whose row records a disposition but no R1 re-verification.
+
+    The A1 ledger has TWO independent columns: the R1 verdict (what re-checking
+    the source found) and the final status (what the edit did). Requiring only a
+    documented verdict/status let `{"id": "F-001", "status": "fixed"}` dispose a
+    finding without ever recording the re-check that Rule 1B requires before an
+    edit (F-080). An R1 verdict in the `verdict` column must use the R1
+    vocabulary; a final-status token there is the same defect.
+    """
+    want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
+    bad = set()
+
+    def row_id(row):
+        for key in ("id", "finding", "finding_id", "frozen_id"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ""
+
+    def visit(node, depth: int, keyed_id: str = ""):
+        if depth > LEDGER_SCAN_DEPTH:
+            return
+        if isinstance(node, dict):
+            rid = row_id(node) or keyed_id
+            if not want or rid in want:
+                raw_verdict = " ".join(str(node.get("verdict") or "").split())
+                has_final = any(str(node.get(k) or "").strip() for k in
+                                ("final_status", "final status", "status", "disposition"))
+                if raw_verdict:
+                    if not LEDGER_REVERIFY_RE.match(raw_verdict):
+                        bad.add(rid)
+                elif has_final:
+                    bad.add(rid)
+            for key, value in node.items():
+                if isinstance(value, (dict, list, tuple)):
+                    visit(value, depth + 1,
+                          key.strip() if isinstance(key, str) else "")
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                if isinstance(item, (dict, list, tuple)):
+                    visit(item, depth + 1)
+
+    visit(ledger, 0)
+    return bad
 
 
 def ledger_disposed_ids(ledger, wanted=()) -> set:
@@ -2070,8 +2207,12 @@ def pdf_signature_problem(path: Path) -> str:
         if size <= 0:
             return "the file is empty"
         with path.open("rb") as fh:
-            if b"%PDF-" not in fh.read(1024):
-                return "no %PDF- header in the first 1024 bytes"
+            head = fh.read(1024)
+            if not head.startswith(b"%PDF-"):
+                # The header is the FILE MAGIC at offset zero. `in the first
+                # 1024 bytes` accepted a text file with the marker somewhere
+                # near the top as a "PDF" (F-074).
+                return "no %PDF- header at the start of the file"
             tail_len = min(2048, size)
             fh.seek(-tail_len, os.SEEK_END)
             if b"%%EOF" not in fh.read(tail_len):

@@ -520,14 +520,15 @@ def do_concerns(sb: Path, name: str, round_no: int) -> int:
                  "status": "resolvable", "concern": r["id"]} for r in rows]
     coverage = [{
         "check": "scope",
-        "disposition": ("the scoped review covers only the admitted concerns; every class "
-                        "outside this ledger is a named gap, not a clean result"),
+        "disposition": ("the scoped review covers only the admitted concerns; "
+                        "gap: style, figure quality and citation formatting are outside "
+                        "the ledger"),
         "detail": "stub"}]
     if (sb / "feedback" / "llm").is_dir():
         coverage.append({
             "check": "LLM-pre-filter",
-            "disposition": ("the upstream LLM pre-filter dropped classes are a named gap, "
-                            "never a clean result"),
+            "disposition": ("the upstream LLM pre-filter dropped duplicate style nits; "
+                            "gap: duplicates and house-style variants"),
             "detail": "stub"})
     write_json(rev / "findings.json", {"submission_dir": "./base",
                                        "guidelines_source": "stub",
@@ -751,12 +752,12 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
                 continue
             fid = row.get("id")
             if fid and not any(r.get("id") == fid for r in rows):
-                rows.append({"id": fid, "verdict": "fixed",
+                rows.append({"id": fid, "verdict": "confirmed", "final_status": "fixed",
                              "rationale": "stub revision applied",
                              "evidence": "chromium-free stub edit marker in the document",
                              "files": changed})
     write_json(out / "revision_report.json",
-               rows or [{"id": "F-000", "verdict": "none",
+               rows or [{"id": "F-000", "verdict": "not-found-in-source", "final_status": "discarded",
                          "rationale": "stub: the frozen review listed no finding",
                          "evidence": "n/a"}])
     # The E5 difference-tracking auxiliary, under its current name (the pipeline

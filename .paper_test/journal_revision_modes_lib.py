@@ -596,7 +596,7 @@ def test_j5_narrative():
     (sb / "base" / "manuscript.txt").write_text("original text\n", encoding="utf-8")
     (sb / "revised" / "manuscript.txt").write_text("revised text\n", encoding="utf-8")
     (sb / "revised" / "revision_report.json").write_text(
-        json.dumps([{"id": "C1", "verdict": "fixed", "files": ["manuscript.txt"]}]),
+        json.dumps([{"id": "C1", "verdict": "confirmed", "final_status": "fixed", "files": ["manuscript.txt"]}]),
         encoding="utf-8")
     errs = nb.scoped_scope_problems(None, sb, sb / "revised")
     check("J5 a named change passes the scope guard", not errs, str(errs))

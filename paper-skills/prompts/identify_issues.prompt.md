@@ -1,5 +1,5 @@
 # identify_issues (pre-submission review) — standalone prompt fallback
-Paste this entire file as the prompt for a manuscript review task when you cannot install Codex skills. Replace the placeholder paths (SUBMISSION_DIR, ZOTERO_SKILL) with your own at the top of the PROMPT BODY. The bundled scripts referenced in the prompt are optional but strongly recommended — copy them from paper-review/scripts/ next to your working directory.
+Paste this entire file as the prompt for a manuscript review task when you cannot install Codex skills. Replace the placeholder paths (SUBMISSION_DIR, ZOTERO_SKILL) with your own at the top of the PROMPT BODY. The bundled scripts referenced in the prompt are REQUIRED for Phases 1 and 2 as written: `convert_corpus.py` builds the corpus the sweeps read, and the code-side seeds (`FORMAT_SCAN.json`, the M20-M36 artifacts) come from the pipeline's scanners. Copy them from paper-review/scripts/ next to your working directory. If you cannot run them at all, say so in the review's limits section and do not claim coverage the scripts would have produced; there is no complete tool-free substitute.
 ---
 ## PROMPT BODY (SKILL.md)
 # Pre-Submission Review — identify_issues
@@ -902,8 +902,9 @@ all caught only by manual audit before this sweep existed.
 ## M16 — Abstract traceability sweep (validated: iteration-1)
 
 **Purpose:** every statistic and headline claim in the abstract must be
-traceable to a main-text/Methods statement (the abstract is a review surface
-of its own).
+traceable to a Results, Methods or SI statement (the abstract is a review
+surface of its own; a claim carried only by an appendix is reported under the
+finding rule below, so state whether a main-text pointer is required for it).
 
 **Enumeration (scriptable):** extract every number/statistic from the abstract
 (p, AUC, n, percent, fold, CI, counts) and enumerate occurrences of the same
@@ -1977,7 +1978,7 @@ Phase 2 sweeps.
 **Inputs:**
 - `SUBMISSION_DIR` = the reviewed directory (default `./non_revised`)
 - `PRIOR` = `./guided_review/findings.json` (canonical prior findings; also `./guided_review/findings.md`)
-- `WORK` = `./guided_review/work` — converted corpus from the prior run; REUSE it (reconvert only missing files)
+- `WORK` = `./guided_review/work` — converted corpus from the prior run. REUSE a converted file only when you have established it is FRESH for the current `SUBMISSION_DIR`: its source exists, and the source's size/mtime (or hash, when the converter recorded one) matches what the converted text was made from. A file that is missing, changed, or cannot be shown fresh is reconverted before any finding is judged; when freshness cannot be established for the corpus, reconvert all of it. Applying prior findings and prior extracted text to changed source bytes is a stale-evidence error, not a shortcut.
 - `OUT2` = `./guided_review/round2` (create it; ALL outputs here)
 
 If PRIOR is missing, STOP and tell the user to run the standard review first.
@@ -1992,7 +1993,10 @@ contract — see "The orchestrator's contract" at the end of this file.
 
 ## D0 — Dedup base
 
-From PRIOR build two indexes (`OUT2/known_index.md`):
+PRIOR was produced against an earlier state of the corpus: confirm from `WORK`
+that every finding's cited location still exists in the CURRENT source before
+using it as a dedup key or a "already known" verdict. From PRIOR build two
+indexes (`OUT2/known_index.md`):
 - **KNOWN-CLASSES**: the 41 check IDs (M1–M36, J1–J5) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 

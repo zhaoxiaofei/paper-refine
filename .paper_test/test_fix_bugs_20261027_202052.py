@@ -416,7 +416,9 @@ def test_pipeline_rules():
     check("G-012 coverage rows are validated",
           pp.concern_coverage_problems({"coverage": []}, False)
           and pp.concern_coverage_problems(
-              {"coverage": [{"check": "scope", "disposition": "outside is a gap"}]}, False) == []
+              {"coverage": [{"check": "scope",
+                             "disposition": "gap: style and figure quality are outside"}]},
+              False) == []
           and pp.concern_coverage_problems(
               {"coverage": [{"check": "scope", "disposition": "gap"}]}, True))
     check("R05 arbitrary coverage rows do not satisfy the named-gap gate",
@@ -428,9 +430,9 @@ def test_pipeline_rules():
           and pp.concern_coverage_problems({"coverage": [
               {"check": "scope", "disposition": "not a gap"}]}, False)
           and pp.concern_coverage_problems({"coverage": [
-              {"check": "scope", "disposition": "every class outside is a named gap"},
+              {"check": "scope", "disposition": "gap: style and figure quality"},
               {"check": "LLM-pre-filter",
-               "disposition": "its dropped classes are a named gap"}]}, True) == [])
+               "disposition": "gap: duplicates and house-style variants"}]}, True) == [])
     check("G-015 an explicit default_cap 0 is preserved",
           pp._clean_captions({"published_limit": 250, "default_cap": 0}, "x", [])
           ["default_cap"] == 0

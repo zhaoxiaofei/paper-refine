@@ -17,7 +17,7 @@ Columns: `id | category | severity | location | evidence | verdict | rationale |
   the class in the rationale whenever a row is disputed or resolved by a wording-only edit: an edit
   the panel cannot name in that vocabulary reads as cosmetic, and the reviewer's finding then never
   becomes an improvement a judge can see.
-- **verdict** (from R1): `confirmed` / `false-positive` / `clarification` / `manual-required` / `not-found-in-source`
+- **verdict** (from R1): `confirmed` / `false-positive` / `clarification` / `manual-required` / `not-found-in-source` / `dropped-by-audit` (the last is the auditor-dropped exception in E7: the row carries the auditor's evidence in its rationale instead of a re-verification)
 - **final status** (after edits): `fixed` / `fixed-with-caveat` / `clarification` / `placeholder-inserted` / `discarded` / `manual-required`
 
 **Completeness check: ledger row count == total findings count across both
@@ -101,8 +101,10 @@ row.
 ## A8 — RESCAN ARTIFACTS + RESCAN FINDINGS
 
 V3 output: the M-sweep artifacts re-run over the ENTIRE revised corpus (using
-the paper-review scripts where applicable) PLUS any sweep definitions from
-`./guided_review/round2/new_sweeps.md` (discovery classes — they apply now too).
+the paper-review scripts where applicable) PLUS only the sweep definitions from
+`./guided_review/round2/new_sweeps.md` that the user has VALIDATED. That file is
+a PROPOSAL list (D5): a proposal that was not validated is not an active rule and
+is not a diagnostic probe this stage may execute.
 Every rescan finding is classified:
 - (a) residual manual-required item — must map to an existing ledger row;
 - (b) NEW issue introduced or revealed by revision — fix immediately, assign `R-xxx`, add to the change log;

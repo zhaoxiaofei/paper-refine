@@ -427,12 +427,17 @@ auditor's `audit/audit.json` disposes every frozen finding (confirm, or drop
 with evidence). The auditor GENERATES NO NEW FINDING: it does not add `AU-*`
 rows. Rules:
 
-* the ledger still gets one row per **effective** finding id (frozen minus
-  drops); `audit/audit.json` is the record of why an id is not yours;
-* a DROPPED finding is not yours to re-litigate. If you believe the audit's
-  evidence is wrong, re-open it explicitly: state the new evidence in the
-  ledger row's rationale (a quote, a file:line, or a re-derivation) — never
-  silently reinstate the finding;
+* the ledger still gets one row for EVERY frozen finding id, including the ones
+  the audit dropped: a dropped id gets a non-editing row whose `verdict` is
+  `dropped-by-audit` (with the auditor's evidence in the rationale) AND whose
+  final status is `discarded`, so the F-080 gate sees the R1 verdict and
+  `audit/audit.json` is never used to shrink the ledger;
+* a DROPPED finding is not yours to re-litigate or to apply in this run. If new
+  evidence shows the reviewer was right, record that evidence in the ledger
+  row's rationale (a quote, a file:line, or a re-derivation) AND in the manual
+  list for the NEXT round's review — never silently reinstate the finding and
+  never edit for it here, because this session may not generate and patch a
+  finding in one run (AGENTS.md rule 1A);
 * an observation the auditor records outside the frozen list is NOT a finding
   and is not yours to resolve: route it to the next finding-generating review,
   or record it as a manual item when it needs an author decision;
@@ -442,9 +447,11 @@ rows. Rules:
 
 ## E9 — The L1–L11 language pass (every package-producing stage)
 
-After the finding-led edits, run the pass sentence by sentence — including
-legends, tables, footnotes and the cover letter — and write `work/R6_language.md`
-in the package you produced:
+After the finding-led edits, SCAN every sentence of every document in the
+package you produced — including documents the finding-led edits did not touch,
+and including legends, tables, footnotes and the cover letter — and edit only
+what each step's own rule permits. An unchanged document is scanned, not
+exempt. Write `work/R6_language.md` in the package you produced:
 
 * ONE row per change: `step | location | before | after | reason`;
 * a COVERAGE table at the end with ONE row per step, including the steps that

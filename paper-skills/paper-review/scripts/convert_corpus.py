@@ -563,7 +563,9 @@ def _xlsx_cell_value(attrs, body, shared):
         idx = int(v)
         if 0 <= idx < len(shared):
             return shared[idx]
-        return ""      # dangling shared-string index: never its own number
+        # A dangling index is corruption, not a blank cell: keep it visible so
+        # the evidence view cannot silently lose the value (F-082).
+        return "[dangling shared-string index: %d]" % idx
     return v
 
 
@@ -598,6 +600,35 @@ def _xlsx_row_cells(row_xml, shared):
     return cells
 
 
+def _xlsx_escape_cell(value) -> str:
+    """One cell in the line-delimited evidence view, reversibly escaped.
+
+    A literal `|` or newline in a cell used to fabricate extra columns/rows in
+    the rendered table (F-075). Backslash-escape the delimiter and the escape
+    itself, and spell line breaks as `\n`; the text stays decodable.
+    """
+    return (str(value or "").replace("\\", "\\\\").replace("|", "\\|")
+            .replace("\r\n", "\\n").replace("\n", "\\n")
+            .replace("\r", "\\n"))
+
+
+def _xlsx_cached_formulas(row_xml: str, shared) -> list:
+    """`<ref> =formula -> cached-value` for formula cells WITH a cached result."""
+    out = []
+    for cm in CELL_RE.finditer(row_xml):
+        attrs, body = cm.group("attrs") or "", cm.group("body") or ""
+        fm = re.search(r"<f(?:\s[^>]*)?>(.*?)</f>", body, re.S)
+        if fm is None or not re.search(r"<v(?:\s[^>]*)?>", body):
+            continue
+        ref = re.search(r'r="([^"]*)"', attrs)
+        value = _xlsx_cell_value(attrs, body, shared)
+        if not value or value.startswith("[uncached formula"):
+            continue
+        formula = _xlsx_unescape(_html_unescape(fm.group(1))).strip().lstrip("=")
+        out.append("%s =%s -> %s" % (ref.group(1) if ref else "?", formula, value))
+    return out
+
+
 def xlsx_to_text(path: str) -> tuple:
     notes = []
     try:
@@ -613,19 +644,38 @@ def xlsx_to_text(path: str) -> tuple:
             for name, p in plan:
                 if p in names:
                     resolved.append((name, p))
-                elif leftovers:
-                    resolved.append((name, leftovers.pop(0)))
+                else:
+                    # A named sheet whose relationship target is missing must
+                    # not borrow the next unclaimed worksheet: their values
+                    # would be presented under the wrong title (F-073).
+                    why = ("has no resolvable worksheet relationship"
+                           if not p else "targets a missing part %s" % p)
+                    notes.append("xlsx-partial: sheet %r %s; its data are not "
+                                 "rendered under that name" % (name, why))
             for p in leftovers:
                 resolved.append((None, p))
             lines = []
             for name, sf in resolved:
                 sname = name or sf
-                lines.append("### corpus-marker: sheet: %s" % sname)
+                lines.append("### corpus-marker: sheet: %s" % _xlsx_escape_cell(sname))
                 sh = z.read(sf).decode("utf-8", errors="replace")
+                try:
+                    _ET.fromstring(sh)
+                except _ET.ParseError as e:
+                    # The row regex below can still salvage complete rows, but a
+                    # malformed part is a PARTIAL conversion and must say so
+                    # (F-072); a truncated row silently disappeared before.
+                    notes.append("xlsx-partial: %s: malformed worksheet XML (%s)" % (sf, e))
                 rows = []
+                cached_formulas = []
+                saw_dangling = False
                 max_col = 0
                 for rm in re.finditer(r"<row\b([^>]*)>(.*?)</row>", sh, re.S):
                     cells = _xlsx_row_cells(rm.group(2), shared)
+                    cached_formulas.extend(_xlsx_cached_formulas(rm.group(2), shared))
+                    if any(str(v).startswith("[dangling shared-string index:")
+                           for v in cells.values()):
+                        saw_dangling = True
                     if not cells:
                         continue
                     rn = re.search(r'r="(\d+)"', rm.group(1))
@@ -643,7 +693,16 @@ def xlsx_to_text(path: str) -> tuple:
                 # column C, or a merged/omitted cell) cannot silently shift values
                 # into the wrong column when the table is summed downstream (M15)
                 for _row_idx, cells in sorted(rows, key=lambda r: r[0]):
-                    lines.append(" | ".join(cells.get(c, "") for c in range(1, max_col + 1)))
+                    lines.append(" | ".join(_xlsx_escape_cell(cells.get(c, ""))
+                                             for c in range(1, max_col + 1)))
+                for marker in cached_formulas:
+                    # Keep the cached number in its cell (the reconciliation
+                    # reads it) and record the formula beside it (F-086).
+                    lines.append("### corpus-marker: cached-formula %s!%s"
+                                 % (_xlsx_escape_cell(sname), marker))
+                if saw_dangling:
+                    notes.append("xlsx-partial: %s: a cell references a shared string "
+                                 "outside the shared-string table" % sf)
             if not resolved:
                 notes.append("xlsx-unreadable: no workbook/worksheet parts found")
             return "\n".join(lines), notes

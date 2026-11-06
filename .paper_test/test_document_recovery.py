@@ -126,7 +126,7 @@ def build_revise_sandbox(ctx, drop=(), empty=(), rename=False, edited_pdf_twin=T
     # bookkeeping the revise contract requires (including the L1-L11 pass)
     xf.write_language_pass(rev)
     (rev / "revision_report.json").write_text(json.dumps(
-        [{"id": "F-001", "verdict": "fixed", "rationale": "done"}]))
+        [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed", "rationale": "done"}]))
     (rev / "CHANGELOG.md").write_text("# changelog\n")
     (rev / "MANUAL_STEPS.md").write_text("1. (none)\n")
     (rev / "VISUAL_CHECK.md").write_text(

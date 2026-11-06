@@ -222,7 +222,7 @@ def test_f14() -> None:
     (base / "doc.docx").write_text("A", encoding="utf-8")
     (rev / "doc.docx").write_text("B", encoding="utf-8")
     (rev / "revision_report.json").write_text(json.dumps(
-        [{"id": "F-001", "verdict": "fixed", "file": "../outside/doc.docx"}]),
+        [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed", "file": "../outside/doc.docx"}]),
         encoding="utf-8")
     errs = pp.scoped_scope_problems(None, sb, rev)
     check("F14 a traversal row does not authorize the real file",

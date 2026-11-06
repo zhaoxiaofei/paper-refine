@@ -532,6 +532,7 @@ def run_dsh_streaming(cmd: list, env: dict) -> tuple:
     proc = subprocess.Popen(cmd, stdin=sys.stdin, stdout=subprocess.PIPE,
                             stderr=sys.stderr, env=env)
     turn_failed = None
+    saw_turn_end = False
     carry = b""
     try:
         # `read1`, not `read`: a buffered `read(n)` waits for n bytes (or EOF),
@@ -550,18 +551,26 @@ def run_dsh_streaming(cmd: list, env: dict) -> tuple:
                 failed = _dsh_turn_failed(line)
                 if failed is not None:
                     turn_failed = failed
+                    saw_turn_end = True
             if len(carry) > MAX_DSH_LINE_BYTES:
                 carry = b""           # a single event line over budget: unusable
         if carry:
             failed = _dsh_turn_failed(carry)
             if failed is not None:
                 turn_failed = failed
+                saw_turn_end = True
         proc.wait()
     finally:
         if proc.poll() is None:
             with contextlib.suppress(OSError):
                 proc.kill()
             proc.wait()
+    if not saw_turn_end:
+        # Exit status 0 with no turn_end event is NOT a completed turn: the
+        # harness may have died before answering. The caller checks this flag
+        # by truthiness, so "no completion event" must be a failure (F-087).
+        print("qwen: the harness emitted no turn_end completion event", file=sys.stderr)
+        turn_failed = True
     return int(proc.returncode or 0), turn_failed
 
 

@@ -734,8 +734,9 @@ def test_l02_l04_l05_l09_l11():
                    "</sheetData></worksheet>")
     cc = _load_script("convert_corpus", REV_SCRIPTS / "convert_corpus.py")
     text, _notes = cc.xlsx_to_text(str(xlsx))
-    check("L9 a dangling shared-string index renders empty, never its own number",
-          "3" not in text.split("S1")[-1], repr(text))
+    check("L9 a dangling shared-string index is a visible error marker, "
+          "never its own number",
+          "[dangling shared-string index: 3]" in text, repr(text))
     txt = tmp / "u.txt"
     txt.write_bytes("HLA-DR was measured.\n".encode("utf-16"))
     decoded, _notes = cc.plain_copy(str(txt))

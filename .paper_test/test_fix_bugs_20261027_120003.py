@@ -568,7 +568,7 @@ def test_f40_revision_ledger():
     check("id-only mappings are rejected", any("without a VERDICT" in e for e in errs),
           str(errs)[:200])
     (pkg / "revision_report.json").write_text(json.dumps({"rows": [
-        {"id": "F-001", "verdict": "fixed"},
+        {"id": "F-001", "verdict": "confirmed", "final_status": "fixed"},
         {"id": "F-002", "verdict": "false-positive"},
         {"id": "F-003", "verdict": "confirmed"}]}))
     errs, _warns = pp.revision_ledger_problems(pkg, ["F-001", "F-002", "F-003"], 3)

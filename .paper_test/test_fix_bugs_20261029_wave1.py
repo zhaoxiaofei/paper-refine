@@ -993,16 +993,16 @@ def test_f88() -> None:
     check("F88 prose mention is not a ledger row", any("no structured row" in e for e in errs),
           str(errs))
     _write(sb / "revised" / "revision_report.json", json.dumps([{
-        "id": "F1", "verdict": "fixed", "files": ["main.docx"]}]))
+        "id": "F1", "verdict": "confirmed", "final_status": "fixed", "files": ["main.docx"]}]))
     check("F88 a structured files row authorises it",
           pp.scoped_scope_problems(None, sb, sb / "revised") == [])
     _write(sb / "revised" / "revision_report.json", json.dumps({
-        "F1": {"verdict": "fixed", "file": "main.docx"}}))
+        "F1": {"verdict": "confirmed", "final_status": "fixed", "file": "main.docx"}}))
     check("F88 a mapping keyed by finding id authorises it",
           pp.scoped_scope_problems(None, sb, sb / "revised") == [])
     _write(sb / "revised" / "revision_report.json",
            "Here is the ledger:\n```json\n" + json.dumps([{
-               "id": "F1", "verdict": "fixed", "files": ["main.docx"]}]) + "\n```\n")
+               "id": "F1", "verdict": "confirmed", "final_status": "fixed", "files": ["main.docx"]}]) + "\n```\n")
     check("F88 a lenient agent ledger authorises it",
           pp.scoped_scope_problems(None, sb, sb / "revised") == [])
 

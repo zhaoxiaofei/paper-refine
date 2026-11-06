@@ -1835,10 +1835,11 @@ the review workflow, and do not ask the user anything -- nothing is blocked on y
 
 YOUR JOB: produce a COMPLETE, SELF-CONTAINED ALTERNATIVE VERSION of the base manuscript -- the same
 submission with the same documents, the same scientific content, and the same claims, data, numbers
-and conclusions, but REORGANIZED AND REWRITTEN:
+and conclusions, but REWRITTEN at the level this arm owns:
 @@REWRITE_LEVEL_BLOCK@@
-  * alternative organization of content: section order, paragraph order, narrative flow, headings,
-    transitions, and the internal order of statements inside a passage;
+  * the arm block above defines THIS arm's rewrite surface: a structural arm may move section order,
+    paragraph order, narrative flow, headings, transitions, and the internal order of statements;
+    a sentence arm keeps the base's sections, paragraphs and headings exactly where they are;
   * rewriting for clarity and consistency: sentence structure, antecedents, terminology, voice and
     tense consistency, perspective (for example a drifting "we" / "this study" / "the authors"),
     ambiguous or over-packed sentences, and the way a reader is taken from evidence to claim.
@@ -2033,8 +2034,9 @@ This is the REWRITE stage and it runs FIRST in its round, before the review. It 
 NOT a revision: there is no guided_review/ directory here, there is no findings list to consume, and the
 excerpts above are attached only for their STYLE, structure and formatting rules (including the
 source hierarchy and the "never invent content" rule). Produce a COMPLETE rewritten candidate in
-rewritten/ -- alternative organization, rewritten prose, the same scientific content, nothing
-invented and nothing lost -- plus rewritten/REWRITE_REPORT.md (organization map, what stayed
+rewritten/ -- the rewrite level your arm owns (see the arm block: structural reorganization, or
+sentence-level rewriting with the base's organization unchanged), the same scientific content,
+nothing invented and nothing lost -- plus rewritten/REWRITE_REPORT.md (organization map, what stayed
 unchanged, and the problems the rewrite surfaced), rewritten/MANUAL_STEPS.md for every hand-off
 item, the render-then-look record in rewritten/VISUAL_CHECK.md, and _pipeline_done.json with
 stage="rewrite" as the very last step. Your candidate will be judged against the other rewrites,
@@ -2043,9 +2045,13 @@ it may win the round and become the next round's base.
 """
 
 
-LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every edited sentence:
-  After the finding-led edits, run this pass sentence by sentence (including legends, tables,
-  footnotes and the cover letter) and record ONE row per change in `@@R6_PATH@@`
+LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over the package you produced:
+  SCAN every sentence of every package document — including documents your finding-led edits did
+  not touch, and including legends, tables, footnotes and the cover letter — so an instance is not
+  missed; an unchanged document is scanned, not exempt. EDIT only what each step's own rule
+  permits (a gated step only the exact change its authorising frozen finding names), and never
+  rewrite substantive content. After the finding-led edits, run this pass sentence by sentence and
+  record ONE row per change in `@@R6_PATH@@`
   (`step | location | before | after | reason`); iterate at most TWICE, then stop and report.
   Steps, in order, each applied to the sentence it names:
     L1 premise/factual errors AND claim calibration (a claim contradicted by the data or by

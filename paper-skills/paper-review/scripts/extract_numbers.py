@@ -162,15 +162,21 @@ LABEL_PATTERNS = [
     ("n", re.compile(
         r"\b[nN]\s*=\s*(\d{1,3}(?:[,\u00a0\u202f ]\d{3})+|\d+)\b"
         r"(?![.,]\d)(?![\u00a0\u202f ]\d{3}\b)")),
+    # A labelled AUC is a metric even when its VALUE is impossible: the old
+    # pattern accepted only 0.x and 1.0, so `AUC = 1.2` produced no occurrence
+    # and the M4 inventory could never expose it (PR151-161). An EXPLICIT
+    # assignment now takes a full numeric literal (multi-digit, exponent,
+    # optional percent unit): `AUC = 12.3`, `AUC = 0.91e0`, `AUC = 9%` used to
+    # be dropped or truncated to one leading digit (F-049).
     ("AUC", re.compile(
-        # A labelled AUC is a metric even when its VALUE is impossible: the
-        # old pattern accepted only 0.x and 1.0, so `AUC = 1.2` produced no
-        # occurrence at all and the M4 inventory could never expose it
-        # (PR151-161). Keep the `AUC of 12 patients` guard by accepting one
-        # digit before the decimal point only: a two-digit count (`12`, `95%`)
-        # still does not match.
+        r"\bAU(?:C|ROC)\s*[:=]\s*([+\-\u2212]?(?:\d+(?:\.\d+)?|\.\d+)"
+        r"(?:[eE][+\-\u2212]?\d+)?%?)", re.I)),
+    # Prose forms keep the `AUC of 12 patients` guard: without an explicit
+    # assignment operator only a single leading digit is accepted, so a count
+    # cannot be read as a metric.
+    ("AUC", re.compile(
         r"\bAU(?:C|ROC)\s*(?:(?:was|is|of|approximately|approx\.?|about)\s*)*"
-        r"(?:[:=]\s*)?((?:0?\.\d+|[0-9](?:\.\d+)?))(?!\d|\.\d)", re.I)),
+        r"([0-9](?:\.\d+)?%?)(?!\d|\.\d)", re.I)),
     ("percentage", re.compile(
         # The sign is part of the value: -12.5% is a decrease, not 12.5.
         r"(?<![\w.])([+\-\u2212]?(?:\.\d+|\d{1,4}(?:\.\d+)?))\s*%")),
@@ -207,7 +213,13 @@ def _metric_key(label: str, val) -> str:
                    .replace("\u202f", "").replace(" ", "").strip())
         if re.fullmatch(r"[+\-]?\d+", compact):
             return str(int(compact))
+    _op = ""
     if label == "p-value":
+        # Preserve the comparator so equal numeric thresholds with different
+        # operators are not collapsed (F-030).
+        _om = re.match(r"^(<=|>=|[<>])\s*(.*)$", text)
+        if _om:
+            _op, text = _om.group(1), _om.group(2)
         # `p = 5 × 10^-8`, `5 \times 10^{-8}` and `5 × 10⁻⁸` are one number;
         # capturing only the coefficient made it look like p = 5.
         _sup = str.maketrans("\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076"
@@ -218,7 +230,7 @@ def _metric_key(label: str, val) -> str:
                          r"([+\-]?\d+)\s*", _raw)
         if m:
             try:
-                return format(float(m.group(1)) * (10 ** int(m.group(2))), ".15g")
+                return _op + format(float(m.group(1)) * (10 ** int(m.group(2))), ".15g")
             except (ValueError, OverflowError):
                 return text
     if label == "CI":
@@ -236,9 +248,9 @@ def _metric_key(label: str, val) -> str:
         return text
     if label in ("p-value", "AUC", "R2", "n", "percentage", "fold"):
         try:
-            return format(float(text.replace(",", "").replace("\u2212", "-")
-                               .replace("\u00a0", "").replace("\u202f", "")
-                               .replace(" ", "")), ".15g")
+            return _op + format(float(text.replace(",", "").replace("\u2212", "-")
+                                     .replace("\u00a0", "").replace("\u202f", "")
+                                     .replace(" ", "")), ".15g")
         except ValueError:
             return text
     return text
@@ -521,6 +533,16 @@ def main():
             for label, pat in LABEL_PATTERNS:
                 for m in pat.finditer(raw):
                     val = m.group(1) if m.lastindex else m.group(0)
+                    if label == "p-value":
+                        # The comparator is part of the claim: `p = 0.05`,
+                        # `p < 0.05` and `p > 0.05` are different assertions
+                        # that used to share one numeric key (F-030). Equality
+                        # keeps the bare number so existing rows stay stable.
+                        _pre = raw[m.start():m.start(1)]
+                        _om = re.search(r"(<=|>=|[=<>\u2264\u2265]|\bof\b)", _pre)
+                        _op = _om.group(1) if _om else "="
+                        if _op.lower() != "of" and _op != "=":
+                            val = _op + val
                     if label == "percentage" and (
                             re.match(r"\s*(?:CI|confidence)\b", raw[m.end():], re.I)
                             or re.search(r"(?:CI|confidence)\s*$", raw[:m.start()], re.I)):

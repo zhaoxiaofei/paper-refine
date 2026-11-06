@@ -215,9 +215,9 @@ def test_extractors():
         m = pv.search(text)
         check(f"p-value operator/label parses: {text!r}", m and m.group(1) == want,
               (m.group(0) if m else None))
-    auc = dict(en.LABEL_PATTERNS)["AUC"]
-    check("AUC = 1 is inventoried",
-          (auc.search("AUC = 1") or [None]) and auc.search("AUC = 1").group(1) == "1")
+    _aucs = [pat for label, pat in en.LABEL_PATTERNS if label == "AUC"]
+    _m1 = next((m for _p in _aucs if (m := _p.search("AUC = 1"))), None)
+    check("AUC = 1 is inventoried", _m1 is not None and _m1.group(1) == "1")
 
     m = ec.REF_ENTRY_RE.match("[1]Smith J. Nature 2019.")
     check("a numbered entry needs no space after the number",
@@ -282,12 +282,12 @@ def test_pairwise():
         dict(round=1, member="a2", credited="", direction="received",
              opponent_id="a1", source_judge_run="j1", source_judge_index=1,
              sheet_target="a1", score_as_written=2),
-        dict(round=1, member="a1", credited=5, direction="own", opponent_id="a3",
+        dict(round=1, member="a1", credited=4, direction="own", opponent_id="a3",
              source_judge_run="", source_judge_index="", sheet_target="a1",
-             score_as_written=5),
-        dict(round=1, member="a1", credited=5, direction="own", opponent_id="a3",
+             score_as_written=4),
+        dict(round=1, member="a1", credited=4, direction="own", opponent_id="a3",
              source_judge_run="", source_judge_index="", sheet_target="a1",
-             score_as_written=5),
+             score_as_written=4),
     ]
     import csv
     with (base / "reports" / "round1_raw_scores.csv").open("w", newline="") as fh:
@@ -299,7 +299,7 @@ def test_pairwise():
           cubes[base.name]["1"][("a2", "a1")].values == [-2.0],
           str(cubes[base.name]["1"][("a2", "a1")].values))
     check("blank-identity judges are not deduped away",
-          cubes[base.name]["1"][("a1", "a3")].values == [5.0, 5.0],
+          cubes[base.name]["1"][("a1", "a3")].values == [4.0, 4.0],
           str(cubes[base.name]["1"][("a1", "a3")].values))
 
 

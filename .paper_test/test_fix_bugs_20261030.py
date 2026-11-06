@@ -419,9 +419,16 @@ def test_f12_ledger_verdict() -> None:
           str(errs_for([{"id": "F-001", "verdict": "whatever", "rationale": "x"}])))
     check("a documented verdict passes",
           errs_for([{"id": "F-001", "verdict": "confirmed", "rationale": "x"}]) == [])
-    check("a documented final status passes",
-          errs_for([{"id": "F-001", "final_status": "fixed-with-caveat",
-                     "rationale": "x"}]) == [])
+    check("a documented verdict plus final status passes",
+          errs_for([{"id": "F-001", "verdict": "confirmed",
+                     "final_status": "fixed-with-caveat", "rationale": "x"}]) == [])
+    check("a final status without a re-verification verdict is rejected (F-080)",
+          any("re-verification" in e for e in errs_for(
+              [{"id": "F-001", "final_status": "fixed-with-caveat",
+                "rationale": "x"}])))
+    check("a final-status word in the verdict column is rejected (F-080)",
+          any("re-verification" in e for e in errs_for(
+              [{"id": "F-001", "verdict": "fixed", "rationale": "x"}])))
 
 
 # ---------------------------------------------------------------------------

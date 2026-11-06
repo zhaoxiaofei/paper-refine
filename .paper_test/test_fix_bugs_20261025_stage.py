@@ -454,7 +454,9 @@ def test_extract_numbers():
     check("plural p-values extract", pats["p-value"].search("p-values < 0.05").group(1) == "0.05")
     check("a p-value 'of' form extracts", pats["p-value"].search("p-value of 0.03") is not None)
     check("AUC of 12 patients is not AUC 12", pats["AUC"].search("AUC of 12 patients") is None)
-    check("AUC = 1 is still a perfect AUC", pats["AUC"].search("AUC = 1").group(1) == "1")
+    _aucs = [pat for label, pat in en.LABEL_PATTERNS if label == "AUC"]
+    _auc1 = next((m for _p in _aucs if (m := _p.search("AUC = 1"))), None)
+    check("AUC = 1 is still a perfect AUC", _auc1 is not None and _auc1.group(1) == "1")
     check("0.05/.05/0.050 normalize to one key",
           en._metric_key("p-value", "0.05") == en._metric_key("p-value", ".05")
           == en._metric_key("p-value", "0.050"))

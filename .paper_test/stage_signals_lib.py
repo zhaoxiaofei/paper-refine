@@ -667,12 +667,12 @@ def test_selfcheck_covers_the_other_stages():
     sb, pkg = package_sandbox(tmp / "a", "r1_a2_revise", "revise")
     write(sb / "guided_review" / "findings.json",
           {"findings": [{"id": "F-001"}, {"id": "F-002"}]})
-    write(pkg / "revision_report.json", {"rows": [{"id": "F-001", "verdict": "fixed"}]})
+    write(pkg / "revision_report.json", {"rows": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"}]})
     errs = nb.sandbox_selfcheck(sb, "revise", "r1_a2_revise", 1)[1]
     check("revise: a ledger that omits a frozen finding id is caught before the marker",
           any("does not name" in e and "F-002" in e for e in errs), str(errs)[:200])
-    write(pkg / "revision_report.json", {"rows": [{"id": "F-001", "verdict": "fixed"},
-                                                   {"id": "F-002", "verdict": "fixed"}]})
+    write(pkg / "revision_report.json", {"rows": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"},
+                                                   {"id": "F-002", "verdict": "confirmed", "final_status": "fixed"}]})
     check("revise: a complete sandbox then passes",
           nb.sandbox_selfcheck(sb, "revise", "r1_a2_revise", 1)[0] is True,
           str(nb.sandbox_selfcheck(sb, "revise", "r1_a2_revise", 1)[1])[:160])
@@ -801,6 +801,13 @@ def judge_rec(rid="judge_tok9_j1"):
 
 
 def judge_sheet(check_id, score=1, tier="writing", severity="minor"):
+    checks = {c: "clean -- test fixture: examined, nothing found"
+              for c in nb.JUDGE_COVERAGE_CHECKS}
+    # A check that carries a ledger row cannot be `clean` (the coverage gate now
+    # checks both directions): dispose the row's own check as `findings`.
+    _frozen = nb._frozen_check_id(check_id)
+    if _frozen in nb.JUDGE_COVERAGE_CHECKS:
+        checks[_frozen] = "findings -- test fixture: the ledger row below"
     return {"run_id": "judge_tok9_j1", "target_id": "tok9", "judge_index": 1,
             "comparisons": [{"opponent_label": "v1", "score": score, "basis": tier,
                              "reason": "one comparison for the stub",
@@ -808,8 +815,7 @@ def judge_sheet(check_id, score=1, tier="writing", severity="minor"):
                                            "evidence": "the sentence repeats itself",
                                            "check": check_id}],
                              "introduced": [],
-                             "checks": {c: "clean -- test fixture: examined, nothing found"
-                                        for c in nb.JUDGE_COVERAGE_CHECKS}}]}
+                             "checks": checks}]}
 
 
 def test_judge_check_ids_the_prompt_names_are_accepted():

@@ -290,7 +290,10 @@ def test_pdf_signature_and_cache() -> None:
           "%%EOF" in pp.pdf_signature_problem(late_eof))
     check("pdf: an empty file is reported", pp.pdf_signature_problem(empty) != "")
 
-    prev = {("label", "paper.docx"): {"ok": True, "sha256": "abc", "kind": "docx"}}
+    import hashlib
+    prev = {("label", "paper.docx"): {
+        "ok": True, "sha256": "abc", "kind": "docx",
+        "out_sha256": hashlib.sha256(good.read_bytes()).hexdigest()}}
     check("cache: a corrupt cached render is NOT reused",
           pp._reuse_pdf_record(prev, "label", "paper.docx", "abc", no_header,
                                "docx") is None)
@@ -340,7 +343,13 @@ def test_auc_out_of_range_is_inventoried() -> None:
     if str(scripts) not in sys.path:
         sys.path.insert(0, str(scripts))
     import extract_numbers as en
-    auc = dict(en.LABEL_PATTERNS)["AUC"]
+    # The explicit-assignment form takes a full numeric literal and the prose
+    # form keeps the single-leading-digit guard, so the label has two patterns.
+    aucs = [pat for label, pat in en.LABEL_PATTERNS if label == "AUC"]
+
+    def auc_match(text):
+        return next((m for pat in aucs if (m := pat.search(text))), None)
+
     cases = {
         "AUC = 1.2": "1.2",
         "AUC 2": "2",
@@ -348,14 +357,14 @@ def test_auc_out_of_range_is_inventoried() -> None:
         "an AUC of 0.72": "0.72",
     }
     for text, want in cases.items():
-        m = auc.search(text)
+        m = auc_match(text)
         check(f"AUC: {text!r} is inventoried as {want}",
               m is not None and m.group(1) == want,
               str(m.group(1)) if m else "no match")
     for text in ("AUC of 12 patients", "AUC 95%"):
         check(f"AUC: {text!r} is not read as an AUC",
-              auc.search(text) is None,
-              str(auc.search(text).group(0)) if auc.search(text) else "")
+              auc_match(text) is None,
+              str(auc_match(text).group(0)) if auc_match(text) else "")
 
 
 # ---------------------------------------------------------------------------

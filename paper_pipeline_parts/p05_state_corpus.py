@@ -1746,8 +1746,19 @@ def content_multiset(paths) -> list:
 
 
 def judge_view_digest(judge_view: Path) -> list:
-    """The content multiset of a materialized judge view."""
-    return content_multiset([judge_view])
+    """(relative path, content digest) for every file of a materialized view.
+
+    A content MULTISET is path-blind: two files swapped between anonymous names
+    kept the same digest, so a tampered view could be reused (F-015). The
+    relative path is part of the identity.
+    """
+    out = []
+    if not judge_view.is_dir():
+        return out
+    for p in sorted(judge_view.rglob("*")):
+        if p.is_file():
+            out.append((p.relative_to(judge_view).as_posix(), sha256_file(p)))
+    return sorted(out)
 
 
 def _view_digest(ctx: Ctx, r: int, vid: str) -> list:
@@ -1788,6 +1799,11 @@ VIEW_TEXT_EXTS = (".tex", ".ltx", ".bib", ".md", ".txt", ".rst", ".sh", ".py",
 VIEW_TEXT_NAMES = ("makefile", "gnumakefile", "cmakelists.txt", "latexmkrc")
 VIEW_OOXML_EXTS = (".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm")
 VIEW_PDF_EXTS = (".pdf",)
+# Raster/vector images are copied byte-for-byte: their embedded metadata
+# (EXIF/IPTC/XMP, authoring paths) is not sanitized. That is a recorded
+# anonymity gap, never a silent clean file (F-002).
+VIEW_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif",
+                   ".webp", ".emf", ".wmf", ".heic", ".avif")
 VIEW_LATEX_TARGET_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".svg")
 # LaTeX source files are addressed WITHOUT their extension by \input,
 # \include, \bibliography, \addbibresource and \subfile. Their stems must be
@@ -2056,12 +2072,141 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
 
     # A renamed Python module keeps its import graph only if the import site is
     # rewritten too: `helper.py` -> `f2.py` left `import helper` broken (F15).
+    # A renamed PACKAGE is the harder case: the anonymous layout flattens and
+    # renames every directory, so `helper/__init__.py` may become `d01/f0002.py`
+    # and `helper/sub.py` `d01/f0003.py`.  `import helper.sub` named neither new
+    # file and was left behind, leaving the code unrunnable (F-016).  The view
+    # therefore rewrites the WHOLE import graph onto the anonymous module paths
+    # and re-binds the original names as aliases: `pkg` is bound to the renamed
+    # `__init__` module and `pkg.sub` to the renamed module, so the rewritten
+    # code keeps the same bindings it had before the rename.
     if Path(old_rel).suffix.lower() == ".py":
+        def _py_dotted(rel: str) -> str:
+            """Dotted MODULE name of a package-relative `.py` path."""
+            parts = list(Path(rel).with_suffix("").parts)
+            if parts and parts[-1] == "__init__":
+                parts = parts[:-1]
+            return ".".join(parts)
+
         _py_mods = {}
         for o, n in file_map.items():
             if Path(o).suffix.lower() == ".py":
-                _py_mods[_latex_stem(posixpath.basename(o))] = \
-                    _latex_stem(posixpath.basename(n))
+                _old_mod = _py_dotted(o)
+                if _old_mod:
+                    _py_mods[_old_mod] = _py_dotted(n)
+
+        _cur_mod = _py_dotted(old_rel)
+        _cur_pkg = (_cur_mod.split(".") if Path(old_rel).name == "__init__.py"
+                    else _cur_mod.split(".")[:-1])
+
+        def _py_sibling(name: str):
+            """The renamed BASENAME of a module beside the current file.
+
+            All files of one original directory share one anonymous directory
+            (`_view_layout`), so a script in a renamed subdirectory still runs
+            with its own directory on `sys.path` and an absolute `import
+            helper` must name the renamed `fNNNN.py` beside it. The full dotted
+            map alone left that pre-F-016 layout broken (R01).
+            """
+            if not _cur_pkg or "." in name:
+                return None
+            sibling = ".".join(_cur_pkg + [name])
+            if sibling == _cur_mod:
+                return None
+            mapped = _py_mods.get(sibling)
+            return mapped.rsplit(".", 1)[-1] if mapped else None
+        _alias_n = [0]
+
+        def _tmp_name():
+            _alias_n[0] += 1
+            return f"_vmod{_alias_n[0]}"
+
+        def _resolve_relative(level, module):
+            """Original dotted target for a `from .…module import …`."""
+            if not _cur_pkg or level < 1 or level > len(_cur_pkg):
+                return None
+            base = _cur_pkg[:len(_cur_pkg) - (level - 1)]
+            if module:
+                base = base + module.split(".")
+            return ".".join(base)
+
+        def _prefix_imports(name):
+            """`import` every mapped package prefix of `name` (side effects)."""
+            out = []
+            parts = name.split(".")
+            for i in range(1, len(parts)):
+                pre = ".".join(parts[:i])
+                if pre in _py_mods and pre != _cur_mod:
+                    out.append(f"import {_py_mods[pre]}")
+            return out
+
+        def _import_alias(al, top_level):
+            """(statements, changed) for one `import n [as x]` alias."""
+            n = al.name
+            original = f"import {n}" + (f" as {al.asname}" if al.asname else "")
+            mapped = _py_mods.get(n)
+            if mapped is None:
+                mapped = _py_sibling(n)
+            if mapped is None:
+                return [original], False
+            if al.asname:
+                return (_prefix_imports(n)
+                        + [f"import {mapped} as {al.asname}"]), True
+            root = n.split(".")[0]
+            if root not in _py_mods:
+                if "." in n:
+                    # A namespace-package root has no `__init__.py` to map; import
+                    # the renamed module itself and keep going where possible.
+                    return _prefix_imports(n) + [f"import {_py_mods[n]}"], True
+                # A module BESIDE this script: the renamed file's basename is
+                # importable from the script's own directory.
+                if top_level:
+                    return [f"import {mapped}", f"{n} = {mapped}"], True
+                return [f"import {mapped} as {n}"], True
+            if "." not in n:
+                if top_level:
+                    # The documented top-level form (`import f2` + binding),
+                    # which keeps `helper` usable after the rename.
+                    return [f"import {_py_mods[n]}", f"{n} = {_py_mods[n]}"], True
+                return [f"import {_py_mods[n]} as {n}"], True
+            # `import a.b.c` binds `a`; import each renamed prefix and attach
+            # `b`/`c` to it so `a.b.c` still resolves.
+            out = [f"import {_py_mods[root]} as {root}"]
+            for i in range(2, len(n.split(".")) + 1):
+                pre = ".".join(n.split(".")[:i])
+                if pre not in _py_mods:
+                    break
+                temp = _tmp_name()
+                out.append(f"import {_py_mods[pre]} as {temp}")
+                out.append(f"{pre} = {temp}")
+            return out, True
+
+        def _from_stmts(node, base_orig):
+            """Statements for a `from base import …`, or None when unmapped."""
+            if not base_orig:
+                return None
+            mapped = _py_mods.get(base_orig) or _py_sibling(base_orig)
+            if not mapped:
+                return None
+            out, attrs, changed = [], [], False
+            for al in node.names:
+                if al.name == "*":
+                    out.append(f"from {mapped} import *")
+                    changed = True
+                    continue
+                sub = f"{base_orig}.{al.name}"
+                if sub in _py_mods:
+                    out += _prefix_imports(sub)
+                    out.append(f"import {_py_mods[sub]} as {al.asname or al.name}")
+                    changed = True
+                else:
+                    attrs.append(al.name
+                                 + (f" as {al.asname}" if al.asname else ""))
+            if attrs:
+                out.append(f"from {mapped} import "
+                           + ", ".join(attrs))
+                changed = True
+            return out if changed else None
 
         def _rewrite_python_imports(source: str):
             """Rewrite IMPORT STATEMENTS via the AST, preserving every binding.
@@ -2082,54 +2227,44 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
                 starts.append(starts[-1] + len(_line))
 
             def _pos(lineno, col):
-                return starts[lineno - 1] + col
+                # `ast` reports col_offset in UTF-8 BYTES; `source` is a str,
+                # so a non-ASCII character before the import shifted the span
+                # and the cut landed inside the keyword (`iimport`) (F-016).
+                line = source.splitlines(keepends=True)[lineno - 1]
+                prefix = line.encode("utf-8")[:max(0, int(col))]
+                return starts[lineno - 1] + len(prefix.decode("utf-8", "ignore"))
 
             edits = []
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
-                    parts, changed = [], False
+                    stmts, changed = [], False
                     for al in node.names:
-                        head = al.name.split(".", 1)[0]
-                        new_head = _py_mods.get(head)
-                        if not new_head:
-                            parts.append(al.name + ((" as " + al.asname)
-                                                    if al.asname else ""))
-                            continue
-                        changed = True
-                        new_name = new_head + al.name[len(head):]
-                        # Keep the original binding (`helper`, not just `f2`).
-                        parts.append(new_name + " as " + (al.asname or head))
+                        part, one = _import_alias(
+                            al, node.col_offset == 0 and len(node.names) == 1)
+                        stmts += part
+                        changed = changed or one
                     if changed:
-                        if (len(node.names) == 1 and node.col_offset == 0
-                                and not node.names[0].asname):
-                            # Top-level single import: the documented form is
-                            # `import f2` plus an explicit binding line, which
-                            # also keeps `helper.sub` usable as a root package.
-                            _head = node.names[0].name.split(".", 1)[0]
-                            replacement = (f"import {_py_mods[_head]}"
-                                           f"\n{_head} = {_py_mods[_head]}")
-                        else:
-                            replacement = "import " + ", ".join(parts)
-                        edits.append((_pos(node.lineno, node.col_offset),
-                                      _pos(node.end_lineno, node.end_col_offset),
-                                      replacement))
-                elif (isinstance(node, ast.ImportFrom) and node.module
-                      and not node.level):
-                    head = node.module.split(".", 1)[0]
-                    new_head = _py_mods.get(head)
-                    if not new_head:
-                        continue
-                    names = ", ".join(al.name + ((" as " + al.asname)
-                                                 if al.asname else "")
-                                      for al in node.names)
-                    edits.append((_pos(node.lineno, node.col_offset),
-                                  _pos(node.end_lineno, node.end_col_offset),
-                                  f"from {new_head + node.module[len(head):]} import {names}"))
+                        edits.append((node, stmts))
+                elif isinstance(node, ast.ImportFrom):
+                    base = (_resolve_relative(node.level, node.module)
+                            if node.level else node.module)
+                    stmts = _from_stmts(node, base)
+                    if stmts:
+                        edits.append((node, stmts))
             if not edits:
                 return source
-            edits.sort()
+            spans = []
+            for node, stmts in edits:
+                # At column 0 the replacement can use real lines; an inline or
+                # indented import statement must stay ONE line (`;`), or the
+                # generated statement escapes if/for/try blocks.
+                sep = "\n" if node.col_offset == 0 else "; "
+                spans.append((_pos(node.lineno, node.col_offset),
+                              _pos(node.end_lineno, node.end_col_offset),
+                              sep.join(stmts)))
+            spans.sort()
             out, last = [], 0
-            for start, end, replacement in edits:
+            for start, end, replacement in spans:
                 if start < last:            # overlapping node (should not happen)
                     continue
                 out.append(source[last:start])
@@ -2718,7 +2853,12 @@ def expected_view_digest(ctx: Ctx, r: int, vid: str, view_seed: str) -> list:
     digs = []
     for old_rel, src in files:
         data, _notes = _transform_view_file(old_rel, src, file_map)
-        digs.append(hashlib.sha256(data).hexdigest() if data is not None else sha256_file(src))
+        digest = (hashlib.sha256(data).hexdigest() if data is not None
+                  else sha256_file(src))
+        # The anonymous NAME is part of the expected identity (F-015): a view
+        # whose files carry the right bytes under the wrong names is not the
+        # view this corpus materializes.
+        digs.append((file_map[old_rel], digest))
     digs = sorted(digs)
     with _VIEW_EXPECT_LOCK:
         if len(_VIEW_EXPECT_CACHE) > 5000:
@@ -2792,6 +2932,10 @@ def build_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
                 _transform_warnings.append(f"{file_map[rel]}: {_note}"[:400])
         if data is None:
             shutil.copyfile(src, out)                 # content only: no metadata
+            if Path(rel).suffix.lower() in VIEW_IMAGE_EXTS:
+                _transform_warnings.append(
+                    f"{file_map[rel]}: image copied byte-for-byte; embedded "
+                    f"metadata (EXIF/IPTC/XMP) was not stripped"[:400])
         else:
             out.write_bytes(data)
         try:
@@ -5407,3 +5551,20 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     if reset_ids:
         ctx.save_state()
     return reset_ids
+
+def record_anonymity_gaps(ctx: Ctx, certification: dict) -> None:
+    """Copy judge-view sanitizer gaps into the decision's certification block.
+
+    The warnings live in root state and on the console; a certified decision a
+    reader sees must carry them too, or it looks fully anonymous while some
+    judge-view file kept its metadata (F-002).
+    """
+    gaps = getattr(ctx, "state", {}).get("view_transform_warnings") or {}
+    if not isinstance(gaps, dict) or not gaps:
+        return
+    certification["anonymity_gaps"] = {
+        str(k): list(v or [])[:10] for k, v in list(gaps.items())[:50]}
+    certification["notes"] = list(certification.get("notes") or []) + [
+        f"anonymity: {len(gaps)} judge view(s) carry file(s) the sanitizer "
+        f"could not fully anonymize (see `anonymity_gaps`); the panel is blinded by "
+        f"view construction, but this decision does not prove complete anonymity"]

@@ -2470,16 +2470,30 @@ def _simple_table(text: str):
 
 
 def _cell_number(cell: str):
-    """The float a table cell carries, or None (empty/NaN/non-numeric)."""
-    v = (str(cell or "").replace(",", "").replace("$", "").replace("%", "")
-         .replace("\u2009", "").replace("\u202f", "").replace("\u00a0", "")
-         .replace("\u2212", "-").strip())
+    """The plain number a table cell carries, or None.
+
+    A unit-bearing (`50%`, `$50`) or locale-ambiguous (`0,5` is five in one
+    convention and half in another) cell is NOT the plain number it contains:
+    stripping the sign let a producer summary report 5 for 0,5 and 6 for a
+    percent column. Non-finite inputs (`inf`) are rejected too, not averaged
+    into a mean (F-005). The exact-value index already excluded those cells;
+    the producer statistics did not.
+    """
+    raw = str(cell or "").strip()
+    if any(u in raw for u in ("%", "$", "\u20ac", "\u00a3")):
+        return None
+    if "," in raw and not re.fullmatch(
+            r"[+\-\u2212]?\d{1,3}(?:,\d{3})*(?:\.\d+)?", raw):
+        return None
+    v = (raw.replace(",", "").replace("\u2009", "").replace("\u202f", "")
+         .replace("\u00a0", "").replace("\u2212", "-").strip())
     if v.lower() in ("", "nan", "na", "n/a", "-"):
         return None
     try:
-        return float(v)
+        fv = float(v)
     except ValueError:
         return None
+    return fv if fv == fv and abs(fv) != float("inf") else None
 
 
 def _fmt_number(value: float) -> str:
@@ -2994,13 +3008,33 @@ def _number_proof_context_ok(row: dict, hit: dict) -> bool:
     # not be proved by the TREATMENT row's 42 (F01). If the sentence names a
     # row from this column, the hit must be that row; a sentence that names no
     # row at all still falls back to the column/file context.
+    if kind in ("sum", "min", "max"):
+        # A column aggregate must not prove a sentence that claims a DIFFERENT
+        # statistic: sum(2,3,4)=9 does not prove "The mean age was 9 years"
+        # (F-003). The estimator test is INDEPENDENT of any aggregate word: a
+        # sentence that says both ("The mean total age was 9 years") still
+        # claims the mean, and the sum cannot prove it (R03). An implicit total
+        # ("yielded 45,365 cells") carries no estimator word and stays provable
+        # -- the documented value-only/implicit-sum callers depend on it.
+        _low = sentence.lower()
+        _conflict = ("mean", "average", "median", "rate", "proportion",
+                     "percentage", "ratio", "fraction", "share")
+        if any(re.search(r"\b" + re.escape(w) + r"\b", _low) for w in _conflict):
+            return False
     if kind == "cell":
         hit_row = str(hit.get("row") or "").strip()
         if hit_row:
             known_rows = [str(x).strip() for x in hit.get("rows") or () if str(x).strip()]
-            named = [x for x in known_rows if _context_tokens(x) & written]
-            if named and hit_row not in named:
-                return False
+            # The row the sentence NAMES must be the row the value came from.
+            # Any shared token used to count as a name, so "treated adult"
+            # matched the "treated child" row (F-003); require the best-matching
+            # row (the largest token overlap) to be the hit row.
+            scored = [(len(_context_tokens(x) & written), x) for x in known_rows]
+            best = max((score for score, _x in scored), default=0)
+            if best:
+                best_rows = {x for score, x in scored if score == best}
+                if hit_row not in best_rows:
+                    return False
     return bool(written & (_context_tokens(hit.get("column"))
                             | _context_tokens(hit.get("file"))))
 

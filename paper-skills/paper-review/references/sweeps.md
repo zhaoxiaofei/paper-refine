@@ -761,8 +761,9 @@ all caught only by manual audit before this sweep existed.
 ## M16 — Abstract traceability sweep (validated: iteration-1)
 
 **Purpose:** every statistic and headline claim in the abstract must be
-traceable to a main-text/Methods statement (the abstract is a review surface
-of its own).
+traceable to a Results, Methods or SI statement (the abstract is a review
+surface of its own; a claim carried only by an appendix is reported under the
+finding rule below, so state whether a main-text pointer is required for it).
 
 **Enumeration (scriptable):** extract every number/statistic from the abstract
 (p, AUC, n, percent, fold, CI, counts) and enumerate occurrences of the same

@@ -317,11 +317,19 @@ def main() -> int:
               == "sentinel\n")
         check("the original aggregation survived the full orchestration",
               json.dumps(pd._json_safe(agg), sort_keys=True) == agg_snapshot)
+        stub_cmd = [sys.executable, "-c", stub_agent_code()]
         again = pd.write_round_defect_audit(
-            ctx, 1, agg=agg,
-            agent_cmd=[sys.executable, "-c", "raise SystemExit(3)"], timeout=60)
+            ctx, 1, agg=agg, agent_cmd=stub_cmd, timeout=60)
         check("a stored audit is reused without running the agent again",
               again.get("reused") and again.get("ok") and again.get("tp") == 2, again)
+        # ... but only for the SAME auditor: a changed backend must not inherit
+        # the old backend's verdicts (F-050).
+        changed = pd.write_round_defect_audit(
+            ctx, 1, agg=agg,
+            agent_cmd=[sys.executable, "-c", "raise SystemExit(3)"], timeout=60)
+        check("a changed auditor does not reuse the old backend's verdicts",
+              changed.get("used") and not changed.get("reused")
+              and not changed.get("ok"), changed)
         # A stored verdict with NO label must stay unlabelled: the README says
         # "unlabelled rows are never silently treated as TP", so reuse must not
         # invent a TP for a row the auditor never labelled.
@@ -329,8 +337,7 @@ def main() -> int:
         (ctx.reports_dir / "round1_defect_audit.json").write_text(
             json.dumps(meta), encoding="utf-8")
         again2 = pd.write_round_defect_audit(
-            ctx, 1, agg=agg,
-            agent_cmd=[sys.executable, "-c", "raise SystemExit(3)"], timeout=60)
+            ctx, 1, agg=agg, agent_cmd=stub_cmd, timeout=60)
         check("a stored verdict with no label is never silently relabelled TP",
               again2.get("tp") == 2 and again2.get("incomplete") == 1,
               (again2.get("tp"), again2.get("incomplete")))

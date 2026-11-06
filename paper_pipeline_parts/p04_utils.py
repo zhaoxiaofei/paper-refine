@@ -7130,7 +7130,7 @@ def _evidence_artifact_table(rows: list, columns: list, empty_note: str) -> str:
 DATA_TABLE_EXTS = (".tsv", ".csv")
 
 
-def data_table_texts(sources: list, limit: int = 40) -> list:
+def data_table_texts(sources: list, limit: int = 40, coverage: dict = None) -> list:
     """[(rel, text)] for the corpus files that can PROVE a number.
 
     Machine-readable tables (`.tsv`/`.csv`) and tabular-looking `.tex`/`.txt`
@@ -7139,6 +7139,9 @@ def data_table_texts(sources: list, limit: int = 40) -> list:
     the *prose* proves nothing about where it came from.
     """
     out = []
+    omitted = []
+    if isinstance(coverage, dict):
+        coverage.update({"cap": limit, "truncated": False, "omitted": omitted})
     # Later sources override earlier ones for the same relative path (the rule
     # corpus_manifest enforces by construction): without the filter a collided
     # document's values were read twice, and a stale copy's numbers could be the
@@ -7148,8 +7151,6 @@ def data_table_texts(sources: list, limit: int = 40) -> list:
         if not src.is_dir():
             continue
         for p in _iter_tree_files(src):
-            if len(out) >= limit:
-                return out
             try:
                 if is_bookkeeping_name(p.name) or _is_aux_doc(p.name):
                     continue
@@ -7173,7 +7174,15 @@ def data_table_texts(sources: list, limit: int = 40) -> list:
                 if not (first.count("|") >= 2 or first.count("&") >= 2
                         or first.count("\t") >= 1):
                     continue
+            if len(out) >= limit:
+                # The inventory cap is REAL coverage loss: enumerate the omitted
+                # eligible producers so M30 can record the gap instead of looking
+                # complete (F-006).
+                omitted.append(prefix + rel)
+                continue
             out.append((prefix + rel, text))
+    if isinstance(coverage, dict) and omitted:
+        coverage["truncated"] = True
     return out
 
 
@@ -7235,8 +7244,38 @@ def _lookup_cache_fresh(entry: dict) -> bool:
 LOOKUP_BUDGET_SHARES = {"reference": 16, "identifier": 8, "placeholder": 2, "gene": 10}
 
 
+def _lookup_target_key(t) -> tuple:
+    """The normalized (kind, query) identity of one lookup occurrence."""
+    return (str(t.get("kind") or "").strip().lower(),
+            str(t.get("query") or "").strip())
+
+
 def _select_lookup_targets(targets: list, budget: int) -> list:
-    """Trim the lookup list to `budget`, with an allocation per source class.
+    """Trim the lookup list to `budget` DISTINCT queries, then fan them out.
+
+    The budget used to count OCCURRENCES: one repeated DOI could fill the whole
+    allowance before the request cache (which deduplicates by kind+query)
+    reached the only distinct identifier later in the list (F-054). Select
+    distinct keys under the per-class allocation, then return every occurrence
+    of a selected key so each row still gets the cached verdict.
+    """
+    groups, order = {}, []
+    for t in targets or []:
+        key = _lookup_target_key(t)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(t)
+    if len(order) <= budget:
+        return list(targets or [])
+    distinct = [groups[key][0] for key in order]
+    picked = _select_lookup_targets_distinct(distinct, budget)
+    kept = {_lookup_target_key(t) for t in picked}
+    return [t for key in order if key in kept for t in groups[key]]
+
+
+def _select_lookup_targets_distinct(targets: list, budget: int) -> list:
+    """Trim a list of DISTINCT lookup targets to `budget` per source class.
 
     Every class first takes up to its reserved share; the remaining budget is
     then filled with the REMAINDER of those same lists (reserved classes first,
@@ -7354,8 +7393,21 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
         # work/ copies and PROVENANCE.json are written by the same loop).
         art.mkdir(parents=True, exist_ok=True)
     docs = corpus_text_documents(sources)
-    tables = data_table_texts(sources)
+    _table_coverage = {}
+    tables = data_table_texts(sources, coverage=_table_coverage)
     num_rows = [dict(r) for r in ((ev.get("numbers") or {}).get("rows") or [])]
+    if _table_coverage.get("omitted"):
+        _om = list(_table_coverage["omitted"])
+        num_rows.append({
+            "document": "", "paragraph": None, "kind": "gap", "number": "", "unit": "",
+            "sentence": (f"{len(_om)} eligible producer file(s) omitted by the "
+                         f"{_table_coverage.get('cap')}-file data-table inventory cap; "
+                         f"the provenance pack is INCOMPLETE (e.g. "
+                         f"{', '.join(_om[:5])})"),
+            "candidate producer": "(truncated - producer-file inventory cap reached)",
+            "producer summary": "", "seed check": (
+                "these files were not read for provenance; raise the cap or check them "
+                "manually")})
     reconcile = mod.reconcile_number_rows(num_rows, tables)
     ident_rows = mod.identifier_rows(docs)
     gene_rows = mod.gene_symbol_rows(docs)

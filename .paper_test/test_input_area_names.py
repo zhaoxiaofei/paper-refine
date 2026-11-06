@@ -125,7 +125,7 @@ def build_revise_sandbox(ctx, tamper=True, drop=()):
         (rev / "raw_data" / "scratch_notes.csv").write_text("a,b\n", encoding="utf-8")
     xf.write_language_pass(rev)
     (rev / "revision_report.json").write_text(json.dumps(
-        [{"id": "F-001", "verdict": "fixed", "rationale": "done"}]), encoding="utf-8")
+        [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed", "rationale": "done"}]), encoding="utf-8")
     (rev / "CHANGELOG.md").write_text("# changelog\n", encoding="utf-8")
     (rev / "MANUAL_STEPS.md").write_text("1. (none)\n", encoding="utf-8")
     (rev / "VISUAL_CHECK.md").write_text(

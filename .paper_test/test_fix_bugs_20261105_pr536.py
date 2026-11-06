@@ -261,8 +261,8 @@ def test_pr021_conflicting_ledger() -> None:
     pkg = d / "revised"
     pkg.mkdir()
     (pkg / "revision_report.json").write_text(json.dumps([
-        {"id": "F-001", "status": "fixed", "rationale": "a"},
-        {"id": "F-001", "status": "discarded", "rationale": "b"}]))
+        {"id": "F-001", "verdict": "confirmed", "status": "fixed", "rationale": "a"},
+        {"id": "F-001", "verdict": "confirmed", "status": "discarded", "rationale": "b"}]))
     errs, _warns = pp.revision_ledger_problems(pkg, ["F-001"], 1)
     check("PR536-021 conflicting verdicts fail the revise gate",
           any("CONFLICTING dispositions" in e and "F-001" in e for e in errs),

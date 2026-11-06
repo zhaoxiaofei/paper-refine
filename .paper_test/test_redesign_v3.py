@@ -148,8 +148,9 @@ def test_contract_v4():
     # An id nobody recognizes may not cost a 20-40 minute judge session either:
     # a ledger row's `check` cell is descriptive (the arithmetic reads
     # tier/severity/evidence only), so it is reported and the row still counts.
-    e_u, w_u = np.judge_basis_problems(comp(1, [row("writing", "minor", check_id="ZZ9")]),
-                                       "c[0]", strict=True)
+    e_u, w_u = np.judge_basis_problems(
+        comp(1, [row("writing", "minor", check_id="ZZ9")], basis="writing"),
+        "c[0]", strict=True)
     check("an unknown id is a warning that names what to cite, not a failed run",
           not e_u and any("ZZ9" in x and "not a frozen check id" in x for x in w_u),
           f"{e_u[:1]} {w_u[:1]}")

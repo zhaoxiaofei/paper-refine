@@ -166,10 +166,10 @@ def main() -> int:
     # A8: ledger shapes that ARE a ledger -> accepted (bare list, or a dict with
     # one of the tolerated row keys)
     for label, payload in (
-            ("bare list", [{"id": "F-001", "verdict": "fixed"}]),
-            ("findings key", {"findings": [{"id": "F-001", "verdict": "fixed"}]}),
-            ("revisions key", {"revisions": [{"id": "F-001", "verdict": "fixed"}]}),
-            ("rows key", {"rows": [{"id": "F-001", "verdict": "fixed"}]})):
+            ("bare list", [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"}]),
+            ("findings key", {"findings": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"}]}),
+            ("revisions key", {"revisions": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"}]}),
+            ("rows key", {"rows": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"}]})):
         tmp, ctx, rec, sb = new_case()
         (sb / "revised" / "revision_report.json").write_text(json.dumps(payload))
         ok, errs, warns, crash = run_postcheck(ctx, rec)
@@ -182,14 +182,14 @@ def main() -> int:
     # wrote complete ledgers under `coverage` / `coverage_table`, were told they
     # named no finding id, and failed every attempt of the stage.
     for label, payload in (
-            ("coverage key", {"coverage": [{"id": "F-001", "final_status": "fixed"}]}),
+            ("coverage key", {"coverage": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"}]}),
             ("coverage_table key",
              {"run_id": "r2_a2_revise", "stage": "revise", "round": 2,
               "findings_total": 1, "finding_ids": ["F-001"],
-              "coverage_table": [{"id": "F-001", "final_status": "fixed",
+              "coverage_table": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed",
                                   "edit_ids": ["A7"], "evidence": "A7 hunk 2"}]}),
             ("mapping keyed by finding id",
-             {"F-001": {"verdict": "fixed", "evidence": "A7 hunk 2"}}),
+             {"F-001": {"verdict": "confirmed", "final_status": "fixed", "evidence": "A7 hunk 2"}}),
             ("id list", {"findings_total": 1, "finding_ids": ["F-001"]})):
         tmp, ctx, rec, sb = new_case()
         (sb / "revised" / "revision_report.json").write_text(json.dumps(payload))

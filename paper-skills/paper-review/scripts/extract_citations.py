@@ -904,16 +904,36 @@ def main():
             keys = tex_cited_by_file[f]
             contexts = sorted(file_roots.get(f) or ()) or [None]
             for root in contexts:
-                if f in nocite_all_files:
-                    # The wildcard cites every key in THIS root's space.
-                    continue
+                # A `\nocite{*}` cites every key in THIS root's space, but it
+                # does not excuse an explicit `\cite`/`\nocite` key that the
+                # root does not define. The whole-file skip hid exactly those
+                # (F-025); `all_tex_cited` above still treats the wildcard as
+                # covering the space.
                 orphans = sorted({k for k in keys if k not in _tex_space_for(f, root)})
                 if not orphans:
                     continue
                 label = f if len(contexts) == 1 else "%s [root %s]" % (f, root)
                 tex_orphans_by_file[label] = orphans
     tex_orphans = sorted({k for keys in tex_orphans_by_file.values() for k in keys})
-    tex_uncited = sorted({b["key"] for b in tex_bibitems} - all_tex_cited)
+    # Uncited inline entries are ROOT-specific, exactly like orphans: a key
+    # cited in one compile root masked the same key defined but never cited in
+    # another (F-048). A file reached from several roots is reported per root,
+    # the same way `tex_orphans_by_file` is.
+    tex_uncited_by_context = {}
+    for b in tex_bibitems:
+        contexts = sorted(file_roots.get(b["file"]) or ()) or [None]
+        for root in contexts:
+            files = root_closures.get(root, {b["file"]}) if root is not None else {b["file"]}
+            cited = set()
+            for cf in files:
+                cited.update(tex_cited_by_file.get(cf, ()))
+            for cf in sorted(nocite_all_files & files):
+                cited |= _tex_space_for(cf, root)
+            if b["key"] in cited:
+                continue
+            label = b["file"] if len(contexts) == 1 else "%s [root %s]" % (b["file"], root)
+            tex_uncited_by_context.setdefault(label, set()).add(b["key"])
+    tex_uncited = sorted({k for keys in tex_uncited_by_context.values() for k in keys})
     # \cite keys with no list in the corpus at all: the reference list was not
     # submitted, so the orphan/uncited checks cannot run. That is `unable`,
     # never an empty "none".
@@ -924,6 +944,31 @@ def main():
         dupes = {n: c for n, c in Counter(nums).items() if c > 1}
         if dupes:
             duplicate_entries[f] = dupes
+    # Duplicate LaTeX KEYS were never checked: key lookup collapsed them into a
+    # set and the duplicate test above reads numbered lists only (F-029). A key
+    # defined twice inside one compile root is a conflict; the same key in two
+    # INDEPENDENT roots is legal, so the count is per root closure.
+    duplicate_tex_keys = {}
+    _root_bib_files = {}
+    for _root in sorted(tex_roots):
+        _files = root_closures.get(_root, set())
+        _bib = set()
+        for _f in _files:
+            for _name in bib_refs.get(_f, ()):
+                _bib |= _bib_files_for(_flat_dir(_root), _name)
+        _root_bib_files[_root] = _bib
+        _keys = [b["key"] for b in tex_bibitems if b["file"] in _files]
+        _keys += [b["key"] for b in bib_entries if b["file"] in _bib]
+        _dup = {k: c for k, c in Counter(_keys).items() if c > 1}
+        if _dup:
+            duplicate_tex_keys[_root] = _dup
+    for _f in sorted({b["file"] for b in tex_bibitems}):
+        if _f in file_roots:
+            continue
+        _dup = {k: c for k, c in Counter(
+            b["key"] for b in tex_bibitems if b["file"] == _f).items() if c > 1}
+        if _dup:
+            duplicate_tex_keys[_f] = _dup
 
     order_violations = []
     # Numeric styles number a reference at its FIRST call-out: a later call-out
@@ -985,6 +1030,8 @@ def main():
            "  - per document: %s" % (tex_orphans_by_file or "none"),
            "- LaTeX \\bibitem entries never cited by any \\cite: %s" % (tex_uncited or "none"),
            "- Duplicate entry numbers within one list: %s" % (duplicate_entries or "none"),
+           "- Duplicate LaTeX keys within one compile root: %s" % (
+               duplicate_tex_keys or "none"),
            "- Order violations (numeric style, within one document): %d" % len(order_violations),
            "- Max cited number: %d; entries listed: %d (across %d list(s))" % (
                max_cited, len(ref_entries), len(lists_by_file)),
@@ -1014,8 +1061,11 @@ def main():
                    "tex_orphan_keys": tex_orphans,
                    "tex_orphan_keys_by_file": tex_orphans_by_file,
                    "tex_uncited_keys": tex_uncited,
+                   "tex_uncited_by_context": {k: sorted(v) for k, v in
+                                              tex_uncited_by_context.items()},
                    "tex_unresolved": tex_unresolved,
                    "duplicate_entries": duplicate_entries,
+                   "duplicate_tex_keys": duplicate_tex_keys,
                    "order_violations": order_violations,
                    "suspect_brackets": suspect_brackets}, f, indent=2)
 

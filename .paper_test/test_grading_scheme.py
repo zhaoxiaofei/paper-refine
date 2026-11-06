@@ -337,7 +337,8 @@ FULL = [{"opponent_label": "v1", "score": 1, "reason": "target is better",
          "resolved": [{"check": "M8", "tier": "consistency", "severity": "minor",
                        "evidence": "Fig. 2: metric count now consistent"}],
          "introduced": [],
-         "checks": {c: "clean -- unit fixture" for c in np.JUDGE_COVERAGE_CHECKS}},
+         "checks": {**{c: "clean -- unit fixture" for c in np.JUDGE_COVERAGE_CHECKS},
+                    "M8": "findings -- unit fixture: the M8 row below"}},
         {"opponent_label": "v2", "score": 0, "reason": "no net difference",
          "basis": "none", "resolved": [], "introduced": [],
          "checks": {c: "clean -- unit fixture" for c in np.JUDGE_COVERAGE_CHECKS}}]
@@ -398,7 +399,7 @@ for label, c, want_err in rules:
 low_basis = comp(2, "formatting", MAJOR, [])
 _e, w = basis_problems(low_basis, "comparisons[0]", strict=True)
 check("C6 a basis that understates its own ledger is reported",
-      any("tier that decides this comparison" in x for x in w), str(w[:1]))
+      any("tier that decides this comparison" in x for x in _e), str(_e[:1]))
 
 # the stubs that drive the end-to-end suites must satisfy the strict contract
 sa_spec = importlib.util.spec_from_file_location(
@@ -659,12 +660,13 @@ check("E2 the +3 anchor states the deciding-tier requirement",
       and "includes a MAJOR defect resolved" in judge_flat)
 check("E2 the +2 anchor states the MINOR-run bound",
       "a run of MINOR rows reaches +2 and no further" in judge_flat)
-for score, rowset, want_err, label in (
-        (4, CRIT, True, "one critical row with +4 is rejected"),
-        (3, CRIT, False, "one critical row with +3 is accepted"),
-        (3, MAJOR, True, "one major row with +3 is rejected"),
-        (2, MAJOR, False, "one major row with +2 is accepted")):
-    e, _w = basis_problems(comp(score, "correctness", rowset, []), "comparisons[0]", strict=True)
+for score, rowset, row_basis, want_err, label in (
+        (4, CRIT, "correctness", True, "one critical row with +4 is rejected"),
+        (3, CRIT, "correctness", False, "one critical row with +3 is accepted"),
+        (3, MAJOR, "consistency", True, "one major row with +3 is rejected"),
+        (2, MAJOR, "consistency", False, "one major row with +2 is accepted")):
+    e, _w = basis_problems(comp(score, row_basis, rowset, []), "comparisons[0]",
+                           strict=True)
     check(f"E2 {label}", bool(e) is want_err, str(e[:1]))
 
 # E3: the writing rubric must refile a meaning-changing row as `correctness`.
@@ -768,13 +770,13 @@ check("F1 'a factual error is not automatically Critical' is stated",
 
 # F2: the basis names the DECIDING tier (the first tier whose net is not zero).
 mix = gcomp(2, "formatting", resolved=[grow("consistency", "major")])
-_e, w_basis = basis_problems(mix, "comparisons[0]", strict=True)
+e_basis, _w_basis = basis_problems(mix, "comparisons[0]", strict=True)
 check("F2 a basis that names a tier which does not decide is reported",
-      any("tier that decides this comparison" in x and "'consistency'" in x for x in w_basis),
-      str(w_basis[:1])[:160])
+      any("tier that decides this comparison" in x and "'consistency'" in x for x in e_basis),
+      str(e_basis[:1])[:160])
 _e2, w_basis2 = basis_problems(dict(mix, basis="consistency"), "comparisons[0]", strict=True)
-check("F2 the same sheet with the deciding tier's basis stays clean", not w_basis2,
-      str(w_basis2[:1]))
+check("F2 the same sheet with the deciding tier's basis stays clean",
+      not _e2 and not w_basis2, str(w_basis2[:1]))
 check("F2 the judge prompt defines the basis as the deciding tier",
       "the tier that DECIDES this comparison" in judge_flat2
       and "never a lower-priority tier" in judge_flat2)
@@ -823,8 +825,8 @@ e_cov2, _w_cov2 = np.judge_coverage_problems(gcomp(0, "none", checks=reasoned), 
 check("F4 a reasoned `unable` passes", not e_cov2, str(e_cov2[:1])[:160])
 all_unable = {c: "unable -- the corpus is image-only" for c in np.JUDGE_COVERAGE_CHECKS}
 e_cov3, w_cov3 = np.judge_coverage_problems(gcomp(0, "none", checks=all_unable), "c0", True)
-check("F4 an all-`unable` map is reported as a non-judgment",
-      not e_cov3 and any("judged nothing" in x for x in w_cov3), str(w_cov3[:1])[:160])
+check("F4 an all-`unable` map is reported as an abstention",
+      not e_cov3 and any("abstention" in x for x in w_cov3), str(w_cov3[:1])[:160])
 padded = {c: "clean -- unit fixture" for c in np.JUDGE_COVERAGE_CHECKS}
 padded["M01"] = padded.pop("M1")
 e_cov4, w_cov4 = np.judge_coverage_problems(gcomp(0, "none", checks=padded), "c0", True)

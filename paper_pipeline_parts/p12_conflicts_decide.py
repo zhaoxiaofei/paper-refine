@@ -9335,7 +9335,9 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         # `set-tiebreak-defect-floor`); reading today's config re-ranked a past
         # decision after an operator change (F18/F19). Old roots that predate
         # the record fall back to the current config.
-        agg = aggregate_round(ctx, r, field, dedup=rrec.get("dedup_mode"))
+        _recorded_rule = rrec.get("anti_regression_rule") or next(
+            (s.get("anti_regression_rule") for s in (rrec.get("stats") or {}).values()), None)
+        agg = aggregate_round(ctx, r, field, dedup=rrec.get("dedup_mode"), rule=_recorded_rule)
         # Keep every decided round's own raw-score file present and current, even
         # for roots whose round predates it (the same file `run` writes at
         # aggregation time).
@@ -9688,7 +9690,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             "are a named gap, not a clean result"]
     certification["submission_ready"] = readiness["submission_ready"]
     certification["package_findings"] = readiness["findings"]
-    cert_blockers = certification["blockers"]
+    record_anonymity_gaps(ctx, certification); cert_blockers = certification["blockers"]  # F-002
     cert_notes = certification["notes"]
     # The status document is a SIBLING of the directory and is written on every
     # `decide` (certified, provisional or refused), so the package is never

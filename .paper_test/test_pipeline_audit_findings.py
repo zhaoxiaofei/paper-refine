@@ -53,7 +53,7 @@ def make_version(root: Path, vid: str, when: float, prose: str, sandbox: str = N
     (rev / "manuscript-p.docx").write_bytes(b"PK\x03\x04 fake docx for " + vid.encode())
     (rev / "README.md").write_text(f"# {prose}\n")
     (rev / "CHANGELOG.md").write_text(f"# changelog\n{prose}\n")
-    (rev / "revision_report.json").write_text(json.dumps([{"id": "F-001", "verdict": "fixed"}]))
+    (rev / "revision_report.json").write_text(json.dumps([{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"}]))
     for p in [rev, *rev.rglob("*")]:
         os.utime(p, (when, when))
     return rev

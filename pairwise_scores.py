@@ -40,6 +40,9 @@ from pathlib import Path
 
 csv.field_size_limit(min(sys.maxsize, 10_000_000))
 
+# The pipeline's documented per-comparison integer scale.
+SCORE_MIN, SCORE_MAX = -4, 4
+
 # `paper_pipeline.py` writes BOTH frames of one judgment: the target's
 # `direction=own` row and the opponent's `direction=received` negation. Keeping
 # the latter in a directed matrix silently manufactures a judgment in the
@@ -249,11 +252,13 @@ def discover_csv_files(inputs: list[Path]) -> list[tuple[Path, str | None]]:
 def read_rows(path: Path, inline: str | None) -> list[dict[str, str]]:
     if inline is None:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            return list(csv.DictReader(handle))
+            # strict=True raises on an unterminated quoted field instead of
+            # returning a torn record as a complete one (F-084).
+            return list(csv.DictReader(handle, strict=True))
     # `splitlines()` fed newline-free fragments to DictReader, so a quoted
     # multiline `reason` (and its blank lines) was joined into one string. The
     # StringIO keeps the records' own line breaks.
-    return list(csv.DictReader(io.StringIO(inline)))
+    return list(csv.DictReader(io.StringIO(inline), strict=True))
 
 
 def opponent_of(row: dict[str, str]) -> str:
@@ -318,10 +323,12 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
         lambda: defaultdict(lambda: defaultdict(PairScores))
     )
     sources: dict[str, list[str]] = defaultdict(list)
-    seen: set[tuple] = set()
+    seen: dict[tuple, float] = {}
     directions_seen: set[str] = set()
     skipped_direction = 0
     skipped_incomplete = 0
+    skipped_out_of_range = 0
+    conflicting_scores = 0
     truncated = False
 
     for (path, inline), run in zip(files, run_names):
@@ -346,11 +353,19 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
             direction = (row.get("direction") or "").strip()
             if direction:
                 directions_seen.add(direction)
-            if own_only and direction and direction.lower() != "own":
+            if own_only and direction.lower() != "own":
+                # A missing direction is not an own judgment. The old truthy
+                # test silently admitted rows with no direction column (F-085).
                 skipped_direction += 1
                 continue
             if not member or not opponent or score is None or member == opponent:
                 skipped_incomplete += 1
+                continue
+            if not (float(score).is_integer() and SCORE_MIN <= score <= SCORE_MAX):
+                # The pipeline's raw credited score is an integer on the
+                # documented -4..+4 scale; 99 is not a stronger judgment
+                # (F-076).
+                skipped_out_of_range += 1
                 continue
             # A received row is the opponent's frame: when the caller asks to
             # keep both directions for audit, its credited value is the
@@ -376,14 +391,21 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
                 opponent,
                 judge,
                 judge_index,
-                score,
                 (row.get("sheet_target") or "").strip(),
             )
             # A bare judge identity ("", "") is not an identity: two blank-
             # identity rows can be two independent judgments, so they are kept.
-            if dedupe_key in seen and (judge or judge_index):
-                continue
-            seen.add(dedupe_key)
+            # The score is NOT part of the identity: one judge cannot cast both
+            # +4 and -4 for the same pair as two votes (F-071). A conflicting
+            # repeat is quarantined and counted, never averaged in.
+            if judge or judge_index:
+                if dedupe_key in seen:
+                    if seen[dedupe_key] != score:
+                        conflicting_scores += 1
+                    continue
+                seen[dedupe_key] = score
+            else:
+                seen[dedupe_key] = score
             # Keep this direction only. Never store (opponent, member) = -score.
             cubes[run][round_id][(member, opponent)].add(
                 score, judge or judge_index or "judge"
@@ -400,6 +422,8 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
         "directions": sorted(directions_seen),
         "skipped_direction": skipped_direction,
         "skipped_incomplete": skipped_incomplete,
+        "skipped_out_of_range": skipped_out_of_range,
+        "conflicting_scores": conflicting_scores,
         "agg": how,
         "pooled": pool_rounds,
     }
@@ -563,7 +587,7 @@ def add_description_sheet(workbook, cubes, index_rows, how: str) -> None:
         ("Row 1", "Column names. These are the opponent version ids."),
         ("Column A", "Row names. These are the version ids the score is credited to."),
         ("Scores", f"The cell in row R and column C is the {agg_word} of the raw credited values for that ordered pair. If more than one judge scored the pair, the cell comment lists each judge."),
-        ("Sign", "Positive means the row version was judged better than the column version. Negative means the row version was judged worse. Zero means the judges called them equal."),
+        ("Sign", "Positive means the row version was judged better than the column version. Negative means the row version was judged worse. Zero is only the aggregate: it does not mean the judges agreed (for example +4 and -4 average to 0); read n and the per-judge cell comment before treating a zero as equality."),
         ("Not symmetric", "A versus B is not the negative of B versus A. Each direction is its own judgment and can differ in size and in sign. If one direction was not judged, that cell is blank. The blank is never filled by flipping the sign of the other direction."),
         ("Diagonal", "An em dash. A version is not compared with itself."),
         ("Version ids", "Taken from member and opponent_id: orig, a2, i1, i2, w1, w2, r1_i3, and similar ids. The v1, v2, v3 values in opponent_label are not version names and are not used as row or column names."),
@@ -856,6 +880,12 @@ def main(argv: list[str] | None = None) -> None:
         print(f"skipped {notes['skipped_direction']} non-own rows")
     if notes["skipped_incomplete"]:
         print(f"skipped {notes['skipped_incomplete']} incomplete/self/non-numeric row(s)")
+    if notes.get("skipped_out_of_range"):
+        print(f"skipped {notes['skipped_out_of_range']} row(s) outside the integer "
+              f"{SCORE_MIN}..{SCORE_MAX} score scale")
+    if notes.get("conflicting_scores"):
+        print(f"skipped {notes['conflicting_scores']} conflicting repeat score(s) from the same "
+              f"judge for one pair")
     if notes["truncated"]:
         print("warning: input is a truncated head listing; scores cover only those lines")
     print_preview(cubes, args.agg)

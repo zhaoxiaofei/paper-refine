@@ -9,7 +9,8 @@ from __future__ import annotations
 # AGGREGATION (Section D -- pure deterministic code, no LLM arithmetic)
 # =====================================================================
 
-def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dict:
+def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
+                    rule: str = None) -> dict:
     """Collect the round's directed scores into each version's own frame.
 
     D1  V's own judges contribute score(V vs W) to V["own"][W]; W's judges
@@ -43,6 +44,11 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dic
     # (the 2026-10-28 audit's F19).
     if dedup is None:
         dedup = dedup_mode_of(ctx)
+    # The anti-regression RULE is frozen with the round exactly like `dedup`:
+    # replaying a past decision under a rule the operator changed afterwards
+    # re-ranked it (F-027). A caller that has the round record passes it in.
+    if rule is None:
+        rule = vs_original_rule_of(ctx)
     judges = round_judges(ctx, r)
     selection = judge_selection(ctx, r)          # empty = every session runs
     # Which judges run for each version (`--only` may select only some).
@@ -51,7 +57,8 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dic
                   for vid in field_ids}
     diags = {"sheets_used": 0, "sheets_expected": sum(per_judges.values()),
              "scores_collected": 0, "unresolved": [], "incomplete_sheets": [],
-             "superseded_sheets": [], "out_of_range_sheets": []}
+             "superseded_sheets": [], "out_of_range_sheets": [],
+             "abstained_comparisons": []}
     # Provenance of every FLAT-LIST entry, so reports/round<r>_raw_scores.csv can
     # show the exact numbers the median and the mean were computed from (one row
     # per frame entry: the target's own score, and the SAME integer negated into
@@ -107,6 +114,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dic
                 f"{old.get('id')} superseded by {rec.get('id')} for {slot[0]} judge "
                 f"j{slot[1]} (the newest sheet is used)")
         newest[slot] = rec
+    accepted_recs = []
     for rec in sheets:
         if newest.get((rec.get("target_id"), rec.get("judge_index"))) is not rec:
             continue
@@ -117,6 +125,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dic
         sj = rec.get("scores")
         if not isinstance(sj, dict):
             continue
+        accepted_recs.append(rec)
         lm = rec.get("label_map") or {}
         per[vid]["judges"] += 1
         diags["sheets_used"] += 1
@@ -134,6 +143,14 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dic
             if not (SCORE_MIN <= score <= SCORE_MAX):
                 diags["unresolved"].append(
                     f"{rec['id']}: score {score!r} for label {label!r} is out of range")
+                continue
+            if judge_comparison_abstained(comp):
+                # A sheet that says it examined nothing is not a vote: its zero
+                # does not enter the panel, and the missing directed scores make
+                # the version's panel incomplete (F-034).
+                diags["abstained_comparisons"].append(
+                    f"{rec['id']} vs {label}: every frozen check is `unable`; the "
+                    f"comparison is an abstention, not a judgment")
                 continue
             census_obs.append((rec.get("id"), vid, opp, comp))
             per[vid]["own"].setdefault(opp, []).append(int(score))
@@ -240,8 +257,8 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dic
             "vs_original_ties": sum(1 for x in vs_vals if x == 0),
             "vs_original_sign_p": _binomial_tail_p(sum(1 for x in vs_vals if x < 0),
                                                    sum(1 for x in vs_vals if x != 0)),
-            "anti_regression_rule": vs_original_rule_of(ctx),
-            "anti_regression_ok": anti_regression_verdict(ctx, vid, vs, vs_vals),
+            "anti_regression_rule": rule,
+            "anti_regression_ok": anti_regression_verdict(ctx, vid, vs, vs_vals, rule),
             "vs_base": vs_base,
             "vs_base_n": len(base_vals),
             # The raw directed scores of the incumbent pair: REPORTED (the margin
@@ -301,8 +318,12 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dic
     ranges = [max(vals) - min(vals) for vid in field_ids
               for vals in (per[vid].get("own") or {}).values() if len(vals) >= 2]
     pq["within_direction_range_max"] = max(ranges) if ranges else 0
-    for rec in ctx.runs(kind="judge", round_no=r):
-        if rec.get("status") != "done" or not isinstance(rec.get("scores"), dict):
+    for rec in accepted_recs:
+        # The SAME accepted roster scoring used: superseded, out-of-range and
+        # disabled sheets are already excluded above. Re-scanning every done
+        # sheet here let a superseded sheet change basis counts, calibration
+        # totals and judge means (F-053).
+        if not isinstance(rec.get("scores"), dict):
             continue
         vals = [c.get("score") for c in (rec["scores"].get("comparisons") or [])
                 if isinstance(c, dict) and is_int(c.get("score"))]
@@ -371,6 +392,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None) -> dic
             "stats": stats, "diagnostics": diags,
             "score_rows": score_rows, "issue_census": census,
             "issue_rows": issue_rows, "dedup_mode": dedup,
+            "anti_regression_rule": rule,
             "base_id": A1_ID, "base_rep": base_rep,
             "generated": utcnow()}
 
@@ -1246,6 +1268,8 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
         # what `decide` re-derives for this round (F18/F19).
         "tiebreak_defect_floor": tiebreak_defect_floor_of(ctx),
         "dedup_mode": agg.get("dedup_mode") or dedup_mode_of(ctx),
+        "anti_regression_rule": agg.get("anti_regression_rule")
+        or vs_original_rule_of(ctx),
         "pipeline_version": VERSION,
     })
     write_json_atomic(ctx.reports_dir / f"round{r}.json",
@@ -2730,12 +2754,39 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
         entry = ledger.get(rid) or {}
         _before_q = _repair_norm(entry.get("before") or row.get("wrong") or "")
         _after_q = _repair_norm(entry.get("after") or row.get("correct") or "")
-        if not _before_q or not _after_q or _before_q == _after_q:
+        # The quotes must describe THIS plan row: a plan for `n = 10 -> 20`
+        # cannot be discharged by quoting an unrelated `7 -> 9` edit in the
+        # same document (F-069).
+        _plan_wrong = _repair_norm(row.get("wrong") or "")
+        _plan_correct = _repair_norm(row.get("correct") or "")
+        if _plan_wrong and _plan_wrong not in _before_q:
+            bad.setdefault(rel, "the confirmed row's `before` quote does not contain the "
+                                "plan's `wrong` text/value")
+            continue
+        if _plan_correct and _plan_correct not in _after_q:
+            bad.setdefault(rel, "the confirmed row's `after` quote does not contain the "
+                                "plan's `correct` value")
             continue
         _text = _repair_file_text(cur / rel)
         if _text is None:
             continue
         _tn = _repair_norm(_text)
+        if not _before_q and _after_q:
+            # A pure INSERTION: the promised text must now be present, even
+            # though the file-level digest is unchanged because the edit was
+            # never applied (F-070).
+            if _after_q not in _tn:
+                bad.setdefault(rel, "the confirmed insertion is a no-op: its `after` "
+                                    "text is absent from the unchanged file")
+            continue
+        if _before_q and not _after_q:
+            # A pure DELETION: the quoted text must be gone.
+            if _before_q in _tn:
+                bad.setdefault(rel, "the confirmed deletion is a no-op: its `before` "
+                                    "text is still present in the unchanged file")
+            continue
+        if not _before_q or not _after_q or _before_q == _after_q:
+            continue
         if _before_q in _tn and _after_q not in _tn:
             bad.setdefault(rel, "the confirmed row is a no-op: its promised `after` "
                                 "text is absent and its `before` text is still present")

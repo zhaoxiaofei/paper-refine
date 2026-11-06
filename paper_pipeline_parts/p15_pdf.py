@@ -331,7 +331,10 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
                 # linked into the build workspace, exactly like a stage sandbox.
                 res = compile_latex_pdf(src, rel, out_pdf, link_evidence=True)
                 rec = {"rel": rel, "kind": "latex", "out": out_pdf.relative_to(ctx.root).as_posix(),
-                       "sha256": digest, "ok": bool(res.get("ok")), "tool": res.get("tool"),
+                       "sha256": digest,
+                       "out_sha256": (sha256_file(out_pdf)
+                                      if bool(res.get("ok")) and out_pdf.is_file() else ""),
+                       "ok": bool(res.get("ok")), "tool": res.get("tool"),
                        "pages": res.get("pages") or 0, "error": res.get("error")}
             docs.append(rec)
     for f in list_track_files(sources, exts=(".docx",)):
@@ -367,7 +370,10 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
                     shutil.rmtree(_tmp, ignore_errors=True)
             rec = {"rel": rel, "kind": "docx",
                    "out": out_pdf.relative_to(ctx.root).as_posix(),
-                   "sha256": f["digest"], "ok": bool(res.get("ok")),
+                   "sha256": f["digest"],
+                   "out_sha256": (sha256_file(out_pdf)
+                                  if bool(res.get("ok")) and out_pdf.is_file() else ""),
+                   "ok": bool(res.get("ok")),
                    "tool": res.get("tool"), "pages": res.get("pages") or 0,
                    "error": res.get("error"), "fallbacks": res.get("fallbacks")}
         docs.append(rec)
@@ -387,6 +393,8 @@ def _reuse_pdf_record(previous: dict, label: str, rel: str, digest: str,
     rec = previous.get((label, rel))
     if (rec and rec.get("ok") and rec.get("sha256") == digest and rec.get("kind") == kind
             and out_pdf.is_file() and out_pdf.stat().st_size > 0
+            and rec.get("out_sha256")
+            and rec.get("out_sha256") == sha256_file(out_pdf)
             and not pdf_signature_problem(out_pdf)):
         fresh = dict(rec)
         fresh["cached"] = True

@@ -6283,7 +6283,7 @@ def vs_original_rule_of(ctx) -> str:
     return raw if raw in ("median", "sign") else VS_ORIGINAL_RULE
 
 
-def anti_regression_verdict(ctx, vid: str, vs, vs_vals: list):
+def anti_regression_verdict(ctx, vid: str, vs, vs_vals: list, rule: str = None):
     """Eligibility against the pristine original under the configured rule.
 
     None for the original's own row (there is nothing to regress against); False
@@ -6295,7 +6295,7 @@ def anti_regression_verdict(ctx, vid: str, vs, vs_vals: list):
         return None
     if vs is None:
         return False
-    if vs_original_rule_of(ctx) == "sign":
+    if (rule or vs_original_rule_of(ctx)) == "sign":
         non_tied = sum(1 for x in vs_vals if x != 0)
         losses = sum(1 for x in vs_vals if x < 0)
         return not (_binomial_tail_p(losses, non_tied) < VS_ORIGINAL_ALPHA)

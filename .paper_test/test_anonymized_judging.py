@@ -286,11 +286,22 @@ def test_judge_views_are_anonymous():
           str([p for p in all_paths if not re.fullmatch(anon_re, p)][:3]))
     # the CONTENT and the file types survive (after the view transform:
     # references rewritten, metadata sanitized)
+    # `judge_sandbox()` returns the first materialized judge, whose target is
+    # the pristine original (not `a1`). The view identity is now path-sensitive,
+    # so the expected digest must be computed for THAT target and judge index
+    # (F-015 exposed the old a1/actual-orig mismatch).
+    _jrec = next(r for r in ctx.runs(kind="judge")
+                 if ctx.sandbox_of(r) == sb)
+    _tvid = str(_jrec.get("target_id"))
+    _jidx = int(_jrec.get("judge_index") or 1)
     want = nb.expected_view_digest(
-        ctx, 1, "a1", f"{nb.judge_view_seed_for(ctx, 1, 'a1', 1)}|target")
+        ctx, 1, _tvid, f"{nb.judge_view_seed_for(ctx, 1, _tvid, _jidx)}|target")
     target_files = [p for p in (sb / "target").rglob("*") if p.is_file()]
-    got = sorted(nb.sha256_file(p) for p in target_files)
-    check("the anonymous target carries exactly the base's documents (content multiset)",
+    # The view identity is path-sensitive: the same bytes under the wrong
+    # anonymous name is not the same view (F-015).
+    got = sorted((p.relative_to(sb / "target").as_posix(), nb.sha256_file(p))
+                 for p in target_files)
+    check("the anonymous target carries exactly the base's documents (path + content)",
           got == want, f"{len(got)} vs {len(want)} document(s)")
     check("the extensions (file types) are preserved",
           sorted(p.suffix for p in target_files)

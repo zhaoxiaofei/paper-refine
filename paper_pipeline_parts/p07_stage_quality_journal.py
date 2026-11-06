@@ -2027,7 +2027,7 @@ def tier_net_scores(items) -> dict:
     for side, tier, severity, _e, cid, _ai in items:
         weight = TIER_ROW_WEIGHTS.get(tier, {}).get(severity, 0)
         signed = weight if side == "resolved" else -weight
-        if tier == "formatting" and cid in LENGTH_GUARD_CHECKS:
+        if tier == "formatting" and _is_length_guard_check(cid):
             length_net += signed
         else:
             raw[tier] = raw.get(tier, 0) + signed
@@ -2086,6 +2086,12 @@ DEDUP_MIN_WORDS = 7
 DEDUP_FUZZY_THRESHOLD = 0.8
 DEDUP_LINE_RE = re.compile(r"(?:\blines?\b|\bln\b|\bl\.)\s*[:#]?\s*(\d+)\b", re.I)
 DEDUP_WORD_RE = re.compile(r"[0-9A-Za-z]+")
+# The document the excerpt was taken from. A line number alone is ambiguous
+# between two files; without this a repeated sentence at the same line in two
+# documents merged as one defect (F-009).
+DEDUP_DOC_RE = re.compile(
+    r"([\w][\w./-]*\.(?:md|markdown|txt|tex|ltx|docx|doc|rtf|pdf|csv|tsv|json|py|bib))"
+    r"(?::\d+|\b)", re.I)
 _NUMERIC_CHECK_RE = re.compile(r"^M0*(\d+)$", re.I)
 
 
@@ -2116,11 +2122,13 @@ def dedup_class_id(check) -> str:
 
 
 def dedup_location_of(evidence) -> tuple:
-    """(line or None, word tuple) parsed from one ledger row's evidence text."""
+    """(line or None, word tuple, document or None) parsed from one row."""
     text = " ".join(str(evidence or "").split())
     m = DEDUP_LINE_RE.search(text)
     line = int(m.group(1)) if m else None
-    return line, tuple(w.lower() for w in DEDUP_WORD_RE.findall(text))
+    d = DEDUP_DOC_RE.search(text)
+    doc = d.group(1).replace("\\", "/").lower() if d else None
+    return line, tuple(w.lower() for w in DEDUP_WORD_RE.findall(text)), doc
 
 
 def dedup_fuzzy_similarity(a_words, b_words) -> float:
@@ -2131,19 +2139,27 @@ def dedup_fuzzy_similarity(a_words, b_words) -> float:
     return len(a & b) / len(a | b)
 
 
-def dedup_rows_match(class_a, loc_a, class_b, loc_b, threshold: float = None) -> bool:
+def dedup_rows_match(class_a, loc_a, class_b, loc_b, severity_a=None,
+                     severity_b=None, threshold: float = None) -> bool:
     """True when two rows are the SAME defect under the structured key.
 
-    Requires: same defect class, BOTH line numbers present and EQUAL, both
-    excerpts at least DEDUP_MIN_WORDS words, and token-set Jaccard >= threshold.
-    A row with NO check id has no defect class, so it never merges: the key
-    would be incomplete.
+    Requires: same defect class, the SAME severity, BOTH line numbers present
+    and EQUAL, both excerpts at least DEDUP_MIN_WORDS words, and token-set
+    Jaccard >= threshold. When both rows name a document (a `file.ext:line`
+    token in the evidence), the documents must be EQUAL: a line number alone is
+    ambiguous between two documents. A row with NO check id has no defect class
+    and never merges. A severity disagreement is an adjudication, never a merge
+    whose winner depends on input order (F-009).
     """
     if not class_a or not class_b or class_a != class_b:
         return False
-    line_a, words_a = loc_a
-    line_b, words_b = loc_b
+    if severity_a != severity_b:
+        return False
+    line_a, words_a, doc_a = loc_a
+    line_b, words_b, doc_b = loc_b
     if line_a is None or line_b is None or line_a != line_b:
+        return False
+    if doc_a and doc_b and doc_a != doc_b:
         return False
     if len(words_a) < DEDUP_MIN_WORDS or len(words_b) < DEDUP_MIN_WORDS:
         return False
@@ -2165,8 +2181,8 @@ def dedup_same_place(loc_a, loc_b) -> bool:
 
 def dedup_excerpts_match(loc_a: tuple, loc_b: tuple, threshold: float = None) -> bool:
     """Both excerpts carry DEDUP_MIN_WORDS and overlap at the census threshold."""
-    _line_a, words_a = loc_a
-    _line_b, words_b = loc_b
+    _line_a, words_a = loc_a[0], loc_a[1]
+    _line_b, words_b = loc_b[0], loc_b[1]
     if len(words_a) < DEDUP_MIN_WORDS or len(words_b) < DEDUP_MIN_WORDS:
         return False
     thr = DEDUP_FUZZY_THRESHOLD if threshold is None else float(threshold)
@@ -2271,20 +2287,23 @@ def build_issue_census(observations, field_ids, sessions_expected=None,
                 class_id = dedup_class_id(check)
                 loc = dedup_location_of(evidence)
                 entries = accepted.setdefault((vid, src), [])
-                for kept_class, kept_loc, kept_sess in entries:
+                for kept_class, kept_loc, kept_sess, kept_severity in entries:
                     if dedup_rows_match(class_id, loc, kept_class, kept_loc,
+                                        severity, kept_severity,
                                         threshold=dedup_threshold):
                         effective = False
                         c["tiers"][tier][severity]["merged_" + src] += 1
                         c["dedup_audit"].append({
                             "version": vid, "source": src, "session": str(sess),
-                            "class": class_id, "line": loc[0],
+                            "class": class_id, "line": loc[0], "document": loc[2],
+                            "severity": severity,
                             "excerpt": " ".join(str(evidence or "").split())[:200],
                             "kept_session": str(kept_sess),
+                            "kept_severity": kept_severity,
                             "kept_excerpt": " ".join(kept_loc[1])[:200]})
                         break
                 else:
-                    entries.append((class_id, loc, sess))
+                    entries.append((class_id, loc, sess, severity))
             if effective:
                 c["tiers"][tier][severity][src] += 1
     n_expected = (int(sessions_expected) if is_int(sessions_expected) else None)
@@ -2413,13 +2432,14 @@ def build_issue_ledger_rows(observations, field_ids, dedup: str = "off",
                 class_id = dedup_class_id(check)
                 loc = dedup_location_of(evidence)
                 entries = accepted.setdefault((vid, src), [])
-                for kept_class, kept_loc, kept_sess in entries:
+                for kept_class, kept_loc, kept_sess, kept_severity in entries:
                     if dedup_rows_match(class_id, loc, kept_class, kept_loc,
+                                        severity, kept_severity,
                                         threshold=dedup_threshold):
                         counted, merged_into = False, str(kept_sess)
                         break
                 else:
-                    entries.append((class_id, loc, sess))
+                    entries.append((class_id, loc, sess, severity))
             rows.append({
                 "session": str(sess), "target_version": target, "peer_version": opp,
                 "version": vid, "source": src, "side": side, "check": check,
@@ -2543,6 +2563,40 @@ def _frozen_check_id(raw) -> str:
     return f"M{int(m.group(1))}" if m else cid
 
 
+def _coverage_disposition(text: str):
+    """The leading disposition token, or None.
+
+    The old `startswith(JUDGE_DISPOSITIONS)` matched `cleanup`/`findingsish`
+    as `clean`/`findings`: only a whole first word is a disposition (F-052).
+    """
+    m = re.match(r"^(?:" + "|".join(JUDGE_DISPOSITIONS) + r")(?![a-z0-9_])",
+                 str(text or "").strip().lower())
+    return m.group(0) if m else None
+
+
+def judge_comparison_abstained(comp) -> bool:
+    """True when a comparison disposed every check as `unable` (a non-judgment)."""
+    checks = comp.get("checks") if isinstance(comp, dict) else None
+    if not isinstance(checks, dict) or not checks:
+        return False
+    return all(_coverage_disposition(v) == "unable" for v in checks.values())
+
+
+def _is_length_guard_check(cid: str) -> bool:
+    """True for M18/M19 and their near-miss/padded spellings.
+
+    The length cap used an exact set membership, so a mistyped check id turned
+    a caption-length row into an ordinary scoring row and the formatting-minor
+    guard never ran (F-026). The id is first mapped onto the FROZEN vocabulary
+    (`_frozen_check_id`), so every spelling the validator already reads as M19
+    -- including the documented padded `M019` -- enters the same guard; an
+    unrecognized suffix (`M19x`, `M18.1`) still matches on the numeric core.
+    """
+    cid = _frozen_check_id(cid)
+    return str(cid or "").upper() in LENGTH_GUARD_CHECKS or bool(
+        re.match(r"^M(?:18|19)(?![0-9])", str(cid or "").upper()))
+
+
 def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
     """(errors, warnings) for one comparison's per-opponent check coverage.
 
@@ -2565,26 +2619,47 @@ def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
              f"requires one disposition per frozen check id for EVERY opponent "
              f"({', '.join(JUDGE_COVERAGE_CHECKS)})")
         return out_e, out_w
-    have, seen = {}, set()
+    have, seen = {}, {}
+    ledger_rows = []
+    for _side in ("resolved", "introduced"):
+        _raw = comp.get(_side)
+        if isinstance(_raw, list):
+            ledger_rows.extend(row for row in _raw if isinstance(row, dict))
     for raw_id, raw_val in checks.items():
         cid = _frozen_check_id(raw_id)
         if cid in seen:
-            out_w.append(f"{where}.checks lists {cid!r} twice")
-        seen.add(cid)
+            # M1 and M01 name the same check. Keeping the later value made the
+            # verdict depend on dict order and silently dropped the first
+            # disposition; the second spelling is a written conflict, never a
+            # replacement (F-051).
+            emit(f"{where}.checks lists {raw_id!r} and {seen[cid]!r} under the same "
+                 f"normalized check {cid!r}; one disposition per check id")
+            continue
+        seen[cid] = raw_id
         text = str(raw_val or "").strip().lower()
         if not text:
             emit(f"{where}.checks[{cid!r}] is empty: state one of "
                  f"{'/'.join(JUDGE_DISPOSITIONS)} for every frozen check id")
             continue
-        if not text.startswith(JUDGE_DISPOSITIONS):
+        disp = _coverage_disposition(text)
+        if disp is None:
             emit(f"{where}.checks[{cid!r}] = {raw_val!r} is not a disposition: it must start "
-                 f"with one of {'/'.join(JUDGE_DISPOSITIONS)}")
+                 f"with one of {'/'.join(JUDGE_DISPOSITIONS)} as a whole word")
             continue
         if cid not in JUDGE_COVERAGE_CHECKS:
             out_w.append(f"{where}.checks names {cid!r}, which is not a frozen check id of this "
                          f"round; it is ignored")
             continue
-        if text.startswith("clean"):
+        if disp == "clean":
+            under = sorted({_frozen_check_id(row.get("check")) for row in ledger_rows
+                            if _frozen_check_id(row.get("check")) == cid})
+            if under:
+                # A check with a defect row cannot be "examined, nothing
+                # found": the sheet scored the defect and then certified its
+                # own check clean (F-024).
+                emit(f"{where}.checks[{cid!r}] = {raw_val!r} marks {cid!r} clean, but the "
+                     f"ledger files a defect under that check; dispose it as `findings` "
+                     f"with that row, or correct the row's `check` cell")
             tail = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
             basis = re.search(r"(?i)\bbasis\s*:\s*(.*)$", tail)
             reason = basis.group(1) if basis else tail
@@ -2592,27 +2667,22 @@ def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
                 emit(f"{where}.checks[{cid!r}] = {raw_val!r} states no basis; `clean` means "
                      f"'examined, nothing found', so add the one-line basis "
                      f"(e.g. 'clean -- M3 sweep row: no change')")
-        if text.startswith("unable") and len(text.split()) < 3:
+        if disp == "unable" and len(text.split()) < 3:
             emit(f"{where}.checks[{cid!r}] = {raw_val!r} states no reason; `unable` means "
                  f"'examined, could not be judged', so say why (the keyword plus at least two "
                  f"words, e.g. 'unable -- the figure is image-only')")
-        if text.startswith("findings"):
-            ledger_rows = [row for row in (list(comp.get("resolved") or [])
-                                           + list(comp.get("introduced") or []))
-                           if isinstance(row, dict)]
+        if disp == "findings":
             if not ledger_rows:
                 emit(f"{where}.checks[{cid!r}] = {raw_val!r} claims findings but both "
                      f"`resolved` and `introduced` are empty; the items it examined must "
                      f"appear in one of those ledgers (or the disposition is `clean`/`unable`)")
             else:
                 row_checks = {_frozen_check_id(row.get("check")) for row in ledger_rows}
-                named = any(
-                    bool(str(row.get("check") or "").strip()) and re.search(
-                        r"(?i)(?<![a-z0-9_-])"
-                        + re.escape(str(row.get("check")).strip())
-                        + r"(?![a-z0-9_-])", text)
-                    for row in ledger_rows)
-                if cid not in row_checks and not named:
+                # A mention of a row's id in the disposition text is not a
+                # binding: every check could cite the one M1 row and pass
+                # (F-031). The row's own normalized `check` cell must name the
+                # check this disposition reports.
+                if cid not in row_checks:
                     emit(f"{where}.checks[{cid!r}] = {raw_val!r} claims findings but no "
                          f"`resolved`/`introduced` row names {cid!r} in its `check` cell "
                          f"(or in this disposition); bind the row this check reports, or "
@@ -2622,10 +2692,16 @@ def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
     if missing:
         emit(f"{where}.checks omits {len(missing)} frozen check id(s): {', '.join(missing[:8])}"
              + (" ..." if len(missing) > 8 else ""))
-    if have and not any(v.startswith(("clean", "findings")) for v in have.values()):
-        out_w.append(f"{where}.checks carries no `clean` and no `findings` entry -- every frozen "
-                     f"id it disposed is `unable`; the session judged nothing, so its zeros are "
-                     f"non-judgments, not agreements")
+    if have and not any(_coverage_disposition(v) in ("clean", "findings")
+                        for v in have.values()):
+        # Every check abstained: record it, and `aggregate_round` excludes the
+        # comparison from the panel's completed coverage instead of counting
+        # its zero as agreement (F-034). It is NOT a postcheck error: a scoped
+        # repair may legitimately complete a missing map with `unable` rows, and
+        # a comparison it cannot judge must be an abstention, not a failed run.
+        out_w.append(f"{where}.checks carries no `clean` and no `findings` entry -- every "
+                     f"frozen id it disposed is `unable`; the session judged nothing, so "
+                     f"this comparison is recorded as an abstention, not an agreement")
     return out_e, out_w
 
 
@@ -2712,7 +2788,7 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
             if len(norm[2].split()) > EVIDENCE_MAX_WORDS:
                 out_w.append(f"{where}.{side}[{k}].evidence is {len(norm[2].split())} words "
                              f"(schema: <={EVIDENCE_MAX_WORDS})")
-            if cid in LENGTH_GUARD_CHECKS and (norm[0] != "formatting" or norm[1] != "minor"):
+            if _is_length_guard_check(cid) and (norm[0] != "formatting" or norm[1] != "minor"):
                 emit(f"{prefix}{where}.{side}[{k}]: a length/caption row (`{cid}`) is a "
                      f"formatting-tier MINOR row -- length may enter a comparison by at most +-1 "
                      f"and is never a scoring tier of its own; got tier {norm[0]!r}, severity "
@@ -2782,9 +2858,12 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
                          f"'none' is for a clean 0 with no item on either side -- the deciding "
                          f"tier is {deciding!r}")
         elif basis != deciding:
-            out_w.append(f"{where}.basis is {basis!r} but the tier that decides this comparison "
-                         f"is {deciding!r} (the FIRST tier whose net is not zero; for a 0, the "
-                         f"highest-priority tier in which the two versions differ)")
+            # The prompt makes the exact deciding tier mandatory; a warning let
+            # a current-contract sheet name the wrong tier and still pass
+            # (F-058). Legacy sheets keep the warning.
+            emit(f"{where}.basis is {basis!r} but the tier that decides this comparison "
+                 f"is {deciding!r} (the FIRST tier whose net is not zero; for a 0, the "
+                 f"highest-priority tier in which the two versions differ)")
     return out_e, out_w
 
 
@@ -3476,8 +3555,10 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
     The `after` check does not depend on the `before` check: when the pre-revision
     package is unavailable the `before` span cannot be verified, but the revised
     text is still present in `target/` and must be quoted exactly. Short values
-    (fewer than four words) are labels, not spans, and binary formats the
-    extractor cannot read are skipped rather than guessed at. This is the binding
+    are checked too: a claimed `50 mM -> 25 mM` edit is still a claim about the
+    document, not a label. Binary formats the extractor cannot read are skipped
+    rather than guessed at, and an edit whose two sides are identical changed
+    nothing. This is the binding
     the map schema promised and no validator performed: a real path with invented
     hunk contents used to pass an addressed response (PR151-036).
     """
@@ -3496,14 +3577,29 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
             if not f:
                 continue
             before, after = norm(c.get("before")), norm(c.get("after"))
-            if len(before.split()) >= 4 and prev_available:
+            if not str(c.get("location") or "").strip():
+                problems.append(
+                    f"response row {cid!r}: the change to {f!r} names no `location`; the "
+                    f"claimed edit must be locatable in the document it changes")
+            if before and after and before == after:
+                # An edit whose two sides are the same sentence changed nothing,
+                # yet it used to pass as both the pre- and the post-image (F-033).
+                problems.append(
+                    f"response row {cid!r}: the change to {f!r} quotes the SAME text as "
+                    f"`before` and `after`; an edit must show the revised wording (a concern "
+                    f"with no text change is `already-addressed`, `planned` or `manual`)")
+            # A short value (`50 mM`, a p-value, a cohort label) is still a claimed
+            # edit, not an unverifiable label: checking only four-plus-word spans
+            # let an invented `50 mM -> 25 mM` pair pass (F-032). Presence is
+            # required wherever the corresponding package is available.
+            if before and prev_available:
                 ptext = _response_file_text(prev / f)
                 if ptext is not None and before not in norm(ptext):
                     problems.append(
                         f"response row {cid!r}: the change's `before` span is not present in "
                         f"previous_package/{f}; quote the pre-revision text verbatim (no "
                         f"ellipsis, no summary)")
-            if len(after.split()) >= 4:
+            if after:
                 ttext = _response_file_text(target / f)
                 if ttext is not None and after not in norm(ttext):
                     problems.append(
@@ -3853,11 +3949,13 @@ THE FINDING LIST (the revision session consumes it):
       concern     the concern id
   * When the corpus carries the false-positive-filtered LLM review
     (`feedback/llm/`), add one `coverage` row with `check`: "LLM-pre-filter" for
-    the upstream pre-filter: name it and state that the classes it dropped are a
-    named gap, never a clean result.
+    the upstream pre-filter: name it and list the classes it dropped as
+    `gap: <classes>` (or `cannot identify` when it published no such list),
+    never a clean result.
   * The scoped review covers ONLY the admitted concerns: add one `coverage` row
-    with `check`: "scope" naming that scope and stating that every class outside
-    the ledger is a named gap, not a clean result.
+    with `check`: "scope" naming that scope and listing the classes it excludes
+    as `gap: <classes>` (or `cannot identify` when the material does not let you
+    name them), not a clean result. A bare "gap" is not coverage.
   * guided_review/artifacts/JF_concerns.md — a copy of that ledger table for the review
     artifacts (the canonical copy is `concerns/JF_concerns.md`).
   * guided_review/findings.md — the findings in the review's markdown shape.
@@ -3957,8 +4055,8 @@ ABSOLUTE RULES:
     content), `after` is empty, and the file must no longer exist in target/.
     The letter's `**Changes:**` line uses the same pre-revision path; do not
     pretend the deleted file is still shipped, and do not cite it as new data;
-  * `"before"` and `"after"` are VERBATIM CONTIGUOUS SPANS, not summaries: when
-    each is four or more words, `before` must occur in
+  * `"before"` and `"after"` are VERBATIM CONTIGUOUS SPANS, not summaries: every
+    non-empty span (however short) must occur in
     `previous_package/<file>` (when that package is staged) and `after` must
     occur in `target/<file>`. No ellipsis, no paraphrase, no joined fragments.
     Omit a side only for a pure insertion (`before` empty) or a pure deletion
@@ -4113,6 +4211,22 @@ every `to-fix`/`manual` row must be answered.
 
 def _norm_ws(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _complete_source_unit(needle: str, hay: str) -> bool:
+    """True when `needle` is a whole line or a whole sentence of `hay`.
+
+    Used only to license a short concern quote: the minimum length exists to
+    reject fragments, not a complete one-word instruction like `Retain.`.
+    """
+    needle = " ".join(str(needle or "").split())
+    if not needle:
+        return False
+    lines = [" ".join(line.split()) for line in str(hay or "").splitlines()]
+    if needle in lines:
+        return True
+    flat = " ".join(str(hay or "").split())
+    return needle in [s.strip() for s in re.split(r"(?<=[.!?])\s+", flat)]
 
 
 def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict:
@@ -4301,8 +4415,9 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
                         f"under feedback/files/ or feedback/llm/files/ (name the feedback "
                         f"file the quote comes from)")
         quote = _norm_ws(row.get("quote"))
-        if len(quote) < 8:
-            errs.append(f"concern {cid}: quote is missing/too short (a verbatim <=300-char "
+        short = bool(quote) and len(quote) < 8
+        if not quote:
+            errs.append(f"concern {cid}: quote is missing (a verbatim <=300-char "
                         f"excerpt is required)")
         elif len(quote) > 300:
             errs.append(f"concern {cid}: quote is {len(quote)} characters; the ledger's limit "
@@ -4335,12 +4450,25 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
                     pos = hay.find(needle, pos + 1)
                 return False
 
-            if not named or not _boundary_match(quote, named):
+            if short and named and _complete_source_unit(quote, named):
+                # A complete, verified source unit may legitimately be shorter
+                # than eight characters (`Retain.`): the minimum is for PARTIAL
+                # excerpts, not for the whole instruction (F-081).
+                pass
+            elif short:
+                errs.append(f"concern {cid}: quote is too short to be a partial excerpt "
+                            f"({len(quote)} characters); a short quote is accepted only when it "
+                            f"is the COMPLETE sentence/line in the named source file")
+            elif not named or not _boundary_match(quote, named):
                 errs.append(f"concern {cid}: the quote is not verbatim in {where} its `source` "
                             f"names ({cited!r}) -- checked whitespace-normalised, on word "
                             f"boundaries, against that file alone; a mid-word fragment, a "
                             f"paraphrase, a quote from another file in the same stream, or a "
                             f"quote from the other stream fails here")
+        elif short:
+            errs.append(f"concern {cid}: quote is too short to be a partial excerpt "
+                        f"({len(quote)} characters) and no source file could be checked to "
+                        f"prove it is a complete unit")
         action = str(row.get("action") or "").strip()
         if action not in JOURNAL_CONCERN_ACTIONS:
             errs.append(f"concern {cid}: action {action!r} is not one of "
@@ -4548,11 +4676,12 @@ def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) ->
 def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
     """The Rule 8 named-gap rows the scoped concerns prompt requires.
 
-    One row (`check` = "scope") must name the admitted scope and say every class
-    outside the ledger is a named gap; when the corpus carries the pre-filtered
-    LLM review, a second row (`check` = "LLM-pre-filter") must name that
-    upstream pre-filter and its dropped classes. A row that does not name the
-    required thing, or that denies a gap, does not satisfy the gate.
+    One row (`check` = "scope") must name the admitted scope and LIST the
+    excluded classes (`gap: <classes>`, or `cannot identify` when they cannot
+    be named); when the corpus carries the pre-filtered LLM review, a second row
+    (`check` = "LLM-pre-filter") does the same for that upstream filter. A row
+    that only says the word "gap", or that denies a gap, does not satisfy the
+    gate.
     """
     rows = fj.get("coverage") if isinstance(fj, dict) else None
     rows = [r for r in (rows or []) if isinstance(r, dict)] if isinstance(rows, list) else []
@@ -4566,10 +4695,36 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
     # "not a gap" / "no gap" is the opposite of the required statement; a bare
     # substring test would accept it.
     gap_denied = re.compile(r"\b(?:not|no|never|without)\s+(?:an?\s+)?(?:named\s+)?gaps?\b")
+    # A row that merely says the word "gap" is not a named gap: the contract
+    # asks for the EXCLUDED classes. The row must list them (`gap: <classes>`)
+    # or state that the upstream filter cannot identify them (F-036). A colon
+    # with no payload, or a placeholder such as `none`/`n/a`/`nothing`/`-`, is
+    # a generic mention and not a list (R04).
+    gap_list = re.compile(r"\bgaps?\s*:\s*(?P<payload>.+)", re.I)
+    gap_placeholder = re.compile(r"^(?:none|n/?a|nothing|-+|\.+)$", re.I)
+    gap_unknown = re.compile(
+        r"\b(?:cannot|can\'t|could not|unable to|not able to)\s+"
+        r"(?:identify|name|enumerate|determine)\b", re.I)
+
+    def named_gap_payload(field: str) -> bool:
+        """Does one row FIELD's `gap:` carry class text (not a placeholder)?"""
+        for m in gap_list.finditer(field.lower()):
+            payload = m.group("payload").strip().strip(" \t.,;:`'\"")
+            if payload and not gap_placeholder.match(payload):
+                return True
+        return False
 
     def states_gap(wanted) -> bool:
-        return any(wanted(name(r)) and "gap" in text(r)
-                   and not gap_denied.search(text(r)) for r in rows)
+        for r in rows:
+            if not wanted(name(r)):
+                continue
+            fields = [str(v) for v in r.values() if isinstance(v, str)]
+            t = text(r)
+            if "gap" not in t or gap_denied.search(t):
+                continue
+            if gap_unknown.search(t) or any(named_gap_payload(f) for f in fields):
+                return True
+        return False
 
     errs = []
     if not states_gap(lambda n: n == "scope"):
@@ -4835,18 +4990,20 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None) -> list:
     """
     revised_paras = {}
     for rel, _line, text in deletion_audit_paragraphs(revised):
-        revised_paras.setdefault(rel, []).append(_deleted_para_norm(text).lower())
-    revised_norm = {para for parts in revised_paras.values() for para in parts}
+        # Case is part of the identity: lowercasing made `50 mM` and `50 MM`
+        # (or a case-only gene/unit edit) compare equal, so a fact-changing
+        # edit produced no deletion-audit row (F-059).
+        revised_paras.setdefault(rel, []).append(_deleted_para_norm(text))
     revised_join = {rel: " ".join(parts) for rel, parts in revised_paras.items()}
     exempt = {}
     for document, sentence in exempt_removed or ():
-        norm = _deleted_para_norm(sentence).lower()
+        norm = _deleted_para_norm(sentence)
         if norm:
             exempt.setdefault(str(document), []).append(norm)
     rows, seen = [], set()
     for rel, line, text in deletion_audit_paragraphs(base):
         norm = _deleted_para_norm(text)
-        low = norm.lower()
+        low = norm
         removed_here = exempt.get(rel, [])
         if any(low == sentence for sentence in removed_here):
             continue
@@ -4860,9 +5017,12 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None) -> list:
                 # The rest of the paragraph survives: the only deleted text was
                 # the pipeline's own dangling-reference sentence.
                 continue
-        if low in revised_norm or low in seen:
+        # A paragraph must survive in ITS OWN document. The package-wide set
+        # treated a copy in another document as proof the local one survived
+        # (F-061); a cross-document move is now a row the auditor disposes.
+        if low in revised_paras.get(rel, ()) or (rel, low) in seen:
             continue
-        seen.add(low)
+        seen.add((rel, low))
         rows.append({"document": rel, "line": line, "paragraph": norm})
     return rows
 
@@ -4892,7 +5052,11 @@ def _deletion_audit_identity(value) -> str:
     # pipe. The old `.replace("\\|", "|")` on the RAW value did exactly that
     # and left the seed cell double-escaped (`\\\\|`), which the splitter read
     # as a backslash plus a cell separator (PR151-008).
-    return re.sub(r"\s+", " ", str(value or "")).strip()[:1200]
+    # The identity must survive the Markdown cell: `md_table_cell` trims the
+    # cell, so a 1,200-character cut that lands on a space would decode one
+    # character shorter than the fresh expectation. Normalise both sides to the
+    # same trailing-whitespace-free form.
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:1200].rstrip()
 
 
 def _deletion_audit_ref(index: int, row) -> str:

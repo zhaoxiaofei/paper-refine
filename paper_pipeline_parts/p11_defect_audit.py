@@ -82,36 +82,80 @@ Write only `audit.json`; do not modify any other file.
 """)
 
 
+_DEFECT_AUDIT_LABELS = {
+    "tp": "TP", "true_positive": "TP", "true positive": "TP", "true": "TP",
+    "pass": "TP", "ok": "TP",
+    "fp": "FP", "false_positive": "FP", "false positive": "FP", "false": "FP",
+    "fail": "FP",
+    "unverified": "UNVERIFIED", "unknown": "UNVERIFIED",
+    "uncertain": "UNVERIFIED", "unable": "UNVERIFIED",
+}
+
+
+def _defect_audit_row_label(item):
+    """(label or None, reason) for one audit row."""
+    if not isinstance(item, dict):
+        return None, ""
+    raw = item.get("label", item.get("verdict"))
+    if isinstance(raw, bool):
+        label = "TP" if raw else "FP"
+    else:
+        label = _DEFECT_AUDIT_LABELS.get(" ".join(str(raw or "").split()).lower())
+    reason = " ".join(str(item.get("reason") or item.get("basis") or "").split())[:400]
+    return label, reason
+
+
 def _normalize_defect_audit(data, valid_ids) -> dict:
     """{defect_id: (label, reason)} from the auditor's audit.json (junk dropped)."""
     out = {}
     rows = data.get("verdicts") if isinstance(data, dict) else data
     if not isinstance(rows, list):
         return out
-    label_map = {
-        "tp": "TP", "true_positive": "TP", "true positive": "TP", "true": "TP",
-        "pass": "TP", "ok": "TP",
-        "fp": "FP", "false_positive": "FP", "false positive": "FP", "false": "FP",
-        "fail": "FP",
-        "unverified": "UNVERIFIED", "unknown": "UNVERIFIED",
-        "uncertain": "UNVERIFIED", "unable": "UNVERIFIED",
-    }
     for item in rows:
         if not isinstance(item, dict):
             continue
         did = str(item.get("defect_id") or item.get("id") or "").strip()
         if did not in valid_ids or did in out:
             continue
-        raw = item.get("label", item.get("verdict"))
-        if isinstance(raw, bool):
-            label = "TP" if raw else "FP"
-        else:
-            label = label_map.get(" ".join(str(raw or "").split()).lower())
+        label, reason = _defect_audit_row_label(item)
         if label is None:
             continue
-        reason = " ".join(str(item.get("reason") or item.get("basis") or "").split())[:400]
         out[did] = (label, reason)
     return out
+
+
+def _defect_audit_coverage(data, valid_ids, verdicts) -> dict:
+    """What the submitted audit did and did not cover.
+
+    `_normalize_defect_audit` keeps the first duplicate so the caller can show
+    what was said, but a duplicate is a CONFLICT, not a vote: the run is not a
+    successful audit unless every submitted id has exactly one valid verdict and
+    a reason (F-028).
+    """
+    rows = data.get("verdicts") if isinstance(data, dict) else data
+    rows = rows if isinstance(rows, list) else []
+    duplicates, invalid, no_reason = set(), set(), set()
+    seen = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        did = str(item.get("defect_id") or item.get("id") or "").strip()
+        if did not in valid_ids:
+            continue
+        if did in seen:
+            duplicates.add(did)
+            continue
+        seen.add(did)
+        label, reason = _defect_audit_row_label(item)
+        if label is None:
+            invalid.add(did)
+        elif not reason:
+            no_reason.add(did)
+    return {"expected": len(valid_ids), "labelled": len(verdicts),
+            "missing": sorted(set(valid_ids) - set(verdicts)),
+            "duplicate_ids": sorted(duplicates),
+            "invalid_labels": sorted(invalid),
+            "empty_reasons": sorted(no_reason)}
 
 
 def run_defect_audit_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
@@ -167,10 +211,24 @@ def run_defect_audit_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
     valid = {str(x.get("defect_id")) for x in (payload.get("defects") or [])
              if isinstance(x, dict)}
     verdicts = _normalize_defect_audit(data, valid)
+    coverage = _defect_audit_coverage(data, valid, verdicts)
     info["verdicts"] = len(verdicts)
-    info["ok"] = bool(verdicts)
+    info["coverage"] = coverage
+    incomplete = any(coverage[k] for k in
+                     ("missing", "duplicate_ids", "invalid_labels", "empty_reasons"))
+    info["partial"] = bool(verdicts) and incomplete
+    info["ok"] = bool(verdicts) and not incomplete
     if not verdicts:
         info["error"] = info.get("error") or "the agent labelled no defect row"
+    elif incomplete:
+        bits = []
+        for key, word in (("missing", "unlabelled"), ("duplicate_ids", "duplicate"),
+                          ("invalid_labels", "invalid-label"),
+                          ("empty_reasons", "no-reason")):
+            if coverage[key]:
+                bits.append(f"{len(coverage[key])} {word}")
+        info["error"] = (info.get("error")
+                         or "the audit is incomplete: " + ", ".join(bits))
     return verdicts, info
 
 
@@ -267,9 +325,36 @@ def census_from_filtered_rows(template: dict, rows: list) -> dict:
     `build_issue_census` uses.  Rows marked `counted == "no"` (the opt-in
     location-dedup merges) stay excluded, exactly as in the original census.
     """
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    # A location-dedup cluster's representative can be judged FP and removed
+    # from the TP-only list while its merged TP duplicate stays -- with
+    # `counted=no` and no counted member left. Re-cluster the FILTERED rows
+    # instead of trusting the pre-audit flag, so the verified defect is counted
+    # once (F-056).
+    location_mode = any(str(r.get("dedup_mode") or "") == "location" for r in rows)
+    if location_mode:
+        accepted, regrouped = {}, []
+        for row in rows:
+            if str(row.get("dedup_mode") or "") != "location":
+                regrouped.append(row)
+                continue
+            vid = str(row.get("version"))
+            sev = str(row.get("severity"))
+            cls = dedup_class_id(row.get("check"))
+            loc = dedup_location_of(row.get("evidence"))
+            src = "own" if str(row.get("source")) == "own" else "peer"
+            entries = accepted.setdefault((vid, src), [])
+            for kc, kl, _ks, ksev in entries:
+                if dedup_rows_match(cls, loc, kc, kl, sev, ksev):
+                    break
+            else:
+                entries.append((cls, loc, row.get("session"), sev))
+                regrouped.append(row)
+        rows = regrouped
     counts, seen = {}, set()
-    for row in rows or []:
-        if str(row.get("counted") or "yes").strip().lower() == "no":
+    for row in rows:
+        if (not location_mode
+                and str(row.get("counted") or "yes").strip().lower() == "no"):
             continue
         vid = str(row.get("version"))
         tier, sev = str(row.get("tier")), str(row.get("severity"))
@@ -460,13 +545,32 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
     rows = defect_list_rows(ctx, r, agg)
     if not rows:
         return {"used": False, "reason": "no defect rows to audit", "rows": 0}
-    fingerprint = hashlib.sha256(
-        json.dumps(_json_safe(rows), sort_keys=True, ensure_ascii=False)
-        .encode("utf-8")).hexdigest()[:16]
     # An explicit disable (--no-defect-audit / agent_cmd None) wins over a stored
     # audit: the operator asked for no audit in THIS invocation.
     if not use_agent or agent_cmd is None:
         return {"used": False, "reason": "the LLM defect audit is off", "rows": len(rows)}
+    judge_runs = {}
+    for rec in ctx.runs(kind="judge", round_no=r):
+        judge_runs[str(rec.get("id"))] = {
+            "judge_index": rec.get("judge_index"),
+            "target": rec.get("target_id"),
+            "label_map": rec.get("label_map") or {},
+            "sandbox": rec.get("sandbox"),
+        }
+    # The fingerprint binds the audit to its INPUT and to the auditor that
+    # judged it: the rows alone let a changed backend or prompt reuse verdicts
+    # the old one produced (F-050). Judge sessions are part of the evidence the
+    # auditor adjudicates against, so their identity is included too.
+    audit_identity = {
+        "cmd": [str(x) for x in (agent_cmd or [])],
+        "prompt": hashlib.sha256(
+            _defect_audit_prompt(r, len(rows)).encode("utf-8")).hexdigest(),
+        "judge_runs": _json_safe(judge_runs),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps({"rows": _json_safe(rows), "identity": audit_identity},
+                   sort_keys=True, ensure_ascii=False)
+        .encode("utf-8")).hexdigest()[:16]
     meta_path = ctx.reports_dir / f"round{int(r)}_defect_audit.json"
     existing = read_json(meta_path, revive=False, lenient=True)
     if isinstance(existing, dict) and not force \
@@ -497,14 +601,6 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
                 "labelled": labelled, "audited": audited,
                 "agent": existing.get("agent") or {},
                 "files": [str(x) for x in files]}
-    judge_runs = {}
-    for rec in ctx.runs(kind="judge", round_no=r):
-        judge_runs[str(rec.get("id"))] = {
-            "judge_index": rec.get("judge_index"),
-            "target": rec.get("target_id"),
-            "label_map": rec.get("label_map") or {},
-            "sandbox": rec.get("sandbox"),
-        }
     payload = {"run": ctx.root.name, "round": r, "generated": utcnow(),
                "field": [str(v) for v in (agg.get("field") or [])],
                "defects": [_json_safe(x) for x in rows],
@@ -515,10 +611,15 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
     fp = [x for x in labelled if x["audit_label"] == "FP"]
     unverified = [x for x in labelled if x["audit_label"] == "UNVERIFIED"]
     incomplete = [x for x in labelled if not x["audit_label"]]
-    if not verdicts:
-        return {"used": True, "ok": False, "rows": len(rows), "tp": 0, "fp": 0,
-                "unverified": 0, "incomplete": len(rows), "labelled": labelled,
-                "agent": info,
+    if not verdicts or not info.get("ok"):
+        # A partial or self-contradictory audit is not a successful audit: it is
+        # reported with its coverage and never reaches the TP-only family
+        # (F-028).
+        return {"used": True, "ok": False, "partial": bool(verdicts),
+                "rows": len(rows), "tp": len(tp), "fp": len(fp),
+                "unverified": len(unverified), "incomplete": len(incomplete),
+                "labelled": labelled, "agent": info,
+                "coverage": info.get("coverage") or {},
                 "reason": info.get("error") or "the audit returned no verdict"}
     audited = audited_defect_agg(ctx, r, agg, labelled)
     files = write_defect_audit_reports(ctx, r, agg, labelled, audited=audited)

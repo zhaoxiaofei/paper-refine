@@ -12,7 +12,7 @@ Phase 2 sweeps.
 **Inputs:**
 - `SUBMISSION_DIR` = the reviewed directory (default `./non_revised`)
 - `PRIOR` = `./guided_review/findings.json` (canonical prior findings; also `./guided_review/findings.md`)
-- `WORK` = `./guided_review/work` — converted corpus from the prior run; REUSE it (reconvert only missing files)
+- `WORK` = `./guided_review/work` — converted corpus from the prior run. REUSE a converted file only when you have established it is FRESH for the current `SUBMISSION_DIR`: its source exists, and the source's size/mtime (or hash, when the converter recorded one) matches what the converted text was made from. A file that is missing, changed, or cannot be shown fresh is reconverted before any finding is judged; when freshness cannot be established for the corpus, reconvert all of it. Applying prior findings and prior extracted text to changed source bytes is a stale-evidence error, not a shortcut.
 - `OUT2` = `./guided_review/round2` (create it; ALL outputs here)
 
 If PRIOR is missing, STOP and tell the user to run the standard review first.
@@ -27,7 +27,10 @@ contract — see "The orchestrator's contract" at the end of this file.
 
 ## D0 — Dedup base
 
-From PRIOR build two indexes (`OUT2/known_index.md`):
+PRIOR was produced against an earlier state of the corpus: confirm from `WORK`
+that every finding's cited location still exists in the CURRENT source before
+using it as a dedup key or a "already known" verdict. From PRIOR build two
+indexes (`OUT2/known_index.md`):
 - **KNOWN-CLASSES**: the 41 check IDs (M1–M36, J1–J5) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 

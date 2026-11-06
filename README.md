@@ -96,7 +96,9 @@ last two cases — see *Exit codes*.
 
 ## Requirements
 
-* Python 3.9+ (the pipeline and both companion tools are standard-library only).
+* Python 3.9+ (the pipeline and both companion tools are standard-library only,
+  except that `pairwise_scores.py` imports `openpyxl` to write its workbook; the
+  pipeline itself and score collection do not need it).
 * An agent CLI for the stage sessions: `codex` (default), `claude`, the
   DeepSeek Harness (`dsh`, the CLI of the same name), Qwen3.8-27B through an
   OpenAI-compatible vLLM endpoint (`--agent qwen`), or a custom command via
@@ -2362,9 +2364,9 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | review | 112 KB | 45 KB | 60% |
 | cold_start_review | 57 KB | 22 KB | 61% |
 | audit | 83 KB | 41 KB | 51% |
-| revise | 111 KB | 58 KB | 48% |
+| revise | 112 KB | 58 KB | 48% |
 | integrate | 110 KB | 58 KB | 47% |
-| rewrite | 103 KB | 54 KB | 48% |
+| rewrite | 103 KB | 54 KB | 47% |
 | judge | 98 KB | 68 KB | 30% |
 | revision_audit | 21 KB | 11 KB | 45% |
 | revision_repair | 21 KB | 7 KB | 62% |
@@ -2743,8 +2745,9 @@ numbers instead of re-estimating, dispose or reconcile every seeded row in your
 own artifact, and state before → after numbers whenever your work changes one of
 them.
 
-**The judge gets none of it — blinding is absolute.** A judge sandbox contains
-only the blinded views (`target/`, `field/<label>/`, `original/`) and the prompt;
+**The judge gets none of it — blinding holds by construction and by prompt.** A
+judge sandbox contains only the blinded views (`target/`, `field/<label>/` and the
+designated evidence subtrees those views carry) and the prompt;
 no review findings, no discovery list, no change ledger, no orchestrator scan,
 no digest or revision token, no pre-computed M18/M19/M20 rows. Even a scan
 computed from the judge's *own* target would be a pre-digested view (and a digest
@@ -2761,12 +2764,15 @@ run record, warns (never fails) when the judge produced no corresponding
 artifact table, and requires the discovery pass to exist for every side. The
 panel's numbers stay auditable without the judge ever being handed an answer key.
 
-What a judge can see is submission content only, and every other channel is
-closed by construction:
+What a judge can see is the blinded submission content plus the designated
+evidence areas (`evidence/raw_data/`, `evidence/human_review_feedback/` and, when
+present, `evidence/llm_review_feedback/`) that the judge prompt tells it how to
+use. The pristine comparator is not a judge input: the legacy `original/` view is
+removed from every sandbox. Every other channel is closed by construction:
 
 | channel | what a judge view does |
 |---|---|
-| file names / labels | every view is a salted per-view permutation of `d01/`, `f0001<ext>` placeholders, so the same document has a different name in `target/`, in each `field/<label>/` and in `original/`; the label → version map lives only in the run record |
+| file names / labels | every view is a salted per-view permutation of `d01/`, `f0001<ext>` placeholders, so the same document has a different name in `target/` and in each `field/<label>/`; the label → version map lives only in the run record |
 | run ids | `judge_<token>_j<k>` is an opaque token derived from (round, target, salt): no round prefix, no arm name, not recomputable without the root secret |
 | timestamps / modes | one mtime and one mode for the whole session, identical across all its views (nothing to order the packages by) |
 | auxiliary files | difference-tracking auxiliaries (`*.tracking-<baseline>.*` and their `*.logging-<baseline>.*` fallbacks, where `<baseline>` is `original`, a version id such as `a1`/`w1`/`a2`, or `winner<r>`), the pipeline's bookkeeping/report files (`CHANGELOG.md`, `MANUAL_STEPS.md`, `REVISION_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`, `VISUAL_CHECK.md`), the `work/` scratch and Word's `~$name.docx` owner file never reach a view |
@@ -3002,9 +3008,13 @@ the `run` command accumulates the reported defect counts over the
 canonical severity_tier_category order (fatal, critical, major, minor -- the
 SAME four rungs this table reports, 48 cells) and stops at the first prefix where the
 cleanest ranked version reaches the configured floor (default 10 defects), or
-when every cell is used; the cumulative count at that prefix is the LEADING
-comparator (the panel median/mean/IQR are the tie-breaks below it). A per-cell count is never a rung of its own: with
-small counts its fluctuation is larger than the signal. Two sibling files carry
+when every cell is used. The LEADING comparator is the ORDERED PER-CELL CENSUS at
+that prefix, compared cell by cell in the canonical severity/tier order (the panel
+median/mean/IQR are the tie-breaks below it): a smaller count in the first cell
+that differs wins, so one fatal defect does not tie with several minor ones. The
+cumulative total chooses the prefix; it is not the comparator itself, because a
+total would collapse one fatal defect and one minor defect to the same number.
+Two sibling files carry
 the numbers: `reports/round<r>_issue_matrix.csv` (fileA: rows = versions,
 columns = the cells in canonical order, values = reported counts) and
 `reports/round<r>_issue_cumulative.csv` (its prefix sums, same rows/columns); a
@@ -3482,7 +3492,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 187 suites (a few
+any failure. They are independent, so run them in parallel — 188 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
