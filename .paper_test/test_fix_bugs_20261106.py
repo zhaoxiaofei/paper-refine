@@ -448,6 +448,38 @@ def test_cover_letter_under_length_path() -> None:
           and "UNDER-length part is not padded or invented" in rtexts["adress prompt"])
 
 
+# ---------------------------------------------------------------------------
+# 11. False-positive guards in the review references: DOI identity, M20 field
+#     flattening, and M8's consolidated artifact.
+# ---------------------------------------------------------------------------
+def test_reference_precision_guards() -> None:
+    print()
+    print("== review rules: DOI identity, field flattening and the M8 artifact ==")
+    sweeps = " ".join((WS / "paper-skills/paper-review/references/sweeps.md")
+                      .read_text(encoding="utf-8").split())
+    identify = " ".join((WS / "paper-skills/prompts/identify_issues.prompt.md")
+                        .read_text(encoding="utf-8").split())
+    skill = " ".join((WS / "paper-skills/paper-review/SKILL.md")
+                      .read_text(encoding="utf-8").split())
+    for name, text in (("sweeps", sweeps), ("identify prompt", identify)):
+        check(f"{name}: a title/year variant is not automatically a different work",
+              "names a different work" in text
+              and "not merely a shorter/fuller title or an online-first vs issue year" in text,
+              text[:160])
+        check(f"{name}: flattening is a final-export action, not a candidate repair",
+              "FINAL SUBMISSION EXPORT only" in text
+              and "never a repair to a revised, rewritten or integrated candidate" in text,
+              text[:160])
+    for name, text in (("review SKILL", skill), ("identify prompt", identify)):
+        check(f"{name}: M8's raw enumerations are not the whole artifact",
+              "RAW enumerations" in text
+              and "M8_terminology.md" in text and "consolidated" in text,
+              text[:160])
+        check(f"{name}: the acceptance check names the consolidated M8 artifact",
+              "the consolidated `guided_review/artifacts/M8_terminology.md` is the artifact"
+              in text, text[:160])
+
+
 if __name__ == "__main__":
     test_judge_priority_uses_net_difference()
     test_reviser_does_not_reopen_dropped_findings()
@@ -459,6 +491,7 @@ if __name__ == "__main__":
     test_auc_out_of_range_is_inventoried()
     test_plain_citations_are_not_field_defects()
     test_cover_letter_under_length_path()
+    test_reference_precision_guards()
     print()
     if FAILS:
         print(f"FAILED: {len(FAILS)} check(s): " + ", ".join(FAILS))

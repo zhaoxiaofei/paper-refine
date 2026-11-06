@@ -69,7 +69,7 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the REWRITE-PARITY checks M25–M29 (figure-artwork/text parity, house-style/orthographic conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise vs printed-schema parity), the SOURCE-HIERARCHY reconciliation M30 (a written claim against the code/raw data that produced it) and the EVIDENCE-INTEGRITY sweeps M31–M36 (artwork-versus-legend consistency, a headline statistic against the correction the paper itself states, availability-locator finality, figure-source-data coverage, disclosure/provenance completeness, and M36's Zotero live-field refresh parity).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J5 may be prioritized; J5 (architecture & rewrite-class) produces scope-level rows in `OUT/ARCHITECTURE.md`, not per-sentence findings. The word "non-exhaustive" never applies to a mechanical sweep.
 5. **One finding per instance.** "Several acronyms are undefined" is not a finding; each undefined acronym is its own finding with its own ID, quote, and location.
    M1(a) "used before it is defined" includes the acronym-first compound: a sentence that prints the short form first and the expansion after it (`MALBAC-sequenced (multiple annealing …)`) has used the token before defining it. When the sentence itself prints the expansion, the token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
-6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole submission corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
+6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`; for M8 those are the RAW enumerations, and the required consolidated M8 artifact is `OUT/artifacts/M8_terminology.md` (entity | variant forms | counts | locations | consistent?) — pass `--out OUT/artifacts` if you prefer the raw files alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole submission corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
 7. **A sweep with zero findings is INVALID unless its artifact exists and every row is disposed.**
 8. **The evidence areas (`raw_data/`, `human_review_feedback/`, `llm_review_feedback/`) are EVIDENCE, not submission content.** Their text never feeds a written-surface sweep (M1–M29), a word count (M18/M19), a file-hygiene row (M9) or a finding's evidence quote; the same holds for a feedback/response document kept elsewhere in the corpus, by name. M30 alone reads `raw_data/`, as the producer side of a written claim; the human feedback (and, when supplied, the pre-filtered LLM review) drives the concern reconciliation. Editors'/reviewers'/LLM-review feedback is external prose and is never attributed to the authors.
    The child `human_review_feedback/original_submission/`, when present, is the manuscript version the previous journal's reviewers actually saw — evidence for resolving what a concern refers to and whether the current submission already answers it, never a submission document, a sweep surface, a quotation source or a candidate version.
@@ -132,7 +132,7 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 ## Acceptance checks (for the human, after the run)
 
 1. `findings.md` coverage table lists every defined check ID: M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows), M21–M24 (the earlier adopted sweeps), M25–M29 (the rewrite-parity checks), M30 (the source-hierarchy reconciliation) and M31–M36 (the evidence-integrity sweeps, including M36's Zotero live-field refresh parity).
-2. Every sweep with findings has a matching artifact file in `guided_review/artifacts/` (M8's occurrence enumerations live in `guided_review/work/occurrences_*.md`). A sweep with findings but no artifact means it worked from impression — re-run that sweep.
+2. Every sweep with findings has a matching artifact file in `guided_review/artifacts/` (for M8, the consolidated `guided_review/artifacts/M8_terminology.md` is the artifact; its raw occurrence enumerations live in `guided_review/work/occurrences_*.md`). A sweep with findings but no artifact means it worked from impression — re-run that sweep.
 3. Each finding points to a specific word/number/phrase with a verbatim quote, not a whole passage.
 4. `findings.json` exists and every finding has all eight fields.
 
@@ -532,9 +532,11 @@ every in-text call-out (one row) + auto-derived mismatches.
 - misordered numeric call-outs / list numbering gaps
 - wrong citation content: authors, year, journal, volume/pages, DOI (verify against internal knowledge; flag suspected hallucinated/nonexistent references — flag, never guess)
 - **an entry's DOI that resolves to a DIFFERENT work than the entry names**
-  (`M2_references.md`: the resolver's record disagrees with the entry's title or
-  year). Evidence: the verdict row with the returned title/year beside the
-  entry's own text. This is a correctness finding, and the fix is the entry's
+  (`M2_references.md`: the resolver's record names a different work — different
+  authors, journal, volume/pages, or a title that is not a short/full-length
+  variant of the entry's title — not merely a shorter/fuller title or an
+  online-first vs issue year). Evidence: the verdict row with the returned
+  title, year and creators beside the entry's own text. This is a correctness finding, and the fix is the entry's
   identifier — never deleting the DOI so the row disappears;
 - **an entry whose stated DOI is not registered** (verdict `absent`: neither
   metadata agency — Crossref or DataCite — returned a record AND the DOI handle
@@ -1094,8 +1096,10 @@ rule | severity | location | evidence | fix kind | disposition.
 - an italic run in the title/affiliation/correspondence block, an italic
   "et al." or a journal title that is not italic in a reference, italics on a
   URL/email → finding; when the run is inside a Zotero field the row is marked
-  `field-protected` and the fix is the CSL style or unlinking the fields in the
-  submission copy
+  `field-protected` and the fix is the CSL style. Unlinking the fields is an
+  action for the FINAL SUBMISSION EXPORT only, after M36's refresh scan is
+  clean — never a repair to a revised, rewritten or integrated candidate,
+  whose live fields must survive (revise E2, field continuity)
 - mixed URL/email treatments (hyperlink + plain, differing colour/underline/
   italic) → one finding per treatment set
 - mixed straight/curly quotation marks, a spaced hyphen used as a dash, or

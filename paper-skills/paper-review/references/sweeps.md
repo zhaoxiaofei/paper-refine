@@ -391,9 +391,11 @@ every in-text call-out (one row) + auto-derived mismatches.
 - misordered numeric call-outs / list numbering gaps
 - wrong citation content: authors, year, journal, volume/pages, DOI (verify against internal knowledge; flag suspected hallucinated/nonexistent references — flag, never guess)
 - **an entry's DOI that resolves to a DIFFERENT work than the entry names**
-  (`M2_references.md`: the resolver's record disagrees with the entry's title or
-  year). Evidence: the verdict row with the returned title/year beside the
-  entry's own text. This is a correctness finding, and the fix is the entry's
+  (`M2_references.md`: the resolver's record names a different work — different
+  authors, journal, volume/pages, or a title that is not a short/full-length
+  variant of the entry's title — not merely a shorter/fuller title or an
+  online-first vs issue year). Evidence: the verdict row with the returned
+  title, year and creators beside the entry's own text. This is a correctness finding, and the fix is the entry's
   identifier — never deleting the DOI so the row disappears;
 - **an entry whose stated DOI is not registered** (verdict `absent`: neither
   metadata agency — Crossref or DataCite — returned a record AND the DOI handle
@@ -953,8 +955,10 @@ rule | severity | location | evidence | fix kind | disposition.
 - an italic run in the title/affiliation/correspondence block, an italic
   "et al." or a journal title that is not italic in a reference, italics on a
   URL/email → finding; when the run is inside a Zotero field the row is marked
-  `field-protected` and the fix is the CSL style or unlinking the fields in the
-  submission copy
+  `field-protected` and the fix is the CSL style. Unlinking the fields is an
+  action for the FINAL SUBMISSION EXPORT only, after M36's refresh scan is
+  clean — never a repair to a revised, rewritten or integrated candidate,
+  whose live fields must survive (revise E2, field continuity)
 - mixed URL/email treatments (hyperlink + plain, differing colour/underline/
   italic) → one finding per treatment set
 - mixed straight/curly quotation marks, a spaced hyphen used as a dash, or
