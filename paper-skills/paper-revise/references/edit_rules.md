@@ -39,9 +39,11 @@ compression in the A7 diff log and in CHANGELOG.md under check id M19. A
 section that cannot be brought within the cap without losing content is left as
 it is and handed to MANUAL_STEPS.md. The cover letter's PERSUADING part follows
 the user's configured 300-500-word preference (the default profile's venue
-states no cover-letter word limit, checked 2026-09-19): bring it into the range by
+states no cover-letter word limit, checked 2026-09-19): bring an OVER-length part into the range by
 removing redundancy only, label it as the user's preference rather than a
-journal requirement, and never delete content to reach it. Figure legends
+journal requirement, and never delete content to reach it. An UNDER-length part
+is not padded or invented: leave it as it is and record the shortfall in
+MANUAL_STEPS.md as an author item (the preference is not a journal rule). Figure legends
 (check id M18) are always counted: with no proxy cap configured, record the
 counts and never cut a legend for length; when the operator configured a cap,
 the same redundancy-only compression applies.

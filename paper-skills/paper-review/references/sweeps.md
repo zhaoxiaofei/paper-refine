@@ -899,10 +899,11 @@ skip.
 - a section that cannot be brought within the cap without losing content →
   `unable — needs the author's judgement`, listed for manual action
 
-**Never:** flag UNDER-length text (the limits are upper bounds; no minimum is
-invented), cut text that is within the cap for length reasons, or delete
-scientific content, claims, limitations, data or needed methodological detail to
-reach a cap. Length is never a gate: it never makes a version ineligible and
+**Never:** flag UNDER-length abstract or main text (the limits are upper bounds;
+no minimum is invented -- the cover-letter preference is the one configured
+floor, so a persuading part outside it is a MINOR item in both directions), cut
+text that is within the cap for length reasons, or delete scientific content,
+claims, limitations, data or needed methodological detail to reach a cap. Length is never a gate: it never makes a version ineligible and
 only ever enters a comparison through the formatting tier.
 
 **What compression may remove -- and what it may not.** Redundancy, repeated

@@ -403,6 +403,51 @@ def test_plain_citations_are_not_field_defects() -> None:
           judge[:160])
 
 
+# ---------------------------------------------------------------------------
+# 10. The no-under-length rule is an UPPER-bound rule; the cover letter has a
+#     configured floor and an under-length part is not padded.
+# ---------------------------------------------------------------------------
+def test_cover_letter_under_length_path() -> None:
+    print()
+    print("== M19: the cover-letter floor is the one under-length item ==")
+    files = {
+        "review SKILL": WS / "paper-skills" / "paper-review" / "SKILL.md",
+        "review sweeps": WS / "paper-skills" / "paper-review" / "references" / "sweeps.md",
+        "identify prompt": WS / "paper-skills" / "prompts" / "identify_issues.prompt.md",
+    }
+    texts = {name: " ".join(path.read_text(encoding="utf-8").split())
+             for name, path in files.items()}
+    check("review SKILL: under-length is scoped to abstract/main text",
+          "under-length abstract or main text" in texts["review SKILL"],
+          texts["review SKILL"][:160])
+    check("review sweeps: under-length is scoped to abstract/main text",
+          "UNDER-length abstract or main text" in texts["review sweeps"])
+    check("review sweeps: the cover-letter preference is the one floor",
+          "cover-letter preference is the one configured floor" in texts["review sweeps"])
+    check("identify prompt: the mission sentence carries the scoping",
+          "under-length abstract or main text" in texts["identify prompt"]
+          and "cover-letter preference is the one configured floor"
+          in texts["identify prompt"])
+    check("identify prompt: the sweeps appendix carries the scoping",
+          "UNDER-length abstract or main text" in texts["identify prompt"])
+
+    revise = {
+        "revise SKILL": WS / "paper-skills" / "paper-revise" / "SKILL.md",
+        "edit rules": WS / "paper-skills" / "paper-revise" / "references" / "edit_rules.md",
+        "adress prompt": WS / "paper-skills" / "prompts" / "adress_issues.prompt.md",
+    }
+    rtexts = {name: " ".join(path.read_text(encoding="utf-8").split())
+              for name, path in revise.items()}
+    check("revise SKILL: an under-length letter is not padded",
+          "under-length part is not padded or invented" in rtexts["revise SKILL"])
+    check("edit rules: an under-length letter is a manual item, not padding",
+          "UNDER-length part is not padded or invented" in rtexts["edit rules"]
+          and "record the shortfall in MANUAL_STEPS.md" in rtexts["edit rules"])
+    check("adress prompt: the summary and the edit-rules appendix both carry it",
+          "under-length part is not padded or invented" in rtexts["adress prompt"]
+          and "UNDER-length part is not padded or invented" in rtexts["adress prompt"])
+
+
 if __name__ == "__main__":
     test_judge_priority_uses_net_difference()
     test_reviser_does_not_reopen_dropped_findings()
@@ -413,6 +458,7 @@ if __name__ == "__main__":
     test_pdf_signature_and_cache()
     test_auc_out_of_range_is_inventoried()
     test_plain_citations_are_not_field_defects()
+    test_cover_letter_under_length_path()
     print()
     if FAILS:
         print(f"FAILED: {len(FAILS)} check(s): " + ", ".join(FAILS))
