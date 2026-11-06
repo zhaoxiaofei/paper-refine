@@ -132,6 +132,21 @@ def cmd_setup(args) -> None:
                                      rounds, "--judges")
     if any(j < 1 for j in judges_list):
         die(f"--judges must be >= 1 per round, got {judges_list}", code=2)
+    # The sign rule's decision rule is "the exact one-sided sign test is
+    # significant": with 2 judges the vs_original pair carries 2*2 = 4 directed
+    # scores, and the smallest attainable p (4/4 losses) is 1/16 = 0.0625,
+    # above VS_ORIGINAL_ALPHA. Accepting that configuration shipped a gate that
+    # could never reject. Refuse it at the point the operator chooses it.
+    _vs_rule = str(getattr(args, "vs_original_rule", None)
+                   or VS_ORIGINAL_RULE).strip().lower()
+    if _vs_rule == "sign" and any(j < 3 for j in judges_list):
+        die(f"--vs-original-rule sign needs at least 3 judges in every round "
+            f"(got --judges {judges_list}): the rule fails only when the exact "
+            f"one-sided sign test over the pair's 2*judges directed scores is "
+            f"significant at {VS_ORIGINAL_ALPHA}, and 2 judges give 4 scores whose "
+            f"smallest attainable p (4/4 losses) is 1/16 = 0.0625 -- that gate "
+            f"could never reject. Use the default median rule, or --judges 3.",
+            code=2)
     integrators = ([ROUND_SCHEDULE[i - 1]["integrators"] for i in round_indices]
                    if round_indices else
                    parse_round_masks(getattr(args, "integrators", None) or

@@ -101,10 +101,15 @@ def _kill_process_group(proc):
     A tool may spawn a helper (a verifier, a converter's worker) that inherits
     the child's process group. `proc.kill()` left those grandchildren running
     after the orchestrator had timed out and moved on (the 2026-10-30 F51).
+
+    `os.killpg` is POSIX-only: on Windows the attribute does not exist, so the
+    old `except OSError` let an AttributeError escape from the TIMEOUT handler
+    (the sibling code in p15 already catches both and falls back to
+    `proc.kill()`).
     """
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except OSError:
+    except (AttributeError, OSError):
         try:
             proc.kill()
         except OSError:

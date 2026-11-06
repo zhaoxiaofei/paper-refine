@@ -1111,12 +1111,21 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
 
 
 def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=(),
-                  on_error=None) -> dict:
+                  on_error=None, exclude_top_only=()) -> dict:
     """SHA-256 manifest of every file under dirp (relative posix paths).
 
     `on_error` is passed through to sha256_files; an integrity caller uses a
     sentinel so one unreadable file is REPORTED as changed instead of raising
     PermissionError out of every command that checks the pristine/pinned chain.
+
+    `exclude_top` applies copy_into()'s SCRATCH rule: a top-level entry with an
+    excluded name is skipped and a directory with that name is pruned at ANY
+    depth. `exclude_top_only` is the distinct top-level-only rule for entries
+    that merely share a name with a root area (the evidence areas
+    `ensure_pristine_input` links, not packable content). Keeping the two rules
+    separate is what lets the expected manifest agree with the copy in both
+    callers; one shared predicate would silently drop a `supp/raw_data/` that
+    the submission legitimately carries (R02).
     """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
@@ -1139,11 +1148,18 @@ def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=(),
         if not (follow_dir_links and ok):
             return {"files": {}, "count": 0}
     paths = _iter_tree_files(dirp, follow_dir_links=follow_dir_links)
-    if exclude_top:
+    if exclude_top or exclude_top_only:
         blocked = set(exclude_top)
-        paths = [p for p in paths
-                 if p.relative_to(dirp).parts[:1] and
-                 p.relative_to(dirp).parts[0] not in blocked]
+        blocked_root = set(exclude_top_only)
+        kept = []
+        for p in paths:
+            rel = p.relative_to(dirp).as_posix()
+            if rel.split("/", 1)[0] in blocked_root:
+                continue
+            if excluded_corpus_component(rel, blocked):
+                continue
+            kept.append(p)
+        paths = kept
     digs = sha256_files(paths, on_error=on_error)
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
     return {"files": files, "count": len(files)}
@@ -1179,6 +1195,26 @@ def corpus_tree_manifest(dirp: Path) -> dict:
     return {"files": files, "count": len(files)}
 
 
+def excluded_corpus_component(rel, exclude_top) -> bool:
+    """True when a corpus-relative FILE is excluded by the scratch rule.
+
+    This is copy_into()'s rule, not a near-copy of it: a TOP-LEVEL entry with an
+    excluded name is skipped (file or directory), and an excluded name at any
+    deeper level is a DIRECTORY that is pruned, so every file below it is out.
+    The exclusion applies at ANY depth, matching the revision token's own rule
+    (`work/` at every level is stage scratch). A rule that matched only the
+    first path component let a materialized corpus, its manifest and the judge
+    view carry a file the token excluded -- the same package then had two
+    identities.
+    """
+    if not exclude_top:
+        return False
+    parts = Path(str(rel)).parts
+    if not parts:
+        return False
+    return parts[0] in exclude_top or any(part in exclude_top for part in parts[1:-1])
+
+
 def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
     """Manifest of a MATERIALIZED version corpus (a judge target/field, a pin, a
     published winner).
@@ -1190,11 +1226,12 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
     agent that wrote the version also wrote those reports) would make every pin
     verification fail.
 
-    `exclude_top` adds the top-level exclusions of a SOURCE directory that is not
-    a materialized corpus: a stage writes its process scratch INSIDE its output
+    `exclude_top` adds the exclusions of a SOURCE directory that is not a
+    materialized corpus: a stage writes its process scratch INSIDE its output
     directory (`revised/work/`, `rewritten/work/`), so a code-side scan of that
     directory has to pass `CORPUS_EXCLUDE_TOP` to see the same file set the pin,
-    the judge view and the recorded digest use. Left empty (the default) the
+    the judge view and the recorded digest use. An excluded name is a directory
+    at ANY depth (see `excluded_corpus_component`). Left empty (the default) the
     function is byte-compatible with every digest a root has already recorded.
 
     This is NOT where an `is_non_shippable_name` file (the WSL/Windows
@@ -1212,7 +1249,7 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
             return False
         if is_bookkeeping_name(p.name):
             return False
-        if exclude_top and p.relative_to(dirp).as_posix().split("/", 1)[0] in exclude_top:
+        if excluded_corpus_component(p.relative_to(dirp).as_posix(), exclude_top):
             return False
         return True
 
@@ -1988,6 +2025,20 @@ def count_manual_steps(path: Path):
 # prose. Nothing here gates a version: see caption_gate().
 # ---------------------------------------------------------------------
 
+# Inline verbatim is CODE, not prose (`\verb|x y|`, `\lstinline[opts]{x y}`):
+# the command-name stripper removed only the command, so the delimiters and the
+# code tokens stayed in the M19 count. The delimiter form needs a
+# backreference, so the two shapes are separate patterns. The lookahead on
+# the captured delimiter keeps a doubled delimiter from ending the body early.
+TEX_INLINE_VERBATIM_RE = re.compile(
+    r"\\mintinline\*?(?:\[[^\[\]]*\]\s*)?\{[^{}]*\}\s*"
+    r"(?:\{[^{}]*\}|(?P<md>[^\sA-Za-z0-9])(?:\\.|(?!(?P=md))[\s\S])*?(?P=md))")
+TEX_INLINE_VERB_RE = re.compile(
+    r"\\(?:verb|lstinline)\*?(?:\[[^\[\]]*\]\s*)?"
+    r"(?:\{[^{}]*\}|(?P<vd>[^\sA-Za-z0-9])"
+    r"(?:\\.|(?!(?P=vd))[\s\S])*?(?P=vd))")
+
+
 def _strip_latex(text: str) -> str:
     # Keep in step with paper-skills/paper-review/scripts/count_words.py: the
     # same two gaps made the two word counters disagree with each other AND
@@ -1999,8 +2050,30 @@ def _strip_latex(text: str) -> str:
     # every prefixed form, so `\pageref{p12}` left the phantom word `p12` in the
     # M19 count. And an ESCAPED dollar (`\$5`) is a literal, not math: the math
     # pattern is lookbehind-guarded, so `\$5 to \$6` no longer swallows `5 to $`.
-    text = re.sub(r"\\(?:cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
-                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text)
+    # The CITATION family is matched case-insensitively and on BOTH sides of
+    # `cite`: `[a-zA-Z]*cite[a-zA-Z]*` covers the biblatex-prefixed commands
+    # (`\nocite`, `\autocite`, `\parencite`, `\textcite`, `\footcite`) the skill
+    # already dropped, and `re.I` covers the capitalized natbib forms (`\Cite`,
+    # `\Citet`, `\Citep`) whose keys both counters used to count as prose.
+    text = re.sub(r"\\(?:[a-zA-Z]*cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
+                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text, flags=re.I)
+    text = TEX_INLINE_VERBATIM_RE.sub(" ", text)
+    text = TEX_INLINE_VERB_RE.sub(" ", text)
+    # A colour, font or graphics-file argument is an identifier, not prose:
+    # `\textcolor{red}{word}` counted `red` and `\includegraphics{fig1}` counted
+    # `fig1`. Only the formatting/asset argument is dropped; the VISIBLE text
+    # argument of \textcolor/\colorbox survives (the braces below become
+    # spaces, the words stay).
+    text = re.sub(r"\\(?:includegraphics|includesvg|includepdf)\*?\s*"
+                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text, flags=re.I)
+    text = re.sub(r"\\textcolor\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text,
+                  flags=re.I)
+    text = re.sub(r"\\colorbox\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text,
+                  flags=re.I)
+    text = re.sub(r"\\fcolorbox\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}\s*\{[^{}]*\}",
+                  " ", text, flags=re.I)
+    text = re.sub(r"\\(?:color|pagecolor|definecolor)\s*(?:\[[^\[\]]*\]\s*)*"
+                  r"(?:\{[^{}]*\}\s*){1,3}", " ", text, flags=re.I)
     # `(?:\\\\)*` consumes an EVEN run of backslashes before the math: after a
     # LaTeX line break (`\\$x$`) the dollar is still math, while `\$5` (one
     # backslash) is an escaped literal and stays prose.
@@ -2026,6 +2099,18 @@ def count_words(text: str) -> int:
 
 def count_caption_words(text: str) -> int:
     return count_words(_strip_latex(text or ""))
+
+
+# Table-cell numeric shapes shared with the PKG-12 p/CI scan (p12). A CI cell
+# may use `[]` or `()` (a mixed pair too), a comma/semicolon/en-dash/em-dash/
+# hyphen/"to" separator, scientific notation and a leading-dot decimal; the old
+# `[plain, plain]` pattern rejected every other spelling, so PKG-12 skipped the
+# row as if the table had no interval.
+NUMBER_CELL_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
+CI_CELL_RE = re.compile(
+    r"^\s*[\[(]?\s*(?P<lo>" + NUMBER_CELL_RE.pattern + r")\s*"
+    r"(?:,|;|\u2013|\u2014|\.\.\.|\bto\b|-)\s*(?P<hi>"
+    + NUMBER_CELL_RE.pattern + r")\s*[\])]?\s*$")
 
 
 def _docx_onoff(rpr, tag: str) -> bool:
@@ -8570,7 +8655,7 @@ def collect_documents(sources: list) -> dict:
             if _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded_corpus_component(rel, excluded):
                 continue
             if (prefix + rel) in overrides[i]:
                 continue
@@ -8593,6 +8678,42 @@ def collect_documents(sources: list) -> dict:
     return out
 
 
+def collect_non_editable_submission_files(sources: list) -> set:
+    """The submission files a source carries that are NOT editable documents.
+
+    `collect_documents` keeps only EDITABLE_DOC_EXTS, which is what the
+    one-to-one document pairing needs. The ADDED direction of
+    `document_set_check` also has to see the other half of a submission -- a new
+    PDF, figure or archive the base never had -- because a non-editable file
+    added to a package used to be invisible to the check (the collector dropped
+    it before the comparison). The same corpus exclusions apply, and the
+    editable suffixes are left out because `added` already covers them.
+    """
+    out = set()
+    overrides = corpus_source_overrides(sources)
+    for i, (src, prefix, excluded) in enumerate(sources):
+        if not src.is_dir():
+            continue
+        for p in _iter_tree_files(src):
+            if _is_aux_doc(p.name):
+                continue
+            rel = p.relative_to(src).as_posix()
+            if excluded_corpus_component(rel, excluded):
+                continue
+            if (prefix + rel) in overrides[i]:
+                continue
+            if is_evidence_rel(rel):
+                continue
+            if is_author_to_complete_readme_name(p.name):
+                continue
+            if is_bookkeeping_name(p.name):
+                continue
+            if p.suffix.lower() in EDITABLE_DOC_EXTS:
+                continue
+            out.add(prefix + rel)
+    return out
+
+
 def document_set_check(base_sources: list, cand_sources: list) -> dict:
     """Did every base document survive, and does the candidate carry rename twins?
 
@@ -8607,7 +8728,10 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
     a document the base had and the candidate lost is a preservation failure,
     and a submission document the candidate carries that the base never had is
     the same comparison read the other way (content that was added/invented --
-    or a declared scaffolding addition under the mandatory-item rule). Both are
+    or a declared scaffolding addition under the mandatory-item rule). The added
+    direction covers the WHOLE submission: `added` lists the editable documents
+    and `added_non_editable` the PDFs/figures/archives the base never had, since
+    the editable collector alone could not see the second half (F086). Both are
     REPORTED, neither is failed here: a lost document is restored from the base
     by `backfill_missing_files` wherever recovery is legal (a deliberately
     dropped derived output stays dropped), and only a human can tell a
@@ -8666,8 +8790,16 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
             # exactly the pre/post-rename twin this check exists to surface
             duplicates[key] = names
     added = [rel for i, (_k, rel, _d) in enumerate(cand_pool) if i not in used]
+    # The added direction is TWO-SIDED over the whole submission: the editable
+    # collection above cannot see a PDF/figure/archive, so an invented
+    # non-editable file was never reported. This stays a separate list (rather
+    # than widening `added`) so the paired editable counts keep their meaning.
+    added_non_editable = sorted(
+        collect_non_editable_submission_files(cand_sources)
+        - collect_non_editable_submission_files(base_sources))
     return {"missing": missing, "content_preserved_under_other_name": content_only,
             "added": added,
+            "added_non_editable": added_non_editable,
             "duplicates": duplicates,
             "base_count": sum(len(v) for v in base.values()),
             "candidate_count": sum(len(v) for v in cand.values())}
@@ -9426,9 +9558,9 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
     if ok:
         # The non-evidence part must match the pristine corpus exactly, and every
         # evidence area must be a link to the canonical copy.
-        if (hash_manifest(ctx.pristine, exclude_top=excluded).get("files")
+        if (hash_manifest(ctx.pristine, exclude_top_only=excluded).get("files")
                 != hash_manifest(dst, follow_dir_links=True,
-                                 exclude_top=excluded).get("files")):
+                                 exclude_top_only=excluded).get("files")):
             ok = False
         for name in areas:
             link = dst / name
@@ -9440,7 +9572,7 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
     if dst.exists():
         rmtree_force(dst, ignore_errors=True)
     dst.mkdir(parents=True, exist_ok=True)
-    copy_into(ctx.pristine, dst, exclude_top=set(areas), root=ctx.root)
+    copy_into(ctx.pristine, dst, exclude_top_only=set(areas), root=ctx.root)
     for name in areas:
         link = dst / name
         if _try_symlink_dir(want[name], link):
@@ -9457,7 +9589,7 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
 
 def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
               strip_bookkeeping: bool = False, normalize_mtime: bool = False,
-              root: Path = None) -> None:
+              root: Path = None, exclude_top_only=()) -> None:
     """Copy the CONTENTS of src into dst (idempotent; overwrites files).
 
     root: the pipeline root that owns `src`. A top-level evidence link is
@@ -9465,8 +9597,16 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     `<root>/non_revised/<area>` store (see `is_canonical_evidence_link`); a
     caller that omits it follows no evidence link at all.
 
-    exclude_top: top-level entry names to skip (used to keep a candidate's
-    process scratch, e.g. revised/work/, out of its submission corpus).
+    exclude_top: SCRATCH names to skip (used to keep a candidate's process
+    scratch, e.g. revised/work/, out of its submission corpus). A name in this
+    list is excluded as a DIRECTORY at ANY depth: a nested `supp/work/` is the
+    same stage scratch as a top-level `work/`, and the revision token already
+    excludes it at every depth.
+    exclude_top_only: entry names to skip ONLY as the first path component. This
+    is the distinct meaning `ensure_pristine_input` needs for the evidence-area
+    names (`raw_data/` ...): a nested `supp/raw_data/` is ordinary submission
+    content, not the root's evidence area (`evidence_area_of` recognises only a
+    top-level name), so the any-depth rule above must not drop it (R02).
     skip_aux: leave out the difference-tracking auxiliaries
     ("*.tracking-<token>.<ext>" and their "*.logging-<token>.<ext>" fallbacks)
     -- set by every call that
@@ -9531,13 +9671,22 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     def _ignore(dirpath, names):
         out = set(_corpus_ignore(skip_aux, strip_bookkeeping)(dirpath, names) or ())
         for name in names:
-            if os.path.islink(os.path.join(dirpath, name)):
-                skipped.append(os.path.join(dirpath, name))
+            full = os.path.join(dirpath, name)
+            if name in exclude_top and os.path.isdir(full) and not os.path.islink(full):
+                # A NAMED DIRECTORY at ANY depth is process scratch, not corpus
+                # content: `supp/work/scratch.md` used to be copied into the
+                # judged corpus (and pin/published package) while the revision
+                # token excluded `work/` at every depth -- the two identity
+                # rules disagreed about the same file.
+                out.add(name)
+                continue
+            if os.path.islink(full):
+                skipped.append(full)
                 out.add(name)
         return sorted(out)
 
     for entry in sorted(src.iterdir()):
-        if entry.name in exclude_top:
+        if entry.name in exclude_top or entry.name in exclude_top_only:
             continue
         if is_disabled_evidence_rel(entry.name):
             # `<evidence area>.disabled/` is inert: never carried into a
@@ -9601,7 +9750,8 @@ def ensure_copy(src: Path, dst: Path, **kw) -> bool:
     # out made the mismatch permanent and rebuilt the whole directory on every
     # re-entry.
     want = hash_manifest(
-        src, exclude_top=tuple(kw.get("exclude_top") or ())).get("files") or {}
+        src, exclude_top=tuple(kw.get("exclude_top") or ()),
+        exclude_top_only=tuple(kw.get("exclude_top_only") or ())).get("files") or {}
     # An inert `<area>.disabled/` is never copied (copy_into skips it
     # unconditionally), so it must not make the expected manifest mismatch.
     want = {rel: dig for rel, dig in want.items()

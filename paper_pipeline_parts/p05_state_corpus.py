@@ -1289,9 +1289,10 @@ def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
     records (`corpus_manifest`) and by every code-side scan that claims to
     describe the same corpus (`code_side_evidence`): the revision auxiliaries
     and the pipeline's own mandated bookkeeping (which build_corpus_dir() strips
-    from every materialized copy) are dropped, the sources' own top-level
-    exclusions (`work/` scratch) apply, and later sources override earlier ones
-    with the same relative path.
+    from every materialized copy) are dropped, the sources' own scratch
+    exclusions (`work/` at ANY depth, the same rule build_corpus_dir() and the
+    revision token apply) apply, and later sources override earlier ones with
+    the same relative path.
 
     `owner_root` is the run root that owns the copy; passing it makes an
     evidence-area link follow only when it is THIS root's canonical
@@ -1313,7 +1314,7 @@ def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
             if is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             if is_disabled_evidence_rel(rel):
                 continue
@@ -1364,7 +1365,7 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             if is_disabled_evidence_rel(rel):
                 # An inert `<evidence>.disabled/` area is not corpus content:
@@ -1723,7 +1724,7 @@ def corpus_dir_view_files(dirp: Path, owner_root: Path = None) -> list:
         if is_bookkeeping_name(p.name):
             continue
         rel = p.relative_to(dirp).as_posix()
-        if rel.split("/", 1)[0] in CORPUS_EXCLUDE_TOP:
+        if excluded_corpus_component(rel, CORPUS_EXCLUDE_TOP):
             continue
         if is_disabled_evidence_rel(rel):
             # An inert `<evidence>.disabled/` area is neither submission content

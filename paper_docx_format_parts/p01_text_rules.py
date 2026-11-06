@@ -2431,8 +2431,14 @@ def _simple_table(text: str):
     ONE parser for `table_value_index` (a value a shipped table proves) and
     `table_column_stats` (M30: the column a written value is reconciled
     against), so the two can never read the same table differently.
+
+    The text is read as ONE CSV stream, not one `csv.reader` per physical line:
+    a valid record with a quoted embedded newline was split into two, every
+    later cell moved one column left and the reported row count was inflated, so
+    M30 reconciled a written value against the wrong column/cohort.
     """
-    lines = [l for l in str(text or "").splitlines() if l.strip()]
+    raw = str(text or "")
+    lines = [l for l in raw.splitlines() if l.strip()]
     if len(lines) < 3:
         return None, None
     head = lines[0]
@@ -2441,24 +2447,32 @@ def _simple_table(text: str):
               ("," if head.count(",") >= 1 else None)))
     if delim is None:
         return None, None
-    def cells(line: str) -> list:
-        if delim == "|":
-            # Markdown row: the leading/trailing pipes are delimiters, not
-            # empty first/last columns (they each used to emit a phantom
-            # empty-name column of statistics).
-            line = line.strip()
-            if line.startswith("|"):
-                line = line[1:]
-            if line.endswith("|"):
-                line = line[:-1]
-        # csv.reader honours quoted delimiters: `"Smith, Jr.",1,ok` is three
-        # columns, not four. The pipe form has already had its outer pipes
-        # stripped above.
-        return [c.strip() for c in next(csv.reader([line], delimiter=delim,
-                                                   skipinitialspace=True))]
+    try:
+        records = [r for r in csv.reader(raw.splitlines(keepends=True), delimiter=delim,
+                                         skipinitialspace=True)
+                   if r and not (len(r) == 1 and not r[0].strip())]
+    except csv.Error:
+        return None, None
+    if not records:
+        return None, None
+    if delim == "|":
+        # Markdown row: the leading/trailing pipes are delimiters, not empty
+        # first/last columns (they each used to emit a phantom empty-name
+        # column of statistics). The header decides the table's own style.
+        lead, trail = head.strip().startswith("|"), head.strip().endswith("|")
 
-    header = cells(head)
-    body = [cells(l) for l in lines[1:]]
+        def cells(rec):
+            if lead and rec and not rec[0].strip():
+                rec = rec[1:]
+            if trail and rec and not rec[-1].strip():
+                rec = rec[:-1]
+            return [c.strip() for c in rec]
+    else:
+        def cells(rec):
+            return [c.strip() for c in rec]
+
+    header = cells(records[0])
+    body = [cells(r) for r in records[1:]]
     if delim == "|" and body and body[0]:
         # `|---|---|` (with optional alignment colons) is the separator row, not
         # a data row: counting it made every table's row count off by one.

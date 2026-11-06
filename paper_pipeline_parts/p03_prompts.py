@@ -2482,11 +2482,16 @@ after the acronym's first use) is the evidence surface for the acronym case -- r
 scoring such a difference as merely stylistic.
 
 CLAIM CALIBRATION IS SCORED IN BOTH DIRECTIONS (correctness tier). A claim whose strength does
-not match its evidence is a defect whichever way it deviates, and one direction never cancels the
-other: `introduced` covers a claim the target states MORE strongly than the evidence supports (the
+not match its evidence is a defect whichever way it deviates, and BOTH directions are filed:
+`introduced` covers a claim the target states MORE strongly than the evidence supports (the
 classic overclaim) AND a claim the target states MORE weakly than its own evidence supports (an
 underclaim: a supported result hedged into "may"/"could"/"suggests"/"a trend"/"preliminary", a
-conclusion the data establish left unstated, a limitation phrased as a retreat). So an edit that
+conclusion the data establish left unstated, a limitation phrased as a retreat). They are separate
+ROWS scored inside the correctness tier: the integer below adds `resolved` rows and subtracts
+`introduced` rows there, so an equal-weight resolved overclaim and introduced underclaim CANCEL
+to a correctness net of 0 -- file both, and let the net show the trade; a lower tier can still
+decide the comparison, which is 0 only when all six nets are 0. Never drop one direction because
+the other is present. So an edit that
 weakens a supported claim is `introduced` correctness, and a target that states the SAME claim at
 its supported strength where the opponent undersells it has a `resolved` correctness item.
 Enumerate the two directions yourself for each target (a hedge and a maximal claim are both

@@ -108,32 +108,36 @@ def is_head_dump(path: Path) -> bool:
     The detector used to require the literal ``opponent_label``, while
     ``opponent_of()`` reads ``opponent_id``: a dump with every consumed field
     except ``opponent_label`` was treated as a plain CSV and scored zero rows.
+    It also read only the first 8000 bytes, so a dump with a long preamble (a
+    shell banner, a long path list, many preceding blocks) looked like a plain
+    CSV and the workbook came out empty with no error. The whole file is
+    scanned, streaming: the marker may appear anywhere, and the first CSV row
+    after each marker is still the only candidate header.
     """
     if path.suffix.lower() == ".csv":
         return False
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
-            chunk = handle.read(8000)
+            in_block = False
+            for line in handle:
+                line = line.rstrip("\n")
+                if HEAD_MARKER.match(line.strip()):
+                    in_block = True
+                    continue
+                if not in_block or not line.strip() or "," not in line:
+                    continue
+                try:
+                    fields = {str(f).strip().lower() for f in next(csv.reader([line]))}
+                except (csv.Error, StopIteration):
+                    continue
+                if "opponent_id" in fields or "opponent_label" in fields:
+                    return True
+                # The first CSV row after a marker is the header; a data row
+                # that does not name the consumed fields does not make this a
+                # head dump.
+                in_block = False
     except OSError:
         return False
-    if "==>" not in chunk:
-        return False
-    in_block = False
-    for line in chunk.splitlines():
-        if HEAD_MARKER.match(line.strip()):
-            in_block = True
-            continue
-        if not in_block or not line.strip() or "," not in line:
-            continue
-        try:
-            fields = {str(f).strip().lower() for f in next(csv.reader([line]))}
-        except (csv.Error, StopIteration):
-            continue
-        if "opponent_id" in fields or "opponent_label" in fields:
-            return True
-        # The first CSV row after a marker is the header; a data row that does
-        # not name the consumed fields does not make this a head dump.
-        in_block = False
     return False
 
 

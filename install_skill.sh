@@ -118,7 +118,20 @@ for i in "${!tool_names[@]}"; do
     if [ -e "$tool_path" ]; then
         mv -- "$tool_path" "$old_path"
     fi
-    mv -- "$staging" "$tool_path"
+    if ! mv -- "$staging" "$tool_path"; then
+        # A failed switch-in must not leave the server absent: `set -e` used to
+        # exit here with the live path gone, the only copy at the .old.$$ name
+        # and the cleanup trap removing just the staged tree -- a broken install
+        # destroying the working one it replaced.
+        if [ -e "$old_path" ]; then
+            if mv -- "$old_path" "$tool_path"; then
+                echo "restored the previous mcp-tool after the failed switch-in: ${tool_path}" >&2
+            else
+                echo "error: could not restore ${tool_path}; the previous install is at ${old_path}" >&2
+            fi
+        fi
+        exit 1
+    fi
     rm -rf -- "$old_path"
     rm -rf -- "${tool_path}-${new_version}"
     cp -r -- "$tool_path" "${tool_path}-${new_version}"

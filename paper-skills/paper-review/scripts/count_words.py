@@ -447,6 +447,19 @@ def lenient_cap(base: int, factor: float) -> int:
     return math.floor(float(base) * float(factor) + 1e-9)
 
 
+# Inline verbatim is CODE, not prose (`\verb|x y|`, `\lstinline[opts]{x y}`):
+# the command-name stripper removed only the command, so the delimiters and the
+# code tokens stayed in the M19 count. Keep these two patterns, and the whole
+# `_strip_latex` order, IDENTICAL to paper_pipeline._strip_latex.
+TEX_INLINE_VERBATIM = re.compile(
+    r"\\mintinline\*?(?:\[[^\[\]]*\]\s*)?\{[^{}]*\}\s*"
+    r"(?:\{[^{}]*\}|(?P<md>[^\sA-Za-z0-9])(?:\\.|(?!(?P=md))[\s\S])*?(?P=md))")
+TEX_INLINE_VERB = re.compile(
+    r"\\(?:verb|lstinline)\*?(?:\[[^\[\]]*\]\s*)?"
+    r"(?:\{[^{}]*\}|(?P<vd>[^\sA-Za-z0-9])"
+    r"(?:\\.|(?!(?P=vd))[\s\S])*?(?P=vd))")
+
+
 def _strip_latex(text: str) -> str:
     """Prose of a LaTeX line: commands removed, math blanked, braces as spaces."""
     # The OPTIONAL arguments come first: the brace-only pattern left `[p.5]` and
@@ -459,8 +472,26 @@ def _strip_latex(text: str) -> str:
     # M19 count. An ESCAPED dollar (`\$5`) is a literal, not math: the math
     # pattern is lookbehind-guarded (keep this in step with
     # paper_pipeline._strip_latex).
+    # The CITATION family is matched case-insensitively and on BOTH sides of
+    # `cite`: the biblatex-prefixed commands (`\nocite`, `\autocite`,
+    # `\parencite`, `\textcite`, `\footcite`) and the capitalized natbib forms
+    # (`\Cite`, `\Citet`, `\Citep`) used to leave their keys as prose.
     text = re.sub(r"\\(?:[a-zA-Z]*cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
-                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text)
+                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text, flags=re.I)
+    text = TEX_INLINE_VERBATIM.sub(" ", text)
+    text = TEX_INLINE_VERB.sub(" ", text)
+    # A colour, font or graphics-file argument is an identifier, not prose (keep
+    # in step with paper_pipeline._strip_latex).
+    text = re.sub(r"\\(?:includegraphics|includesvg|includepdf)\*?\s*"
+                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text, flags=re.I)
+    text = re.sub(r"\\textcolor\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text,
+                  flags=re.I)
+    text = re.sub(r"\\colorbox\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text,
+                  flags=re.I)
+    text = re.sub(r"\\fcolorbox\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}\s*\{[^{}]*\}",
+                  " ", text, flags=re.I)
+    text = re.sub(r"\\(?:color|pagecolor|definecolor)\s*(?:\[[^\[\]]*\]\s*)*"
+                  r"(?:\{[^{}]*\}\s*){1,3}", " ", text, flags=re.I)
     # Inline and single-line display math (`$p<0.05$`, `\(x\)`, `\[x\]`) is not
     # prose; only the command names used to be stripped, so the body's tokens
     # were counted.

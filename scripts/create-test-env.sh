@@ -77,7 +77,31 @@ env_registered() {
   if [[ -n "${ENV_PREFIX}" ]]; then
     [[ -e "${ENV_PREFIX}" ]]
   else
-    "${CONDA}" env list --json 2>/dev/null | grep -Fq "\"/${ENV_NAME}\""
+    # A named environment is listed as `.../envs/<name>`, never as `/<name>`:
+    # the old `grep -Fq "\"/${ENV_NAME}\""` could only match a root-level env
+    # path, so a normal named environment (including a broken one) was
+    # invisible and `--recreate` skipped its removal. Parse the JSON and
+    # compare each listed path's LAST component -- the env's name. A namesake
+    # directory elsewhere in the path (e.g. a pkgs entry) does not match.
+    local listed
+    listed="$("${CONDA}" env list --json 2>/dev/null || true)"
+    if command -v python3 >/dev/null 2>&1; then
+      printf '%s' "${listed}" | python3 -c '
+import json
+import re
+import sys
+name = sys.argv[1]
+try:
+    envs = json.load(sys.stdin).get("envs") or []
+except Exception:
+    sys.exit(1)
+sys.exit(0 if any(re.split(r"[\\/]", str(p))[-1] == name for p in envs) else 1)
+' "${ENV_NAME}"
+    else
+      # No interpreter to parse the JSON: the suffix form is still correct for
+      # a path whose last component is the environment name.
+      printf '%s' "${listed}" | grep -Fq "/${ENV_NAME}\""
+    fi
   fi
 }
 

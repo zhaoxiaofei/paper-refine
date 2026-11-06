@@ -1481,24 +1481,31 @@ def _toml_array_at(text: str, start: int):
     bracket truncated the array, `json.loads` failed and every argument was
     silently dropped -- the server then launched with no args at all, a wrong
     configuration that looked like a successful launch.
+
+    A quote is consumed with `_toml_string_at`, not with a one-character quote
+    flag: inside a triple-quoted element with an embedded quote
+    (`args = [\"\"\"a\"b\"\"\"]`) the single-quote flag alternated on every
+    embedded quote and left the scanner "inside a string", so a legal array
+    was never found and `mcp_server_spec()` silently launched the server with
+    `args = []` (R04). The string scanner already knows single, triple-quoted
+    and escaped strings, so the delimiter and the value parser cannot disagree
+    about where an element ends.
     """
     i = start
     while i < len(text) and text[i] in " \t":
         i += 1
     if i >= len(text) or text[i] != "[":
         return None
-    j, depth, quote = i, 0, None
+    j, depth = i, 0
     while j < len(text):
         ch = text[j]
-        if quote:
-            if quote == '"' and ch == "\\":
-                j += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch == "#":
+        if ch in "\"'":
+            got = _toml_string_at(text, j)
+            if got is None:
+                return None
+            j = got[1]
+            continue
+        if ch == "#":
             # A TOML comment inside the array may carry a bracket; it is not
             # part of the array (and `args = ["a", # note with ]\n "b"]` must
             # not stop at that bracket).
@@ -1507,7 +1514,7 @@ def _toml_array_at(text: str, start: int):
                 return None
             j = nl
             continue
-        elif ch == "[":
+        if ch == "[":
             depth += 1
         elif ch == "]":
             depth -= 1
@@ -1521,26 +1528,49 @@ def _toml_string_at(text: str, i: int):
     """(value, index after) for the TOML string literal at `text[i]`, else None.
 
     A basic (`"…"`) string decodes TOML's own escapes (`\\"`, `\\\\`, `\\t`,
-    `\\uXXXX`); a literal (`'…'`) string does not. An unterminated multi-line
-    (triple-quoted) string, an unknown escape or an unterminated literal returns
-    None: the caller reports the entry as UNREADABLE instead of launching a
-    server with a wrong argv or a Windows path that still carries its double
-    backslashes.
+    `\\uXXXX`); a literal (`'…'`) string does not. The MULTI-LINE forms
+    (`\"\"\"…\"\"\"` and `'''…'''`) are legal TOML too: a same-line
+    `args = [\"\"\"node\"\"\"]` used to be reported as unreadable, so the entry was
+    dropped and the server started without its argument. An unterminated
+    string, an unknown escape or an unterminated literal returns None: the
+    caller reports the entry as UNREADABLE instead of launching a server with a
+    wrong argv or a Windows path that still carries its double backslashes.
     """
     if i >= len(text) or text[i] not in "\"'":
         return None
     q = text[i]
-    if text.startswith(q * 3, i):
-        return None
-    out, j, n = [], i + 1, len(text)
+    multi = text.startswith(q * 3, i)
+    delim = q * 3 if multi else q
+    out, j, n = [], i + len(delim), len(text)
+    if multi and text.startswith("\r\n", j):
+        j += 2                              # TOML trims the line break after """
+    elif multi and j < n and text[j] == "\n":
+        j += 1
     while j < n:
+        if text.startswith(delim, j):
+            if not multi:
+                return "".join(out), j + 1
+            # A run of 4-5 quotes closes the string AND contributes the extra
+            # quotes to the value (TOML permits up to two adjacent quotes).
+            k = j + 3
+            while k < n and k - j < 5 and text[k] == q:
+                k += 1
+            out.append(q * (k - (j + 3)))
+            return "".join(out), k
         c = text[j]
-        if c == q:
-            return "".join(out), j + 1
         if c == "\\" and q == '"':
             if j + 1 >= n:
                 return None
             e = text[j + 1]
+            if multi and e in "\r\n":
+                # A line-ending backslash trims the newline and the whitespace
+                # that follows it (TOML multi-line basic string).
+                j += 2
+                if e == "\r" and j < n and text[j] == "\n":
+                    j += 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                continue
             simple = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r",
                       '"': '"', "\\": "\\"}
             if e in simple:
@@ -1567,23 +1597,26 @@ def _toml_string_at(text: str, i: int):
 def _toml_array_values(raw: str):
     """The string values of a TOML array (`raw`), or None when unreadable.
 
-    `json.loads` is the fast path, but the operator's own `config.toml` may use
-    TOML's literal strings (`args = ['node', 'server.js']`) or a trailing comma
+    `json.loads` is the fast path, but it also accepts booleans, numbers and
+    `null` -- legal TOML values that are NOT argv strings. `args = [true, "x"]`
+    used to come back as `['True', 'x']`, launching the server with unusable
+    arguments instead of reporting the entry unreadable. Only a list whose every
+    element is a string takes the fast path; anything else falls through to the
+    quote-aware scan, which accepts only quoted elements. That scan also covers
+    TOML's literal strings (`args = ['node', 'server.js']`) and a trailing comma
     (`args = ["node", "server.js",]`) -- both legal TOML, both a `ValueError`
-    for `json.loads`. The fallback scans the bracketed body quote-aware and
-    accepts only quoted elements, so a genuinely malformed array still reports
-    as unreadable instead of silently dropping every argument. The fallback also
-    decodes TOML's string escapes and ignores `#` comments, so a legal entry
-    like `args = ["say \\"hi\\"",]` or one carrying a comment is read correctly
-    instead of coming back with the backslashes still in it (the server would
-    then be launched with a wrong argv).
+    for `json.loads`. It decodes TOML's string escapes and ignores `#` comments,
+    so a legal entry like `args = ["say \\"hi\\"",]` or one carrying a comment is
+    read correctly instead of coming back with the backslashes still in it.
     """
     try:
-        return [str(a) for a in json.loads(raw)]
+        parsed = json.loads(raw)
     except ValueError:
-        pass
+        parsed = None
     except TypeError:
         return None
+    if isinstance(parsed, list) and all(isinstance(a, str) for a in parsed):
+        return list(parsed)
     body = (raw or "").strip()
     if len(body) < 2 or body[0] != "[" or body[-1] != "]":
         return None
@@ -5739,6 +5772,17 @@ def _caption_and_document_checks(ctx: Ctx, rec: dict, vid: str, base_sources: li
                            "hand-off placeholders) or the visible output of a finding; a "
                            "document that adds content silently is invented content, the same "
                            "defect class as a lost document, read in the other direction")
+        if dset.get("added_non_editable"):
+            # A submission document is not only an editable manuscript source: a
+            # new PDF, figure, data table or archive the base never had is the
+            # same two-sided defect, and the editable collector used to drop it
+            # before the comparison (F086).
+            warns.append("NEW non-editable submission file(s) not present in the base: "
+                         + ", ".join(dset["added_non_editable"][:6])
+                         + " -- a PDF, figure, table or archive is submission content too; each "
+                           "must be declared scaffolding for a mandatory item or the visible "
+                           "output of a finding, and an undeclared one is invented content, the "
+                           "same defect class as a lost document read in the other direction")
 
 
 def postcheck_a1(ctx: Ctx, rec: dict):

@@ -705,7 +705,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "fresh arm with a negative vs_original median ineligible; 'sign' fails "
                          "only when the exact one-sided sign test over that pair's directed "
                          "scores is significant at 0.05. The pair is 2*judges scores, so both "
-                         "rules are coarse -- the sign counts and p are reported either way")
+                         "rules are coarse -- the sign counts and p are reported either way. "
+                         "The sign rule needs >= 3 judges: at 2 judges the pair has 4 scores "
+                         "and the smallest attainable one-sided p (4/4 losses) is 0.0625, so "
+                         "setup refuses that combination instead of shipping a gate that can "
+                         "never reject")
     ps.add_argument("--tiebreak-defect-floor", type=int, default=DEFAULT_TIEBREAK_DEFECT_FLOOR,
                     metavar="N",
                     help=f"the adaptive defect-prefix tie-break's floor (default "

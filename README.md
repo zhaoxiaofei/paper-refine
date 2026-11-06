@@ -333,7 +333,7 @@ evidence pack.
 | `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
 | `redline --root ROOT` / `track --root ROOT` | (re)write the tracked-changes `.docx` tree / the difference-tracking copies (`*.tracking-*`) plus the persistent PDF renders |
 | `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: `off` = no Zotero tooling, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
-| `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant |
+| `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant. The pair carries `2*judges` scores, so the sign rule needs at least 3 judges: at 2 judges the smallest attainable one-sided p (4/4 losses) is 0.0625, and `setup` refuses that combination rather than shipping a gate that can never reject |
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
 | `--judge-agent {codex,claude,dsh,qwen,manual}` / `--judge-agent-cmd JSON` (`run`) | run the judge panel only on a different (e.g. cheaper) backend; defaults to `--agent` / `--agent-cmd` |
 | `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
@@ -2367,7 +2367,7 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | revise | 112 KB | 58 KB | 48% |
 | integrate | 110 KB | 58 KB | 47% |
 | rewrite | 103 KB | 54 KB | 47% |
-| judge | 98 KB | 68 KB | 30% |
+| judge | 99 KB | 69 KB | 30% |
 | revision_audit | 21 KB | 11 KB | 45% |
 | revision_repair | 21 KB | 7 KB | 62% |
 
@@ -3492,7 +3492,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 188 suites (a few
+any failure. They are independent, so run them in parallel — 189 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

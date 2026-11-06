@@ -1615,10 +1615,15 @@ printing.
 
 **Enumeration.** For every table: parse the caption's promised fields and pair
 each with the printed/extracted header (or the shipped table file). For every
-figure: pair each promised panel/encoding (n, error bars, colour scale,
-markers, axis meaning) with the artwork's own text (M25's extraction). The
-seeded `WORK/NUMBERS_LEDGER.md`, the outline rows and the table headers are
-the evidence.
+figure: split the promise into TEXT-BEARING parts (n, panel letters, axis
+labels and meaning, any number or name printed in the artwork) and pair those
+with the artwork's own text (M25's extraction); a VISUAL encoding (error bars,
+colour scale, markers, shading) has no text counterpart by construction, so
+inspect the RENDERED IMAGE itself (or an OCR/vision pass when one is available)
+and record `unable — rendered artwork not inspectable` with the missing
+prerequisite where it cannot be viewed -- the absence of a visual encoding from
+the text layer is NOT a finding. The seeded `WORK/NUMBERS_LEDGER.md`, the
+outline rows and the table headers are the evidence.
 
 **Artifact.** `M29_caption_schema.md`: caption promise (with location) |
 printed evidence (file + header/artwork token) | satisfied? | fix route |
@@ -1626,7 +1631,9 @@ disposition.
 
 **Finding rules (one per promised item with no printed counterpart).**
 `completeness` normally; `correctness` when a printed count or field list
-contradicts the caption's own claim. A promise satisfied inside a dataset
+contradicts the caption's own claim. A visual encoding is decided on the
+rendered image, never on the text layer: its silence in an extraction proves
+nothing about the printed figure. A promise satisfied inside a dataset
 identifier rather than as its own column is recorded as partial satisfaction
 with the fix route. Fixes align the editable side (caption or printed source
 when it is in the corpus); a generated print's regeneration step goes to

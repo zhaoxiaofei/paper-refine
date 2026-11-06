@@ -94,6 +94,32 @@ def _package_symlink_problems(pkg: Path) -> list:
     return out
 
 
+def _copy_evidence_no_follow(src_dir: Path, dst_dir: Path) -> list:
+    """Copy one evidence area WITHOUT following its nested symlinks.
+
+    The `symlinks=False` fallback used when a platform cannot create the
+    evidence-area link FOLLOWED every nested link inside `raw_data/` or the
+    feedback area, copying outside content into the LaTeX build tree and then
+    into the compiled PDF -- the package's own symlink refusal, which exempts
+    the evidence areas, was thus evaded. A nested link has no place in a build
+    tree the compiler reads, so it is SKIPPED and named in the returned list.
+    """
+    skipped = []
+
+    def _ignore(dirpath, names):
+        out = []
+        for name in names:
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                skipped.append(Path(full).relative_to(src_dir).as_posix())
+                out.append(name)
+        return out
+
+    shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True, symlinks=True,
+                    ignore=_ignore)
+    return skipped
+
+
 def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                       timeout: int = LATEX_COMPILE_TIMEOUT,
                       keep_aux: bool = False, link_evidence: bool = False) -> dict:
@@ -125,6 +151,7 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                          + (f" and {len(links) - 6} more" if len(links) > 6 else "")
                          + ": a linked source can pull outside content into the PDF"}
     work = Path(tempfile.mkdtemp(prefix="paper_pdf_"))
+    skipped_links: list = []
     try:
         shutil.copytree(pkg, work, dirs_exist_ok=True,
                         # Name-based, not glob-based: the tracking token space is
@@ -145,9 +172,16 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                                target_is_directory=True)
                 except OSError:
                     # A platform without symlinks: a real copy is the fallback
-                    # (correct, only slower), never a silently missing file.
-                    shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True,
-                                    symlinks=False)
+                    # (correct, only slower), never a silently missing file. A
+                    # NESTED link inside the area is skipped and named (see
+                    # _copy_evidence_no_follow): following it copied outside
+                    # content into the build tree and the compiled PDF.
+                    skipped_links.extend(_copy_evidence_no_follow(src_dir, dst_dir))
+                    if skipped_links:
+                        print(f"warning: skipped {len(skipped_links)} nested symlink(s) "
+                              f"while copying the evidence area {src_dir} into the PDF "
+                              f"build tree (a link is not build content): "
+                              + ", ".join(skipped_links[:5]), file=sys.stderr)
         # The package may itself ship a PDF named like the compiled output (a
         # previous render). Leaving it in the build copy meant a compiler that
         # exited 0 WITHOUT writing anything still looked successful: the stale
@@ -219,9 +253,10 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                 "error": (None if ok else
                           (errors[0] if errors
                            else f"latexmk exited {proc.returncode} without a PDF")[:300]),
-                "errors": errors}
+                "errors": errors, "skipped_links": skipped_links}
     except (OSError, subprocess.SubprocessError, shutil.Error) as e:    # noqa: BLE001
-        return {"ok": False, "tool": "latexmk", "error": f"{type(e).__name__}: {e}"}
+        return {"ok": False, "tool": "latexmk", "error": f"{type(e).__name__}: {e}",
+                "skipped_links": skipped_links}
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

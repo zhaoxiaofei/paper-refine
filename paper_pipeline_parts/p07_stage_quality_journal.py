@@ -3451,7 +3451,7 @@ JOURNAL_LEDGER_SCHEMA = """{
   "source_files": ["<the feedback file names you read>"],
   "concerns": [
     {"id": "R1-1",
-     "source": "<feedback file>",
+     "source": "<feedback file; separate several places with ';'>",
      "author": "Reviewer 1",
      "quote": "<verbatim, <=300 chars; it must appear in feedback/text/>",
      "summary": "<one sentence, in your own words>",
@@ -3807,7 +3807,9 @@ gets its own ledger row — disposition `not-applicable` (or action `disagree`)
 with the concrete rationale in `evidence_needed` — never a silent omission. Name
 the LLM the file itself names as the `author` (e.g. "Claude review"); when the
 file names none, use "LLM review (pre-filtered)". A demand the human letter and
-the LLM review both raise is still ONE row whose `source` names both.
+the LLM review both raise is still ONE row whose `source` names both, separated
+by `;` (`editor_letter.txt; llm_review.md`): every named file must be a staged
+feedback file and the `quote` must appear verbatim in at least one of them.
 
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
@@ -3825,8 +3827,11 @@ without a reason, or names a concern that does not exist.
 THE LEDGER IS THE DELIVERABLE (one row per distinct concern):
   * A reviewer paragraph that raises three separate demands is three rows; the
     same demand repeated by the editor, a reviewer or the LLM review is ONE row
-    whose `source` names every place it was raised. Never merge two demands,
-    never split one.
+    whose `source` names every place it was raised, separated by `;`
+    (`editor_letter.txt; reviewer_report.txt`). Every named file must be a staged
+    feedback file and the `quote` must appear verbatim in at least one of them;
+    name the corresponding `author`s in the `author` cell. Never merge two
+    demands, never split one.
   * `quote` is VERBATIM from the feedback (<=300 chars, whitespace-normalised):
     it is checked mechanically against feedback/text/ and feedback/llm/text/, so
     a paraphrase fails.
@@ -3905,7 +3910,9 @@ human reviewer's point. Enumerate it, answer it, and never dismiss it as a model
 false positive; a row you still believe is wrong gets `not-applicable` (or
 action `disagree`) with the concrete rationale — never a silent omission. Name
 the LLM the file itself names as `author`, else "LLM review (pre-filtered)"; a
-demand the letter and the LLM review both raise is ONE row naming both sources.
+demand the letter and the LLM review both raise is ONE row naming both sources,
+separated by `;` (`editor_letter.txt; llm_review.md`), with the quote verbatim in
+at least one of them.
 
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
@@ -4349,6 +4356,7 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
     human_labels = _staged_labels(sb / "feedback" / "files", _seed_labels("files"))
     llm_labels = _staged_labels(sb / "feedback" / "llm" / "files", _seed_labels("llm_files"))
     seen = set()
+    unverified_authors = []
     for i, row in enumerate(rows, 1):
         if not isinstance(row, dict):
             errs.append(f"concerns[{i}] is not an object")
@@ -4385,35 +4393,60 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
                     out.append(label)
             return out
 
-        human_hits = _named_labels(source, human_labels)
-        llm_hits = _named_labels(source, llm_labels)
-        human_strong = _strong_labels(source, human_labels)
-        llm_strong = _strong_labels(source, llm_labels)
-        stream = ""
-        if human_strong and llm_strong:
+        def _resolve_source(tok: str):
+            """(stream, human_hits, llm_hits) for ONE source spelling."""
+            human_hits = _named_labels(tok, human_labels)
+            llm_hits = _named_labels(tok, llm_labels)
+            human_strong = _strong_labels(tok, human_labels)
+            llm_strong = _strong_labels(tok, llm_labels)
+            if human_strong and llm_strong:
+                return "both", human_strong, llm_strong
+            if human_strong:
+                return "human", human_strong, []
+            if llm_strong:
+                return "llm", [], llm_strong
+            if human_hits and llm_hits:
+                # No exact spelling on either side: an ambiguous bare basename
+                # must not silently bind one concern to BOTH streams (a quote
+                # from the model file then satisfied a human-labelled row).
+                errs.append(f"concern {cid}: source {tok!r} is ambiguous -- it names "
+                            f"{', '.join(human_hits + llm_hits)}; cite the stream's own path")
+                return "", [], []
+            if human_hits:
+                return "human", human_hits, []
+            if llm_hits:
+                return "llm", [], llm_hits
+            errs.append(f"concern {cid}: source {tok!r} does not name any file staged "
+                        f"under feedback/files/ or feedback/llm/files/ (name the feedback "
+                        f"file the quote comes from)")
+            return "", [], []
+
+        # A demand the editor, a reviewer or the LLM review all raise is ONE row
+        # whose `source` names EVERY place it was raised (the merged-row rule
+        # above). The cell is a list: `;`- (or `+`-)separated spellings, each
+        # resolved and stream-bound on its own. The old single-string resolution
+        # could not match a combined cell at all, so the prompt's merged row
+        # failed validation ("does not name any file") -- the ledger had to lose
+        # a source or fail.
+        tokens = ([t.strip() for t in re.split(r"\s*;\s*|\s+\+\s+", source) if t.strip()]
+                  if source else [])
+        human_hits, llm_hits = [], []
+        for tok in tokens:
+            _st, _h, _l = _resolve_source(tok)
+            for lab in _h:
+                if lab not in human_hits:
+                    human_hits.append(lab)
+            for lab in _l:
+                if lab not in llm_hits:
+                    llm_hits.append(lab)
+        if human_hits and llm_hits:
             stream = "both"
-            human_hits, llm_hits = human_strong, llm_strong
-        elif human_strong:
-            stream = "human"
-            human_hits, llm_hits = human_strong, []
-        elif llm_strong:
-            stream = "llm"
-            human_hits, llm_hits = [], llm_strong
-        elif human_hits and llm_hits:
-            # No exact spelling on either side: an ambiguous bare basename must
-            # not silently bind one concern to BOTH streams (a quote from the
-            # model file then satisfied a human-labelled row).
-            errs.append(f"concern {cid}: source {source!r} is ambiguous -- it names "
-                        f"{', '.join(human_hits + llm_hits)}; cite the stream's own path")
-            stream = ""
         elif human_hits:
             stream = "human"
         elif llm_hits:
             stream = "llm"
-        elif source:
-            errs.append(f"concern {cid}: source {source!r} does not name any file staged "
-                        f"under feedback/files/ or feedback/llm/files/ (name the feedback "
-                        f"file the quote comes from)")
+        else:
+            stream = ""
         quote = _norm_ws(row.get("quote"))
         short = bool(quote) and len(quote) < 8
         if not quote:
@@ -4469,6 +4502,31 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
             errs.append(f"concern {cid}: quote is too short to be a partial excerpt "
                         f"({len(quote)} characters) and no source file could be checked to "
                         f"prove it is a complete unit")
+        # The `author` cell is an ATTRIBUTION (the reviewer/editor/LLM label the
+        # source itself carries), not a free-text field: a non-empty check alone
+        # passed an invented name beside a real quote into the ledger and the
+        # response letter. Bind its words to what the named file(s) say; an
+        # unattributable name is REPORTED and recorded, never silently passed.
+        author_evidence = " ".join(
+            [_label_text(lab, False) for lab in human_hits]
+            + [_label_text(lab, True) for lab in llm_hits]
+            + human_hits + llm_hits).lower()
+        author_words = {w for w in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", author.lower())
+                        if w not in {"the", "review", "pre-filtered", "prefiltered"}}
+
+        def _author_supported(word: str) -> bool:
+            """A word (or its 5-character stem) appears in the source evidence."""
+            return word in author_evidence or (len(word) >= 5
+                                               and word[:5] in author_evidence)
+
+        if author and author_words and author_evidence \
+                and not any(_author_supported(w) for w in author_words):
+            unverified_authors.append(cid)
+            warns.append(f"concern {cid}: the author {author!r} is not named anywhere in the "
+                         f"feedback file(s) its `source` cites "
+                         f"({', '.join(human_hits + llm_hits) or source}); record the "
+                         f"attribution as manual and verify the reviewer/role name against "
+                         f"the source")
         action = str(row.get("action") or "").strip()
         if action not in JOURNAL_CONCERN_ACTIONS:
             errs.append(f"concern {cid}: action {action!r} is not one of "
@@ -4491,6 +4549,8 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
         warns.append(f"{JOURNAL_CONCERNS_MD_REL} is missing (the human-readable ledger table)")
     data["_to_fix"] = sum(1 for r in rows if isinstance(r, dict)
                           and str(r.get("disposition")) in ("to-fix", "manual"))
+    if unverified_authors:
+        data["unverified_authors"] = unverified_authors
     return data
 
 

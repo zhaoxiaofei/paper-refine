@@ -6258,9 +6258,13 @@ VS_ORIGINAL_TOLERANCE = 0.0
 # pre-registered default (a candidate whose vs_original median is negative is
 # ineligible). `sign` fails only when the exact one-sided sign test over the
 # pair's directed scores is significant at VS_ORIGINAL_ALPHA -- the honest
-# statement of what a 2*judges (6-score) pair can support, at the price of
-# passing more real regressions. Both rules are REPORTED with their sign counts
-# and p-value, so a 0.6-median pass that was a coin flip is visible.
+# statement of what a 2*judges-score pair can support, at the price of passing
+# more real regressions. The pair is 2*judges scores (4 at the default 2
+# judges), and 4 scores can NEVER reach alpha 0.05 (4/4 losses give p=1/16);
+# `setup` therefore refuses `--vs-original-rule sign` below 3 judges, which is
+# the smallest complete pair whose one-sided p can fall below 0.05. Both rules
+# are REPORTED with their sign counts and p-value, so a 0.6-median pass that was
+# a coin flip is visible.
 VS_ORIGINAL_RULE = "median"
 VS_ORIGINAL_ALPHA = 0.05
 

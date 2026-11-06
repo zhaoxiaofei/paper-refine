@@ -2899,23 +2899,18 @@ def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
 
 
 def _parse_ci(cell: str):
-    """(low, high) from `[-0.51, -0.02]`, or None."""
-    # U+2212 (the typographic minus a PDF export emits) is a minus sign here.
-    text = str(cell).replace("\u2212", "-")
-    m = re.match(r"^\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]\s*$", text)
-    if not m:
-        return None
-    return float(m.group(1)), float(m.group(2))
+    """(low, high) from `[-0.51, -0.02]`, `(0.1, 0.5)` or `[1e-3, 0.5]`, or None."""
+    text = str(cell).replace("\u2212", "-")      # typographic minus
+    m = CI_CELL_RE.match(text)
+    return (float(m.group("lo")), float(m.group("hi"))) if m else None
 
 
 def _parse_p(cell: str):
     t = re.sub(r"\\textbf\{|\\emph\{|\}", "", str(cell or "")).strip()
     t = re.sub(r"^\$?(?:p|P)?\$?\s*(?:=|<=|>=|<|>|≤|≥)?\s*", "", t)
-    t = t.strip("$ ").rstrip("*")
-    try:
-        return float(t)
-    except ValueError:
-        return None
+    # the VALUE is the leading number; a qualifier after it is not part of it
+    m = re.match(NUMBER_CELL_RE, t)
+    return float(m.group(0)) if m else None
 
 
 def _p_reports_significant(cell: str, parsed=None) -> bool:
@@ -2937,8 +2932,12 @@ def _latex_command_bodies(text: str, command: str) -> list:
     A caption is not brace-free (`\\qty{95}{\\percent}`), so the regex
     `\\caption\\{([^{}]*)\\}` stops at the first nested brace and can cut the
     sentence that states the very rule the scan is checking.
+
+    LaTeX comments are stripped first: a commented-out old caption is not the
+    table's caption (it let a stale sentence activate/contradict PKG-12 and M29).
     """
     out = []
+    text = _tex_strip_comments(text)
     needle = "\\" + command
     i = 0
     while True:
