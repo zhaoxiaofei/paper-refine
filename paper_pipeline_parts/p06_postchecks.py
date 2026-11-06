@@ -2053,6 +2053,35 @@ def _run_render_subprocess(argv, timeout, cwd=None):
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
+def pdf_signature_problem(path: Path) -> str:
+    """'' when `path` looks like a complete PDF, else the reason it does not.
+
+    A non-empty output file is not a render. `docx2pdf.sh` has always checked
+    the `%PDF-` header and the `%%EOF` trailer; the in-process renderer and the
+    persistent-PDF cache did not, so a converter that wrote one garbage byte
+    and exited 0 was recorded `ok`, and a later run reused the same bytes from
+    the cache (PR151-164). The trailer must be near the END, not merely
+    somewhere in the bytes: a truncated file whose text stream contains the
+    marker must not pass (the 2026-10-28 audit's F64 made the same distinction
+    for the shell converter).
+    """
+    try:
+        size = path.stat().st_size
+        if size <= 0:
+            return "the file is empty"
+        with path.open("rb") as fh:
+            if b"%PDF-" not in fh.read(1024):
+                return "no %PDF- header in the first 1024 bytes"
+            tail_len = min(2048, size)
+            fh.seek(-tail_len, os.SEEK_END)
+            if b"%%EOF" not in fh.read(tail_len):
+                return ("no %%EOF trailer in the last 2048 bytes "
+                        "(the file is truncated or not a PDF)")
+    except OSError as e:
+        return f"{type(e).__name__}: {e}"
+    return ""
+
+
 def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
                        timeout: float = 900, page_images: bool = True) -> dict:
     """Render ONE DOCX to PDF + page PNGs under `out_dir`.
@@ -2127,6 +2156,17 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
                 .strip().replace("\n", " ")[:200]
             return {"ok": False, "renderer": name,
                     "error": f"the renderer produced no PDF: {detail}"}
+        # A non-empty file is not a render. Validate the signature BEFORE
+        # moving it into place (and before the page-image pass), so a broken
+        # converter cannot be recorded `ok` and cached for the next run.
+        _sig = pdf_signature_problem(pdf)
+        if _sig:
+            detail = (_child_output(getattr(proc, "stderr", None))
+                      + _child_output(getattr(proc, "stdout", None))) \
+                .strip().replace("\n", " ")[:200]
+            return {"ok": False, "renderer": name,
+                    "error": f"the renderer produced a non-PDF file ({_sig})"
+                             + (f": {detail}" if detail else "")}
         final_pdf = out_dir / (docx.stem + ".pdf")
         shutil.move(str(pdf), str(final_pdf))
         pages = _pdf_page_count(final_pdf)

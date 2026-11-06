@@ -376,10 +376,18 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
 
 def _reuse_pdf_record(previous: dict, label: str, rel: str, digest: str,
                       out_pdf: Path, kind: str) -> dict:
-    """The stored record for an unchanged source, when its PDF is still there."""
+    """The stored record for an unchanged source, when its PDF is still valid.
+
+    The record's `ok` is a claim from the earlier run, not a property of the
+    bytes on disk now: the output may have been truncated, replaced or only
+    partly written. A cached render must pass the same PDF signature check the
+    renderer is held to, or a corrupt file would be reused as `ok=True` for as
+    long as its source digest is unchanged (PR151-164).
+    """
     rec = previous.get((label, rel))
     if (rec and rec.get("ok") and rec.get("sha256") == digest and rec.get("kind") == kind
-            and out_pdf.is_file() and out_pdf.stat().st_size > 0):
+            and out_pdf.is_file() and out_pdf.stat().st_size > 0
+            and not pdf_signature_problem(out_pdf)):
         fresh = dict(rec)
         fresh["cached"] = True
         return fresh

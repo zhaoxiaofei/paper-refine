@@ -636,7 +636,7 @@ for line in sys.stdin:
         docx = str(args.get("docxPath") or "")
         pdf = docx[:-5] + ".pdf" if docx.lower().endswith(".docx") else docx + ".pdf"
         with open(pdf, "wb") as fh:
-            fh.write(b"%PDF-1.4\\n% fake mcp render\\n")
+            fh.write(b"%PDF-1.4\\n% fake mcp render\\n%%EOF\\n")
         print(json.dumps({"jsonrpc": "2.0", "id": msg.get("id"),
                           "result": {"content": [{"type": "text", "text": "converted"}],
                                      "isError": False}}), flush=True)
@@ -2002,7 +2002,7 @@ def test_mcp_first_render_chain():
         broken = tmp / "broken_mcp.py"
         broken.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
         fake_sh = tmp / "docx2pdf.sh"
-        fake_sh.write_text('#!/bin/sh\nprintf \'%%PDF-1.4\\n%% fake word\\n\' > "${1%.*}.pdf"\n',
+        fake_sh.write_text('#!/bin/sh\nprintf \'%%PDF-1.4\\n%% fake word\\n%%%%EOF\\n\' > "${1%.*}.pdf"\n',
                            encoding="utf-8")
         os.chmod(fake_sh, 0o755)
         real_choices, real_pages = nb.visual_renderer_choices, nb._pdf_page_count
@@ -2044,7 +2044,7 @@ def test_visual_template_render_and_comparison():
     sb.mkdir()
     # A fake Word: handed a .docx copy, it writes a (stand-in) PDF next to it.
     fake = tmp / "docx2pdf.sh"
-    fake.write_text('#!/bin/sh\nprintf \'%%PDF-1.4\\n%% fake render\\n\' > "${1%.*}.pdf"\n',
+    fake.write_text('#!/bin/sh\nprintf \'%%PDF-1.4\\n%% fake render\\n%%%%EOF\\n\' > "${1%.*}.pdf"\n',
                     encoding="utf-8")
     os.chmod(fake, 0o755)
     real_choices, real_pages = nb.visual_renderer_choices, nb._pdf_page_count

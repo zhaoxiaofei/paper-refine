@@ -1757,7 +1757,10 @@ page count and any warning. The build runs in a disposable copy of the package,
 so no build by-product (`latexmk`'s `.aux/.log/.pdf/...`) ever lands inside a
 corpus, and `prune` never deletes the tree -- the PDFs outlive the run. An
 uncompilable source or an unrenderable document is recorded and printed as a
-WARNING; the run continues and the decision is unaffected.
+WARNING; the run continues and the decision is unaffected. A cached render is
+reused only while its source digest matches AND the file still passes the PDF
+signature check (`%PDF-` header, near-end `%%EOF` trailer); a truncated or
+non-PDF file is re-rendered instead of being recorded `ok`.
 
 ## Style/formatting checks and repairs
 

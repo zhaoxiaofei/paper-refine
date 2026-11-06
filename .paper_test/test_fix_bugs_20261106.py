@@ -21,7 +21,13 @@ Each block pins one confirmed defect on the current tree:
     where a legal `$` or backtick is expanded by the shell;
   * medium's paged rules are written to one fixed path, so the revision audit
     and bounded repair (which run in the revise sandbox) overwrote the
-    reviser's nine sections while its PROMPT.md still pointed at the file.
+    reviser's nine sections while its PROMPT.md still pointed at the file;
+  * the persistent-PDF cache and the in-process renderer accepted any nonempty
+    file as a successful render (no `%PDF-` header or `%%EOF` trailer), so a
+    broken converter could be recorded `ok` and its garbage reused for every
+    later run whose source digest was unchanged;
+  * the M4 AUC pattern accepted only 0.x and 1.0, so an impossible `AUC = 1.2`
+    produced no occurrence at all and the inventory could not expose it.
 """
 from __future__ import annotations
 
@@ -250,6 +256,104 @@ def test_medium_auxiliary_sidecar_does_not_overwrite_reviser() -> None:
           reviser_file.read_text(encoding="utf-8").count("\n## ") == sections)
 
 
+# ---------------------------------------------------------------------------
+# 7. A nonempty file is not a PDF: renderer output and the persistent cache
+#    both require the header and the trailer.
+# ---------------------------------------------------------------------------
+def test_pdf_signature_and_cache() -> None:
+    print()
+    print("== PDFs: a nonempty file is not a render ==")
+    d = scratch("pdfsig_")
+
+    def write(name: str, data: bytes) -> Path:
+        p = d / name
+        p.write_bytes(data)
+        return p
+
+    good = write("good.pdf", b"%PDF-1.4\nbody\n" + b"x" * 3000 + b"\n%%EOF\n")
+    no_eof = write("no_eof.pdf", b"%PDF-1.4\nbody\n")
+    no_header = write("no_header.pdf", b"not a pdf\n" + b"x" * 3000)
+    late_eof = write("late_eof.pdf",
+                     b"%PDF-1.4\n" + b"x" * 5000 + b"%%EOF\n" + b"y" * 3000)
+    empty = write("empty.pdf", b"")
+    check("pdf: a complete PDF has no problem",
+          pp.pdf_signature_problem(good) == "")
+    check("pdf: a missing %%EOF trailer is reported",
+          "%%EOF" in pp.pdf_signature_problem(no_eof))
+    check("pdf: a missing %PDF- header is reported",
+          "%PDF-" in pp.pdf_signature_problem(no_header))
+    check("pdf: an %%EOF far from the end does not pass the trailer check",
+          "%%EOF" in pp.pdf_signature_problem(late_eof))
+    check("pdf: an empty file is reported", pp.pdf_signature_problem(empty) != "")
+
+    prev = {("label", "paper.docx"): {"ok": True, "sha256": "abc", "kind": "docx"}}
+    check("cache: a corrupt cached render is NOT reused",
+          pp._reuse_pdf_record(prev, "label", "paper.docx", "abc", no_header,
+                               "docx") is None)
+    reused = pp._reuse_pdf_record(prev, "label", "paper.docx", "abc", good, "docx")
+    check("cache: a complete cached render is reused",
+          isinstance(reused, dict) and reused.get("cached") is True)
+    check("cache: an unchanged source with a changed digest is not reused",
+          pp._reuse_pdf_record(prev, "label", "paper.docx", "other", good,
+                               "docx") is None)
+
+    # A fake Word renderer that writes garbage must be a FAILED render, and the
+    # garbage must not be moved into the output directory.
+    docx = d / "paper.docx"
+    docx.write_bytes(b"fake docx")
+    out = d / "out"
+    out.mkdir()
+    bad_sh = d / "bad_word.sh"
+    bad_sh.write_text('#!/bin/sh\necho "not a pdf" > "${1%.docx}.pdf"\n',
+                      encoding="utf-8")
+    bad_sh.chmod(0o755)
+    res = pp.render_docx_visual(docx, out, ("word", str(bad_sh)), timeout=30,
+                                page_images=False)
+    check("render: a non-PDF renderer output is rejected",
+          res.get("ok") is False and "non-PDF" in str(res.get("error")),
+          str(res)[:180])
+    check("render: the rejected output is not moved into place",
+          not (out / "paper.pdf").exists())
+
+    ok_sh = d / "ok_word.sh"
+    ok_sh.write_text('#!/bin/sh\nprintf \'%%PDF-1.4\\nbody\\n%%%%EOF\\n\' > "${1%.docx}.pdf"\n',
+                     encoding="utf-8")
+    ok_sh.chmod(0o755)
+    good_res = pp.render_docx_visual(docx, out, ("word", str(ok_sh)), timeout=30,
+                                     page_images=False)
+    check("render: a complete PDF output still succeeds",
+          good_res.get("ok") is True and (out / "paper.pdf").is_file(),
+          str(good_res)[:180])
+
+
+# ---------------------------------------------------------------------------
+# 8. An impossible AUC is still a labelled metric and must be inventoried.
+# ---------------------------------------------------------------------------
+def test_auc_out_of_range_is_inventoried() -> None:
+    print()
+    print("== M4: an impossible AUC value reaches the inventory ==")
+    scripts = WS / "paper-skills" / "paper-review" / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import extract_numbers as en
+    auc = dict(en.LABEL_PATTERNS)["AUC"]
+    cases = {
+        "AUC = 1.2": "1.2",
+        "AUC 2": "2",
+        "AUC = 0.85": "0.85",
+        "an AUC of 0.72": "0.72",
+    }
+    for text, want in cases.items():
+        m = auc.search(text)
+        check(f"AUC: {text!r} is inventoried as {want}",
+              m is not None and m.group(1) == want,
+              str(m.group(1)) if m else "no match")
+    for text in ("AUC of 12 patients", "AUC 95%"):
+        check(f"AUC: {text!r} is not read as an AUC",
+              auc.search(text) is None,
+              str(auc.search(text).group(0)) if auc.search(text) else "")
+
+
 if __name__ == "__main__":
     test_judge_priority_uses_net_difference()
     test_reviser_does_not_reopen_dropped_findings()
@@ -257,6 +361,8 @@ if __name__ == "__main__":
     test_repair_plan_accepts_pure_deletion()
     test_selfcheck_command_is_shell_quoted()
     test_medium_auxiliary_sidecar_does_not_overwrite_reviser()
+    test_pdf_signature_and_cache()
+    test_auc_out_of_range_is_inventoried()
     print()
     if FAILS:
         print(f"FAILED: {len(FAILS)} check(s): " + ", ".join(FAILS))

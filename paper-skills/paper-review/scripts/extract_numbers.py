@@ -163,8 +163,14 @@ LABEL_PATTERNS = [
         r"\b[nN]\s*=\s*(\d{1,3}(?:[,\u00a0\u202f ]\d{3})+|\d+)\b"
         r"(?![.,]\d)(?![\u00a0\u202f ]\d{3}\b)")),
     ("AUC", re.compile(
+        # A labelled AUC is a metric even when its VALUE is impossible: the
+        # old pattern accepted only 0.x and 1.0, so `AUC = 1.2` produced no
+        # occurrence at all and the M4 inventory could never expose it
+        # (PR151-161). Keep the `AUC of 12 patients` guard by accepting one
+        # digit before the decimal point only: a two-digit count (`12`, `95%`)
+        # still does not match.
         r"\bAU(?:C|ROC)\s*(?:(?:was|is|of|approximately|approx\.?|about)\s*)*"
-        r"(?:[:=]\s*)?((?:0?\.\d+|1(?:\.0+)?))(?!\d|\.\d)", re.I)),
+        r"(?:[:=]\s*)?((?:0?\.\d+|[0-9](?:\.\d+)?))(?!\d|\.\d)", re.I)),
     ("percentage", re.compile(
         # The sign is part of the value: -12.5% is a decrease, not 12.5.
         r"(?<![\w.])([+\-\u2212]?(?:\.\d+|\d{1,4}(?:\.\d+)?))\s*%")),
