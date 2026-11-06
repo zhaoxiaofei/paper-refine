@@ -2370,12 +2370,19 @@ def _revision_plan_rows(sb: Path):
         # from an arbitrary replacement. An incomplete row invalidates the plan
         # rather than being filtered out, so a defect the auditor found is never
         # silently dropped. `wrong` is required as a KEY but may be empty for a
-        # pure addition, where there is no wrong text to quote.
+        # pure addition, where there is no wrong text to quote; symmetrically
+        # `correct` may be empty for a pure DELETION, where the repair removes
+        # text and there is no postimage to quote (the bounded repair's ledger
+        # and span audit already support an empty `after`). At least one of the
+        # two must quote the span, or the row authorizes nothing locatable.
         _required = ("location", "wrong", "correct", "basis", "edit", "evidence")
         if any(key not in row for key in _required):
             return None
+        if not (str(row.get("wrong") or "").strip()
+                or str(row.get("correct") or "").strip()):
+            return None
         if any(not str(row.get(key) or "").strip()
-               for key in ("location", "correct", "basis", "edit", "evidence")):
+               for key in ("location", "basis", "edit", "evidence")):
             return None
         if _unsafe_package_rel(rel):
             return None

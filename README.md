@@ -2180,7 +2180,8 @@ readable `REPAIR_PLAN.md`): one row per defect it confirms IN THE REVISION
 (a correction missing, a fact removed, a wrong value, a non-inferable manual
 item, a missing low-priority re-verification row, or a defect the revision
 introduced). Every row carries the location, the wrong and correct text, and a
-basis another session can re-run; an empty plan is a valid, complete audit.
+basis another session can re-run; a pure deletion carries its removed text in
+`wrong` and an empty `correct`. An empty plan is a valid, complete audit.
 
 When the plan is non-empty, ONE **BOUNDED REPAIR** session re-validates every
 row against `revised/`, `base/` and the source hierarchy, applies only the rows
@@ -2325,6 +2326,9 @@ postcheck.
   dropped, summarised or weakened, and nothing is added that changes a mandate: the same bytes ship
   in the root, the prompt states that the paged sections are mandatory and authoritative, and the
   postchecks are unchanged — the difference is WHERE the instructions live, not what they demand.
+  An auxiliary session that runs in the revise sandbox (the revision audit and the bounded repair)
+  pages into a stage-named sidecar (`INSTRUCTIONS/PROFILE_RULES_<stage>.md`) when the reviser's file
+  is already there, so it never replaces the reviser's sections.
   The profile-only text (the capacity contract, the read policy, the pointer sentences and the
   subordination statement) is
   operating guidance that declares itself SUBORDINATE to the stage contract and to the
@@ -2353,14 +2357,14 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
 | review | 112 KB | 45 KB | 59% |
-| cold_start_review | 56 KB | 21 KB | 62% |
-| audit | 83 KB | 40 KB | 51% |
+| cold_start_review | 57 KB | 22 KB | 61% |
+| audit | 83 KB | 41 KB | 51% |
 | revise | 111 KB | 58 KB | 48% |
 | integrate | 110 KB | 58 KB | 47% |
 | rewrite | 103 KB | 53 KB | 48% |
 | judge | 98 KB | 68 KB | 30% |
-| revision_audit | 21 KB | 11 KB | 46% |
-| revision_repair | 21 KB | 7 KB | 63% |
+| revision_audit | 21 KB | 11 KB | 45% |
+| revision_repair | 21 KB | 7 KB | 62% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
@@ -3475,7 +3479,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 186 suites (a few
+any failure. They are independent, so run them in parallel — 187 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

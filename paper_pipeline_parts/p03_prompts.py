@@ -347,8 +347,8 @@ def selfcheck_block(kind: str, run_id: str, r: int) -> str:
     fallbacks = pipeline_fallback_paths()
     if fallbacks:
         alternate = "\n".join(
-            f'    python "{path}" selfcheck --sandbox . --stage {kind} --run-id {run_id} '
-            f'--round {int(r)}' for path in fallbacks)
+            f'    python {shlex.quote(str(path))} selfcheck --sandbox . --stage {kind} '
+            f'--run-id {run_id} --round {int(r)}' for path in fallbacks)
         alt_text = (f"IF THAT PATH DOES NOT EXIST OR CANNOT BE READ in this session (a sandboxed or\n"
                     f"jailed harness may mount the run root elsewhere), run the SAME frozen driver from\n"
                     f"the snapshot this root was set up from:\n{alternate}\n"
@@ -364,7 +364,7 @@ def selfcheck_block(kind: str, run_id: str, r: int) -> str:
                     "run, and re-read every deliverable schema by hand before writing the marker.\n")
     return (f"""
 SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
-    python "{pipeline_self_path()}" selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
+    python {shlex.quote(str(pipeline_self_path()))} selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
 It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
 required deliverable, the seeded decision tables' dispositions, the audit sheet, the manual TODO
 inventory and source gates of a package-producing stage, the M30 ledger when the round carries an
@@ -403,13 +403,13 @@ def judge_selfcheck_block(run_id: str) -> str:
         alternate = (
             "\nIf the path above cannot be read in this session, the SAME frozen checker is "
             "reachable at:\n"
-            + "\n".join(f'    python "{path}" selfcheck --sandbox . --stage judge'
+            + "\n".join(f'    python {shlex.quote(str(path))} selfcheck --sandbox . --stage judge'
                         for path in fallbacks))
     return (f"""
 === PRE-FLIGHT CHECK — RUN IT BEFORE THE MARKER ===
 
 From the sandbox root, before you write `{MARKER_FILE}`:
-    python "{pipeline_self_path()}" selfcheck --sandbox . --stage judge
+    python {shlex.quote(str(pipeline_self_path()))} selfcheck --sandbox . --stage judge
 It applies the orchestrator's OWN detectors to this sandbox -- scores.json, its schema, the integer
 against the rows that back it, your `checks` map and your coverage of every issued opponent label --
 and prints what the post-check would reject for every family a sandbox can decide on its own (the
@@ -2550,8 +2550,9 @@ outranks missing or unneeded information, which outranks the same thing said/spe
 ways or a convention applied unevenly, which outranks prose whose meaning survives, which
 outranks purely mechanical layout. A claim whose STRENGTH changed (a supported claim weakened, or
 an unsupported claim strengthened) is a correctness row, not preservation: the claim-calibration
-rule below governs both directions. The order is LEXICOGRAPHIC: the first tier in which the two
-versions differ decides the comparison, and no lower tier can offset it. When sources in a package
+rule below governs both directions. The order is LEXICOGRAPHIC: the first tier whose NET difference
+is not zero decides the comparison (rows inside a higher tier that cancel out do not decide it),
+and no lower tier can offset it. When sources in a package
 disagree, the higher-priority source wins, in this order:
   @@SOURCE_HIERARCHY@@
 
@@ -3400,10 +3401,12 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
   audit/        — the AUDITOR's record for this round (present because the operator enabled
                   `--audit on`): audit/audit.json disposes every frozen finding (confirm, or drop
                   WITH its evidence) and adds no new findings; audit/AUDIT.md is the human-readable
-                  form. Act on the AUDITED list: a dropped finding is NOT yours to re-litigate
-                  (re-opening one requires new evidence, and you state it in your ledger row). A
-                  note under audit/UNRESOLVED.md is an observation for the next review, not a
-                  finding you must resolve.
+                  form. Act on the AUDITED list: a dropped finding is NOT yours to re-litigate:
+                  if new evidence shows the reviewer was right, record that evidence in your
+                  ledger row and the manual list for the NEXT round's review -- never apply it
+                  here, because this session may not generate and patch a finding in one run
+                  (AGENTS.md rule 1A). A note under audit/UNRESOLVED.md is an observation for the
+                  next review, not a finding you must resolve.
 """ if audit else "")
     text = (REVISE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
@@ -3605,6 +3608,10 @@ Layout (paths relative to the sandbox root):
    fails the whole attempt (see below). Omit the verifier when no computation can show the
    defect — the evidence quote and location then carry the finding, and that is fully
    acceptable. Never write a script that merely re-prints the claim or hard-codes the answer.
+   HARD BUDGET: the orchestrator re-runs at most @@VERIFIER_MAX@@ declared verifiers per attempt
+   and stops when their aggregate run time exceeds @@VERIFIER_SECONDS@@ s. A declared verifier it
+   did not run FAILS the attempt, so declare no more than that many, and keep the scripts fast
+   enough to finish inside that aggregate budget.
 
 3. FILE THE FINDINGS in `cold_start_review/findings_cold_start_review.json` (plus a readable
    `cold_start_review/findings_cold_start_review.md`), one finding per instance, in the pipeline's standard shape:
@@ -3765,6 +3772,8 @@ def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: 
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
+            .replace("@@VERIFIER_MAX@@", str(int(COLD_START_REPRO_MAX_VERIFIERS)))
+            .replace("@@VERIFIER_SECONDS@@", str(int(COLD_START_REPRO_TOTAL_BUDGET)))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
@@ -4087,16 +4096,20 @@ The audit FAILS (and the stage is retried) while any row's disposition cell is e
 is still a valid result only after every deleted-paragraph row is disposed.
 
 For every row you must give a LOCATION, the WRONG text or value, the CORRECT value, and the BASIS
-(the exact file/line/table/identifier that decides it, re-runnable by another session). If you
-cannot decide a candidate row, do not guess: put it in `revision_audit/NEEDS_EVIDENCE.md` with what
-is missing. A confirmation with no quotable basis is not a confirmation.
+(the exact file/line/table/identifier that decides it, re-runnable by another session). A PURE
+DELETION has no correct value: put the deleted text in `wrong`, leave `correct` as the empty string
+`""`, and state the deletion in `edit` (`delete the duplicated sentence`); at least one of
+`wrong`/`correct` must be non-empty. If you cannot decide a candidate row, do not guess: put it in
+`revision_audit/NEEDS_EVIDENCE.md` with what is missing. A confirmation with no quotable basis is not
+a confirmation.
 
 Write `revision_audit/REPAIR_PLAN.json` (and a readable `revision_audit/REPAIR_PLAN.md`):
   {"rows": [{"id": "RP-001", "finding": "F-012|X-900|none", "file": "manuscript.md",
              "location": "Results, paragraph 3", "wrong": "...", "correct": "...",
              "basis": "...", "edit": "...", "evidence": "..."}]}
-An empty plan is `{"rows": []}` — that is a valid, complete audit. Do NOT put a row in the plan that
-you have not confirmed; a false row makes the bounded repair write a new error.
+A pure-deletion row is the same shape with `"correct": ""`. An empty plan is `{"rows": []}` — that is
+a valid, complete audit. Do NOT put a row in the plan that you have not confirmed; a false row makes
+the bounded repair write a new error.
 
 Write only under `revision_audit/`. Never touch `base/`, `revised/`, `guided_review/`, `audit/`, `raw_data/`
 or `code/`.

@@ -253,6 +253,35 @@ def pageable_rule_blocks(venue_profile, author_to_complete: str) -> list:
     return blocks
 
 
+def _stage_rules_rel(sb: Path, stage: str) -> str:
+    """The paged-rules path for THIS stage in `sb`.
+
+    A sandbox normally carries exactly one stage, so the documented
+    `INSTRUCTIONS/PROFILE_RULES.md` is used. The revision audit and the bounded
+    repair are auxiliary sessions that run in the REVISE sandbox, though: a
+    plain overwrite replaced the reviser's nine paged sections with the audit's
+    one, and the revise `PROMPT.md` still pointed at the truncated file
+    (PR6F7-036). When the existing file was written for another stage, use a
+    stage-specific sidecar and point the auxiliary prompt at it, leaving the
+    reviser's file byte-identical.
+    """
+    base = sb / PROFILE_RULES_REL
+    try:
+        # Do not read THROUGH a planted `INSTRUCTIONS -> /outside` link: the
+        # writer below refuses to page into it, and this probe must not be a
+        # read-side escape either.
+        if (sb / PROFILE_INSTRUCTIONS_DIR).is_symlink():
+            return PROFILE_RULES_REL
+        if base.is_file() and not base.is_symlink():
+            head = base.read_text(encoding="utf-8", errors="replace")[:4096]
+            if f"_Stage: {stage}_" not in head:
+                safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(stage)).strip("_") or "stage"
+                return f"{PROFILE_INSTRUCTIONS_DIR}/PROFILE_RULES_{safe}.md"
+    except OSError:
+        pass
+    return PROFILE_RULES_REL
+
+
 def page_stage_prompt(sandbox, text: str, blocks, stage: str,
                       profile: str = PROFILE_HIGH) -> str:
     """`medium` only: page the elaborative rule blocks out of an assembled prompt.
@@ -260,9 +289,11 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     `blocks` is an ordered list of `(section_title, block_text)` pairs -- the
     exact strings the builder just substituted (or appended).  Each one that
     occurs in `text` is replaced by a pointer to
-    `INSTRUCTIONS/PROFILE_RULES.md`, and every such block is written to that
-    file under its own `## <section>` heading, in the order the pointers occur
-    in the prompt.
+    `INSTRUCTIONS/PROFILE_RULES.md` (or, when the sandbox already carries
+    another stage's paged file, to that stage's own
+    `INSTRUCTIONS/PROFILE_RULES_<stage>.md` -- see `_stage_rules_rel`), and
+    every such block is written to that file under its own `## <section>`
+    heading, in the order the pointers occur in the prompt.
 
     This is a MOVE, not a rewrite (AGENTS.md rule 12): each block's text is
     written byte-for-byte, and the only transformation is the demotion of a
@@ -284,6 +315,7 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     from pathlib import Path
 
     sb = Path(sandbox)
+    rel = _stage_rules_rel(sb, stage)
     # Longest first: a block that contains another must be replaced before the
     # shorter one can eat a piece of it.  This is the REPLACEMENT order only;
     # the file is written in PROMPT order below.
@@ -294,7 +326,7 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
         if body not in text:
             continue
         text = text.replace(body, PROFILE_POINTER_TMPL.format(
-            section=title, rel=PROFILE_RULES_REL))
+            section=title, rel=rel))
         sections.append((title, body))
     if sections:
         instr = sb / PROFILE_INSTRUCTIONS_DIR
@@ -309,7 +341,8 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
         if instr.is_symlink() or not instr.is_dir():
             die(f"refusing to page the profile rules: {PROFILE_INSTRUCTIONS_DIR}/ became a "
                 f"symlink or a non-directory while preparing ({sb}).")
-        parts = [PROFILE_RULES_HEADER, f"_Stage: {stage}_\n"]
+        parts = [PROFILE_RULES_HEADER.replace(PROFILE_RULES_REL, rel),
+                 f"_Stage: {stage}_\n"]
         # PROMPT ORDER, not replacement order: a session that reads the file in
         # full must meet the sections in the sequence the pointers occur, exactly
         # as `high` inlines them, and any positional wording inside a moved block
@@ -319,7 +352,7 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
         # longest-first order that keeps a nested block from being eaten.
         def _pointer_pos(title: str) -> int:
             return text.find(PROFILE_POINTER_TMPL.format(
-                section=title, rel=PROFILE_RULES_REL))
+                section=title, rel=rel))
         for title, body in sorted(sections, key=lambda tb: _pointer_pos(tb[0])):
             # A paged body may itself carry `## ` headings (the attached
             # review/revision brief starts with `## Phase 1` / `## Phase 2`).
@@ -336,12 +369,18 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
             # high prompt's rule sequence (AGENTS.md rule 12); trimming the
             # block here would join it to the next block on expansion.
             parts.append(f"\n## {title}\n\n{body}\n")
-        write_text_atomic(sb / PROFILE_RULES_REL, "".join(parts))
+        write_text_atomic(sb / rel, "".join(parts))
     # The profile contract first (the capacity discipline is the profile's
     # point), then the contradiction rule every stage prompt carries; the
     # contract defers to it explicitly, so the profile block is governed by the
     # same conflict-resolution order `high` uses (AGENTS.md rule 12).
-    return _stage_contract_header(profile) + CONTRADICTION_RULE + text
+    contract = _stage_contract_header(profile)
+    if contract:
+        # No section written means no pointer either: keep the documented
+        # default path in the contract's example rather than naming a sidecar
+        # that does not exist.
+        contract = contract.replace(PROFILE_RULES_REL, rel if sections else PROFILE_RULES_REL)
+    return contract + CONTRADICTION_RULE + text
 
 
 # ---------------------------------------------------------------------------
