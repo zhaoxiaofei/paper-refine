@@ -112,7 +112,8 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
     if artifacts:
         (sb / "guided_review/artifacts").mkdir(parents=True, exist_ok=True)
         (sb / "guided_review/artifacts/M1.md").write_text("|row|\n", encoding="utf-8")
-        for fname in ("M25_artwork_parity.md", "M26_conventions.md",
+        (sb / "guided_review/artifacts/check.md").write_text("|row|\n", encoding="utf-8")
+        for fname in tuple(np.SWEEP_ARTIFACTS.values()) + ("M25_artwork_parity.md", "M26_conventions.md",
                       "M27_evidence_coverage.md", "M28_symmetry.md",
                       "M29_caption_schema.md", "M30_hierarchy_reconciliation.md",
                   "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",

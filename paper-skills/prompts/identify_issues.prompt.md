@@ -64,12 +64,12 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 ## Hard rules
 
 1. **Identification only** — findings, never edits. Never modify any file in SUBMISSION_DIR.
-2. **Never invent.** Unresolvable value → status `unresolvable — manual verification required`. Guideline rule you cannot verify → `guideline-dependent`. Missing data → note a placeholder may be needed; never fabricate.
+2. **Never invent.** Unresolvable value → status `unresolvable` (and list the manual verification it needs). Guideline rule you cannot verify → `guideline-dependent`. Missing data → note a placeholder may be needed; never fabricate.
 3. **No silent skips.** Every check ID must end up in the coverage table with a real disposition (`N findings` / `clean — basis: <artifact/locations>` / `unable — <reason>`), and the verdict goes in the row's `disposition` cell: `detail` is free text and is read only to accept a bare verdict whose `Basis:`/`Reason:` is written there, so a zero-finding row is `clean — basis: <artifact>` in `disposition`, not a bare `clean`. "Not checked" is not an allowed value.
 4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the REWRITE-PARITY checks M25–M29 (figure-artwork/text parity, house-style/orthographic conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise vs printed-schema parity), the SOURCE-HIERARCHY reconciliation M30 (a written claim against the code/raw data that produced it) and the EVIDENCE-INTEGRITY sweeps M31–M36 (artwork-versus-legend consistency, a headline statistic against the correction the paper itself states, availability-locator finality, figure-source-data coverage, disclosure/provenance completeness, and M36's Zotero live-field refresh parity).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J5 may be prioritized; J5 (architecture & rewrite-class) produces scope-level rows in `OUT/ARCHITECTURE.md`, not per-sentence findings. The word "non-exhaustive" never applies to a mechanical sweep.
 5. **One finding per instance.** "Several acronyms are undefined" is not a finding; each undefined acronym is its own finding with its own ID, quote, and location.
    M1(a) "used before it is defined" includes the acronym-first compound: a sentence that prints the short form first and the expansion after it (`MALBAC-sequenced (multiple annealing …)`) has used the token before defining it. When the sentence itself prints the expansion, the token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
-6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`; for M8 those are the RAW enumerations, and the required consolidated M8 artifact is `OUT/artifacts/M8_terminology.md` (entity | variant forms | counts | locations | consistent?) — pass `--out OUT/artifacts` if you prefer the raw files alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole submission corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
+6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`; for M8 those are the RAW enumerations, and the required consolidated M8 artifact is `OUT/artifacts/M8_terms.md` (entity | variant forms | counts | locations | consistent?) — pass `--out OUT/artifacts` if you prefer the raw files alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole submission corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
 7. **A sweep with zero findings is INVALID unless its artifact exists and every row is disposed.**
 8. **The evidence areas (`raw_data/`, `human_review_feedback/`, `llm_review_feedback/`) are EVIDENCE, not submission content.** Their text never feeds a written-surface sweep (M1–M29), a word count (M18/M19), a file-hygiene row (M9) or a finding's evidence quote; the same holds for a feedback/response document kept elsewhere in the corpus, by name. M30 alone reads `raw_data/`, as the producer side of a written claim; the human feedback (and, when supplied, the pre-filtered LLM review) drives the concern reconciliation. Editors'/reviewers'/LLM-review feedback is external prose and is never attributed to the authors.
    The child `human_review_feedback/original_submission/`, when present, is the manuscript version the previous journal's reviewers actually saw — evidence for resolving what a concern refers to and whether the current submission already answers it, never a submission document, a sweep surface, a quotation source or a candidate version.
@@ -105,7 +105,7 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 `OUT/findings.md`:
 1. File inventory (from Phase 1).
 2. All sweep artifacts as titled appendix tables (or pointers to `OUT/artifacts/`).
-3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table; a J5 architecture finding names its paragraph-range scope instead), category, check ID (M1–M36, J1–J5), severity, short verbatim evidence quote (J5: the current → proposed outline), concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
+3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table; a J5 architecture finding names its paragraph-range scope instead and records it in a `scope` key), category, check ID (M1–M36, J1–J5), severity, short verbatim evidence quote (J5: the current → proposed outline), concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
 4. Per-document index of finding IDs.
 5. Coverage table: every check ID (M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows from the pipeline's scan), M21–M24 (the earlier adopted sweeps), M25–M29 (the rewrite-parity checks), M30 (the source-hierarchy reconciliation) and M31–M36 (the evidence-integrity sweeps, including M36's Zotero live-field refresh parity)) → `N findings` / `clean — basis` / `unable — <reason>`.
 6. Summary note: counts by category/severity; unresolved gaps; missing-citation issues; ambiguous context; unresolvable contradictions; the manual-verification list (incl. Zotero fields); guidelines source/version; items to re-check against the current author guide.
@@ -132,7 +132,7 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 ## Acceptance checks (for the human, after the run)
 
 1. `findings.md` coverage table lists every defined check ID: M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows), M21–M24 (the earlier adopted sweeps), M25–M29 (the rewrite-parity checks), M30 (the source-hierarchy reconciliation) and M31–M36 (the evidence-integrity sweeps, including M36's Zotero live-field refresh parity).
-2. Every sweep with findings has a matching artifact file in `guided_review/artifacts/` (for M8, the consolidated `guided_review/artifacts/M8_terminology.md` is the artifact; its raw occurrence enumerations live in `guided_review/work/occurrences_*.md`). A sweep with findings but no artifact means it worked from impression — re-run that sweep.
+2. Every sweep with findings has a matching artifact file in `guided_review/artifacts/` (for M8, the consolidated `guided_review/artifacts/M8_terms.md` is the artifact; its raw occurrence enumerations live in `guided_review/work/occurrences_*.md`). A sweep with findings but no artifact means it worked from impression — re-run that sweep.
 3. Each finding points to a specific word/number/phrase with a verbatim quote, not a whole passage.
 4. `findings.json` exists and every finding has all eight fields.
 
@@ -330,9 +330,10 @@ which value is authoritative (`github code > data in raw_data/ > main figures >
 supplementary figures > main tables > supplementary tables > main text >
 supplementary text`); this list only orders the occurrences you update.
 If the authoritative value cannot be determined (e.g., only visible inside a
-read-only image), mark the finding `unresolvable — manual verification required`.
+read-only image), mark the finding `unresolvable` and list the manual verification it needs.
 
-Statuses: `resolvable` / `unresolvable — manual verification required` / `guideline-dependent`.
+Statuses: `resolvable` / `unresolvable` / `guideline-dependent` (list the manual verification an
+`unresolvable` finding needs beside the finding, never in the status cell).
 
 ## FINDING FORMAT
 
@@ -565,7 +566,7 @@ every in-text call-out (one row) + auto-derived mismatches.
 (`zot --local ... items get|citation|bib`, `zot fulltext get`) before calling a
 citation wrong: cite PARENT bibliographic item keys, never attachment keys, and
 confirm the parent's own metadata (title, creators, year, DOI). An item that
-cannot be resolved is `unresolvable — manual verification required`. This skill
+cannot be resolved is `unresolvable` and is listed for manual verification. This skill
 never edits a citation field and never writes to the Zotero library; a suspected
 metadata error (wrong year, wrong DOI, wrong item) becomes a finding with the
 proposed correction — item key, field, current value, proposed value, evidence —
@@ -720,7 +721,7 @@ high-value term (also detects hyphen/space/case/plural variants). For species
 names: enumerate every occurrence of genus/species tokens. For
 gene/protein symbols: enumerate each symbol's occurrences.
 
-**Artifact:** `M8_terminology.md`: entity | variant forms found | counts |
+**Artifact:** `M8_terms.md`: entity | variant forms found | counts |
 locations | consistent?
 
 **Finding rules:**
@@ -906,18 +907,25 @@ traceable to a Results, Methods or SI statement (the abstract is a review
 surface of its own; a claim carried only by an appendix is reported under the
 finding rule below, so state whether a main-text pointer is required for it).
 
-**Enumeration (scriptable):** extract every number/statistic from the abstract
-(p, AUC, n, percent, fold, CI, counts) and enumerate occurrences of the same
-value across the rest of the corpus (`extract_occurrences.py --value`);
-each abstract value gets a row.
+**Enumeration (numeric part scriptable; claims read by hand):** extract every
+number/statistic from the abstract (p, AUC, n, percent, fold, CI, counts) and
+enumerate occurrences of the same value across the rest of the corpus
+(`extract_occurrences.py --value`); each abstract value gets a row. In the same
+pass read the abstract sentence by sentence and add one row for EVERY
+qualitative headline claim -- a causal, priority, mechanism, generalisation or
+recommendation claim that carries no number -- and record the Results, Methods
+or SI statement that supports it, or `none`.
 
-**Artifact:** `M16_abstract_trace.md`: abstract value | phrase | occurrences
-elsewhere | traceable?
+**Artifact:** `M16_abstract_trace.md`: abstract value or claim | phrase |
+occurrences elsewhere / supporting statement | traceable?
 
 **Finding rules (one per instance):**
 - abstract statistic with zero occurrences in Results/Methods/SI
 - abstract statistic whose label/context differs where it recurs (e.g.,
   attached to a different test)
+- abstract headline claim with no Results/Methods/SI statement that supports it
+- abstract headline claim whose scope or strength is narrower/stronger in the
+  abstract than in the supporting statement it recurs in
 
 Validation: iteration-1 instance F-029 (p = 0.021 appearing only in the
 abstract).
@@ -1603,7 +1611,7 @@ definition order; compare within the set. Artifact
 and others are not, or in which definition order differs across siblings, is
 one finding (`consistency`, Minor) naming every sibling and the symmetric form
 to apply; when a missing expansion exists nowhere in the corpus the row is
-`unresolvable — manual verification required` (never invent an expansion).
+`unresolvable` and is listed for manual verification (never invent an expansion).
 
 ## M29 — Caption-promise vs printed-schema parity
 

@@ -672,10 +672,22 @@ def test_xlsx_row_fallback_index():
 def test_extract_citations_compiles_warning_free():
     print("\n== E6 extract_citations.py compiles without SyntaxWarning ==")
     script = SCRIPT_DIR / "extract_citations.py"
+    # py_compile writes its .pyc beside the source unless the cache is
+    # redirected. On a read-only checkout that write fails with [Errno 30] and
+    # the failure is reported as a code defect; on a writable one it mutates
+    # the tree this suite audits. Send the cache to the test's own tmpdir and
+    # pin the audited tree's bytecode directory unchanged.
+    pycache = script.parent / "__pycache__"
+    snapshot = lambda: {p.name: (p.stat().st_size, p.stat().st_mtime_ns)
+                        for p in pycache.glob("*")} if pycache.is_dir() else {}
+    before = snapshot()
+    env = dict(os.environ, PYTHONPYCACHEPREFIX=str(tmpdir("e6cache") / "pycache"))
     run = subprocess.run([sys.executable, "-W", "error", "-m", "py_compile", str(script)],
-                         capture_output=True, text=True, timeout=120)
+                         capture_output=True, text=True, timeout=120, env=env)
     check("E6 py_compile with warnings-as-errors is clean",
           run.returncode == 0, run.stderr[-200:])
+    check("E6 py_compile does not write bytecode into the audited tree",
+          snapshot() == before, str(pycache))
     probe = subprocess.run(
         [sys.executable, "-W", "always", "-c",
          "import warnings, sys; warnings.simplefilter('always');"

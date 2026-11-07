@@ -484,10 +484,10 @@ def test_reference_precision_guards() -> None:
     for name, text in (("review SKILL", skill), ("identify prompt", identify)):
         check(f"{name}: M8's raw enumerations are not the whole artifact",
               "RAW enumerations" in text
-              and "M8_terminology.md" in text and "consolidated" in text,
+              and "M8_terms.md" in text and "consolidated" in text,
               text[:160])
         check(f"{name}: the acceptance check names the consolidated M8 artifact",
-              "the consolidated `guided_review/artifacts/M8_terminology.md` is the artifact"
+              "the consolidated `guided_review/artifacts/M8_terms.md` is the artifact"
               in text, text[:160])
 
 

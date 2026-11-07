@@ -2742,6 +2742,11 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     ledger = _repair_ledger_entries(cur)
     plan_by_id = {row["id"]: row for row in rows}
     bad = {}
+    # The ledger quotes must describe THIS plan row: a plan for `n = 10 -> 20`
+    # cannot be discharged by quoting an unrelated `7 -> 9` edit in the same
+    # document (F-069/F-16). The binding applies to a CHANGED file too; it used
+    # to sit after the equality skip, so it only ever ran for a no-op.
+    #
     # A CONFIRMED repair whose file is byte-identical to the pre-repair copy
     # was accepted without being applied. Equality used to short-circuit every
     # postcondition check (F06): if the promised `after` is absent while the
@@ -2749,14 +2754,11 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
     for rid in sorted(confirmed_ids):
         row = plan_by_id.get(rid) or {}
         rel = strip_leading_dot_slash(str(row.get("file") or ""))
-        if not rel or _repair_bookkeeping_rel(rel) or before.get(rel) != after.get(rel):
+        if not rel or _repair_bookkeeping_rel(rel):
             continue
         entry = ledger.get(rid) or {}
         _before_q = _repair_norm(entry.get("before") or row.get("wrong") or "")
         _after_q = _repair_norm(entry.get("after") or row.get("correct") or "")
-        # The quotes must describe THIS plan row: a plan for `n = 10 -> 20`
-        # cannot be discharged by quoting an unrelated `7 -> 9` edit in the
-        # same document (F-069).
         _plan_wrong = _repair_norm(row.get("wrong") or "")
         _plan_correct = _repair_norm(row.get("correct") or "")
         if _plan_wrong and _plan_wrong not in _before_q:
@@ -2766,6 +2768,8 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
         if _plan_correct and _plan_correct not in _after_q:
             bad.setdefault(rel, "the confirmed row's `after` quote does not contain the "
                                 "plan's `correct` value")
+            continue
+        if before.get(rel) != after.get(rel):
             continue
         _text = _repair_file_text(cur / rel)
         if _text is None:

@@ -189,9 +189,10 @@ which value is authoritative (`github code > data in raw_data/ > main figures >
 supplementary figures > main tables > supplementary tables > main text >
 supplementary text`); this list only orders the occurrences you update.
 If the authoritative value cannot be determined (e.g., only visible inside a
-read-only image), mark the finding `unresolvable — manual verification required`.
+read-only image), mark the finding `unresolvable` and list the manual verification it needs.
 
-Statuses: `resolvable` / `unresolvable — manual verification required` / `guideline-dependent`.
+Statuses: `resolvable` / `unresolvable` / `guideline-dependent` (list the manual verification an
+`unresolvable` finding needs beside the finding, never in the status cell).
 
 ## FINDING FORMAT
 
@@ -424,7 +425,7 @@ every in-text call-out (one row) + auto-derived mismatches.
 (`zot --local ... items get|citation|bib`, `zot fulltext get`) before calling a
 citation wrong: cite PARENT bibliographic item keys, never attachment keys, and
 confirm the parent's own metadata (title, creators, year, DOI). An item that
-cannot be resolved is `unresolvable — manual verification required`. This skill
+cannot be resolved is `unresolvable` and is listed for manual verification. This skill
 never edits a citation field and never writes to the Zotero library; a suspected
 metadata error (wrong year, wrong DOI, wrong item) becomes a finding with the
 proposed correction — item key, field, current value, proposed value, evidence —
@@ -579,7 +580,7 @@ high-value term (also detects hyphen/space/case/plural variants). For species
 names: enumerate every occurrence of genus/species tokens. For
 gene/protein symbols: enumerate each symbol's occurrences.
 
-**Artifact:** `M8_terminology.md`: entity | variant forms found | counts |
+**Artifact:** `M8_terms.md`: entity | variant forms found | counts |
 locations | consistent?
 
 **Finding rules:**
@@ -765,18 +766,25 @@ traceable to a Results, Methods or SI statement (the abstract is a review
 surface of its own; a claim carried only by an appendix is reported under the
 finding rule below, so state whether a main-text pointer is required for it).
 
-**Enumeration (scriptable):** extract every number/statistic from the abstract
-(p, AUC, n, percent, fold, CI, counts) and enumerate occurrences of the same
-value across the rest of the corpus (`extract_occurrences.py --value`);
-each abstract value gets a row.
+**Enumeration (numeric part scriptable; claims read by hand):** extract every
+number/statistic from the abstract (p, AUC, n, percent, fold, CI, counts) and
+enumerate occurrences of the same value across the rest of the corpus
+(`extract_occurrences.py --value`); each abstract value gets a row. In the same
+pass read the abstract sentence by sentence and add one row for EVERY
+qualitative headline claim -- a causal, priority, mechanism, generalisation or
+recommendation claim that carries no number -- and record the Results, Methods
+or SI statement that supports it, or `none`.
 
-**Artifact:** `M16_abstract_trace.md`: abstract value | phrase | occurrences
-elsewhere | traceable?
+**Artifact:** `M16_abstract_trace.md`: abstract value or claim | phrase |
+occurrences elsewhere / supporting statement | traceable?
 
 **Finding rules (one per instance):**
 - abstract statistic with zero occurrences in Results/Methods/SI
 - abstract statistic whose label/context differs where it recurs (e.g.,
   attached to a different test)
+- abstract headline claim with no Results/Methods/SI statement that supports it
+- abstract headline claim whose scope or strength is narrower/stronger in the
+  abstract than in the supporting statement it recurs in
 
 Validation: iteration-1 instance F-029 (p = 0.021 appearing only in the
 abstract).
@@ -1462,7 +1470,7 @@ definition order; compare within the set. Artifact
 and others are not, or in which definition order differs across siblings, is
 one finding (`consistency`, Minor) naming every sibling and the symmetric form
 to apply; when a missing expansion exists nowhere in the corpus the row is
-`unresolvable — manual verification required` (never invent an expansion).
+`unresolvable` and is listed for manual verification (never invent an expansion).
 
 ## M29 — Caption-promise vs printed-schema parity
 

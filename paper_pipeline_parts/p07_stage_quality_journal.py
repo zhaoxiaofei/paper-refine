@@ -3550,6 +3550,74 @@ def _response_file_text(path: Path):
     return None
 
 
+_RESPONSE_LOCATION_SKIP_RE = re.compile(
+    r"(?i)^(?:whole|entire)\s+(?:file|document)$|^(?:file|n/?a|none)$|"
+    r"^(?:throughout|multiple\s+sections|various\s+sections|entire\s+manuscript)$|"
+    r"^(?:p|pp|page|pages|line|lines|row|rows|para(?:graph)?|§)\.?\s*\d|"
+    r"^[\w./-]+\.(?:md|markdown|txt|tex|ltx|rst|csv|docx)(?::\d+)?$")
+
+
+def _response_location_problem(cid: str, rel: str, location, before, after,
+                               ptext, ttext):
+    """Why a change's `location` does not resolve to a section of its file, or None.
+
+    The span check proves the two strings exist SOMEWHERE in the two packages;
+    without this check an invented locator (`Appendix 9`) passed. The anchor is
+    the location's section/scope name (its first comma/colon-separated chunk,
+    with a trailing page/line/paragraph qualifier removed). When the package
+    text is readable, the anchor must occur in the target's text and the quoted
+    `after` span must occur at or after it; a span that occurs only before the
+    anchor is reported. The `before` span is bound the same way when the
+    pre-revision package is available. Page/line/row-only locators and an
+    explicit `whole file` are skipped: the file field plus the span checks are
+    their verifiable content, and a rendered page number is not in extracted
+    text.
+    """
+    loc = " ".join(str(location or "").split()).strip().strip("\"'“”‘’")
+    if not loc or _RESPONSE_LOCATION_SKIP_RE.match(loc):
+        return None
+    anchor = re.split(r"[,;:—–]|\s+-\s+", loc, 1)[0].strip()
+    anchor = re.sub(r"(?i)\s+(?:p|pp|page|line|paragraph|para)\.?\s*\d+.*$",
+                    "", anchor).strip()
+    if not anchor:
+        return None
+    candidates = [anchor]
+    m = re.match(r"(?i)^(?:section|subsection|chapter)\s+(.+)$", anchor)
+    if m:
+        candidates.append(m.group(1).strip())
+    m = re.match(r"(?i)^(.+?)\s+(?:legend|caption|note|footnote)$", anchor)
+    if m:
+        candidates.append(m.group(1).strip())
+    normalized = lambda x: " ".join(str(x or "").split()).strip().strip("\"'“”‘’")
+    if ttext is not None:
+        tnorm = normalized(ttext)
+        found = [(c, tnorm.lower().find(c.lower())) for c in candidates]
+        found = [(c, i) for c, i in found if i >= 0]
+        if not found:
+            return (f"response row {cid!r}: the change to {rel!r} names location "
+                    f"{loc!r}, which does not resolve to a section/heading of the revised "
+                    f"file; name the real section (or a page/line locator)")
+        _c, i = found[-1]
+        if after:
+            j = tnorm.find(after, i)
+            if j < 0 and after in tnorm:
+                return (f"response row {cid!r}: the `after` span of the change to {rel!r} "
+                        f"occurs BEFORE the named location {loc!r}; quote the text at the "
+                        f"location the letter claims")
+    if before and ptext is not None:
+        pnorm = normalized(ptext)
+        found = [(c, pnorm.lower().find(c.lower())) for c in candidates]
+        found = [(c, i) for c, i in found if i >= 0]
+        if found:
+            _c, i = found[-1]
+            j = pnorm.find(before, i)
+            if j < 0 and before in pnorm:
+                return (f"response row {cid!r}: the `before` span of the change to {rel!r} "
+                        f"occurs BEFORE the named location {loc!r} in the pre-revision "
+                        f"package; quote the text at the location the letter claims")
+    return None
+
+
 def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
     """Verify each change's quoted before/after against the two packages.
 
@@ -3569,6 +3637,7 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
     prev = sb / "previous_package"
     prev_available = prev.is_dir()
     norm = lambda x: " ".join(str(x or "").split()).strip().strip("\"'“”‘’")
+    ptexts, ttexts = {}, {}
     for row in rows:
         cid = str(row.get("id") or "")
         for c in row.get("changes") or ():
@@ -3584,6 +3653,15 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
                 problems.append(
                     f"response row {cid!r}: the change to {f!r} names no `location`; the "
                     f"claimed edit must be locatable in the document it changes")
+            if f not in ptexts:
+                ptexts[f] = _response_file_text(prev / f) if prev_available else None
+            if f not in ttexts:
+                ttexts[f] = _response_file_text(target / f)
+            ptext, ttext = ptexts[f], ttexts[f]
+            _loc_problem = _response_location_problem(
+                cid, f, c.get("location"), before, after, ptext, ttext)
+            if _loc_problem:
+                problems.append(_loc_problem)
             if before and after and before == after:
                 # An edit whose two sides are the same sentence changed nothing,
                 # yet it used to pass as both the pre- and the post-image (F-033).
@@ -3596,14 +3674,12 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
             # let an invented `50 mM -> 25 mM` pair pass (F-032). Presence is
             # required wherever the corresponding package is available.
             if before and prev_available:
-                ptext = _response_file_text(prev / f)
                 if ptext is not None and before not in norm(ptext):
                     problems.append(
                         f"response row {cid!r}: the change's `before` span is not present in "
                         f"previous_package/{f}; quote the pre-revision text verbatim (no "
                         f"ellipsis, no summary)")
             if after:
-                ttext = _response_file_text(target / f)
                 if ttext is not None and after not in norm(ttext):
                     problems.append(
                         f"response row {cid!r}: the change's `after` span is not present in "

@@ -252,6 +252,10 @@ def test_review_contract():
     art = sb / "guided_review" / "artifacts"
     art.mkdir(parents=True)
     (art / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
+    for fname in nb.SWEEP_ARTIFACTS.values():
+        (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
+                                 encoding="utf-8")
+    (art / "check.md").write_text("| row |\n|---|\n", encoding="utf-8")
     ids = ([f"M{i}" for i in range(1, 18)] + ["M18", "M19", "M20", "M21", "M22", "M23",
                                               "M24", "M25", "M26", "M27", "M28", "M29"]
            + [f"J{i}" for i in range(1, 6)])

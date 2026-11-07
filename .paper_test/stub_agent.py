@@ -348,7 +348,24 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
     # The rewrite-parity artifacts, the source-hierarchy reconciliation and the
     # architecture table are part of the review contract (M25-M30 + J5): a sweep
     # with no artifact proves nothing.
-    for fname, cid in (("M25_artwork_parity.md", "M25"),
+    for fname, cid in (("M3_display_items.md", "M3"),
+                       ("M4_numbers.md", "M4"),
+                       ("M5_mandatory.md", "M5"),
+                       ("M6_hygiene.md", "M6"),
+                       ("M7_crossrefs.md", "M7"),
+                       ("M9_files.md", "M9"),
+                       ("M10_ref_format.md", "M10"),
+                       ("M11_si.md", "M11"),
+                       ("M12_authors.md", "M12"),
+                       ("M13_reporting.md", "M13"),
+                       ("M14_metadata.md", "M14"),
+                       ("M15_totals.md", "M15"),
+                       ("M16_abstract_trace.md", "M16"),
+                       ("M17_anomalies.md", "M17"),
+                       ("M21_correspondence.md", "M21"),
+                       ("M22_availability.md", "M22"),
+                       ("M23_supp_parity.md", "M23"),
+                       ("M25_artwork_parity.md", "M25"),
                        ("M26_conventions.md", "M26"),
                        ("M27_evidence_coverage.md", "M27"),
                        ("M28_symmetry.md", "M28"),
@@ -586,7 +603,7 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
         md += [f"## {cid}", f"**Comment:** \"{str(row.get('quote') or '')[:120]}\"",
                "**Response:** stub", ""]
         mapped.append({"id": cid, "status": "addressed", "response": "stub",
-                       "changes": ([{"file": files[0], "location": "stub",
+                       "changes": ([{"file": files[0], "location": "whole file",
                                      "before": "a", "after": "b"}] if files else []),
                        "new_data": []})
     (out / "RESPONSE_TO_REVIEWERS.md").write_text("\n".join(md), encoding="utf-8")
@@ -1042,7 +1059,8 @@ def _revision_repair_stub(sb: Path) -> int:
                            "reason": "file not found", "files": []})
             continue
         old_text = target.read_text(encoding="utf-8")
-        new_text = old_text + "\n<!-- stub bounded repair -->\n"
+        marker = str(row.get("correct") or "<!-- stub bounded repair -->")
+        new_text = old_text.rstrip("\n") + "\n" + marker + "\n"
         target.write_text(new_text, encoding="utf-8")
         ledger.append({"id": row.get("id"), "verdict": "confirmed", "reason": "stub",
                        "before": old_text, "after": new_text,

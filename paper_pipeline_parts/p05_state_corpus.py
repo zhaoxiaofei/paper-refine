@@ -4073,6 +4073,7 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
                     f"examined and the findings filed, so a zero-finding outcome is an examined "
                     f"corpus and not an unrun pass")
         checked = []
+    _claimed = 0
     for c in checked:
         if not isinstance(c, dict) or not str(c.get("area") or "").strip():
             errs.append(f"{COLD_START_FINDINGS_REL}: a `checked` row has no 'area' name")
@@ -4089,24 +4090,33 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
                             f"{key!r} count (a non-negative integer is required)")
                 continue
             _counts[key] = value
-        if len(_counts) == 2 and _counts["findings"] > _counts["examined"]:
-            errs.append(f"{COLD_START_FINDINGS_REL}: checked area {area!r} reports "
-                        f"{_counts['findings']} findings from {_counts['examined']} examined "
-                        f"candidates")
+        if len(_counts) == 2:
+            # One examined candidate may yield several independent findings,
+            # so `findings` is not capped by `examined`. A count of findings
+            # from ZERO examined candidates is still impossible, and the count
+            # is a claim about the findings list (checked below).
+            if _counts["examined"] == 0 and _counts["findings"] > 0:
+                errs.append(f"{COLD_START_FINDINGS_REL}: checked area {area!r} reports "
+                            f"{_counts['findings']} findings from 0 examined candidates")
+            _claimed += _counts["findings"]
     raw = doc.get("findings")
-    if not isinstance(raw, list):
+    _raw_ok = isinstance(raw, list)
+    if not _raw_ok:
         errs.append(f"{COLD_START_FINDINGS_REL} carries no 'findings' list (an empty list is legal "
                     f"when `checked` documents the examination)")
         raw = []
     if not raw:
-        _claimed = 0
-        for _c in checked:
-            if isinstance(_c, dict) and isinstance(_c.get("findings"), int) \
-                    and not isinstance(_c.get("findings"), bool):
-                _claimed += _c["findings"]
         if _claimed:
             errs.append(f"{COLD_START_FINDINGS_REL}: the `checked` rows report {_claimed} "
                         f"finding(s) but the findings list is empty")
+    elif _claimed < len(raw):
+        # A finding may be counted in more than one examined area (a claim in
+        # the abstract checked against raw_data/ is one finding in two areas),
+        # so only an UNDER-count is inconsistent: it means a filed finding was
+        # never counted anywhere.
+        errs.append(f"{COLD_START_FINDINGS_REL}: the `checked` rows report {_claimed} "
+                    f"finding(s) but the findings list carries {len(raw)}; every filed "
+                    f"finding must be counted in at least one examined area")
     findings, seen = [], set()
     for i, f in enumerate(raw):
         if not isinstance(f, dict):

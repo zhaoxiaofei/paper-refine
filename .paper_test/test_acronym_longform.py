@@ -348,6 +348,11 @@ def fake_review_sandbox(tmp, m1_md, findings, coverage):
     art = sb / "guided_review" / "artifacts"
     art.mkdir(parents=True, exist_ok=True)
     (art / "M1_acronyms.md").write_text(m1_md, encoding="utf-8")
+    for fname in np.SWEEP_ARTIFACTS.values():
+        if fname != "M1_acronyms.md":
+            (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
+                                     encoding="utf-8")
+    (art / "check.md").write_text("| row |\n|---|\n", encoding="utf-8")
     # The rewrite-parity artifacts + the architecture table are part of the
     # review contract (M25-M29 + J5).
     for fname in ("M25_artwork_parity.md", "M26_conventions.md",

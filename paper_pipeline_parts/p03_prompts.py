@@ -578,8 +578,9 @@ Skill discipline that the orchestrator will check for:
      pipeline's caption sweep) ALWAYS appears as well: legends are always enumerated, and only its
      proxy cap is optional. Number your discovery proposals from M37 upwards (M18-M20 are reserved
      by the pipeline, M21-M36 are adopted).
-  * Never invent content, citations, numbers, or accession IDs. Anything unresolvable becomes
-    "unresolvable — manual verification required" and is listed in the manual-verification list.
+  * Never invent content, citations, numbers, or accession IDs. Anything unresolvable gets
+    status "unresolvable" and is listed in the manual-verification list (the instruction text
+    lives in that list, never in the status cell).
   * Findings are reported, never fixed: identification only.
   * Stay inside the sandbox. The $paper-review skill's closing advice to validate proposed new sweeps
     with the user and append them to its references/sweeps.md does NOT apply to this run: the skill
@@ -614,6 +615,8 @@ Skill discipline that the orchestrator will check for:
      "coverage": [{"check": "M1", "disposition": "2 findings", "detail": "F-003, F-004"},
                   {"check": "M2", "disposition": "clean -- basis: guided_review/artifacts/M2_references.md",
                    "detail": "8 entries, 0 orphans"}]}
+    A J5 architecture finding additionally carries "scope": "<doc>/<section>/<par-a>–<par-b>"
+    (the revision stage's restructuring licence is bounded by it); every other check omits it.
     The `disposition` cell carries the verdict; `detail` is free text and is read only when a
     BARE `clean`/`unable`/`out of scope` in `disposition` names its `Basis:`/`Reason:` there.
     A zero-finding row is `clean -- basis: <artifact>` IN `disposition`.

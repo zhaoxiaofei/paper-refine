@@ -415,7 +415,7 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
           {"submission_dir": "./base", "findings": [],
            "coverage": [{"check": c, "disposition": "clean -- basis: stub artifact",
                          "detail": "stub"} for c in wanted]})
-    for fname in ("M25_artwork_parity.md", "M26_conventions.md",
+    for fname in tuple(nb.SWEEP_ARTIFACTS.values()) + ("M25_artwork_parity.md", "M26_conventions.md",
                   "M27_evidence_coverage.md", "M28_symmetry.md",
                   "M29_caption_schema.md", "M30_hierarchy_reconciliation.md",
                   "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",

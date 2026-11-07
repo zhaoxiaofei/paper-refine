@@ -1434,6 +1434,32 @@ def ledger_disposed_ids(ledger, wanted=()) -> set:
 # ---------------------------------------------------------------------
 
 REQUIRED_REVIEW_CHECKS = tuple([f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)])
+
+# The per-sweep artifact each mechanical check must have when its coverage row
+# says `clean`. DECISION_ARTIFACTS/parity already gate M2, M8, M18-M20,
+# M24-M36; this table closes the rest (M1, M3-M7, M9-M17, M21-M23), so a
+# `clean -- basis: locations` row cannot certify a sweep that produced no
+# enumeration table (F82). The name is the one the skill/sweeps define.
+SWEEP_ARTIFACTS = {
+    "M1": "M1_acronyms.md",
+    "M3": "M3_display_items.md",
+    "M4": "M4_numbers.md",
+    "M5": "M5_mandatory.md",
+    "M6": "M6_hygiene.md",
+    "M7": "M7_crossrefs.md",
+    "M9": "M9_files.md",
+    "M10": "M10_ref_format.md",
+    "M11": "M11_si.md",
+    "M12": "M12_authors.md",
+    "M13": "M13_reporting.md",
+    "M14": "M14_metadata.md",
+    "M15": "M15_totals.md",
+    "M16": "M16_abstract_trace.md",
+    "M17": "M17_anomalies.md",
+    "M21": "M21_correspondence.md",
+    "M22": "M22_availability.md",
+    "M23": "M23_supp_parity.md",
+}
 _CHECK_ID_RE = re.compile(r"([MJ])0*(\d+)", re.I)
 
 
@@ -1468,10 +1494,16 @@ JUDGE_DISPOSITIONS = ("clean", "findings", "unable")
 # so a row of filler ("x", "done") proved a sweep that never ran. Every form
 # that can carry a reason must name one: bare `unable`/`out of scope` is filler.
 COVERAGE_DISPOSITION_RE = re.compile(
-    r"(?i)^(?:\d+\s+finding"
-    r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
-    r"|unable\s*(?:--|—|–)\s*\S"
-    r"|out\s+of\s+scope\s*(?:--|—|–)\s*\S)")
+    r"(?i)^(?:\d+\s+findings?\b.*"
+    r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S.*"
+    r"|unable\s*(?:--|—|–)\s*\S.*"
+    r"|out\s+of\s+scope\s*(?:--|—|–)\s*\S.*)$")
+# A reason that NEGATES the check is not a disposition: `clean -- basis:
+# x.md not checked` says the opposite of what the cell's verdict claims.
+_COVERAGE_NEGATED_CHECK_RE = re.compile(
+    r"(?i)\b(?:not|never|could\s+not|cannot|can['\u2019]t|wasn['\u2019]t|"
+    r"weren['\u2019]t|isn['\u2019]t|didn['\u2019]t|did\s+not)\s+"
+    r"(?:be\s+)?(?:checked|verified|re-?derived|examined|reviewed|inspected)\b")
 _COVERAGE_NAMED_BASIS_RE = re.compile(
     r"(?i)(?:basis\s*:|unable\s*(?:--|—|–)"
     r"|out\s+of\s+scope\s*(?:--|—|–))\s*(.*)$")
@@ -1486,11 +1518,17 @@ def _coverage_reason_named(reason) -> bool:
     reason = str(reason or "").strip(" \t.;:,—-–")
     # A reason must say SOMETHING. "unable -- no"/"none"/"n/a" is filler, not a
     # named reason; the old length-only test counted its two letters and passed.
-    if not reason or re.fullmatch(r"(?i)no|none|n/?a|tbd|todo|unknown", reason):
+    if not reason or re.fullmatch(
+            r"(?i)ok|okay|yes|y|done|checked|clean|good|fine|pass|passed|true|false|"
+            r"nil|null|no|none|n/?a|na|tbd|todo|unknown", reason):
         return False
-    # At least two alphanumeric characters: a one-letter token or punctuation
-    # alone cannot name an artifact or a reason.
-    return len(re.findall(r"[A-Za-z0-9]", reason)) >= 2
+    # A reason that negates the check's own verdict contradicts it.
+    if _COVERAGE_NEGATED_CHECK_RE.search(reason):
+        return False
+    # At least three alphanumeric characters: a one- or two-character token
+    # (`x`, `ok`, `ab`, `12`) and punctuation alone cannot name an artifact or
+    # a reason.
+    return len(re.findall(r"[A-Za-z0-9]", reason)) >= 3
 
 
 def _coverage_disposition_ok(value) -> bool:
@@ -1510,7 +1548,11 @@ def _coverage_disposition_ok(value) -> bool:
     """
     text = re.sub(r"(?i)^out[\s_\-]+of[\s_\-]+scope", "out of scope",
                   str(value or "").strip())
-    if not COVERAGE_DISPOSITION_RE.match(text):
+    if not COVERAGE_DISPOSITION_RE.fullmatch(text):
+        return False
+    if re.match(r"(?i)^\d+\s+finding", text) and re.search(
+            r"(?i)\b(?:but|however|yet)\b[^.;]*\b(?:none|no|zero)\b", text):
+        # `2 findings but none` starts with a count and then contradicts it.
         return False
     m = _COVERAGE_NAMED_BASIS_RE.search(text)
     if m is None:
@@ -3554,6 +3596,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     # but no coverage table crashed the contract check with NameError instead
     # of reporting the missing table.
     seen_ids, seen_rows, bad, bad_out_of_scope = {}, {}, [], []
+    in_scope = set()
     # 1. the review must be about base/, not about non_revised/ or anything else.
     raw = fj.get("submission_dir")
     if isinstance(raw, str) and raw.strip():
@@ -3953,6 +3996,43 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     #     row must still be in the table the reviewer disposed.
     if want_parity_artifacts:
         errs.extend(cover_letter_row_survival_problems(ctx, sb))
+    # 3c. a CLEAN mechanical-sweep disposition needs its enumeration artifact.
+    #     The gate used to require only that `artifacts/` contain SOME file, so
+    #     M1/M3-M7/M9-M17/M21-M23 could be certified clean with no table at all
+    #     (F82). Only a clean disposition is bound: a finding row proves the
+    #     sweep ran, and an `unable` row names its own blocker.
+    if isinstance(coverage, list) and art_dir.is_dir():
+        for _cid, _fname in sorted(SWEEP_ARTIFACTS.items()):
+            if _cid not in seen_ids:
+                continue
+            if in_scope and _cid not in in_scope:
+                continue
+            _row = seen_rows.get(_cid) or {}
+            _disp = str(_row.get("disposition") or "").strip()
+            if not re.match(r"(?i)^clean\b", _disp):
+                continue
+            _p = art_dir / _fname
+            if _p.is_symlink() or not _p.is_file():
+                errs.append(f"{ARTIFACTS_REL}/{_fname} is missing or a symlink: {_cid} is "
+                            f"disposed `clean`, so its per-sweep enumeration table must exist "
+                            f"and every row must be disposed")
+                continue
+            _body = read_text_bounded(_p)
+            if _body is None or not _body.strip():
+                errs.append(f"{ARTIFACTS_REL}/{_fname} is empty or unreadable: a zero-finding "
+                            f"{_cid} is valid ONLY with a disposed enumeration table")
+            # A basis cell that names an artifact must resolve. A bare
+            # `clean -- basis: locations` is still accepted, but a named
+            # `artifacts/<file>` is never allowed to point at a missing file.
+            for _m in re.finditer(r"(?i)(?:guided_review/)?artifacts/[A-Za-z0-9_./-]+",
+                                  _disp + " " + str(_row.get("detail") or "")):
+                _named = _m.group(0).rstrip(".,;:)")
+                _rel = _named if _named.startswith(GUIDED_REVIEW_DIR + "/") \
+                    else f"{GUIDED_REVIEW_DIR}/{_named}"
+                if not (sb / _rel).is_file():
+                    errs.append(f"{FINDINGS_REL} coverage row {_cid!r} names basis "
+                                f"{_named!r}, which does not resolve to a file in this "
+                                f"sandbox")
 
 
 # The M1b table's own column names and row-number headers. A session that
