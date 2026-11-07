@@ -392,6 +392,14 @@ evidence pack.
   generation-counter rename never reaches inside either area.
 * On WSL, `/mnt/c` occasionally returns transient `EIO` errors under a synced
   folder; re-running the affected command is safe (the pipeline is resumable).
+* When an external read-only audit or debug tool inspects this checkout, give it a run
+  directory outside the tree (for example `--work-dir ~/gdp-runs/paper-refine`) or prune
+  `debug_runs/` first. `debug_runs/` is git-ignored, but it is still part of the work tree:
+  a 2026-11-08 generic-debug-pipeline run spent ten minutes walking 87 archived runs before
+  its audit started, because the tool's read-only fingerprint enumerates ignored files. The
+  same rule applies to generated trees inside the checkout: "ignored" is not "out of scope"
+  for such tools, so keep them outside the repository when a run does not need their history,
+  and point the tool's run directory at a location that will not be committed.
 
 ## Revision modes: `continue`, `init`, the journal modes (options 1–4), and `llm` (5)
 
