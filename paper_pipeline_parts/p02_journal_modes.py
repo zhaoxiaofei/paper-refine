@@ -662,6 +662,10 @@ def final_clean_dirname(root: Path) -> str:
 # root stays self-contained; when it is absent the scan reports "unavailable"
 # instead of failing the run.
 DOCX_FORMAT_MODULE = "paper_docx_format.py"
+# The formatter's ordered implementation parts: a thin loader cannot run
+# without them, so every place that stages the module stages this directory
+# beside it too.
+DOCX_FORMAT_PARTS_DIR = "paper_docx_format_parts"
 # `setup --format-fix`: normalize the mechanical OOXML formatting defects of the
 # pristine copy (and, later, of every stage package) before anything is
 # fingerprinted/judged. `off` keeps the copy byte-identical to --source and the

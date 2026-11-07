@@ -215,7 +215,8 @@ def judge_sheet_complete(sj, rec: dict) -> bool:
     return labels <= seen
 
 
-def _copy_session_tools(sb: Path, stamp: float = None) -> None:
+def _copy_session_tools(sb: Path, stamp: float = None,
+                        include_driver: bool = True) -> None:
     """Put the code-side scanner/validator next to PROMPT.md.
 
     The stage prompts call `python paper_docx_format.py scan|validate <dir>` by
@@ -225,6 +226,24 @@ def _copy_session_tools(sb: Path, stamp: float = None) -> None:
     fresh sandbox look like it holds agent work. A judge sandbox gets it too
     (its prompt names the same command) and the file is stamped with the view
     timestamp, so it cannot date the packages around it.
+
+    The SELF-CHECK block names the pipeline DRIVER, not the formatter: in a
+    jailed harness both the run root and the origin snapshot can be hidden (the
+    eval harness masks its results tree), which made the pre-flight a dead path.
+    The frozen driver and its ordered parts are therefore staged under
+    `selfcheck/` in the sandbox too, and the prompt's first command runs that
+    copy. The staged driver loads its companion FORMATTER from beside itself
+    (`_format_module()`), so the formatter and its ordered parts are staged
+    there as well: without them the package-stage pre-flight reports the OOXML
+    scanner as unavailable, a failure the session cannot repair because the
+    sandbox-root copy is not where `__file__` points. `leftovers_present()`
+    never looks at `selfcheck/`.
+
+    A JUDGE sandbox is BLINDED: the evidence-pack blinding check forbids any
+    orchestrator artifact beside the blinded packages and the public formatter,
+    so `include_driver=False` keeps the driver bundle out of it. The judge's
+    pre-flight uses the ROOT's frozen copy or the harness's read-only
+    `/paper-pipeline` mount instead.
     """
     src = Path(__file__).resolve().with_name(DOCX_FORMAT_MODULE)
     dst = sb / DOCX_FORMAT_MODULE
@@ -250,28 +269,79 @@ def _copy_session_tools(sb: Path, stamp: float = None) -> None:
             _safe_restore_copy(src, dst, sb)
         # The formatter is a thin loader too: its ordered parts must sit beside
         # it, or the stage's `python paper_docx_format.py scan` call cannot run.
-        parts_name = "paper_docx_format_parts"
+        parts_name = DOCX_FORMAT_PARTS_DIR
         if (src.parent / parts_name).is_dir():
             copy_asset_dirs(src.parent, sb, names=(parts_name,))
+        # The driver and its ordered parts: the prompt's self-check runs THIS
+        # copy first, so it must be complete even when the root/snapshot are
+        # masked. The tool dir is orchestrator-owned: a planted symlink there
+        # is removed rather than written through. A judge sandbox is blinded
+        # and gets no driver bundle (see the docstring).
+        if include_driver:
+            driver_src = Path(__file__).resolve()
+            if driver_src.is_file():
+                tool_dir = sb / SELFCHECK_TOOL_DIR
+                if tool_dir.is_symlink() or (tool_dir.exists() and not tool_dir.is_dir()):
+                    tool_dir.unlink()
+                tool_dir.mkdir(parents=True, exist_ok=True)
+                _safe_restore_copy(driver_src, tool_dir / SELFCHECK_DRIVER, sb)
+                parts_name = "paper_pipeline_parts"
+                if (driver_src.parent / parts_name).is_dir():
+                    copy_asset_dirs(driver_src.parent, tool_dir, names=(parts_name,))
+                # The staged DRIVER also loads its companion formatter from
+                # beside ITSELF (`_format_module()`), and the package-stage
+                # self-check runs the format-regression family. Staging only
+                # the driver made that pre-flight report the scanner as
+                # UNAVAILABLE for rewrite/revise/integrate -- a false failure
+                # the session could never fix (the sandbox-root copy is not
+                # where `__file__` points). Stage the formatter bundle beside
+                # the driver too, so the preview sees the same code the root
+                # postcheck does.
+                fmt_src = driver_src.parent / DOCX_FORMAT_MODULE
+                if fmt_src.is_file():
+                    _safe_restore_copy(fmt_src, tool_dir / DOCX_FORMAT_MODULE, sb)
+                if (driver_src.parent / DOCX_FORMAT_PARTS_DIR).is_dir():
+                    copy_asset_dirs(driver_src.parent, tool_dir,
+                                    names=(DOCX_FORMAT_PARTS_DIR,))
     except OSError as e:
         # A partial/refused copy used to be swallowed: the stage then called a
-        # missing or incomplete formatter and the agent had no scan tool, with
-        # no diagnostic naming the staging failure. Fail the stage loudly.
+        # missing or incomplete formatter (or driver) and had no diagnostic
+        # naming the staging failure. Fail the stage loudly.
         raise RuntimeError(
-            f"could not stage {DOCX_FORMAT_MODULE} and paper_docx_format_parts "
-            f"into {sb}: {type(e).__name__}: {e}") from e
+            f"could not stage {DOCX_FORMAT_MODULE}, {DOCX_FORMAT_PARTS_DIR}, "
+            f"{SELFCHECK_DRIVER_REL} or paper_pipeline_parts into {sb}: "
+            f"{type(e).__name__}: {e}") from e
     # Stamping is cosmetic (it keeps the copy from dating the sandbox): a
     # timestamp failure must not turn into a staging failure.
     if stamp is not None:
         with contextlib.suppress(OSError):
             if dst.is_file():
                 os.utime(dst, (stamp, stamp))
-        parts_name = "paper_docx_format_parts"
+        parts_name = DOCX_FORMAT_PARTS_DIR
         if (sb / parts_name).is_dir():
             with contextlib.suppress(OSError):
                 for p in (sb / parts_name).rglob("*.py"):
                     os.utime(p, (stamp, stamp))
                 os.utime(sb / parts_name, (stamp, stamp))
+        tool_dir = sb / SELFCHECK_TOOL_DIR
+        if tool_dir.is_dir():
+            with contextlib.suppress(OSError):
+                driver = tool_dir / SELFCHECK_DRIVER
+                if driver.is_file():
+                    os.utime(driver, (stamp, stamp))
+                fmt = tool_dir / DOCX_FORMAT_MODULE
+                if fmt.is_file():
+                    os.utime(fmt, (stamp, stamp))
+                parts = tool_dir / "paper_pipeline_parts"
+                if parts.is_dir():
+                    for p in parts.rglob("*.py"):
+                        os.utime(p, (stamp, stamp))
+                staged_fmt_parts = tool_dir / DOCX_FORMAT_PARTS_DIR
+                if staged_fmt_parts.is_dir():
+                    for p in staged_fmt_parts.rglob("*.py"):
+                        os.utime(p, (stamp, stamp))
+                    os.utime(staged_fmt_parts, (stamp, stamp))
+                os.utime(tool_dir, (stamp, stamp))
 
 
 def leftovers_present(ctx: Ctx, rec: dict) -> bool:
@@ -1364,6 +1434,24 @@ def ledger_disposed_ids(ledger, wanted=()) -> set:
 # ---------------------------------------------------------------------
 
 REQUIRED_REVIEW_CHECKS = tuple([f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)])
+_CHECK_ID_RE = re.compile(r"([MJ])0*(\d+)", re.I)
+
+
+def normalise_check_id(value) -> str:
+    """Canonical `M<n>`/`J<n>` spelling of one coverage check id.
+
+    The audit gate has always normalised `M01`/`J05`/`m1` so an id-spelling
+    difference cannot read as a missing check; the review gate compared the raw
+    cell, so a session that wrote `"check": "m1"` was failed with "coverage
+    table is missing check id(s) ['M1']" even though its table disposed M1.
+    Anything that is not an M/J id (a discovery proposal such as M37, a
+    concern's own id) is returned unchanged.
+    """
+    text = str(value or "").strip()
+    m = _CHECK_ID_RE.fullmatch(text)
+    return f"{m.group(1).upper()}{int(m.group(2))}" if m else text
+
+
 # Contract v2+: the judge must also DISPOSE every frozen check id for every
 # opponent, so a sheet that never looked at an opponent is detectable code-side
 # (the check ids are provenance-free: they are the journal/format checks, not a
@@ -1413,14 +1501,69 @@ def _coverage_disposition_ok(value) -> bool:
     The old pattern required only ONE non-space character, so filler such as
     `clean -- basis: x`, `clean -- basis: .` or `unable -- .` satisfied the
     completeness gate and an unexamined check counted as covered (F09).
+
+    An out-of-scope disposal is the ONE shape whose prefix sessions also spell
+    with hyphens/underscores (`out-of-scope -- <reason>`); that spelling names
+    the same disposal, so it is normalized to the documented spaced form before
+    the vocabulary match. The reason requirement is unchanged, and a hyphenated
+    row is still caught by the in-scope guard (`_coverage_is_out_of_scope`).
     """
-    text = str(value or "").strip()
+    text = re.sub(r"(?i)^out[\s_\-]+of[\s_\-]+scope", "out of scope",
+                  str(value or "").strip())
     if not COVERAGE_DISPOSITION_RE.match(text):
         return False
     m = _COVERAGE_NAMED_BASIS_RE.search(text)
     if m is None:
         return True          # "N findings"
     return _coverage_reason_named(m.group(1))
+
+
+_BARE_COVERAGE_DISPOSITIONS = {"clean", "unable", "out of scope", "out-of-scope"}
+
+
+def _coverage_is_out_of_scope(value) -> bool:
+    """True for every accepted spelling of an out-of-scope disposal.
+
+    The documented form is `out of scope -- <reason>`, but a bare verdict may
+    also be spelled `out-of-scope` (the lenient `detail` route below accepts
+    it). Every reader of the disposition must normalize the same way: the
+    in-scope guard and the review-split merge compared only the SPACED prefix,
+    so a hyphenated row slipped past the guard (a full review could dispose an
+    in-scope check as out of scope) and the merge kept A's placeholder row over
+    B's real examination.
+    """
+    text = re.sub(r"[\s_\-]+", " ", str(value or "")).strip().lower()
+    return text.startswith("out of scope")
+
+
+def _coverage_row_disposition_ok(row) -> bool:
+    """True when a coverage ROW carries a real disposition.
+
+    The documented vocabulary lives in the `disposition` cell, but the
+    canonical JSON example shows a sibling `detail` cell, and a session that
+    wrote `"disposition": "clean"` plus `"detail": "... Basis: <artifact>"`
+    was rejected even though it named its basis. Accept that explicit spelling
+    -- and only that: a bare verdict with no `Basis:`/`Reason:` in `detail` is
+    still the filler the gate exists to catch.
+
+    The `detail` cell is FREE TEXT and may run over several lines, so its
+    `Basis:`/`Reason:` marker is searched anywhere in it, not only on the last
+    line (`(.+)$` without DOTALL refused a legitimate multi-line detail whose
+    basis was written first).
+    """
+    if not isinstance(row, dict):
+        return False
+    disp = str(row.get("disposition") or "").strip()
+    if _coverage_disposition_ok(disp):
+        return True
+    bare = re.sub(r"[\s.;:]+$", "", disp.lower())
+    if bare not in _BARE_COVERAGE_DISPOSITIONS:
+        return False
+    detail = str(row.get("detail") or "").strip()
+    if not detail:
+        return False
+    match = re.search(r"(?i)\b(?:basis|reason)\s*:\s*([^\n]+)", detail)
+    return bool(match and _coverage_reason_named(match.group(1)))
 
 
 def visual_tools_available() -> bool:
@@ -3463,7 +3606,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         for row in coverage:
             if not isinstance(row, dict):
                 continue
-            cid = str(row.get("check") or "").strip()
+            cid = normalise_check_id(row.get("check"))
             disp = str(row.get("disposition") or "").strip()
             if cid:
                 if cid in seen_ids:
@@ -3476,10 +3619,10 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 seen_ids[cid] = disp
                 seen_rows[cid] = row
             if cid and (not disp or disp.lower().startswith("not checked")
-                        or not _coverage_disposition_ok(disp)):
+                        or not _coverage_row_disposition_ok(row)):
                 bad.append(cid)
             if (cid and cid in wanted and (not in_scope or cid in in_scope)
-                    and re.sub(r"\s+", " ", disp).lower().startswith("out of scope")):
+                    and _coverage_is_out_of_scope(disp)):
                 # A FULL review's object is the whole package, and a SCOPED
                 # round still owns every check it declares in scope: neither may
                 # dispose one of those as out of scope. The old gate tested
@@ -3496,7 +3639,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
             # a missing disposition.
             for cid in sorted(out_of_scope):
                 disp = (seen_ids.get(cid) or "").strip().lower()
-                if cid in seen_ids and not disp.replace(" ", "").startswith("outofscope"):
+                if cid in seen_ids and not _coverage_is_out_of_scope(disp):
                     errs.append(
                         f"{FINDINGS_REL} coverage row {cid!r} = {disp!r} but this round's review "
                         f"scoped OUT that check: dispose it as 'out of scope -- this round's "
@@ -3510,7 +3653,8 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         if bad:
             errs.append(f"{FINDINGS_REL} coverage rows without a real disposition: {sorted(set(bad))}"
                         f" (each row is 'N findings', 'clean -- basis: <artifact>', "
-                        f"'unable -- <reason>' or 'out of scope -- <reason>'; an empty, "
+                        f"'unable -- <reason>' or 'out of scope -- <reason>'; a bare verdict is "
+                        f"accepted only with a named 'Basis:'/'Reason:' in `detail`; an empty, "
                         f"'not checked' or filler cell is not a disposition)")
         if bad_out_of_scope:
             errs.append(f"{FINDINGS_REL} disposes in-scope check(s) {sorted(set(bad_out_of_scope))} "

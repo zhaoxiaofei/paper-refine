@@ -1553,18 +1553,21 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
         for row in src:
             if not isinstance(row, dict):
                 continue
-            check = str(row.get("check") or "")
+            check = normalise_check_id(row.get("check"))
             if check in have:
                 conflicts.append(check)
                 # Part A may mark a check "out of scope -- session B" because B
                 # owns it (the split prompt invites that row). Keeping A's row
                 # verbatim would then hide B's actual examination of the check.
                 idx = next((i for i, r in enumerate(coverage)
-                            if str(r.get("check") or "") == check), None)
+                            if normalise_check_id(r.get("check")) == check), None)
                 if idx is not None:
-                    old_disp = str(coverage[idx].get("disposition") or "").lower()
-                    new_disp = str(row.get("disposition") or "").lower()
-                    if old_disp.startswith("out of scope") and not new_disp.startswith("out of scope"):
+                    old_disp = str(coverage[idx].get("disposition") or "")
+                    new_disp = str(row.get("disposition") or "")
+                    # Every accepted spelling (`out of scope`, `out-of-scope`,
+                    # and the bare detail-carried form) is one disposition.
+                    if (_coverage_is_out_of_scope(old_disp)
+                            and not _coverage_is_out_of_scope(new_disp)):
                         coverage[idx] = row
                 continue
             have.add(check)

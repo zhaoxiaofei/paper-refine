@@ -339,31 +339,30 @@ def selfcheck_block(kind: str, run_id: str, r: int) -> str:
     read-only SOMEWHERE ELSE, so the path is not guaranteed to resolve: the
     2026-11-01 audit ran `ls` on it, got "No such file or directory", and spent
     its whole attempt "verified manually" because the prompt offered no second
-    way to reach the driver. The block therefore also prints the snapshot the
-    root was set up from (`pipeline_fallback_paths()`), which is exactly what a
-    jailed session can still read; it costs the prompt one extra line, not a
-    filesystem search.
+    way to reach the driver. Every sandbox now also carries its own copy of the
+    frozen driver and parts (`SELFCHECK_DRIVER_REL`, staged by
+    `_copy_session_tools`), which a jailed harness cannot hide; the block names
+    that copy FIRST, then the root, then the origin snapshot and the harness's
+    read-only mount of it (`HARNESS_DRIVER_REL`).
     """
-    fallbacks = pipeline_fallback_paths()
-    if fallbacks:
-        alternate = "\n".join(
-            f'    python {shlex.quote(str(path))} selfcheck --sandbox . --stage {kind} '
-            f'--run-id {run_id} --round {int(r)}' for path in fallbacks)
-        alt_text = (f"IF THAT PATH DOES NOT EXIST OR CANNOT BE READ in this session (a sandboxed or\n"
-                    f"jailed harness may mount the run root elsewhere), run the SAME frozen driver from\n"
-                    f"the snapshot this root was set up from:\n{alternate}\n"
-                    f"It is the same bytes; the verdict is the same.\n")
-    else:
-        # No origin snapshot is recorded (an old root, or a state file that does
-        # not carry `pipeline.path`). Naming state.json here would be a dead end:
-        # this branch is reached BECAUSE that key is absent, and `state.json`
-        # lives in the run ROOT, not in the sandbox root the command runs from.
-        alt_text = ("IF THAT PATH DOES NOT EXIST OR CANNOT BE READ in this session (a sandboxed or\n"
-                    "jailed harness may mount the run root elsewhere) and no second path is named\n"
-                    "above, do not guess: report in your final report that the pre-flight could not\n"
-                    "run, and re-read every deliverable schema by hand before writing the marker.\n")
+    reachable = [Path(path) for path in pipeline_fallback_paths()]
+    harness_mount = Path(HARNESS_DRIVER_REL)
+    if harness_mount not in reachable:
+        reachable.append(harness_mount)
+    alternate = "\n".join(
+        f'    python {shlex.quote(str(path))} selfcheck --sandbox . --stage {kind} '
+        f'--run-id {run_id} --round {int(r)}' for path in reachable)
+    alt_text = (f"IF THAT PATH DOES NOT EXIST OR CANNOT BE READ in this session (a sandboxed or\n"
+                f"jailed harness may mount the run root elsewhere), run the SAME frozen driver from\n"
+                f"the snapshot this root was set up from, or from the harness's read-only mount:\n"
+                f"{alternate}\n"
+                f"It is the same bytes; the verdict is the same.\n")
     return (f"""
 SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
+    python {SELFCHECK_DRIVER_REL} selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
+The driver is staged in THIS sandbox at `{SELFCHECK_DRIVER_REL}` (the same frozen bytes as the ROOT's
+copy), so run that first. The ROOT's frozen copy is authoritative (AGENTS.md rule 11); if the staged
+copy is missing (an older or resumed sandbox), run it instead:
     python {shlex.quote(str(pipeline_self_path()))} selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
 It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
 required deliverable, the seeded decision tables' dispositions, the audit sheet, the manual TODO
@@ -393,18 +392,22 @@ def judge_selfcheck_block(run_id: str) -> str:
     stage name, no bookkeeping file name, no marker token.
 
     The sandbox can be jailed, in which case the root's copy of the driver may
-    not resolve (see `selfcheck_block`); the same frozen snapshot is then named
-    as a second path. That path identifies no candidate and carries none of the
-    forbidden vocabulary, so the blinding rule holds.
+    not resolve (see `selfcheck_block`); a judge sandbox carries NO staged
+    driver bundle (the evidence-pack blinding rule forbids orchestrator
+    artifacts beside the blinded packages), so the origin snapshot and the
+    harness's read-only mount are the fallbacks. Those paths identify no
+    candidate and carry none of the forbidden vocabulary, so the blinding rule
+    holds.
     """
-    fallbacks = pipeline_fallback_paths()
-    alternate = ""
-    if fallbacks:
-        alternate = (
-            "\nIf the path above cannot be read in this session, the SAME frozen checker is "
-            "reachable at:\n"
-            + "\n".join(f'    python {shlex.quote(str(path))} selfcheck --sandbox . --stage judge'
-                        for path in fallbacks))
+    reachable = [Path(path) for path in pipeline_fallback_paths()]
+    harness_mount = Path(HARNESS_DRIVER_REL)
+    if harness_mount not in reachable:
+        reachable.append(harness_mount)
+    alternate = (
+        "\nIf the path above cannot be read in this session, the SAME frozen checker is "
+        "reachable at:\n"
+        + "\n".join(f'    python {shlex.quote(str(path))} selfcheck --sandbox . --stage judge'
+                    for path in reachable))
     return (f"""
 === PRE-FLIGHT CHECK — RUN IT BEFORE THE MARKER ===
 
@@ -567,11 +570,14 @@ Skill discipline that the orchestrator will check for:
     has used the token before defining it. When the sentence itself prints the expansion, the
     token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
   * No silent skips: every check ID M1-M36 and J1-J5 appears in the coverage table with a real
-     disposition (N findings / clean — basis: <artifact> / unable — <reason>); M19 (the pipeline's
-     abstract/main-text length sweep) ALWAYS appears there too, and M18 (the pipeline's caption
-     sweep) ALWAYS appears as well: legends are always enumerated, and only its proxy cap is
-     optional. Number your discovery proposals from M37 upwards (M18-M20 are reserved by the
-     pipeline, M21-M36 are adopted).
+     disposition (N findings / clean — basis: <artifact> / unable — <reason>); THE VERDICT GOES IN
+     THE ROW'S `disposition` CELL -- `detail` is free text and is read only to accept a BARE
+     verdict whose `Basis:`/`Reason:` is spelled out there, so a zero-finding row is
+     `clean -- basis: <artifact>` in `disposition`, not a bare `clean` with the basis in `detail`.
+     M19 (the pipeline's abstract/main-text length sweep) ALWAYS appears there too, and M18 (the
+     pipeline's caption sweep) ALWAYS appears as well: legends are always enumerated, and only its
+     proxy cap is optional. Number your discovery proposals from M37 upwards (M18-M20 are reserved
+     by the pipeline, M21-M36 are adopted).
   * Never invent content, citations, numbers, or accession IDs. Anything unresolvable becomes
     "unresolvable — manual verification required" and is listed in the manual-verification list.
   * Findings are reported, never fixed: identification only.
@@ -605,7 +611,12 @@ Skill discipline that the orchestrator will check for:
                    "severity": "Critical|Major|Minor|Fatal", "evidence": "...",
                    "explanation": "...", "status": "resolvable|unresolvable|guideline-dependent"}],
      "artifacts": {"M1_acronyms": [...], "M2_citations": {...}, "...": "..."},
-     "coverage": [{"check": "M1", "disposition": "N findings", "detail": "..."}]}
+     "coverage": [{"check": "M1", "disposition": "2 findings", "detail": "F-003, F-004"},
+                  {"check": "M2", "disposition": "clean -- basis: guided_review/artifacts/M2_references.md",
+                   "detail": "8 entries, 0 orphans"}]}
+    The `disposition` cell carries the verdict; `detail` is free text and is read only when a
+    BARE `clean`/`unable`/`out of scope` in `disposition` names its `Basis:`/`Reason:` there.
+    A zero-finding row is `clean -- basis: <artifact>` IN `disposition`.
     Every finding id must be unique and stable (F-001, F-002, ...); Phase 2 consumes this file as
     the authoritative finding list, so ids must not be renumbered later.
   guided_review/artifacts/     — one file per mechanical sweep.

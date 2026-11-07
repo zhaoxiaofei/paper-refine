@@ -84,7 +84,7 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 
 1. **Identification only** — findings, never edits. Never modify any file in SUBMISSION_DIR.
 2. **Never invent.** Unresolvable value → status exactly `unresolvable`, and add the manual verification it needs to the manual-verification list (the status cell is an enum: `resolvable` / `unresolvable` / `guideline-dependent`; the instruction text lives beside it, never in it). Guideline rule you cannot verify → `guideline-dependent`. Missing data → note a placeholder may be needed; never fabricate.
-3. **No silent skips.** Every check ID must end up in the coverage table with a real disposition (`N findings` / `clean — basis: <artifact/locations>` / `unable — <reason>`). "Not checked" is not an allowed value.
+3. **No silent skips.** Every check ID must end up in the coverage table with a real disposition (`N findings` / `clean — basis: <artifact/locations>` / `unable — <reason>`), and the verdict goes in the row's `disposition` cell: `detail` is free text and is read only to accept a bare verdict whose `Basis:`/`Reason:` is written there, so a zero-finding row is `clean — basis: <artifact>` in `disposition`, not a bare `clean`. "Not checked" is not an allowed value.
 4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the REWRITE-PARITY checks M25–M29 (figure-artwork/text parity, house-style/orthographic conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise vs printed-schema parity), the SOURCE-HIERARCHY reconciliation M30 (a written claim against the code/raw data that produced it) and the EVIDENCE-INTEGRITY sweeps M31–M36 (artwork-versus-legend consistency, a headline statistic against the correction the paper itself states, availability-locator finality, figure-source-data coverage, disclosure/provenance completeness, and M36's Zotero live-field refresh parity).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J5 may be prioritized; J5 (architecture & rewrite-class) produces scope-level rows in `OUT/ARCHITECTURE.md`, not per-sentence findings. The word "non-exhaustive" never applies to a mechanical sweep.
 5. **One finding per instance.** "Several acronyms are undefined" is not a finding; each undefined acronym is its own finding with its own ID, quote, and location.
 6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`; for M8 those are the RAW enumerations, and the required consolidated M8 artifact is `OUT/artifacts/M8_terminology.md` (entity | variant forms | counts | locations | consistent?) — pass `--out OUT/artifacts` if you prefer the raw files alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole submission corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
@@ -137,8 +137,12 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
                "severity": "Major", "evidence": "...", "explanation": "...",
                "status": "resolvable"}],
  "artifacts": {"M1_acronyms": [...], "M2_citations": {...}},
- "coverage": [{"check": "M1", "disposition": "N findings", "detail": "..."}]}
+ "coverage": [{"check": "M1", "disposition": "N findings", "detail": "free text"},
+              {"check": "M2", "disposition": "clean -- basis: artifacts/M2_references.md",
+               "detail": "free text"}]}
 ```
+
+The `disposition` cell carries the verdict; `detail` is free text and is not read as the disposition.
 
 **Verification pass before finalizing:** confirm every artifact row has a disposition; confirm every check ID is present in the coverage table; add any missed findings with new IDs; state in the summary that the pass was performed.
 

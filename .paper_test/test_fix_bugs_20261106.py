@@ -193,8 +193,10 @@ def test_selfcheck_command_is_shell_quoted() -> None:
         block = pp.selfcheck_block("revise", "r1_a2_revise", 1)
     finally:
         pp.pipeline_self_path, pp.pipeline_fallback_paths = real, real_fb
-    m = re.search(r"(?m)^\s+python (.*?) selfcheck --sandbox", block)
-    token = m.group(1) if m else ""
+    tokens = re.findall(r"(?m)^\s+python (.*?) selfcheck --sandbox", block)
+    # The block now names the staged sandbox-local copy first; that is a
+    # fixed relative path, not the dangerous ROOT path this check is about.
+    token = next((t for t in tokens if "PAPER_SELF_DIR" in t), "")
     check("selfcheck: the command names the path", bool(token), block[:160])
     env = dict(os.environ, PAPER_SELF_DIR="EXPANDED")
     got = subprocess.run(["bash", "-c", f"printf '%s' {token}"],
@@ -212,8 +214,8 @@ def test_selfcheck_command_is_shell_quoted() -> None:
         judge = pp.judge_selfcheck_block("judge_x_j1")
     finally:
         pp.pipeline_self_path, pp.pipeline_fallback_paths = real, real_fb
-    m = re.search(r"(?m)^\s+python (.*?) selfcheck --sandbox", judge)
-    token = m.group(1) if m else ""
+    tokens = re.findall(r"(?m)^\s+python (.*?) selfcheck --sandbox", judge)
+    token = next((t for t in tokens if "PAPER_SELF_DIR" in t), "")
     got = subprocess.run(["bash", "-c", f"printf '%s' {token}"],
                          capture_output=True, text=True, env=env)
     check("selfcheck: the judge's pre-flight is quoted the same way",

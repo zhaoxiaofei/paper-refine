@@ -3993,6 +3993,12 @@ def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
     note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / PROMPT_FILE
     if not prompt.is_file():
+        # The cold-start prompt carries the SELF-CHECK block, whose FIRST
+        # command runs the sandbox-local `selfcheck/` copy. Without this call
+        # that path is dead in every cold-start sandbox (the one stage that was
+        # missed when the staged bundle was added), so a jailed harness hid
+        # BOTH the first command and its absolute-path fallbacks.
+        _copy_session_tools(sb)
         write_text_atomic(prompt, cold_start_review_prompt(sb, rid, r, prior_failure=note,
                                                venue=venue_profile_of(ctx),
                                                author_to_complete=author_to_complete_mode_of(ctx),
@@ -4907,7 +4913,7 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             # DISCOVERY_SEED_DIR).
             prompt = sb / "PROMPT.md"
             if not prompt.is_file():
-                _copy_session_tools(sb, stamp=view_stamp)
+                _copy_session_tools(sb, stamp=view_stamp, include_driver=False)
                 write_text_atomic(prompt, judge_prompt(
                     sb, rid, r, token, j, judges, labels,
                     # C26: the panel balances the reading order

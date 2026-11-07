@@ -338,6 +338,19 @@ PIPELINE_VENUE_ASSET_DIRS = ("venue_profiles",)
 # trimmed checkout without the skills pack still creates a root (the copy is
 # recorded as None rather than aborting setup).
 PIPELINE_SKILL_ASSET_DIRS = ("paper-skills",)
+# The stage prompt's SELF-CHECK pre-flight runs the driver itself.  A jailed
+# harness can hide both the run root and the origin snapshot, so every stage
+# sandbox carries its own copy of the frozen driver and its ordered parts, at
+# this sandbox-relative path (the prompt names it).  The copy is staged from
+# the RUNNING root's frozen bundle (rule 11), never from a maintained checkout.
+SELFCHECK_TOOL_DIR = "selfcheck"
+SELFCHECK_DRIVER = "paper_pipeline.py"
+SELFCHECK_DRIVER_REL = f"{SELFCHECK_TOOL_DIR}/{SELFCHECK_DRIVER}"
+# The eval harness mounts the same frozen bundle read-only at this neutral path
+# after its results-tree mask (the /skills pattern); the prompt names it as the
+# last fallback for a sandbox materialized before the staged copy existed.
+HARNESS_PIPELINE_MOUNT = "/paper-pipeline"
+HARNESS_DRIVER_REL = f"{HARNESS_PIPELINE_MOUNT}/{SELFCHECK_DRIVER}"
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
 #   off   -- never run the `zot` CLI; live fields stay on the skills' manual route

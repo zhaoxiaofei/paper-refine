@@ -2361,12 +2361,12 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 112 KB | 45 KB | 60% |
+| review | 114 KB | 46 KB | 59% |
 | cold_start_review | 57 KB | 22 KB | 61% |
-| audit | 83 KB | 41 KB | 51% |
+| audit | 84 KB | 41 KB | 51% |
 | revise | 112 KB | 58 KB | 48% |
-| integrate | 110 KB | 58 KB | 47% |
-| rewrite | 103 KB | 54 KB | 47% |
+| integrate | 111 KB | 58 KB | 47% |
+| rewrite | 104 KB | 55 KB | 47% |
 | judge | 99 KB | 69 KB | 30% |
 | revision_audit | 21 KB | 11 KB | 45% |
 | revision_repair | 21 KB | 7 KB | 62% |
@@ -3334,6 +3334,15 @@ Three independent layers now cover that class:
 | the postcheck | ADOPTS a signal that names this run and stage from the stage's own directory (moves it to the root, records a warning naming the stray path) — nothing about the work changed, only its address. A file that names ANOTHER run or stage is never adopted: the failure message names where it is and what it really says |
 | `selfcheck` | `python paper_pipeline.py selfcheck --sandbox <dir> --stage <kind> [--run-id <id>] [--round <r>]` — the postcheck's own detectors applied to one sandbox, read-only, no `--root` needed. Every stage prompt tells the session to run it from the sandbox root BEFORE it writes the marker, so a session fixes its own paperwork while its context is still live instead of paying a rebuilt attempt |
 
+Every non-judge stage sandbox also carries a frozen copy of the driver, its
+ordered parts and the OOXML formatter bundle under `selfcheck/`, and the prompt
+runs that copy FIRST: a jailed harness can hide both the run root and the
+origin snapshot, which made the pre-flight a dead path. The judge sandbox is
+deliberately excluded (blinding forbids an orchestrator artifact beside the
+blinded packages); its prompt names the root copy and the harness's read-only
+mount instead. The staged copy is loaded from the running root's frozen bundle,
+never from the maintained checkout (rule 11).
+
 `selfcheck` is a pre-flight, not a second verdict: it reports the marker and its
 location, the stage's deliverables (present, parseable), the seeded decision
 tables' dispositions and the audit sheet — the checks the postcheck performs
@@ -3492,7 +3501,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 189 suites (a few
+any failure. They are independent, so run them in parallel — 190 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
