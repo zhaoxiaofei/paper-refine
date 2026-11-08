@@ -4129,7 +4129,7 @@ DELETION has no correct value: put the deleted text in `wrong`, leave `correct` 
 a confirmation.
 
 Write `revision_audit/REPAIR_PLAN.json` (and a readable `revision_audit/REPAIR_PLAN.md`):
-  {"rows": [{"id": "RP-001", "finding": "F-012|X-900|none", "file": "manuscript.md",
+  {"rows": [{"id": "RP-001", "finding": "F-012|X-901|none", "file": "manuscript.md",
              "location": "Results, paragraph 3", "wrong": "...", "correct": "...",
              "basis": "...", "edit": "...", "evidence": "..."}]}
 A pure-deletion row is the same shape with `"correct": ""`. An empty plan is `{"rows": []}` — that is

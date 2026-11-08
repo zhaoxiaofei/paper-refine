@@ -253,7 +253,7 @@ def test_review_contract():
     art.mkdir(parents=True)
     (art / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
     for fname in nb.SWEEP_ARTIFACTS.values():
-        (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
+        (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK — tested: the row is inside its bar |\n",
                                  encoding="utf-8")
     (art / "check.md").write_text("| row |\n|---|\n", encoding="utf-8")
     ids = ([f"M{i}" for i in range(1, 18)] + ["M18", "M19", "M20", "M21", "M22", "M23",
@@ -273,13 +273,13 @@ def test_review_contract():
                   "M32_statistics.md", "M33_availability.md",
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md", "M2_references.md"):
-        (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
+        (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK — tested: the row is inside its bar |\n",
                                  encoding="utf-8")
     (sb / "guided_review" / "ARCHITECTURE.md").write_text(
         "| document | section | paragraphs | current structure | reader cost | "
         "proposed reorganization | class | severity | disposition |\n"
         "|---|---|---|---|---|---|---|---|---|\n"
-        "| ms | all | 1 | x | none | none | writing | Minor | OK |\n", encoding="utf-8")
+        "| ms | all | 1 | x | none | none | writing | Minor | OK — the order serves the reader |\n", encoding="utf-8")
     fj["coverage"].append({"check": "M30", "disposition": "clean -- basis: M30 artifact"})
     for cid in ("M31", "M32", "M33", "M34", "M35", "M36"):
         fj["coverage"].append({"check": cid, "disposition": f"clean -- basis: {cid} artifact"})

@@ -1435,13 +1435,17 @@ def ledger_disposed_ids(ledger, wanted=()) -> set:
 
 REQUIRED_REVIEW_CHECKS = tuple([f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)])
 
-# The per-sweep artifact each mechanical check must have when its coverage row
-# says `clean`. DECISION_ARTIFACTS/parity already gate M2, M8, M18-M20,
-# M24-M36; this table closes the rest (M1, M3-M7, M9-M17, M21-M23), so a
-# `clean -- basis: locations` row cannot certify a sweep that produced no
-# enumeration table (F82). The name is the one the skill/sweeps define.
+# The per-sweep artifact each mechanical check must have whenever its coverage
+# row certifies a sweep that RAN (clean or N findings). DECISION_ARTIFACTS/
+# parity already gate M8, M18-M20 and M24-M36; this table closes the rest
+# (M1-M7, M9-M17, M21-M23), so a `clean -- basis: locations` row cannot
+# certify a sweep that produced no enumeration table (F82) and a finding row
+# cannot report instances without the table that enumerates them (the skill's
+# acceptance check: every sweep with findings has a matching artifact). The
+# name is the one the skill/sweeps define.
 SWEEP_ARTIFACTS = {
     "M1": "M1_acronyms.md",
+    "M2": "M2_citations.md",
     "M3": "M3_display_items.md",
     "M4": "M4_numbers.md",
     "M5": "M5_mandatory.md",
@@ -1461,6 +1465,30 @@ SWEEP_ARTIFACTS = {
     "M23": "M23_supp_parity.md",
 }
 _CHECK_ID_RE = re.compile(r"([MJ])0*(\d+)", re.I)
+
+
+def _split_check_owned(mode: str, part_b: bool, cid: str) -> bool:
+    """Does this split-review half own `cid`? (the REVIEW_SPLIT_SCOPES division).
+
+    A split prompt tells each session to write the OTHER half's checks as
+    "out of scope -- session X"; the contract must accept exactly that row for
+    the checks the other session owns, while still refusing an out-of-scope
+    disposal for a check THIS half owns.
+    """
+    cid = str(cid or "").strip().upper()
+    if mode == "phases":
+        return cid.startswith("J") if part_b else cid.startswith("M")
+    if mode == "aspects":
+        m = re.match(r"^([MJ])(\d+)$", cid)
+        if not m:
+            return True                 # JF and unknown labels: not divided
+        letter, n = m.group(1), int(m.group(2))
+        if letter == "J":
+            return n in (4, 5) if part_b else n in (1, 2, 3)
+        if part_b:
+            return n in (9, 10, 11, 12, 17, 18, 19, 20) or 21 <= n <= 36
+        return 1 <= n <= 8 or 13 <= n <= 16
+    return True
 
 
 def normalise_check_id(value) -> str:
@@ -1550,10 +1578,16 @@ def _coverage_disposition_ok(value) -> bool:
                   str(value or "").strip())
     if not COVERAGE_DISPOSITION_RE.fullmatch(text):
         return False
-    if re.match(r"(?i)^\d+\s+finding", text) and re.search(
-            r"(?i)\b(?:but|however|yet)\b[^.;]*\b(?:none|no|zero)\b", text):
-        # `2 findings but none` starts with a count and then contradicts it.
-        return False
+    _count = re.match(r"(?i)^(\d+)\s+finding", text)
+    if _count and int(_count.group(1)) > 0:
+        # A positive count followed by an unqualified none/no/zero contradicts
+        # itself. The old rule required but/however/yet, so `2 findings; none`,
+        # `2 findings, none` and `2 findings -- none` all passed as real
+        # dispositions. The negative lookahead keeps a genuine qualification
+        # (`2 findings; none critical`) out of the rule.
+        _tail = text[_count.end():]
+        if re.search(r"(?i)(?:^|[^A-Za-z])(?:none|no|zero)\b\s*(?:$|[.;,)\]])", _tail):
+            return False
     m = _COVERAGE_NAMED_BASIS_RE.search(text)
     if m is None:
         return True          # "N findings"
@@ -3619,6 +3653,11 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                     f"the corpus it analysed and it must resolve to this sandbox's base/ -- "
                     f"re-run the review with SUBMISSION_DIR=./base")
     # 2. every check ID must have a real disposition.
+    # `split_mode`/`part_b` are read again by the artifact gates below even when
+    # the coverage table is absent, so they are initialised here, outside the
+    # branch that computes them.
+    split_mode = "off"
+    part_b = False
     coverage = fj.get("coverage")
     if not isinstance(coverage, list):
         errs.append(f"{FINDINGS_REL} has no coverage table; every check ID M1-M17, M18-M36 and "
@@ -3644,6 +3683,20 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         # disclosure/provenance completeness, plus M36's Zotero live-field
     # refresh parity. Review-side like M25-M30.
         wanted += ["M31", "M32", "M33", "M34", "M35", "M36"]
+        # The split mode is needed BEFORE the coverage loop: a split session
+        # legitimately writes the other half's checks as "out of scope --
+        # session X" (the prompt says exactly that), so the in-scope guard must
+        # know which checks this half owns. Computing it after the loop flagged
+        # every one of those rows as an in-scope disposal.
+        split_mode = "off"
+        if split is not None:
+            split_mode = split if split in REVIEW_SPLIT_MODES else "off"
+        elif ctx is not None:
+            try:
+                split_mode = review_split_of(ctx)
+            except Exception:                                    # noqa: BLE001
+                split_mode = "off"
+        part_b = bool(split_mode != "off" and str(sb.name).endswith("_review_b"))
         in_scope = set(scoped_review_checks(scope))
         out_of_scope = set(wanted) - in_scope if in_scope else set()
         for row in coverage:
@@ -3665,7 +3718,9 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                         or not _coverage_row_disposition_ok(row)):
                 bad.append(cid)
             if (cid and cid in wanted and (not in_scope or cid in in_scope)
-                    and _coverage_is_out_of_scope(disp)):
+                    and _coverage_is_out_of_scope(disp)
+                    and (split_mode == "off"
+                         or _split_check_owned(split_mode, part_b, cid))):
                 # A FULL review's object is the whole package, and a SCOPED
                 # round still owns every check it declares in scope: neither may
                 # dispose one of those as out of scope. The old gate tested
@@ -3755,15 +3810,6 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     # (M25-M29 artifacts), session B owns the J5 architecture pass and the
     # discovery round. Each session's postcheck must not demand the other's
     # artifacts -- the merge unions the coverage tables and artifacts.
-    split_mode = "off"
-    if split is not None:
-        split_mode = split if split in REVIEW_SPLIT_MODES else "off"
-    elif ctx is not None:
-        try:
-            split_mode = review_split_of(ctx)
-        except Exception:                                        # noqa: BLE001
-            split_mode = "off"
-    part_b = bool(split_mode != "off" and str(sb.name).endswith("_review_b"))
     # phases: A = mechanical (M25-M29 artifacts), B = J1-J5 + discovery (J5
     # architecture table). aspects: A = content, B = packaging + M21-M30 + J5.
     want_parity_artifacts = (split_mode == "off"
@@ -3858,16 +3904,19 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
             for key in ("location", "check", "evidence", "explanation"):
                 if not str(f.get(key) or "").strip():
                     malformed.append(f"{fid}: no {key}")
-            if not re.match(r"(?i)^(?:M\d{1,2}|J[1-5]|JF)$",
+            if not re.match(r"(?i)^(?:M(?:[1-9]|[12]\d|3[0-6])|J[1-5]|JF)$",
                             str(f.get("check") or "").strip()):
                 malformed.append(f"{fid}: check {f.get('check')!r} is not an M/J check id")
             if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
                 malformed.append(f"{fid}: severity {f.get('severity')!r} is not one of "
                                  f"Fatal/Critical/Major/Minor")
-            try:
-                ok_cat = 0 <= int(f.get("category")) <= 5
-            except (TypeError, ValueError):
-                ok_cat = False
+            _cat = f.get("category")
+            # An agent-written JSON value is not a count by being convertible:
+            # int(1.5) truncates and int("2") accepts a string, both of which
+            # move the row between scored categories without a warning (the
+            # cold-start gate already requires a real int).
+            ok_cat = (isinstance(_cat, int) and not isinstance(_cat, bool)
+                      and 0 <= _cat <= 5)
             if not ok_cat:
                 malformed.append(f"{fid}: category {f.get('category')!r} is not an integer 0-5")
             # The canonical output shape (see the review prompt) requires the
@@ -3996,11 +4045,15 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     #     row must still be in the table the reviewer disposed.
     if want_parity_artifacts:
         errs.extend(cover_letter_row_survival_problems(ctx, sb))
-    # 3c. a CLEAN mechanical-sweep disposition needs its enumeration artifact.
-    #     The gate used to require only that `artifacts/` contain SOME file, so
-    #     M1/M3-M7/M9-M17/M21-M23 could be certified clean with no table at all
-    #     (F82). Only a clean disposition is bound: a finding row proves the
-    #     sweep ran, and an `unable` row names its own blocker.
+    # 3c. a mechanical-sweep disposition that certifies the sweep RAN needs its
+    #     enumeration artifact. The gate used to require only that `artifacts/`
+    #     contain SOME file, so M1/M3-M7/M9-M17/M21-M23 could be certified clean
+    #     with no table at all (F82). Binding only the literal `clean` prefix was
+    #     the next hole: the documented preferred zero spelling (`0 findings`)
+    #     bypassed the same gate, and a finding row could report instances
+    #     without the table that enumerates them (the skill's acceptance check:
+    #     every sweep with findings has a matching artifact). Only `unable` and
+    #     `out of scope` rows may omit it: each names its own blocker.
     if isinstance(coverage, list) and art_dir.is_dir():
         for _cid, _fname in sorted(SWEEP_ARTIFACTS.items()):
             if _cid not in seen_ids:
@@ -4009,21 +4062,38 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 continue
             _row = seen_rows.get(_cid) or {}
             _disp = str(_row.get("disposition") or "").strip()
-            if not re.match(r"(?i)^clean\b", _disp):
+            # The ROW, not only the `disposition` cell: the documented
+            # detail-carried spelling (`disposition: "clean"` plus
+            # `detail: "Basis: ..."`) certifies that the sweep ran exactly like
+            # the inline form, so it must require the same mapped artifact.
+            if not _coverage_row_disposition_ok(_row):
+                continue
+            if re.match(r"(?i)^(?:unable|out[\s_-]+of[\s_-]+scope)\b", _disp):
                 continue
             _p = art_dir / _fname
             if _p.is_symlink() or not _p.is_file():
                 errs.append(f"{ARTIFACTS_REL}/{_fname} is missing or a symlink: {_cid} is "
-                            f"disposed `clean`, so its per-sweep enumeration table must exist "
-                            f"and every row must be disposed")
+                            f"disposed {_disp[:40]!r}, so its per-sweep enumeration table must "
+                            f"exist and every row must be disposed")
                 continue
             _body = read_text_bounded(_p)
             if _body is None or not _body.strip():
                 errs.append(f"{ARTIFACTS_REL}/{_fname} is empty or unreadable: a zero-finding "
                             f"{_cid} is valid ONLY with a disposed enumeration table")
-            # A basis cell that names an artifact must resolve. A bare
-            # `clean -- basis: locations` is still accepted, but a named
-            # `artifacts/<file>` is never allowed to point at a missing file.
+    # 3d. Every clean review coverage row's named basis must resolve, not only
+    #     the SWEEP_ARTIFACTS subset. A M18/M19/M20/M8/M24-M36 clean row could
+    #     name `artifacts/does-not-exist.md` and pass, because the resolution
+    #     loop was nested under the per-sweep map. A bare `clean -- basis:
+    #     locations` is still accepted; a named `artifacts/<file>` is never
+    #     allowed to point at a missing file.
+    if isinstance(coverage, list) and art_dir.is_dir():
+        for _cid in sorted(seen_rows):
+            if in_scope and _cid not in in_scope:
+                continue
+            _row = seen_rows.get(_cid) or {}
+            _disp = str(_row.get("disposition") or "").strip()
+            if not re.match(r"(?i)^clean\b", _disp):
+                continue
             for _m in re.finditer(r"(?i)(?:guided_review/)?artifacts/[A-Za-z0-9_./-]+",
                                   _disp + " " + str(_row.get("detail") or "")):
                 _named = _m.group(0).rstrip(".,;:)")
@@ -6306,6 +6376,36 @@ def _names_check_or_finding(cell: str) -> bool:
                           str(cell or ""), re.I))
 
 
+# A bare closure word is a verdict with no reason: the disposition bar requires
+# `OK — <why this row is inside its bar>` (sweeps.md, "THE DISPOSITION BAR").
+# The old checker only rejected EMPTY cells and repeated boilerplate, so a
+# short parity/architecture table could be filled with `OK` and pass.
+_DISPOSITION_BARE_CLOSURE_RE = re.compile(
+    r"(?i)^\s*(?:ok|okay|pass|passed|done|checked|clean|good|fine|yes|y)[.!]?"
+    r"\s*(?:[—–-]+|:)?\s*$")
+# A verdict with a FILLER tail is still a bare closure: `OK — —`, `OK — x` and
+# `OK — n/a` name no reason, yet the bare-closure regex above (which rejects
+# only the exact verdict and one dangling separator) accepted them. The bar is
+# filler, not length: fixtures use short but genuine reasons such as
+# `OK — present` and `OK — same`, which stay accepted.
+_DISPOSITION_VERDICT_PREFIX_RE = re.compile(
+    r"(?i)^\s*(?:ok|okay|pass|passed|done|checked|clean|good|fine|yes|y)\b"
+    r"\s*[.!:,]?\s*(?:[—–-]+\s*)?")
+_DISPOSITION_FILLER_TAIL_RE = re.compile(
+    r"(?i)^(?:x+|n/?a|none|nil|null|tbd|todo|yes|no|ok|okay|checked|done|"
+    r"pass|passed|tested|fine|good|clean|[-—–_.:;,\s]+)$")
+
+
+def _disposition_filler_closure(cell: str) -> bool:
+    """True for a verdict whose reason tail is only a separator or filler token."""
+    text = re.sub(r"\s+", " ", str(cell or "")).strip()
+    m = _DISPOSITION_VERDICT_PREFIX_RE.match(text)
+    if m is None:
+        return False
+    tail = text[m.end():].strip()
+    return bool(tail) and bool(_DISPOSITION_FILLER_TAIL_RE.match(tail))
+
+
 def short_row_indexes(rows: list, widths, header_width: int) -> list:
     """1-based positions of the rows that are NARROWER than their own header.
 
@@ -6353,6 +6453,17 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
                     f"empty. Re-emit every row with exactly one cell per seeded column and put "
                     f"the verdict IN the `{key}` cell (the last column)")
         problems.append(msg)
+    bare = [r for r in filled
+            if _DISPOSITION_BARE_CLOSURE_RE.match(str(r.get(key) or ""))
+            or _disposition_filler_closure(str(r.get(key) or ""))]
+    if bare:
+        where = [l for l in (row_label(r) for r in bare) if l][:4]
+        problems.append(
+            f"{len(bare)} of {len(rows)} row(s) dispose `{key}` with a bare verdict "
+            f"or a filler reason ({_quote(str(bare[0].get(key) or '').strip(), 40)}) -- "
+            f"the disposition bar requires the row's own reason, e.g. "
+            f"`OK — <why this row is inside its bar>`"
+            + (f" -- e.g. {', '.join(where)}" if where else ""))
     by_text = {}
     for r in filled:
         text = re.sub(r"\s+", " ", str(r.get(key)).strip().lower())

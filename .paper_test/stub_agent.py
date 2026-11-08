@@ -377,7 +377,8 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                        ("M34_source_data_coverage.md", "M34"),
                        ("M35_disclosures.md", "M35"),
                        ("M36_zotero_parity.md", "M36"),
-                       ("M2_references.md", "M2")):
+                       ("M2_references.md", "M2"),
+                       ("M2_citations.md", "M2")):
         (out / "artifacts" / fname).write_text(
             f"# {cid} (stub)\n\n| row | disposition |\n|---|---|\n"
             f"| stub | OK - stub: nothing found |\n", encoding="utf-8")
@@ -390,7 +391,7 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "OK - stub: no scope needs work |\n", encoding="utf-8")
     (out / "artifacts" / "M19_length.md").write_text(
         "# M19 (stub)\n\n| document | section | words | cap | disposition |\n|---|---|---|---|---|\n"
-        "| base | abstract | 0 | 165 | OK |\n| base | main text | 0 | 3750 | OK |\n",
+        "| base | abstract | 0 | 165 | OK — inside the 165-word cap |\n| base | main text | 0 | 3750 | OK — inside the 3750-word limit |\n",
         encoding="utf-8")
     (out / "artifacts" / "VIS_visual.md").write_text(
         "# visual inspection (stub)\n\nstub: pages NOT visually verified (no renderer used); "

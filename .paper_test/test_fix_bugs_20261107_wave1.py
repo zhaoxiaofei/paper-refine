@@ -450,10 +450,12 @@ def test_installer_rollback() -> None:
     write(bin_dir / "mv", wrapper)
     (bin_dir / "mv").chmod(0o755)
     env = dict(os.environ,
-               HOME=str(home), MCP_TOOLS_DIR=str(tools), FAIL_DST=str(live),
+               HOME=str(home), DSH_HOME=str(home / ".dsh"),
+               CODEX_HOME=str(home / ".codex"), INSTALL_CODEX="0", INSTALL_DSH="1",
+               MCP_TOOLS_DIR=str(tools), FAIL_DST=str(live),
                PATH=str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
                PYTHONDONTWRITEBYTECODE="1")
-    proc = subprocess.run(["bash", "install_skill.sh"], cwd=str(WS), env=env,
+    proc = subprocess.run(["bash", "install_agent_tooling.sh"], cwd=str(WS), env=env,
                           capture_output=True, text=True, timeout=300)
     check("F081 the injected failure fails the install", proc.returncode != 0,
           f"rc={proc.returncode}")

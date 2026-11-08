@@ -223,7 +223,8 @@ filed under:
   around. A prose slip that RECURS through a paragraph or section -- or one that leaves a whole
   scope's topic unclear -- is Major, not "several more Minor rows": the structural level a defect
   reaches is part of its distance from correct (a sentence-level slip is Minor, a paragraph-level
-  one Major, a section- or argument-level one Critical).
+  one Major, and a section- or argument-level one Major when the reader can recover the topic on
+  re-reading and Critical only when the scope's topic is unrecoverable).
 - **Minor** — a detail that changes no claim, reported fact or downstream number (polish,
   consistency, style; the closest miss).
 
@@ -460,7 +461,10 @@ form as written | excerpt) -- audit each of those rows individually.
 - (f) redefined in main text after first definition
 - (g) non-standard acronym used in a figure legend or table footnote without a local definition
 - (h) non-exempt acronym in the title, or in the abstract that is not defined at first use within the abstract. Label these `[recommended]` (Minor) unless the current author guide makes them mandatory; the target venue may ask titles to avoid abbreviations (Nature Biotechnology does), but never present a convenience convention as a blocking requirement.
-- (i) inconsistent formatting (scRNAseq vs scRNA-seq; HSP vs HSPs; hyphenation; case)
+- (i) inconsistent formatting (scRNAseq vs scRNA-seq; hyphenation; case) -- an
+  inflectional plural is NOT a formatting variant: `HSPs` (like `CNs` in rule
+  (c)) is an accepted use of `HSP`, so report only a non-inflectional
+  orthographic variant (a different plural form, or a hyphen/case change)
 - (j) acronym coined for a term used fewer than 3 times in total
 - (k) the un-abbreviated long form is used again after that context's own first
   long-form occurrence (e.g. `copy number`, `copy-number`, `Copy-Number`,
@@ -657,9 +661,17 @@ funding/acknowledgements · ethics/consent statements (IRB/animal approval
 where applicable) · permissions for reused material · accession numbers ·
 (preprint disclosure; clinical-trial registration if applicable).
 
-**Artifact:** `M5_mandatory.md`: item | present? (Y/N/partial) | file(s) |
-guideline status label ([required at initial submission] / [required at
-revised-submission stage — prepare now] / [recommended]).
+**Artifact:** `M5_mandatory.md`, with TWO tables because the sweep runs in
+both directions:
+- required items: item | present? (Y/N/partial) | file(s) | guideline status
+  label ([required at initial submission] / [required at revised-submission
+  stage — prepare now] / [recommended]);
+- present-but-unneeded items (the reverse direction): item | location | why
+  unneeded | disposition. Every item the submission HAS and must not ship -- a
+  draft, an internal note or meeting record, a duplicate of a shipped item,
+  personal or confidential material (PII), a document that identifies the
+  authors under a double-anonymized submission -- gets one row and a recorded
+  disposition (file the finding, or remove/redact it before submission).
 
 **Finding rules:** one finding per missing or partial item. Do not invent or
 fabricate missing data; note a placeholder may be needed and report every gap.
@@ -1299,13 +1311,14 @@ finding id. A document with no rows at all is an unfilled artifact.
 **Finding rules (one finding per SCOPE, never per sentence).** `check: J5`,
 category 2, class `consistency` when a structural convention is applied
 unevenly across sibling scopes and `writing` when only flow is at stake;
-severity Major when the reader cannot recover the argument without re-reading,
-Minor otherwise. Unity and linkage are checked at EVERY level -- a chapter or
-section carrying more than one top-level topic, a subsection that is not an
-independent sub-topic of its parent, a paragraph with two messages, adjacent
-units with no stated relation -- and the level sets the severity: a
-sentence-level slip is Minor, a paragraph-level defect Major, a section- or
-argument-level defect Critical when it makes the scope's topic unrecoverable.
+severity is set by ONE ladder, by the level of the defect: a sentence-level
+slip is Minor, a paragraph-level defect Major, and a section- or argument-level
+defect is Major when the reader can recover the topic on re-reading and Critical
+only when the scope's topic is unrecoverable. Unity and linkage are checked at
+EVERY level -- a chapter or section carrying more than one top-level topic, a
+subsection that is not an independent sub-topic of its parent, a paragraph with
+two messages, adjacent units with no stated relation. A defect below the scope
+level may not be raised above Major on this ladder.
 The explanation must state the reader cost and the proposed
 order; the evidence is a short current → proposed outline. Content is never
 changed: the same claims, numbers, citations, limitations and conclusions, in

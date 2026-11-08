@@ -900,16 +900,13 @@ def test_f64_backup_collision():
     print()
     print("== F64: a same-second backup collision does not nest the package ==")
     tmp = scratch("f64_")
-    home = tmp / "home"
-    backup = home / ".codex" / "backup"
-    skills = home / ".codex" / "skills"
+    dsh = tmp / "dsh"
+    backup = dsh / "backup"
+    skills = dsh / "skills"
     backup.mkdir(parents=True)
-    skills.mkdir(parents=True)
-    old = skills / "paper-skills-old"
-    old.mkdir()
-    (old / "SKILL.md").write_text("old", encoding="utf-8")
-    (backup / "paper-skills-old").mkdir()
-    (backup / "paper-skills-old.20260101000000").mkdir()
+    (skills / "paper-review").mkdir(parents=True)
+    (skills / "paper-review" / "SKILL.md").write_text("old", encoding="utf-8")
+    (backup / "paper-review.20260101000000").mkdir()
     binp = tmp / "bin"
     binp.mkdir()
     for tool in ("npm", "git"):
@@ -920,14 +917,16 @@ def test_f64_backup_collision():
     datef.write_text("#!/bin/sh\ncase \"$1\" in\n  +%Y%m%d%H%M%S) echo 20260101000000 ;;\n"
                      "  +%Y-%m%d) echo 2026-0101 ;;\n  *) exec /bin/date \"$@\" ;;\nesac\n")
     datef.chmod(0o755)
-    env = dict(os.environ, HOME=str(home), PATH=f"{binp}:{os.environ.get('PATH', '')}",
+    env = dict(os.environ, HOME=str(tmp / "home"), DSH_HOME=str(dsh),
+               CODEX_HOME=str(tmp / "codex"), INSTALL_CODEX="0", INSTALL_DSH="1",
+               PATH=f"{binp}:{os.environ.get('PATH', '')}",
                MCP_TOOLS_DIR=str(tmp / "tools"))
-    proc = subprocess.run(["bash", str(WS / "install_skill.sh")],
+    proc = subprocess.run(["bash", str(WS / "install_agent_tooling.sh")],
                           capture_output=True, text=True, env=env)
-    nested = backup / "paper-skills-old.20260101000000" / "paper-skills-old"
+    nested = backup / "paper-review.20260101000000" / "paper-review"
     check("the backup did not land inside an existing directory",
           not nested.exists(), sorted(str(p.relative_to(backup)) for p in backup.rglob("*"))[:8])
-    suffix = backup / "paper-skills-old.20260101000000.1"
+    suffix = backup / "paper-review.20260101000000.1"
     check("the package is at a fresh timestamped path",
           (suffix / "SKILL.md").is_file(),
           sorted(p.name for p in backup.iterdir()))
@@ -1116,9 +1115,11 @@ def test_f63_failed_npm_keeps_live_tool():
     npm.write_text("#!/bin/sh\ncase \"$*\" in\n  *mcp-docx-converter*) exit 1 ;;\n"
                    "  *) exit 0 ;;\nesac\n")
     npm.chmod(0o755)
-    env = dict(os.environ, HOME=str(home), PATH=f"{binp}:{os.environ.get('PATH', '')}",
+    env = dict(os.environ, HOME=str(home), DSH_HOME=str(tmp / "dsh"),
+               CODEX_HOME=str(tmp / "codex"), INSTALL_CODEX="0", INSTALL_DSH="1",
+               PATH=f"{binp}:{os.environ.get('PATH', '')}",
                MCP_TOOLS_DIR=str(tools))
-    proc = subprocess.run(["bash", str(WS / "install_skill.sh")],
+    proc = subprocess.run(["bash", str(WS / "install_agent_tooling.sh")],
                           capture_output=True, text=True, env=env)
     check("the install fails", proc.returncode != 0, proc.returncode)
     check("the previously working converter is still installed",

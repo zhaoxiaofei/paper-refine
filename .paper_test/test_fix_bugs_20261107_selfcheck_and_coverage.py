@@ -266,7 +266,7 @@ def test_out_of_scope_spellings_are_one_disposition() -> None:
     sb = prompt_sandbox()
     (sb / "guided_review" / "artifacts").mkdir(parents=True)
     (sb / "guided_review" / "artifacts" / "M1_acronyms.md").write_text(
-        "| acronym | disposition |\n|---|---|\n| DNA | OK |\n", encoding="utf-8")
+        "| acronym | disposition |\n|---|---|\n| DNA | OK — used consistently after its definition |\n", encoding="utf-8")
     errs, warns = [], []
     pp.check_review_contract(
         None, sb, _full_review_findings(
@@ -304,7 +304,7 @@ def test_check_id_spelling_is_normalized() -> None:
     sb = prompt_sandbox()
     (sb / "guided_review" / "artifacts").mkdir(parents=True)
     (sb / "guided_review" / "artifacts" / "M1_acronyms.md").write_text(
-        "| acronym | disposition |\n|---|---|\n| DNA | OK |\n", encoding="utf-8")
+        "| acronym | disposition |\n|---|---|\n| DNA | OK — used consistently after its definition |\n", encoding="utf-8")
     fj = _full_review_findings(
         {"disposition": "clean -- basis: artifacts/M1_acronyms.md"})
     fj["coverage"][0]["check"] = "m01"

@@ -668,6 +668,19 @@ function assertMergeable(patchFile, text, keep) {
         + 'could be read (a row without a serverName, or a row this writer did not recognise); '
         + 'refusing to --merge, which would silently drop the rest');
   }
+  // The writer emits kept rows keyed by serverName (a repeated name is written
+  // once, because one profile cannot register the same server twice). Counting
+  // rows/named above does NOT see a duplicate NAME, so two rows naming the same
+  // server passed this check and the second was dropped silently. Never dedup
+  // an operator's rows without saying so: refuse the merge instead.
+  const names = keep.map((item) => item.serverName).filter(Boolean);
+  const duplicates = [...new Set(names.filter((name, i) => names.indexOf(name) !== i))];
+  if (duplicates.length > 0) {
+    die(`${patchFile}: the managed block carries duplicate serverName row(s) `
+        + `${duplicates.map((n) => JSON.stringify(n)).join(', ')}; --merge keys kept rows by `
+        + 'serverName, so rewriting it would silently drop the duplicate. Remove or rename the '
+        + 'duplicate row first');
+  }
 }
 
 function stripManagedBlock(text) {

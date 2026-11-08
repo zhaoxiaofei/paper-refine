@@ -19,6 +19,37 @@ from pathlib import Path
 DEFAULT_ROOTS = ("python-docx", "openpyxl")
 
 
+def requirement_applies(req: str) -> bool:
+    """Does this Requires-Dist apply to the CURRENT environment (no extras)?
+
+    `closure` used to take the distribution name from every Requires-Dist line
+    and ignore the marker, so an optional-extra requirement (`; extra == "dev"`)
+    and a requirement for a platform/Python the environment is not (`;
+    python_version < "3"`) both entered the exported closure. The export then
+    named packages this environment never installs. `packaging` is present in
+    the test environment (and is the standard evaluator); when it is absent the
+    old keep-everything behaviour is retained rather than silently dropping
+    dependencies.
+    """
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:                                          # pragma: no cover
+        return True
+    try:
+        parsed = Requirement(req)
+    except Exception:                                            # noqa: BLE001
+        return True                       # unparseable: keep it, never drop it
+    if parsed.marker is None:
+        return True
+    try:
+        # `extra` is not requested for the roots (`sdist`/`dev` extras are not
+        # installed by the test environment), so an extra-gated requirement is
+        # out. Other markers are evaluated against the running interpreter.
+        return bool(parsed.marker.evaluate({"extra": ""}))
+    except Exception:                                            # noqa: BLE001
+        return True                       # unknown marker variable: keep it
+
+
 def closure(roots=DEFAULT_ROOTS) -> dict:
     """{lowercased name: (Name, version)} for the roots and everything they need."""
     seen, stack = {}, list(roots)
@@ -33,6 +64,8 @@ def closure(roots=DEFAULT_ROOTS) -> dict:
             continue
         seen[key] = (dist.metadata["Name"] or name, dist.version)
         for req in dist.requires or []:
+            if not requirement_applies(req):
+                continue
             dep = re.split(r"[ (;<>=!~\[]", req.strip())[0].strip()
             if dep and dep.lower() not in seen:
                 stack.append(dep)

@@ -178,7 +178,10 @@ COLD_START_SCRIPT_PREFIX = f"{COLD_START_DIR}/scripts/"
 # X-9001..X-9999 block (which can never collide with the discovery round's
 # X-001.. ids). The old three-digit regex made the 100th finding an exhausted
 # block and aborted a review that had done nothing wrong (PR151-078).
-COLD_START_ID_RE = re.compile(r"^X-(?:9\d{2}|9\d{3})$")
+COLD_START_ID_RE = re.compile(
+    r"^X-(?:9(?:0[1-9]|[1-9]\d)|9(?:0(?:0[1-9]|[1-9]\d)|[1-9]\d{2}))$")
+# 901..999 then 9001..9999: X-900 and X-9000 are OUTSIDE both documented
+# blocks and used to match the old `9\d{2}|9\d{3}` pattern.
 COLD_START_FINDING_ID_BASE = 900
 COLD_START_ID_WIDE_BASE = 9000
 COLD_START_ID_MAX = 9999
@@ -4074,11 +4077,22 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
                     f"corpus and not an unrun pass")
         checked = []
     _claimed = 0
+    _seen_areas = set()
     for c in checked:
         if not isinstance(c, dict) or not str(c.get("area") or "").strip():
             errs.append(f"{COLD_START_FINDINGS_REL}: a `checked` row has no 'area' name")
             continue
         area = str(c["area"]).strip()
+        _area_key = " ".join(area.split()).lower()
+        if _area_key in _seen_areas:
+            # The loop used to keep no area names at all, so the same area could
+            # be listed repeatedly and its findings count added each time: the
+            # coverage totals were then decided by duplicated rows.
+            errs.append(f"{COLD_START_FINDINGS_REL}: checked area {area!r} is listed more "
+                        f"than once; every examined area is ONE row (duplicates double-count "
+                        f"the coverage totals)")
+            continue
+        _seen_areas.add(_area_key)
         _counts = {}
         for key in ("examined", "findings"):
             value = c.get(key)
@@ -4094,10 +4108,19 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
             # One examined candidate may yield several independent findings,
             # so `findings` is not capped by `examined`. A count of findings
             # from ZERO examined candidates is still impossible, and the count
-            # is a claim about the findings list (checked below).
-            if _counts["examined"] == 0 and _counts["findings"] > 0:
-                errs.append(f"{COLD_START_FINDINGS_REL}: checked area {area!r} reports "
-                            f"{_counts['findings']} findings from 0 examined candidates")
+            # is a claim about the findings list (checked below). A zero in
+            # BOTH cells is not an examined area either: it is an area the
+            # session did not look at, and `checked` is the proof of
+            # examination.
+            if _counts["examined"] == 0:
+                if _counts["findings"] > 0:
+                    errs.append(f"{COLD_START_FINDINGS_REL}: checked area {area!r} reports "
+                                f"{_counts['findings']} findings from 0 examined candidates")
+                else:
+                    errs.append(f"{COLD_START_FINDINGS_REL}: checked area {area!r} reports "
+                                f"0 examined candidates; list only an area that was actually "
+                                f"examined (a zero-finding outcome still needs a non-zero "
+                                f"candidate count)")
             _claimed += _counts["findings"]
     raw = doc.get("findings")
     _raw_ok = isinstance(raw, list)

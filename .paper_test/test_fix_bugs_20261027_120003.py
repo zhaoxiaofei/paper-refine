@@ -502,7 +502,7 @@ def _review_sandbox(tmp: Path, m1_md: str, coverage: list, parity_body: str):
                   "M35_disclosures.md", "M36_zotero_parity.md", "M2_references.md"):
         (art / fname).write_text(parity_body, encoding="utf-8")
     (sb / "guided_review" / "ARCHITECTURE.md").write_text(
-        "| scope | disposition |\n|---|---|\n| ms | OK |\n", encoding="utf-8")
+        "| scope | disposition |\n|---|---|\n| ms | OK — the order serves the reader |\n", encoding="utf-8")
     fj = {"submission_dir": "./base", "guidelines_source": "x", "findings": [],
           "artifacts": {}, "coverage": coverage}
     return sb, fj

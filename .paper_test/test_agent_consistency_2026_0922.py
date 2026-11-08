@@ -259,14 +259,14 @@ def test_check_id_coverage():
                   "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md"):
-                (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
+                (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK — tested: the row is inside its bar |\n",
                                          encoding="utf-8")
         if arch:
             (sbx / "guided_review" / "ARCHITECTURE.md").write_text(
                 "| document | section | paragraphs | current structure | reader cost | "
                 "proposed reorganization | class | severity | disposition |\n"
                 "|---|---|---|---|---|---|---|---|---|\n"
-                "| ms | all | 1 | x | none | none | writing | Minor | OK |\n",
+                "| ms | all | 1 | x | none | none | writing | Minor | OK — the order serves the reader |\n",
                 encoding="utf-8")
         fjx = {"submission_dir": "base",
                "coverage": [{"check": c, "disposition": "clean -- basis: artifacts/check.md"} for c in full_ids]}

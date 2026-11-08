@@ -579,11 +579,11 @@ def test_more_fixes():
     check("the file-name id still resolves", pp.load_venue_profile("my-venue", root=r) is not None)
 
     # F042/F056: a mid-table dash row is data; a new header starts a new table.
-    one = ("| finding | disposition |\n|---|---|\n| F1 | OK |\n"
-           "| - | - |\n| F2 | OK |\n")
+    one = ("| finding | disposition |\n|---|---|\n| F1 | OK — merged into Results paragraph 3 |\n"
+           "| - | - |\n| F2 | OK — merged into Methods paragraph 1 |\n")
     check("a mid-table dash row keeps its identity",
           ("-",) in pp._repair_table_rows(one), str(pp._repair_table_rows(one)))
-    two = ("| finding | resolution |\n|---|---|\n| F1 | OK |\n\n"
+    two = ("| finding | resolution |\n|---|---|\n| F1 | OK — merged into Results paragraph 3 |\n\n"
            "| item | evidence |\n|---|---|\n| C1 | raw text |\n")
     check("a second table uses its own header",
           ("C1", "raw text") in pp._repair_table_rows(two), str(pp._repair_table_rows(two)))

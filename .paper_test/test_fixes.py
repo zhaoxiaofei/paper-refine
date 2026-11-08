@@ -120,12 +120,12 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md", "M2_references.md"):
             (sb / "guided_review/artifacts" / fname).write_text(
-                "| row | disposition |\n|---|---|\n| x | OK |\n", encoding="utf-8")
+                "| row | disposition |\n|---|---|\n| x | OK — tested: the row is inside its bar |\n", encoding="utf-8")
         (sb / "guided_review/ARCHITECTURE.md").write_text(
             "| document | section | paragraphs | current structure | reader cost | "
             "proposed reorganization | class | severity | disposition |\n"
             "|---|---|---|---|---|---|---|---|---|\n"
-            "| ms | all | 1 | x | none | none | writing | Minor | OK |\n",
+            "| ms | all | 1 | x | none | none | writing | Minor | OK — the order serves the reader |\n",
             encoding="utf-8")
         if vis:
             (sb / "guided_review/artifacts/VIS_visual.md").write_text("# vis\n", encoding="utf-8")

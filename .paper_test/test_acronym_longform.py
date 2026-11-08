@@ -350,7 +350,7 @@ def fake_review_sandbox(tmp, m1_md, findings, coverage):
     (art / "M1_acronyms.md").write_text(m1_md, encoding="utf-8")
     for fname in np.SWEEP_ARTIFACTS.values():
         if fname != "M1_acronyms.md":
-            (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
+            (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK — tested: the row is inside its bar |\n",
                                      encoding="utf-8")
     (art / "check.md").write_text("| row |\n|---|\n", encoding="utf-8")
     # The rewrite-parity artifacts + the architecture table are part of the
@@ -361,13 +361,13 @@ def fake_review_sandbox(tmp, m1_md, findings, coverage):
                   "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md", "M2_references.md"):
-        (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
+        (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK — tested: the row is inside its bar |\n",
                                  encoding="utf-8")
     (sb / "guided_review" / "ARCHITECTURE.md").write_text(
         "| document | section | paragraphs | current structure | reader cost | "
         "proposed reorganization | class | severity | disposition |\n"
         "|---|---|---|---|---|---|---|---|---|\n"
-        "| ms | all | 1 | x | none | none | writing | Minor | OK |\n", encoding="utf-8")
+        "| ms | all | 1 | x | none | none | writing | Minor | OK — the order serves the reader |\n", encoding="utf-8")
     return sb, {"submission_dir": "./base", "guidelines_source": "x",
                 "findings": findings, "artifacts": {}, "coverage": coverage}
 

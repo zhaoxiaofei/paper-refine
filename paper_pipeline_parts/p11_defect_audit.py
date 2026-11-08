@@ -124,6 +124,22 @@ def _normalize_defect_audit(data, valid_ids) -> dict:
     return out
 
 
+# The audit prompt asks for "what you checked and why the label holds" (<= 40
+# words). A one-character token is not that reason; the coverage gate used to
+# accept any non-empty string, so `reason: "x"` discharged a row.
+_DEFECT_AUDIT_FILLER_RE = re.compile(
+    r"(?i)^(?:ok|okay|yes|y|done|checked|clean|good|fine|pass|passed|true|false|"
+    r"nil|null|no|none|n/?a|na|tbd|todo|unknown|x)[.!]?$")
+
+
+def _defect_audit_reason_ok(reason) -> bool:
+    """Is this audit reason a usable basis rather than a placeholder token?"""
+    text = " ".join(str(reason or "").split()).strip(" \t.;:,—-–")
+    if not text or _DEFECT_AUDIT_FILLER_RE.match(text):
+        return False
+    return len(re.findall(r"[A-Za-z0-9]", text)) >= 3
+
+
 def _defect_audit_coverage(data, valid_ids, verdicts) -> dict:
     """What the submitted audit did and did not cover.
 
@@ -149,7 +165,7 @@ def _defect_audit_coverage(data, valid_ids, verdicts) -> dict:
         label, reason = _defect_audit_row_label(item)
         if label is None:
             invalid.add(did)
-        elif not reason:
+        elif not _defect_audit_reason_ok(reason):
             no_reason.add(did)
     return {"expected": len(valid_ids), "labelled": len(verdicts),
             "missing": sorted(set(valid_ids) - set(verdicts)),

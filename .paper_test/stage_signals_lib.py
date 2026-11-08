@@ -421,12 +421,12 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
                   "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md", "M2_references.md"):
-        write(art / fname, "| row | disposition |\n|---|---|\n| x | OK |\n")
+        write(art / fname, "| row | disposition |\n|---|---|\n| x | OK — tested: the row is inside its bar |\n")
     write(sb / "guided_review" / "ARCHITECTURE.md",
           "| document | section | paragraphs | current structure | reader cost | "
           "proposed reorganization | class | severity | disposition |\n"
           "|---|---|---|---|---|---|---|---|---|\n"
-          "| ms | all | 1 | x | none | none | writing | Minor | OK |\n")
+          "| ms | all | 1 | x | none | none | writing | Minor | OK — the order serves the reader |\n")
     write(art / "OUTLINE.md", "# OUTLINE\n\n" + outline_rows(2 if short_rows else 0,
                                                             0 if short_rows else 2))
     write(art / "VIS_visual.md", "# visual\n\npages reviewed: none\n")

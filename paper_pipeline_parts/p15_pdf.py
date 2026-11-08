@@ -200,15 +200,11 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         with tempfile.TemporaryFile() as out_tmp, tempfile.TemporaryFile() as err_tmp:
             proc = subprocess.Popen(argv, cwd=str((work / rel).parent),
                                     stdout=out_tmp, stderr=err_tmp,
-                                    start_new_session=True)
+                                    **_tool_popen_kwargs())
             try:
                 proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                import signal as _signal
-                try:
-                    os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
-                except (AttributeError, OSError):
-                    proc.kill()
+                _kill_process_group(proc)
                 try:
                     proc.wait(timeout=30)
                 except subprocess.TimeoutExpired:

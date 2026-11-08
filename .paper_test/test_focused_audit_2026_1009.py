@@ -313,7 +313,7 @@ def _review_sb(prompt: str) -> Path:
     (sb / "guided_review" / "findings.md").write_text("# findings\n", encoding="utf-8")
     (sb / "guided_review" / "artifacts").mkdir(parents=True)
     (sb / "guided_review" / "ARCHITECTURE.md").write_text(
-        "| document | disposition |\n|---|---|\n| base | OK |\n", encoding="utf-8")
+        "| document | disposition |\n|---|---|\n| base | OK — examined; nothing to report |\n", encoding="utf-8")
     (sb / "PROMPT.md").write_text(prompt, encoding="utf-8")
     (sb / "_pipeline_done.json").write_text(json.dumps(
         {"id": sb.name, "kind": "guided_review", "round": 1, "status": "done"}), encoding="utf-8")
@@ -665,8 +665,14 @@ def test_xlsx_row_fallback_index():
                    'Target="worksheets/sheet1.xml"/></Relationships>')
         z.writestr("xl/worksheets/sheet1.xml", sheet)
     text, notes = CC.xlsx_to_text(str(p))
+    value_lines = [ln for ln in text.splitlines()
+                   if not ln.startswith("### corpus-marker:")]
     check("E4 the rows are not reordered",
-          text.endswith("later\nunlabeled") and not notes, repr(text) + " " + str(notes))
+          value_lines[-2:] == ["later", "unlabeled"] and not notes,
+          repr(text) + " " + str(notes))
+    check("E4 each row keeps its source coordinate",
+          "### corpus-marker: row: S1!5" in text
+          and "### corpus-marker: row: S1!6" in text, repr(text))
 
 
 def test_extract_citations_compiles_warning_free():

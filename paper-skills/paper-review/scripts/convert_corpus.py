@@ -693,6 +693,15 @@ def xlsx_to_text(path: str) -> tuple:
                 # column C, or a merged/omitted cell) cannot silently shift values
                 # into the wrong column when the table is summed downstream (M15)
                 for _row_idx, cells in sorted(rows, key=lambda r: r[0]):
+                    # Keep each row's ORIGINAL sheet coordinate. The values were
+                    # sorted by `r=` but the output carried only the cells, so
+                    # rows 1 and 100 became output lines 1 and 2: an evidence
+                    # view could not cite the producer's own row, and a sparse
+                    # sheet read as consecutive rows. The marker line keeps the
+                    # row shape unchanged (and is skipped by the number/acronym
+                    # scanners like the sheet marker above).
+                    lines.append("### corpus-marker: row: %s!%d"
+                                 % (_xlsx_escape_cell(sname), _row_idx))
                     lines.append(" | ".join(_xlsx_escape_cell(cells.get(c, ""))
                                              for c in range(1, max_col + 1)))
                 for marker in cached_formulas:

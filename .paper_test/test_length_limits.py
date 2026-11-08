@@ -337,12 +337,12 @@ def test_orchestrator_wiring():
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md", "M2_references.md"):
         write(sb / "guided_review" / "artifacts" / fname,
-              "| row | disposition |\n|---|---|\n| x | OK |\n")
+              "| row | disposition |\n|---|---|\n| x | OK — tested: the row is inside its bar |\n")
     write(sb / "guided_review" / "ARCHITECTURE.md",
           "| document | section | paragraphs | current structure | reader cost | "
           "proposed reorganization | class | severity | disposition |\n"
           "|---|---|---|---|---|---|---|---|---|\n"
-          "| ms | all | 1 | x | none | none | writing | Minor | OK |\n")
+          "| ms | all | 1 | x | none | none | writing | Minor | OK — the order serves the reader |\n")
     ctx = type("C", (), {"cfg": {}})()
 
     def coverage(include_m19=True):

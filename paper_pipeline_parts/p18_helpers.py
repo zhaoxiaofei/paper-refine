@@ -95,25 +95,44 @@ class ToolOutputOverBudget(Exception):
     """A child process printed more than MAX_TOOL_OUTPUT_BYTES on one stream."""
 
 
+def _tool_popen_kwargs() -> dict:
+    """Run a tool in its OWN process group so a timeout can kill its helpers.
+
+    On POSIX that is `start_new_session`; on Windows the parameter is ignored,
+    and the group is created with CREATE_NEW_PROCESS_GROUP so `taskkill /T` can
+    reach the children. The siblings (_render_popen_kwargs in p06 and
+    _redline_popen_kwargs in p13) already branch this way.
+    """
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
 def _kill_process_group(proc):
-    """Kill a `start_new_session=True` child's whole group, not just the child.
+    """Kill a tool's whole process group, not just the direct child.
 
     A tool may spawn a helper (a verifier, a converter's worker) that inherits
     the child's process group. `proc.kill()` left those grandchildren running
     after the orchestrator had timed out and moved on (the 2026-10-30 F51).
 
-    `os.killpg` is POSIX-only: on Windows the attribute does not exist, so the
-    old `except OSError` let an AttributeError escape from the TIMEOUT handler
-    (the sibling code in p15 already catches both and falls back to
-    `proc.kill()`).
+    `os.killpg` is POSIX-only: on Windows the attribute does not exist. The
+    old `except OSError` caught AttributeError too but then fell back to
+    `proc.kill()`, which leaves latexmk/bibtex or a verifier's grandchildren
+    running. Use the Windows tree-kill the sibling modules already use.
     """
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (AttributeError, OSError):
+    if os.name == "nt":
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
+    else:
         try:
-            proc.kill()
-        except OSError:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (AttributeError, OSError):
             pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
 
 
 def run_bounded(argv, timeout, cwd=None, env=None):
@@ -141,7 +160,7 @@ def run_bounded(argv, timeout, cwd=None, env=None):
         proc = subprocess.Popen(
             [str(a) for a in argv], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True)
+            **_tool_popen_kwargs())
         over_budget = threading.Event()
 
         def _pump(pipe, sink):

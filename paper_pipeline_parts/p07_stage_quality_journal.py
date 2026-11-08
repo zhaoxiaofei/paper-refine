@@ -3553,8 +3553,107 @@ def _response_file_text(path: Path):
 _RESPONSE_LOCATION_SKIP_RE = re.compile(
     r"(?i)^(?:whole|entire)\s+(?:file|document)$|^(?:file|n/?a|none)$|"
     r"^(?:throughout|multiple\s+sections|various\s+sections|entire\s+manuscript)$|"
-    r"^(?:p|pp|page|pages|line|lines|row|rows|para(?:graph)?|§)\.?\s*\d|"
-    r"^[\w./-]+\.(?:md|markdown|txt|tex|ltx|rst|csv|docx)(?::\d+)?$")
+    r"^(?:p|pp|page|pages|line|lines|row|rows|para(?:graph)?|§)\.?\s*\d")
+# A location must name a section/scope, not a common function word or the file
+# itself. The old gate accepted ANY string that occurred somewhere in the file,
+# so `location: "the"` passed, and a bare `paper.md` was explicitly skipped:
+# neither proves a section-level placement, and an invented locator in that
+# spelling survived the binding check.
+_RESPONSE_GENERIC_LOCATION_RE = re.compile(
+    r"(?i)^(?:the|a|an|this|that|these|those|it|its|file|document|text|manuscript|"
+    r"paper|section|paragraph|para|content|work|stuff|above|below|same|here|there|"
+    r"elsewhere)$")
+_RESPONSE_FILENAME_LOCATION_RE = re.compile(
+    r"(?i)^[\w./-]+\.(?:md|markdown|txt|tex|ltx|rst|csv|docx|xlsx|pdf)$")
+# A `file.ext:<digits>` locator names a LINE, not a bare filename: the response
+# map's schema spells `"location": "<section/line>"`, and the pre-F016 skip
+# accepted this shape. It stays verifiable (the file field plus the line number)
+# exactly like `line 42`, but only for the file the change is actually in.
+_RESPONSE_FILE_LINE_LOCATION_RE = re.compile(
+    r"(?i)^([\w./-]+\.(?:md|markdown|txt|tex|ltx|rst|csv|docx|xlsx|pdf)):(\d+)$")
+
+
+def _response_same_file(named: str, rel: str) -> bool:
+    """True when a location's filename names the response row's own file."""
+    def _norm(value):
+        return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
+    a, b = _norm(named), _norm(rel)
+    return bool(a) and bool(b) and (a == b or posixpath.basename(a) == posixpath.basename(b))
+
+
+# A response location must name a SECTION, not merely a word that happens to
+# occur in a body sentence. `cohort` and `value` used to pass because the old
+# check was `tnorm.lower().find(anchor)`: a substring test, not a heading test.
+# Resolve the anchor against the document's own headings instead.
+_RESPONSE_MD_HEADING_RE = re.compile(
+    r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_RESPONSE_TEX_HEADING_RE = re.compile(
+    r"(?m)^[ \t]*\\(?:part|chapter|section|subsection|subsubsection|paragraph)\*?"
+    r"[ \t]*\{([^{}\n]*)\}")
+_RESPONSE_SETEXT_HEADING_RE = re.compile(
+    r"(?m)^([^\n#|].*?)[ \t]*\n[ \t]*(?:=+|-+)[ \t]*$")
+# A caption/legend line is a declared location the response schema explicitly
+# allows ("Figure 3 legend"), but it is not a Markdown heading. Recognise the
+# caption's own label so that fix keeps working without accepting body words.
+_RESPONSE_CAPTION_HEADING_RE = re.compile(
+    r"(?im)^[ \t]*((?:figure|fig\.?|table|scheme|box|chart)[ \t]+[A-Z]?\d+[A-Za-z]?)"
+    r"[.:)]?(?:[ \t]|$)")
+
+
+def _response_norm_position(raw: str, pos: int) -> int:
+    """Index in `normalized(raw)` of the text that starts at raw offset `pos`."""
+    prefix = str(raw or "")[:max(0, pos)]
+    norm = " ".join(prefix.split())
+    if not norm:
+        return 0
+    # A separator is inserted before the next word when the prefix ends in
+    # whitespace; outside that case the next character continues the word.
+    return len(norm) + (1 if prefix and prefix[-1].isspace() else 0)
+
+
+def _response_headings(text: str, rel: str) -> list:
+    """[(heading text, normalized start)] for the headings the file declares.
+
+    Markdown ATX/Setext headings and LaTeX section commands are recognised. For
+    formats whose extraction carries no markup (DOCX, plain text) a short
+    standalone line is the heading: a body word inside a sentence still does
+    not resolve, which is the F016 defect this check closes.
+    """
+    entries = []
+    for m in _RESPONSE_MD_HEADING_RE.finditer(text):
+        entries.append((m.group(1), _response_norm_position(text, m.start(1))))
+    for m in _RESPONSE_TEX_HEADING_RE.finditer(text):
+        entries.append((m.group(1), _response_norm_position(text, m.start(1))))
+    for m in _RESPONSE_SETEXT_HEADING_RE.finditer(text):
+        entries.append((m.group(1), _response_norm_position(text, m.start(1))))
+    for m in _RESPONSE_CAPTION_HEADING_RE.finditer(text):
+        entries.append((m.group(1), _response_norm_position(text, m.start(1))))
+    if Path(rel).suffix.lower() in (".docx", ".txt", ".rst"):
+        offset = 0
+        for line in text.splitlines(keepends=True):
+            label = line.strip()
+            if (label and len(label) <= 80
+                    and not label.endswith((".", "!", "?", ":", ";", ","))):
+                entries.append((label, _response_norm_position(text, offset)))
+            offset += len(line)
+    return entries
+
+
+def _response_heading_hits(text: str, rel: str, candidates: list) -> list:
+    """[(candidate, normalized heading start)] for anchors that name a heading."""
+    heads = _response_headings(text, rel)
+    hits = []
+    for candidate in candidates:
+        c = " ".join(str(candidate or "").split()).strip()
+        if not c:
+            continue
+        pat = re.compile(r"(?<![A-Za-z0-9])" + re.escape(c)
+                         + r"(?![A-Za-z0-9])", re.I)
+        for heading, start in heads:
+            if pat.search(" ".join(str(heading or "").split())):
+                hits.append((candidate, start))
+                break
+    return hits
 
 
 def _response_location_problem(cid: str, rel: str, location, before, after,
@@ -3574,13 +3673,27 @@ def _response_location_problem(cid: str, rel: str, location, before, after,
     text.
     """
     loc = " ".join(str(location or "").split()).strip().strip("\"'“”‘’")
-    if not loc or _RESPONSE_LOCATION_SKIP_RE.match(loc):
+    if not loc:
+        return None
+    _file_line = _RESPONSE_FILE_LINE_LOCATION_RE.match(loc)
+    if _file_line:
+        if _response_same_file(_file_line.group(1), rel):
+            return None
+        return (f"response row {cid!r}: the change to {rel!r} names location "
+                f"{loc!r}, whose file is not this row's file; name the real "
+                f"section (or a page/line locator in this file)")
+    if _RESPONSE_LOCATION_SKIP_RE.match(loc):
         return None
     anchor = re.split(r"[,;:—–]|\s+-\s+", loc, 1)[0].strip()
     anchor = re.sub(r"(?i)\s+(?:p|pp|page|line|paragraph|para)\.?\s*\d+.*$",
                     "", anchor).strip()
     if not anchor:
         return None
+    if _RESPONSE_GENERIC_LOCATION_RE.match(anchor) \
+            or _RESPONSE_FILENAME_LOCATION_RE.match(anchor):
+        return (f"response row {cid!r}: the change to {rel!r} names location "
+                f"{loc!r}, which is not a section/scope of the revised file; name "
+                f"the real section (or a page/line locator)")
     candidates = [anchor]
     m = re.match(r"(?i)^(?:section|subsection|chapter)\s+(.+)$", anchor)
     if m:
@@ -3591,8 +3704,7 @@ def _response_location_problem(cid: str, rel: str, location, before, after,
     normalized = lambda x: " ".join(str(x or "").split()).strip().strip("\"'“”‘’")
     if ttext is not None:
         tnorm = normalized(ttext)
-        found = [(c, tnorm.lower().find(c.lower())) for c in candidates]
-        found = [(c, i) for c, i in found if i >= 0]
+        found = _response_heading_hits(ttext, rel, candidates)
         if not found:
             return (f"response row {cid!r}: the change to {rel!r} names location "
                     f"{loc!r}, which does not resolve to a section/heading of the revised "
@@ -3606,8 +3718,7 @@ def _response_location_problem(cid: str, rel: str, location, before, after,
                         f"location the letter claims")
     if before and ptext is not None:
         pnorm = normalized(ptext)
-        found = [(c, pnorm.lower().find(c.lower())) for c in candidates]
-        found = [(c, i) for c, i in found if i >= 0]
+        found = _response_heading_hits(ptext, rel, candidates)
         if found:
             _c, i = found[-1]
             j = pnorm.find(before, i)

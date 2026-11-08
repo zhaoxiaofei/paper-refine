@@ -2578,6 +2578,28 @@ def _repair_text_norm(rel: str, text) -> str:
     return _repair_norm(text)
 
 
+def _repair_norm_position(raw: str, pos: int) -> int:
+    """Index in `_repair_norm(raw)` of the text that starts at raw offset `pos`."""
+    prefix = str(raw or "")[:max(0, pos)]
+    norm = " ".join(prefix.split())
+    if not norm:
+        return 0
+    return len(norm) + (1 if prefix and prefix[-1].isspace() else 0)
+
+
+def _repair_occurrences(hay: str, needle: str) -> list:
+    """Every `(start, end)` occurrence of `needle` in `hay`."""
+    if not needle:
+        return []
+    out, start = [], 0
+    while True:
+        i = hay.find(needle, start)
+        if i < 0:
+            return out
+        out.append((i, i + len(needle)))
+        start = i + 1
+
+
 def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
     """Why `rel`'s actual text change is outside the confirmed rows' spans, or None.
 
@@ -2609,24 +2631,13 @@ def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
     quote_ns = [(_repair_text_norm(rel, b), _repair_text_norm(rel, a))
                 for b, a in quotes]
 
-    def _occurrences(hay: str, needle: str) -> list:
-        if not needle:
-            return []
-        out, start = [], 0
-        while True:
-            i = hay.find(needle, start)
-            if i < 0:
-                return out
-            out.append((i, i + len(needle)))
-            start = i + 1
-
     # Per row, every occurrence of the quote, before/after paired by ordinal.
     # A pure insertion (empty before) or deletion (empty after) has a span on
     # only one side.
     row_pairs = []
     for before, after in quote_ns:
-        pre_occs = _occurrences(pre_n, before) if before else []
-        cur_occs = _occurrences(cur_n, after) if after else []
+        pre_occs = _repair_occurrences(pre_n, before) if before else []
+        cur_occs = _repair_occurrences(cur_n, after) if after else []
         if before and after:
             pairs = [(pre_occs[i], cur_occs[i])
                      for i in range(min(len(pre_occs), len(cur_occs)))]
@@ -2670,6 +2681,244 @@ def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
             return ("a confirmed row's quote matches more than one occurrence; "
                     "the edit is not bound to the quoted location")
         assigned[chosen[0]] = chosen[1]
+    return None
+
+
+def _repair_plan_span_end(p_end: int, pre_n: str, cur_n: str, opcodes) -> int:
+    """End (exclusive) in `cur_n` of the text that replaces `pre_n[:p_end]`'s tail.
+
+    Used only for an occurrence whose START is inside a changed span. The last
+    character of `wrong` may fall in the following equal run (the `10` in
+    `10 -> increased to 20` keeps its trailing `0`), so the window must extend
+    to the mapped occurrence END, not stop at the replaced character.
+    """
+    if p_end <= 0:
+        return None
+    pos = p_end - 1
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal" and i1 <= pos < i2:
+            return j1 + (p_end - i1)
+        if tag in ("replace", "delete") and i1 <= pos < i2:
+            return j2
+    if p_end == len(pre_n):
+        return len(cur_n)
+    return None
+
+
+def _repair_plan_pair_spans(pre_n: str, cur_n: str, opcodes, wrong: str,
+                            correct: str) -> list:
+    """Pre spans of `wrong` that the ACTUAL diff replaces with `correct`.
+
+    The old plan-pair check reused `_repair_spans_cover`'s ordinal pairing,
+    which pairs the FIRST `wrong` occurrence with the FIRST `correct`
+    occurrence. When the correct value already occurs earlier in the document,
+    a legitimate edit at the planned occurrence was paired with the earlier
+    occurrence and rejected. Mapping each `wrong` occurrence through the real
+    diff is independent of occurrence order; the occurrence must also have
+    changed (unless `correct` extends `wrong`, e.g. HSP -> HSPs).
+
+    A replacement may be WIDER than the planned value: `10` can become
+    `increased to 20` because the surrounding wording changed too. The plan is
+    still realized when `correct` occurs anywhere in the replaced window, so
+    the window runs from the first changed position to the mapped END of the
+    occurrence (`10`'s trailing `0` can sit in the following equal run).
+    """
+    pre_occs = _repair_occurrences(pre_n, wrong)
+    spans = []
+    for p, p_end in pre_occs:
+        q = None
+        changed = None
+        for tag, i1, i2, j1, j2 in opcodes:
+            if tag == "equal" and i1 <= p < i2:
+                q = j1 + (p - i1)
+                break
+            if tag in ("replace", "delete") and i1 <= p < i2:
+                q = j1
+                changed = (tag, i1, i2, j1, j2)
+                break
+            if tag == "insert" and p == i1:
+                q = j1
+                changed = (tag, i1, i2, j1, j2)
+                break
+        if q is None and p == len(pre_n):
+            q = len(cur_n)
+        if q is None:
+            continue
+        if changed is not None:
+            q_end = _repair_plan_span_end(p_end, pre_n, cur_n, opcodes)
+            if q_end is None or q_end < q:
+                continue
+            idx = cur_n.find(correct, q, q_end)
+            if idx < 0:
+                if changed[0] == "insert" and cur_n.startswith(correct, q):
+                    idx = q
+                else:
+                    continue
+            spans.append((p, p_end, idx))
+            continue
+        if not cur_n.startswith(correct, q):
+            continue
+        unchanged = cur_n[q:q + len(wrong)] == wrong
+        if unchanged and not (correct.startswith(wrong) and len(correct) > len(wrong)):
+            continue
+        spans.append((p, p_end, q))
+    return spans
+
+
+def _repair_location_regions(text: str, location, norm_text: str = None):
+    """Text regions a plan row's free-text `location` names, best effort.
+
+    The plan contract spells `location` as prose ("Results, paragraph 3") or a
+    page/line locator. `text` is the pre-edit text BEFORE whitespace collapsing;
+    the returned regions are offsets into `norm_text` (the comparison form the
+    plan spans use). An explicit `line N` maps to that line and an explicit
+    `paragraph N`/`para N` maps to the Nth non-empty line of the named section,
+    so a plan at "Results, paragraph 2" is not discharged by editing paragraph 1.
+
+    Returns `[]` when the location carries no usable locator, and `None` when an
+    explicit line/paragraph qualifier cannot be resolved. The caller fails
+    closed on `None` when `wrong` repeats rather than keeping the diff-anchored
+    binding alone.
+    """
+    loc = " ".join(str(location or "").split()).strip()
+    if not loc:
+        return []
+    norm_text = text if norm_text is None else norm_text
+
+    def _region(raw_start, raw_end):
+        if "\n" in norm_text:
+            # A line-preserving comparison form (`.py`): locate the exact text.
+            snippet = _repair_norm(text[raw_start:raw_end])
+            if not snippet:
+                return None
+            i = norm_text.find(snippet)
+            if i < 0:
+                return None
+            return (i, i + len(snippet))
+        # The prose comparison form collapses whitespace: map the raw offsets
+        # directly, so two identical paragraphs do not both resolve to the
+        # first occurrence.
+        start = _repair_norm_position(text, raw_start)
+        end = _repair_norm_position(text, raw_end)
+        if end <= start:
+            return None
+        return (start, end)
+
+    m = re.search(r"(?i)(?<![A-Za-z0-9])(?:line|ln|l)\.?\s*(\d+)\b", loc)
+    if m is None:
+        m = re.search(r":(\d+)$", loc)
+    if m is not None and "\n" in text:
+        n = int(m.group(1))
+        lines = text.splitlines(keepends=True)
+        if 1 <= n <= len(lines):
+            if "\n" in norm_text:
+                # A line-preserving comparison form (`.py`): the same line
+                # number addresses the same normalized line.
+                norm_lines = norm_text.splitlines(keepends=True)
+                if 1 <= n <= len(norm_lines):
+                    start = sum(len(line) for line in norm_lines[:n - 1])
+                    return [(start, start + len(norm_lines[n - 1]))]
+                return None
+            start = sum(len(line) for line in lines[:n - 1])
+            region = _region(start, start + len(lines[n - 1]))
+            return [region] if region else None
+        return None
+    pm = re.search(r"(?i)(?:paragraph|para)\.?\s*(\d+)\b", loc)
+    paragraph = int(pm.group(1)) if pm else None
+    anchors = []
+    for chunk in re.split(r"[,;:—–]|\s+-\s+", loc):
+        chunk = re.sub(r"(?i)\s+(?:p|pp|page|line|paragraph|para)\.?\s*\d+.*$",
+                       "", chunk).strip()
+        chunk = re.sub(r"(?i)^(?:p|pp|page|line|paragraph|para)\.?\s*\d+\b\s*",
+                       "", chunk).strip()
+        if chunk and chunk not in anchors:
+            anchors.append(chunk)
+    regions = []
+    for anchor in anchors:
+        pat = re.compile(r"(?<![A-Za-z0-9])" + re.escape(anchor)
+                         + r"(?![A-Za-z0-9])", re.I)
+        for match in pat.finditer(text):
+            s = match.start()
+            prefix = text[max(0, s - 80):s]
+            line_start = text.rfind("\n", 0, s) + 1
+            line_end = text.find("\n", s)
+            same_line = text[line_start:
+                             len(text) if line_end < 0 else line_end].strip()
+            is_heading = (bool(re.search(r"(?:^|\s)#{1,6}\s+$", prefix))
+                          or bool(re.search(r"\\(?:sub)*section\*?\{\s*$", prefix))
+                          or same_line.lower() == anchor.lower())
+            if is_heading:
+                nxt = re.search(r"(?:\s#|\s\\(?:sub)*section\*?\{)", text[s:])
+                section_end = s + nxt.start() if nxt else len(text)
+                if paragraph is not None:
+                    nl = text.find("\n", s)
+                    body_start = len(text) if nl < 0 else nl + 1
+                    paras, off = [], body_start
+                    for line in text[body_start:section_end].splitlines(keepends=True):
+                        if line.strip():
+                            lstripped = line.lstrip()
+                            paras.append((off + len(line) - len(lstripped),
+                                          off + len(line.rstrip("\r\n"))))
+                        off += len(line)
+                    if 1 <= paragraph <= len(paras):
+                        region = _region(*paras[paragraph - 1])
+                        if region:
+                            regions.append(region)
+                    continue
+                region = _region(s, section_end)
+                if region:
+                    regions.append(region)
+                continue
+            if paragraph is not None:
+                continue
+            # A non-heading anchor names the sentence around it, not the whole
+            # line: `B` in "A 10. B 10." must not authorize the edit at A.
+            seps = (". ", "! ", "? ", ".\n", "!\n", "?\n")
+            prev = max(text.rfind(sep, 0, s) for sep in seps)
+            line_start = text.rfind("\n", 0, s) + 1
+            ends = [x for sep in seps for x in (text.find(sep, s),) if x >= 0]
+            if ends:
+                raw_end = min(ends) + 1
+            else:
+                nl = text.find("\n", s)
+                raw_end = len(text) if nl < 0 else nl
+            region = _region(prev + 2 if prev >= 0 else line_start, raw_end)
+            if region:
+                regions.append(region)
+    if paragraph is not None:
+        return regions or None
+    return regions
+
+
+def _repair_plan_pairs_cover(pre: Path, cur: Path, rel: str, rows: list):
+    """Why a plan's `wrong`/`correct` pair is not realized by the real diff, or None.
+
+    `rows` are `(wrong, correct, location)` triples. Each literal pair must be
+    realized by a diff replacement at one of its occurrences. When `wrong`
+    occurs more than once, the plan's `location` must name the region of the
+    occurrence that was actually replaced, so a plan at location B is not
+    discharged by editing the same value at A. An explicit `line N` or
+    `paragraph N` qualifier that cannot be resolved fails closed; an
+    unqualified/unresolvable prose anchor keeps the diff-anchored binding.
+    """
+    pre_text = _repair_file_text(pre / rel)
+    cur_text = _repair_file_text(cur / rel)
+    if pre_text is None or cur_text is None or pre_text == cur_text:
+        return None
+    pre_n = _repair_text_norm(rel, pre_text)
+    cur_n = _repair_text_norm(rel, cur_text)
+    if pre_n == cur_n:
+        return None
+    opcodes = difflib.SequenceMatcher(None, pre_n, cur_n, autojunk=False).get_opcodes()
+    for wrong, correct, location in rows:
+        spans = _repair_plan_pair_spans(pre_n, cur_n, opcodes, wrong, correct)
+        if not spans:
+            return True
+        if len(_repair_occurrences(pre_n, wrong)) > 1:
+            regions = _repair_location_regions(pre_text, location, norm_text=pre_n)
+            if regions is None or (regions and not any(
+                    r0 <= p < r1 for p, _p_end, _q in spans for r0, r1 in regions)):
+                return True
     return None
 
 
@@ -2894,6 +3143,45 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
                for row, entry in zip(described, quotes)):
             bad.setdefault(rel, "the confirmed row's quotes cover the whole file, not "
                                 "the plan's localized wrong/correct change")
+    # The ledger quotes are AGENT-WRITTEN: covering the actual edit is not proof
+    # that the edit changed the PLAN's wrong value into its correct value. A
+    # plan `10 -> 20` was discharged by a `30 -> 40` edit plus an unrelated
+    # `Target 20.` insertion, because the ledger quoted both whole sentences.
+    # Bind the plan's own pair to the real pre/post diff too. Only literal
+    # (anchored) plan values are span-checked: a descriptive `wrong`/`correct`
+    # ("the duplicated sentence") has no occurrence to anchor, and the plan
+    # schema allows prose there. Grouped per file, exactly like the ledger
+    # quotes, so two confirmed rows in two paragraphs authorize each other.
+    plan_pairs_by_file = {}
+    for rid in sorted(confirmed_ids):
+        row = plan_by_id.get(rid) or {}
+        rel = strip_leading_dot_slash(str(row.get("file") or ""))
+        if not rel or rel in bad or _repair_bookkeeping_rel(rel):
+            continue
+        if not all(key in row for key in _REPAIR_DESCRIBED_KEYS):
+            continue
+        pre_text = _repair_file_text(pre / rel)
+        cur_text = _repair_file_text(cur / rel)
+        if pre_text is None or cur_text is None:
+            continue
+        _w = _repair_text_norm(rel, row.get("wrong") or "")
+        _c = _repair_text_norm(rel, row.get("correct") or "")
+        # The bug this closes is a REPLACEMENT discharged by a different edit.
+        # A pure insertion/deletion has no wrong->correct pair to bind (and the
+        # insertion may legitimately add formatting around its text, e.g. a
+        # newline + marker); its existence is already covered by the no-op
+        # checks and the ledger-quote span.
+        if not (_w and _c):
+            continue
+        pre_n = _repair_text_norm(rel, pre_text)
+        cur_n = _repair_text_norm(rel, cur_text)
+        if _w in pre_n and _c in cur_n:
+            plan_pairs_by_file.setdefault(rel, []).append(
+                (_w, _c, str(row.get("location") or "")))
+    for rel, pairs in sorted(plan_pairs_by_file.items()):
+        if _repair_plan_pairs_cover(pre, cur, rel, pairs):
+            bad.setdefault(rel, "the applied text is outside the plan's described "
+                                "`wrong`/`correct` change")
     if with_reasons:
         return dict(sorted(bad.items()))
     return sorted(bad)

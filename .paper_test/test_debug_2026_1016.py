@@ -182,20 +182,22 @@ def test_adapter_clean_systemexit():
 
 
 # =====================================================================
-# D3. install_skill.sh: a same-day re-run keeps ONE flat snapshot
+# D3. install_agent_tooling.sh: a same-day re-run keeps ONE flat snapshot
 # =====================================================================
 
 def test_install_skill_rerun():
     print()
     print("== D3: a same-day re-run does not nest the versioned tool snapshot ==")
     if not shutil.which("bash"):
-        skip("D3 install_skill.sh re-run", "no bash on this machine")
+        skip("D3 install_agent_tooling.sh re-run", "no bash on this machine")
         return
     tmp = scratch("paper_install_skill_")
     repo = tmp / "repo"
     repo.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(WS / "install_skill.sh", repo / "install_skill.sh")
-    write(repo / "paper-skills" / "SKILL.md", "# skills\n")
+    shutil.copy2(WS / "install_agent_tooling.sh", repo / "install_agent_tooling.sh")
+    for name in ("paper-review", "paper-revise"):
+        write(repo / "paper-skills" / name / "SKILL.md",
+              f"---\nname: {name}\ndescription: {name} skill\n---\n# {name}\n")
     for tool in ("mcp-docx-converter", "mcp-docx-compare"):
         write(repo / tool / "index.js", f"// {tool} version ONE\n")
         write(repo / tool / "package.json", json.dumps({"name": tool}))
@@ -203,9 +205,13 @@ def test_install_skill_rerun():
     write(repo / "docxcompare.sh", "#!/bin/sh\n", mode=0o755)
     bindir = tmp / "bin"
     write(bindir / "npm", "#!/bin/sh\nexit 0\n", mode=0o755)
+    # Only the dsh half: it stages/installs both servers and both skills without
+    # the codex CLI registration, so the test does not depend on a harness.
     env = dict(os.environ, HOME=str(tmp / "home"), MCP_TOOLS_DIR=str(tmp / "tools"),
+               DSH_HOME=str(tmp / "dsh"), CODEX_HOME=str(tmp / "codex"),
+               INSTALL_CODEX="0", INSTALL_DSH="1",
                PATH=f"{bindir}:{os.environ.get('PATH','')}")
-    run = ["bash", str(repo / "install_skill.sh")]
+    run = ["bash", str(repo / "install_agent_tooling.sh")]
     first = subprocess.run(run, capture_output=True, text=True, env=env, timeout=180)
     check("D3 the first install succeeds", first.returncode == 0,
           (first.stdout + first.stderr)[-200:])
@@ -213,8 +219,9 @@ def test_install_skill_rerun():
     second = subprocess.run(run, capture_output=True, text=True, env=env, timeout=180)
     check("D3 the same-day re-run succeeds", second.returncode == 0,
           (second.stdout + second.stderr)[-200:])
-    versions = sorted((tmp / "tools").glob("mcp-docx-converter-*"))
-    check("D3 the versioned snapshot exists", len(versions) == 1,
+    versions = sorted(p for p in (tmp / "tools").glob("mcp-docx-converter-*")
+                      if p.name != "mcp-docx-converter")
+    check("D3 one versioned snapshot exists", len(versions) == 1,
           str([v.name for v in versions]))
     if versions:
         snap = versions[0]
@@ -225,6 +232,10 @@ def test_install_skill_rerun():
         check("D3 the snapshot is not nested inside itself",
               not (snap / "mcp-docx-converter").exists(),
               str(sorted(p.name for p in snap.iterdir())))
+    live = (tmp / "tools" / "mcp-docx-converter" / "index.js")
+    check("D3 the live tool carries the fresh bytes",
+          live.is_file() and "version TWO" in live.read_text(encoding="utf-8"),
+          repr(live.read_text(encoding="utf-8") if live.is_file() else None))
 
 
 # =====================================================================
