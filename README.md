@@ -1735,6 +1735,11 @@ npm ci --prefix /path/to/repo/mcp-docx-compare    # Node >= 20; node_modules/ is
 codex mcp add docx-compare -- node /path/to/repo/mcp-docx-compare/index.js
 ```
 
+`install_agent_tooling.sh` performs the `npm ci` and the registration for every
+harness it finds -- one `[mcp_servers.<name>]` entry per server in Codex, and
+the same two servers in every DeepSeek Harness profile's `cordis.patch.yml` --
+so the two commands above are the manual equivalent for a single server.
+
 Both shipped MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) need that
 `npm ci` step before they can start: `node_modules/` is never vendored, so a
 fresh clone that skips it fails with `Cannot find module
@@ -1742,8 +1747,8 @@ fresh clone that skips it fails with `Cannot find module
 script -- `docxcompare.sh` (`../`, `./`, then PATH) for the compare server,
 `docx2pdf.sh` for the converter -- so a copy deployed without that script
 answers `initialize()` and then fails EVERY tool call with
-`spawn docxcompare.sh ENOENT` (`install_skill.sh` installs the dependency and
-the companion with each copy). The pipeline's probe reads both:
+`spawn docxcompare.sh ENOENT` (`install_agent_tooling.sh` installs the dependency
+and the companion with each copy). The pipeline's probe reads both:
 `mcp_server_unusable_reason(name)` is what the redlines manifest and the
 renderer list report, so a configured-but-dead server is named with the fix
 (`... its Node dependencies are not installed: run npm install in <dir>`;

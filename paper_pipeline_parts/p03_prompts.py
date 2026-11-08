@@ -2782,8 +2782,8 @@ def _node_server_missing_deps(script: Path) -> bool:
 # resolve it inside their own tool call (`../<script>`, `./<script>`, then
 # PATH): a copy deployed without it answers initialize() happily and then fails
 # EVERY tool call with `spawn <script> ENOENT` -- the 2026-10-15 state of the
-# configured docx-compare copy (`install_skill.sh` copies the mcp-* directories
-# but not the scripts they drive). The probe reports the gap up front.
+# configured docx-compare copy (`install_agent_tooling.sh` copies the mcp-*
+# directories but not the scripts they drive). The probe reports the gap up front.
 MCP_SERVER_COMPANIONS = {
     DOCX_COMPARE_MCP_SERVER: ("docxcompare.sh", "DOCXCOMPARE_SH"),
     DOCX_MCP_SERVER: ("docx2pdf.sh", "DOCX2PDF_SH"),

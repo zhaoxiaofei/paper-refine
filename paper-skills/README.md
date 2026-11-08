@@ -1,8 +1,8 @@
 # paper-review + paper-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
 **Package version:** 0.36 (the offline Zotero refresh: the formatter repairs the fields; see CHANGELOG.md) — installed by
-`install_skill.sh` as the directory `paper-skills-<YYYY-MMDD>-<commit>` (the date and
-short commit are recorded at install time; see `install_skill.sh`). The version lives here, not in the skill frontmatter. If more
+`install_agent_tooling.sh` as the directory `paper-skills-<YYYY-MMDD>-<commit>` (the date and
+short commit are recorded at install time; see `install_agent_tooling.sh`). The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
 older copies: Codex registers skills by
 name, so duplicate `paper-review/` or `paper-revise/` directories silently compete
@@ -27,7 +27,9 @@ N revises, K integrations and a blind judge panel that pins the champion. That
 round is drawn in `media/paper-refine-one-revision-round.png`, which `README.md`
 embeds.
 
-## Installation (Codex CLI)
+## Installation (Codex CLI or DeepSeek Harness)
+
+### Codex CLI
 
 ```bash
 # 1. Copy the two skill directories into your Codex skills folder
@@ -54,8 +56,42 @@ cp -r paper-revise  ~/.codex/skills/
 python3 --version
 ```
 
-After installation, Codex auto-discovers both skills by their descriptions;
-no further registration is needed. If you prefer not to install skills, use
+### DeepSeek Harness (`dsh`)
+
+`./install_agent_tooling.sh` installs the same two skills into the harness's own skills
+directory as well (`$DSH_HOME/skills`, default `~/.dsh/skills`) whenever a
+harness is present — `<install>` in step 2 is then
+`~/.dsh/skills/paper-review/SKILL.md` (and `paper-revise`). The run does not
+need `dshx` to be installed, but the `.dshx.json` provenance record it writes is
+what `dshx skill update paper-review` later re-fetches from this checkout, so
+the two halves stay in sync.
+
+The same run installs the two shipped MCP servers (`docx-compare`,
+`docx-converter`) into **every** dsh profile under `$DSH_HOME/profiles` as well:
+it writes its own `@deepseek-ai/dsh-mcp-client` rows (installing that plugin in
+a profile that lacks it) and leaves any other server the profile already has
+alone. That is a native install from this checkout's server list — it never
+reads or copies the Codex configuration; porting one harness's config into the
+other remains a separate, opt-in tool (`scripts/install-codex-mcp.mjs`). The
+Codex side gets the matching `[mcp_servers.*]` entries through `codex mcp add`
+for the same two deployed copies.
+
+The Codex half runs only when the `codex` CLI is available; the dsh half runs
+when a harness is detected (its home directory or either CLI), and only its MCP
+rows need the `dsh` CLI. `INSTALL_CODEX=1` / `INSTALL_DSH=1` force a half on,
+`INSTALL_CODEX=0` / `INSTALL_DSH=0` skip it (e.g.
+`INSTALL_DSH=0 ./install_agent_tooling.sh` installs Codex only). A harness found
+without its CLI still gets the skills, and the MCP rows are reported as skipped.
+
+The harness registers a skill by its frontmatter `name` in a FLAT directory, so
+unlike the versioned Codex package there is exactly ONE copy per skill. A re-run
+therefore replaces it: the previous copy is moved to
+`~/.dsh/backup/<name>.<timestamp>` first, and that is the copy to restore your
+`ZOTERO_SKILL` edit from. The directory is hot-reloaded — no restart.
+
+After installation, Codex auto-discovers both skills by their descriptions and
+the harness by their frontmatter `name`; no further registration is needed. If
+you prefer not to install skills, use
 `prompts/identify_issues.prompt.md` and `prompts/adress_issues.prompt.md`
 (standalone prompt fallbacks with the full sweep definitions inlined).
 What changed in this audit release: `CHANGELOG.md`.

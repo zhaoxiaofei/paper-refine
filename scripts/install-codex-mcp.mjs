@@ -29,6 +29,8 @@
  *   --no-install           Do not run `dsh plugin add`; require an installed/local copy
  *   --dry-run              Print the patch and planned actions; write nothing
  *   --remove               Remove the managed block (does not uninstall the plugin)
+ *   --merge                Keep managed rows this run does not mention (native,
+ *                          explicit-server installs must not drop other servers)
  *   --no-verify            Skip `dsh --dump-config` after writing
  *   -h, --help             Show this help
  */
@@ -61,6 +63,7 @@ Usage: install-codex-mcp.mjs [options]
   --no-install           Do not run "dsh plugin add"
   --dry-run              Print the patch and planned actions; write nothing
   --remove               Remove the managed block (keeps the plugin installed)
+  --merge                Keep managed rows this run does not mention
   --no-verify            Skip the post-write "dsh --dump-config" check
   -h, --help             Show this help
 
@@ -102,6 +105,7 @@ function parseArgs(argv) {
     install: true,
     dryRun: false,
     remove: false,
+    merge: false,
     verify: true,
     help: false,
   };
@@ -130,6 +134,7 @@ function parseArgs(argv) {
       case '--no-install': opts.install = false; break;
       case '--dry-run': opts.dryRun = true; break;
       case '--remove': opts.remove = true; break;
+      case '--merge': opts.merge = true; break;
       case '--no-verify': opts.verify = false; break;
       case '-h':
       case '--help': opts.help = true; break;
@@ -545,18 +550,124 @@ function emitConfig(config, indent) {
   return lines;
 }
 
-function emitBlock(entries) {
-  if (entries.length === 0) return '';
-  const lines = [BEGIN, '- insert:'];
-  for (const entry of entries) {
-    lines.push(`    - id: ${quote(entry.id)}`);
-    lines.push(`      name: ${quote(entry.name)}`);
-    if (entry.disabled) lines.push('      disabled: true');
-    lines.push('      config:');
-    lines.push(...emitConfig(entry.config, 8));
+function renderEntry(entry) {
+  const lines = [`    - id: ${quote(entry.id)}`, `      name: ${quote(entry.name)}`];
+  if (entry.disabled) lines.push('      disabled: true');
+  lines.push('      config:');
+  lines.push(...emitConfig(entry.config, 8));
+  return lines;
+}
+
+/**
+ * Read the entries already inside the managed block, verbatim.
+ *
+ * `--merge` uses this to keep servers a later run does not mention: an install
+ * that names its own two servers explicitly (no Codex config involved) must not
+ * silently delete the rows another source put there. Entries are the tool's own
+ * emission format, so each starts at a `    - id:` line and is identified by
+ * its `serverName`.
+ */
+function parseExistingEntries(text) {
+  const begin = text.indexOf(BEGIN);
+  const end = text.indexOf(END);
+  if (begin < 0 || end < begin) return [];
+  const lines = text.slice(begin + BEGIN.length, end).split('\n');
+  const starts = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^ {4}- id: /.test(lines[i])) starts.push(i);
   }
+  const entries = [];
+  for (let k = 0; k < starts.length; k++) {
+    const from = starts[k];
+    const to = k + 1 < starts.length ? starts[k + 1] : lines.length;
+    const chunk = lines.slice(from, to);
+    while (chunk.length > 0 && chunk[chunk.length - 1].trim() === '') chunk.pop();
+    let serverName = null;
+    for (const line of chunk) {
+      const m = line.match(/^ {8}serverName: (.*)$/);
+      if (m) {
+        serverName = unquoteValue(m[1]);
+        break;
+      }
+    }
+    if (chunk.length > 0) entries.push({ serverName, lines: chunk });
+  }
+  return entries;
+}
+
+function unquoteValue(raw) {
+  const text = String(raw).trim();
+  if (text.startsWith('"')) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+  if (text.startsWith("'") && text.endsWith("'")) return text.slice(1, -1);
+  return text;
+}
+
+function emitBlock(entries, keep = []) {
+  const replaced = new Set(entries.map((entry) => entry.config.serverName));
+  const kept = [];
+  const seen = new Set();
+  for (const item of keep) {
+    if (!item.serverName || replaced.has(item.serverName) || seen.has(item.serverName)) continue;
+    seen.add(item.serverName);
+    kept.push(item);
+  }
+  if (entries.length === 0 && kept.length === 0) return '';
+  const lines = [BEGIN, '- insert:'];
+  for (const entry of entries) lines.push(...renderEntry(entry));
+  for (const item of kept) lines.push(...item.lines);
   lines.push(END);
   return `${lines.join('\n')}\n`;
+}
+
+/**
+ * Refuse a managed block that never closes.
+ *
+ * `mergePatch` can only replace a block delimited by BOTH markers; with the
+ * closing marker gone (a truncated write, a hand edit) it would leave the old
+ * fragment in place and append a second block, so the profile would register
+ * the same server twice. Both writers must stop there and not guess.
+ */
+function assertBlockClosed(patchFile, text) {
+  const begin = text.indexOf(BEGIN);
+  if (begin < 0) return;
+  if (text.indexOf(END) < begin) {
+    const line = text.slice(0, begin).split('\n').length;
+    die(`${patchFile}: the managed block opens at line ${line} but has no closing marker; `
+        + 'refusing to rewrite it (restore the file from a backup first)');
+  }
+}
+
+/**
+ * Refuse a `--merge` that cannot account for every row already in the block.
+ *
+ * `--merge` keeps the rows this run does not mention, but it keeps them as TEXT
+ * it parsed itself: a row whose `- id:` indentation drifted, or a row with no
+ * `serverName`, would be silently dropped by the rewrite. This check turns that
+ * data loss into an error the operator can act on.
+ */
+function assertMergeable(patchFile, text, keep) {
+  const blocks = text.split(BEGIN).length - 1;
+  if (blocks > 1) {
+    die(`${patchFile}: the file carries ${blocks} managed blocks; --merge reads only the first and `
+        + 'would drop the rest (restore the file from a backup, or remove the extra block, first)');
+  }
+  const begin = text.indexOf(BEGIN);
+  if (begin < 0) return;
+  const end = text.indexOf(END);
+  const block = text.slice(begin + BEGIN.length, end);
+  const rows = (block.match(/^\s*-\s+id:/gm) || []).length;
+  const named = keep.filter((item) => item.serverName).length;
+  if (rows !== keep.length || named !== keep.length) {
+    die(`${patchFile}: the managed block carries ${rows} row(s) but only ${named} of ${keep.length} `
+        + 'could be read (a row without a serverName, or a row this writer did not recognise); '
+        + 'refusing to --merge, which would silently drop the rest');
+  }
 }
 
 function stripManagedBlock(text) {
@@ -729,6 +840,7 @@ function main() {
   }
 
   const original = fs.readFileSync(patchFile, 'utf8');
+  assertBlockClosed(patchFile, original);
 
   if (opts.remove) {
     const next = mergePatch(original, '');
@@ -787,7 +899,9 @@ function main() {
     for (const warning of result.warnings) warn(`${server.name}: ${warning}`);
   }
 
-  const block = emitBlock(entries);
+  const keep = opts.merge ? parseExistingEntries(original) : [];
+  if (opts.merge) assertMergeable(patchFile, original, keep);
+  const block = emitBlock(entries, keep);
   const next = mergePatch(original, block);
 
   if (opts.dryRun) {
