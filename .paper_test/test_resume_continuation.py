@@ -266,7 +266,11 @@ def run_with_fake_codex(root: Path, bindir: Path, *extra, mode: str = "finish"):
     env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
     env["FAKE_CODEX_MODE"] = mode
     return subprocess.run([sys.executable, str(root / "paper_pipeline.py"), "run",
-                           "--root", str(root), "--only", "rewrite", *extra],
+                           "--root", str(root), "--only", "rewrite",
+                           # The new default is dsh + deepseek-flash; this suite
+                           # exercises the LEGACY codex resume contract, so name
+                           # that backend explicitly.
+                           "--agent", "codex", *extra],
                           capture_output=True, text=True, timeout=1800, env=env)
 
 

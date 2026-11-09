@@ -260,6 +260,46 @@ from pathlib import Path
 #     order that a Word/Zotero refresh rewrites -- FMT-Z1..Z5 -- with the
 #     `zotero-check` CLI and a version-to-version parity gate), each with its own
 #     coverage row and artifact; the judge's frozen map is unchanged.
+# 3.11.0 -- MODEL / HARNESS SPLIT (`--agent-model` + `--agent-harness`, and the
+#   same pair for judges). The old `--agent` / `--judge-agent` names remain as
+#   legacy shortcuts with their exact old commands. The new axes are:
+#     * harness: dsh (default), gpt-codex, claude-code;
+#     * model: deepseek-flash (default), gpt-sol, gpt-terra, claude-opus,
+#       claude-sonnet, qwen38-27b, dots3-note-preview, OR an arbitrary
+#       OpenAI-compatible chat-completions URL. A custom URL runs on dsh, takes
+#       --agent-model-api-key (exported through the environment, never written
+#       into the provider patch or run record), --agent-model-name when the
+#       endpoint lists several models, and --agent-model-prep-json, an
+#       incomplete JSON object deep-merged into each request (a local loopback
+#       proxy performs the merge after the harness builds the payload).
+#   Every --agent-* option has a --judge-agent-* equivalent, including the
+#   custom-endpoint key/name/prep-json. qwen/dots also learned Claude Code's
+#   Anthropic route.
+#   The default run is now dsh + deepseek-flash. `paper_model_agent.py` owns the
+#   native-provider configuration: a DSH `agent-default-model` patch, Codex's
+#   `-m`/DeepSeek Responses provider, and Claude Code's `--model`/DeepSeek
+#   Anthropic environment. qwen/dots keep their adapters (the dots adapter also
+#   learned Claude Code's `--harness claude`). Unsupported wire-protocol pairs
+#   (GPT through Claude Code, Claude through Codex, Qwen through Claude Code)
+#   are refused before any session starts. The run record stores the effective
+#   harness/model and, for the judge, its own pair.
+# 3.10.0 -- THE DOTS BACKEND (`--agent dots`). The Dots API's OpenAI-compatible
+#   route (https://dots.ai/platform/docs) serves `dots3-note-prev` at
+#   https://note3-prev-api.askdiandian.com/v1. The new `paper_dots_agent.py`
+#   keeps the operator's harness and points it at that route:
+#     * PAPER_DOTS_HARNESS=codex (default) uses the platform's documented Codex
+#       route (`model_provider=dots`, `wire_api=responses`, `DOTS_API_KEY`,
+#       web search disabled) with the model's 512K context window declared;
+#     * PAPER_DOTS_HARNESS=dsh generates the `llm-pi-ai` route over OpenAI Chat
+#       Completions plus an `agent-default-model` override;
+#     * PAPER_DOTS_HARNESS=chat is a text-only direct call.
+#   `dots` joins every --agent/--judge-agent/--conflict-agent parser, the
+#   adapter is frozen into new roots (Rule 11), and `effective_agent_model`
+#   records the selected model/harness instead of guessing the CLI's config.
+#   The dsh stream wrapper (used by the qwen and dots adapters) accepts both
+#   turn-end event shapes the harness has emitted -- the older
+#   `type=turn_end` record and the current `type=status, phase=turn_end`
+#   record -- so a provider error can never pass as a completed turn.
 # 3.9.0 -- CHAMPION SELECTION WITHOUT A PANEL (`--champion-select`). `judge`
 #   (default) keeps the relative-judgment panel and deterministic ranking;
 #   `revise` promotes the round's single review-audit-revised candidate (a2)
@@ -308,14 +348,16 @@ from pathlib import Path
 #   sidecar string and degenerate intervals in a shipped source table all
 #   survived every layer in real runs -- and the discovery round's own probes
 #   had read the very table and reported "no anomalies".
-VERSION = "3.9.0"
+VERSION = "3.11.0"
 STATE_VERSION = 3
 # The driver executes these siblings; a root freezes all of them. Recording only
 # the driver let a root run new code with an old formatter (the round-2 case).
-# The Qwen adapter is a fourth module because the `qwen` agent preset executes it
-# from the same directory; a root without it could not run that preset.
+# The provider adapters are companion modules because their agent presets
+# execute them from the same directory; a root without one could not run that
+# preset.
 PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
                          "paper_redlines_adapter.py", "paper_qwen_agent.py",
+                         "paper_dots_agent.py", "paper_model_agent.py",
                          # The render/track shims are read beside the running
                          # driver (`visual_renderer_choices`), so a root that
                          # lacks them silently loses the highest-fidelity
@@ -407,7 +449,12 @@ DEFAULTS = {
     "retries": 2,           # automatic retries per failed run (2 = three attempts)
     "retry_backoff": 30,    # base seconds for the exponential retry backoff (0 = no wait)
     "retry_backoff_max": 600,   # cap on a single backoff wait
+    # Legacy --agent default for the non-run commands that still expose the old
+    # name (conform, adopt-sweep). `run`/`run-decide` default to the new pair:
+    # dsh + deepseek-flash.
     "agent": "codex",
+    "agent_harness": "dsh",
+    "agent_model": "deepseek-flash",
     "poll": 10,             # manual-mode completion poll interval
 }
 

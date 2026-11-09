@@ -111,8 +111,14 @@ USAGE_EXAMPLES = """usage:
           (default: the root's recorded policy; both enabled unless `setup` disabled one;
            prefer-rewrite off unless `setup` recorded it on or this invocation's flag sets it)
           [--retry-backoff 30] [--retry-backoff-max 600]
-          [--agent codex|claude|dsh|qwen|manual] [--agent-cmd '<json argv>']
-          [--judge-agent codex|claude|dsh|qwen|manual] [--judge-agent-cmd '<json argv>']
+          [--agent-harness dsh|gpt-codex|claude-code] [--agent-model NAME_OR_URL]
+          [--agent-model-api-key KEY] [--agent-model-name MODEL]
+          [--agent-model-prep-json JSON]
+          [--judge-agent-harness dsh|gpt-codex|claude-code] [--judge-agent-model NAME_OR_URL]
+          [--judge-agent-model-api-key KEY] [--judge-agent-model-name MODEL]
+          [--judge-agent-model-prep-json JSON]
+          [--agent codex|claude|dsh|qwen|dots|manual] [--agent-cmd '<json argv>']
+          [--judge-agent codex|claude|dsh|qwen|dots|manual] [--judge-agent-cmd '<json argv>']
           [--poll S] [--skip-hash]
           drive rounds 1..R as a DEPENDENCY GRAPH: every session starts as soon
           as its inputs exist (the M rewrites and the round's review start
@@ -373,8 +379,43 @@ integrity verification and --skip-hash:
   the within-invocation freshness checks that decide what an agent READS, and
   the raw_data/ + human_review_feedback/ read-only enforcement.
 
-agent backends:
-  --agent codex (default) `codex exec -`, plus a `-c` override per MCP server
+model/harness selection:
+  --agent-harness dsh|gpt-codex|claude-code and --agent-model
+  deepseek-flash|gpt-sol|gpt-terra|claude-opus|claude-sonnet|qwen38-27b|
+  dots3-note-preview choose the two axes independently. The defaults are
+  dsh + deepseek-flash. GPT models default to gpt-codex, Claude models to
+  claude-code, and DeepSeek/Qwen/Dots to dsh when only the model is given.
+  Unsupported wire-protocol pairs (GPT through claude-code, Claude through
+  gpt-codex) are refused before any session starts.
+  --judge-agent-harness/--judge-agent-model set the judge pair; both default
+  to the producer's pair. The same `--agent-cmd`/`--judge-agent-cmd` overrides
+  still win, and PAPER_AGENT_HARNESS/MODEL, PAPER_JUDGE_AGENT_HARNESS/MODEL
+  supply the defaults when the CLI flags are absent.
+  gpt-codex + deepseek-flash uses DeepSeek's documented Responses API
+  (DEEPSEEK_API_KEY); claude-code + deepseek-flash uses its Anthropic API;
+  dsh + any of the native models uses an `agent-default-model` patch.
+  qwen38-27b and dots3-note-preview keep their provider adapters; both
+  learned `--harness claude` for Claude Code (qwen needs a vLLM server that
+  serves the Anthropic Messages API).
+  --agent-model may instead be an http(s) OpenAI-compatible chat-completions
+  endpoint URL (for example http://127.0.0.1:18000/v1/chat/completions or
+  https://openrouter.ai/api/v1/chat/completions). A custom endpoint runs on
+  dsh; pass --agent-model-api-key (or PAPER_AGENT_MODEL_API_KEY) for its key
+  and --agent-model-name (or PAPER_AGENT_MODEL_NAME) when the endpoint lists
+  more than one model. The key is exported to the adapter through the
+  environment, never written into the generated provider config or the run
+  record, and the option's value is redacted from the run log. A custom endpoint
+  also accepts --agent-model-prep-json, a JSON object merged into each request
+  (temperature, max_tokens, reasoning_effort, ...); it may be incomplete, and
+  nested objects merge while omitted keys keep the harness defaults. EVERY
+  --agent-* flag has a --judge-agent-* equivalent, including
+  --judge-agent-model-api-key, --judge-agent-model-name,
+  --judge-agent-model-prep-json and --judge-agent-cmd; the judge-side key uses
+  the matching PAPER_JUDGE_AGENT_MODEL_* variables.
+
+legacy agent backends (kept exactly as before; do not combine with the new
+--agent-harness/--agent-model pair):
+  --agent codex `codex exec -`, plus a `-c` override per MCP server
   the prompts drive (an MCP call that wants approval is DENIED, not queued, in
   a non-interactive session: approval policy is `never`)   |   --agent claude
   `claude --permission-mode bypassPermissions --print`   |   --agent dsh
@@ -393,6 +434,12 @@ agent backends:
   --no-wait prints EVERY prompt whose dependencies are already satisfied (a
   revise prompt is never printed before the round's review marker exists, and
   an integration prompt never before the whole pool is done).
+  --agent dots: dots3-note-prev through the Dots API (default endpoint
+  https://note3-prev-api.askdiandian.com/v1, key DOTS_API_KEY). The adapter
+  PAPER_DOTS_HARNESS=codex (default; the platform's documented Responses
+  route), dsh (a generated llm-pi-ai route), or claude (the platform's
+  Anthropic Messages endpoint); `chat` is text-only.
+  See paper_dots_agent.py --probe and PAPER_DOTS_* in its docstring.
   any other CLI: --agent-cmd '["your","cli","--flag"]' or PAPER_AGENT_CMD (JSON
   argv list in the environment).
 
@@ -471,6 +518,14 @@ CHAMPION_SELECT_HELP = (
     "persisted champion_select for this invocation only; `setup` records it as the "
     "default")
 
+
+
+def _agent_model_arg(value):
+    """argparse wrapper: a known model name or an http(s) endpoint URL."""
+    try:
+        return agent_model_choice(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -972,14 +1027,47 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--retry-backoff-max", type=int, default=DEFAULTS["retry_backoff_max"],
                     help=f"cap on a single backoff wait in seconds (default: "
                          f"{DEFAULTS['retry_backoff_max']})")
-    run_opts.add_argument("--agent", choices=list(AGENT_CHOICES), default=DEFAULTS["agent"],
-                    help="the session backend: codex (default) = `codex exec -`, claude = "
-                         "`claude --permission-mode bypassPermissions --print`, dsh = the "
-                         "DeepSeek Harness CLI (`dsh --profile headless --json -`, installed "
-                         "separately), qwen = Qwen3.8-27B through an OpenAI-compatible vLLM "
-                         "endpoint (the adapter wraps codex/dsh; set PAPER_QWEN_* and see "
-                         "paper_qwen_agent.py --probe), manual = stage every prompt for a "
-                         "human; --agent-cmd overrides any of them")
+    run_opts.add_argument("--agent", choices=list(AGENT_CHOICES), default=None,
+                    help="LEGACY shortcut for --agent-harness + --agent-model (codex, claude, "
+                         "dsh, qwen, dots, manual). It keeps the old command exactly; do not "
+                         "combine it with the new --agent-harness/--agent-model/--agent-model-* "
+                         "options. Omit the new options to use the default: dsh + "
+                         "deepseek-flash")
+    run_opts.add_argument("--agent-harness", choices=list(AGENT_HARNESS_CHOICES),
+                    type=agent_choice, default=None, metavar="NAME",
+                    help="the CLI that runs the sessions: dsh (DeepSeek Harness, the default), "
+                         "gpt-codex (OpenAI Codex), claude-code (Claude Code). Combine with "
+                         "--agent-model; when only this is given, the harness's default model "
+                         "is used (dsh->deepseek-flash, gpt-codex->gpt-sol, "
+                         "claude-code->claude-sonnet)")
+    run_opts.add_argument("--agent-model", type=_agent_model_arg, default=None,
+                    metavar="NAME_OR_URL",
+                    help="the model the harness runs: deepseek-flash (default), gpt-sol, "
+                         "gpt-terra, claude-opus, claude-sonnet, qwen38-27b, "
+                         "dots3-note-preview, OR an http(s) OpenAI-compatible "
+                         "chat-completions endpoint URL (e.g. "
+                         "http://127.0.0.1:18000/v1/chat/completions). A URL requires "
+                         "dsh (the default harness) and --agent-model-api-key (or "
+                         "PAPER_AGENT_MODEL_API_KEY) when the endpoint needs a key; "
+                         "--agent-model-name names "
+                         "the model when the endpoint serves more than one. When only "
+                         "this is given, the model's default harness is used "
+                         "(GPT->gpt-codex, Claude->claude-code, DeepSeek/Qwen/Dots/URL->dsh)")
+    run_opts.add_argument("--agent-model-api-key", default=None, metavar="KEY",
+                    help="API key for a custom --agent-model endpoint URL; it is exported "
+                         "to the adapter through PAPER_AGENT_MODEL_API_KEY, never written "
+                         "into the generated provider config or the run record. Prefer the "
+                         "environment variable when the process list must not show it")
+    run_opts.add_argument("--agent-model-name", default=None, metavar="MODEL",
+                    help="the provider's model id for a custom --agent-model endpoint URL "
+                         "that serves more than one model (e.g. an OpenRouter model id); "
+                         "when omitted, a single model listed by /v1/models is used")
+    run_opts.add_argument("--agent-model-prep-json", default=None, metavar="JSON",
+                    help="a JSON object merged into each request to a custom "
+                         "--agent-model endpoint (temperature, max_tokens, "
+                         "reasoning_effort, ...). It may be incomplete: keys it omits keep "
+                         "the harness defaults, and nested objects merge key by key. "
+                         "Applies only to a custom endpoint URL")
     run_opts.add_argument("--no-template-stage", action="store_true",
                           help="do NOT author the package inside the journal's Word templates "
                                "before the round (the default is to run that stage first in "
@@ -988,9 +1076,31 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--agent-cmd", default=None,
                     help="JSON argv list overriding the agent command")
     run_opts.add_argument("--judge-agent", choices=list(AGENT_CHOICES), default=None,
-                    help="backend for judge sessions only (default: same as --agent); the judge "
-                         "panel dominates cost, so this lets it run on a different CLI/model "
-                         "(dsh = the DeepSeek Harness CLI)")
+                    help="LEGACY shortcut for --judge-agent-harness + --judge-agent-model; "
+                         "keeps the old judge command exactly. Do not combine with the new "
+                         "--judge-agent-harness/--judge-agent-model/--judge-agent-model-* "
+                         "options")
+    run_opts.add_argument("--judge-agent-harness", choices=list(AGENT_HARNESS_CHOICES),
+                    type=agent_choice, default=None, metavar="NAME",
+                    help="the CLI for judge sessions only. When neither judge option is "
+                         "given, the producer's pair is inherited; a lone judge option "
+                         "fills its counterpart from the harness/model default")
+    run_opts.add_argument("--judge-agent-model", type=_agent_model_arg, default=None,
+                    metavar="NAME_OR_URL",
+                    help="the model for judge sessions only (same choices and custom-URL "
+                         "rules as --agent-model). When neither judge option is given, the "
+                         "producer's pair is inherited. The judge still sees only the "
+                         "anonymized comparison")
+    run_opts.add_argument("--judge-agent-model-api-key", default=None, metavar="KEY",
+                    help="API key for a custom --judge-agent-model endpoint URL (exported "
+                         "through PAPER_JUDGE_AGENT_MODEL_API_KEY; prefer the environment "
+                         "variable when the process list must not show it)")
+    run_opts.add_argument("--judge-agent-model-name", default=None, metavar="MODEL",
+                    help="the provider's model id for a custom --judge-agent-model "
+                         "endpoint URL that serves more than one model")
+    run_opts.add_argument("--judge-agent-model-prep-json", default=None, metavar="JSON",
+                    help="the judge-side --agent-model-prep-json (same merge contract; "
+                         "applies only to a custom judge endpoint URL)")
     run_opts.add_argument("--judge-agent-cmd", default=None,
                     help="JSON argv list for judge sessions only (default: --agent-cmd)")
     run_opts.add_argument("--poll", type=int, default=DEFAULTS["poll"],
@@ -1094,8 +1204,8 @@ def build_parser() -> argparse.ArgumentParser:
     psync = sub.add_parser(
         "sync-code", parents=[common],
         help="copy the maintained paper_pipeline.py/paper_docx_format.py/"
-             "paper_redlines_adapter.py/paper_qwen_agent.py into a root and record "
-             "their digests")
+             "paper_redlines_adapter.py/paper_qwen_agent.py/paper_dots_agent.py/"
+             "paper_model_agent.py into a root and record their digests")
     psync.set_defaults(func=cmd_sync_code)
 
     ptr = sub.add_parser("trend", parents=[common],

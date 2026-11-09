@@ -3260,7 +3260,7 @@ AGENT_PRESETS = {
     # Qwen3.8-27B through an OpenAI-compatible vLLM endpoint (the SSH-tunnel
     # route documented in `paper_qwen_agent.py`). The adapter is a thin
     # provider-config layer around the harness the operator already uses:
-    # PAPER_QWEN_HARNESS=codex (default) or dsh. It starts the tunnel only when
+    # PAPER_QWEN_HARNESS=codex (default), dsh, or claude. It starts the tunnel only when
     # the endpoint is not already reachable, and a `chat` mode is available for
     # text-only jobs. The model's provider/model/base-url are environment
     # settings (PAPER_QWEN_*; see the adapter's docstring), not pipeline
@@ -3270,21 +3270,177 @@ AGENT_PRESETS = {
     # name, and a plain `python3 stub_agent.py` passed through --agent-cmd still
     # does not look like a shipped preset (the dsh suite checks that).
     "qwen": [str(Path(__file__).resolve().with_name("paper_qwen_agent.py"))],
+    # dots3-note-prev through the Dots API (https://dots.ai/platform/docs).
+    # Like the qwen preset, the adapter is a thin provider-config layer around
+    # the harness the operator already uses: PAPER_DOTS_HARNESS=codex (default,
+    # the platform's documented Responses route) or dsh (a generated
+    # llm-pi-ai route), plus a `chat` mode for text-only jobs. The key is
+    # DOTS_API_KEY and the endpoint/model are environment settings
+    # (PAPER_DOTS_*; see the adapter's docstring), not pipeline config: the
+    # platform account is deployment-specific, never manuscript content.
+    "dots": [str(Path(__file__).resolve().with_name("paper_dots_agent.py"))],
 }
 # The backends an operator may select BY NAME (each maps to a shipped argv;
 # `manual` is the no-CLI mode) -- one list, so every --agent/--judge-agent
 # parser accepts the same set. A custom --agent-cmd/PAPER_AGENT_CMD stays the
 # last route and is never named here.
-AGENT_CHOICES = ("codex", "claude", "dsh", "qwen", "manual")
+AGENT_CHOICES = ("codex", "claude", "dsh", "qwen", "dots", "manual")
 # The CLI each preset launches (`codex`, `claude`, `dsh`). Derived from the
 # preset table itself, so the checks that ask "is this the operator's real
 # agent CLI, or a test stub / foreign tool?" (see `_looks_like_preset_cmd`) and
 # that ask "was this preset's binary not installed?" (see `agent_install_hint`)
 # recognise a preset added above without a second list to keep in step.
-AGENT_PRESET_BINARIES = frozenset(os.path.basename(str(argv[0])).lower()
-                                  for argv in AGENT_PRESETS.values() if argv)
+AGENT_PRESET_BINARIES = frozenset(
+    [os.path.basename(str(argv[0])).lower()
+     for argv in AGENT_PRESETS.values() if argv]
+    # The native-model router is a shipped adapter too, even though it is not a
+    # legacy --agent preset: the defect/conflict audit's "is this a real agent
+    # backend?" check must not classify it as a foreign tool.
+    + ["paper_model_agent.py"])
 # Choices for --conflict-agent (the audit is lightweight by default).
 CONFLICT_AGENT_CHOICES = ("codex-lite", *AGENT_CHOICES)
+
+# ---------------------------------------------------------------------------
+# MODEL / HARNESS SELECTION (3.11.0)
+# ---------------------------------------------------------------------------
+# `--agent-model` chooses the MODEL; `--agent-harness` chooses the CLI that
+# runs it. The old `--agent` NAME is kept as a legacy shortcut and maps to the
+# same (harness, model) pair the operator would otherwise spell out (see
+# LEGACY_AGENT_PAIRS). The two axes are independent only where the wire
+# protocol supports it: the model family fixes which harnesses can reach it.
+#
+# "latest" model ids were read from the installed harnesses/catalogs on
+# 2026-11-10: Codex 0.167.0 knows gpt-6.1-sol / gpt-6.1-terra; the DSH catalog
+# ships deepseek-flash, gpt-6.1-sol/terra, claude-opus-5-5 and
+# claude-sonnet-5-5; Claude Code 2.1.74 resolves the `opus`/`sonnet` aliases to
+# the latest Anthropic models. `qwen38-27b` is the local vLLM checkpoint name
+# the qwen adapter already used (qwen3.8-27b); `dots3-note-preview` is the
+# operator-facing name for the Dots API model `dots3-note-prev`.
+AGENT_MODELS = {
+    "deepseek-flash": {
+        "label": "DeepSeek Flash", "id": "deepseek-flash", "family": "deepseek",
+        "default_harness": "dsh",
+        "harnesses": ("dsh", "gpt-codex", "claude-code"),
+    },
+    "gpt-sol": {
+        "label": "GPT Sol", "id": "gpt-6.1-sol", "family": "gpt",
+        "default_harness": "gpt-codex",
+        "harnesses": ("dsh", "gpt-codex"),
+    },
+    "gpt-terra": {
+        "label": "GPT Terra", "id": "gpt-6.1-terra", "family": "gpt",
+        "default_harness": "gpt-codex",
+        "harnesses": ("dsh", "gpt-codex"),
+    },
+    "claude-opus": {
+        "label": "Claude Opus", "id": "claude-opus-5-5", "alias": "opus",
+        "family": "claude", "default_harness": "claude-code",
+        "harnesses": ("dsh", "claude-code"),
+    },
+    "claude-sonnet": {
+        "label": "Claude Sonnet", "id": "claude-sonnet-5-5", "alias": "sonnet",
+        "family": "claude", "default_harness": "claude-code",
+        "harnesses": ("dsh", "claude-code"),
+    },
+    "qwen38-27b": {
+        "label": "Qwen3.8-27B", "id": "qwen3.8-27b", "family": "qwen",
+        "default_harness": "dsh",
+        "harnesses": ("dsh", "gpt-codex", "claude-code"),
+    },
+    "dots3-note-preview": {
+        "label": "Dots3 Note Preview", "id": "dots3-note-prev", "family": "dots",
+        "default_harness": "dsh",
+        "harnesses": ("dsh", "gpt-codex", "claude-code"),
+    },
+}
+AGENT_MODEL_CHOICES = tuple(AGENT_MODELS)
+AGENT_HARNESSES = {
+    "dsh": {"label": "DeepSeek Harness", "binary": "dsh",
+            "default_model": "deepseek-flash"},
+    "gpt-codex": {"label": "GPT Codex", "binary": "codex",
+                  "default_model": "gpt-sol"},
+    "claude-code": {"label": "Claude Code", "binary": "claude",
+                    "default_model": "claude-sonnet"},
+}
+AGENT_HARNESS_CHOICES = tuple(AGENT_HARNESSES)
+DEFAULT_AGENT_MODEL = "deepseek-flash"
+DEFAULT_AGENT_HARNESS = "dsh"
+# The legacy `--agent` shortcuts keep their old commands (resolve_agent_cmd),
+# but these pairs are what the helper records/reports for them. `None` means
+# "the operator's CLI config owns the model" (legacy codex/claude).
+LEGACY_AGENT_PAIRS = {
+    "codex": ("gpt-codex", None),
+    "claude": ("claude-code", None),
+    "dsh": ("dsh", "deepseek-flash"),
+    "qwen": ("gpt-codex", "qwen38-27b"),
+    "dots": ("gpt-codex", "dots3-note-preview"),
+    "manual": (None, None),
+}
+
+
+def agent_choice(value) -> str:
+    """Normalize an operator spelling for the harness option.
+
+    `gpt codex`, `gpt-codex`, `GPT_CODEX` all become `gpt-codex`; the CLI choices
+    stay the single lowercase hyphenated spelling.
+    """
+    return str(value).strip().lower().replace("_", "-").replace(" ", "-")
+
+
+def agent_model_is_endpoint(value) -> bool:
+    """True when --agent-model is an arbitrary OpenAI-compatible endpoint URL."""
+    text = str(value or "").strip().lower()
+    return text.startswith("http://") or text.startswith("https://")
+
+
+def agent_model_choice(value):
+    """`--agent-model` accepts a known model name OR an http(s) endpoint URL."""
+    raw = str(value).strip()
+    if agent_model_is_endpoint(raw):
+        if not raw.split("://", 1)[1].strip():
+            raise ValueError(f"empty endpoint URL: {raw!r}")
+        return raw
+    slug = agent_choice(raw)
+    if slug not in AGENT_MODELS:
+        raise ValueError(
+            f"unknown model {raw!r}; use one of {', '.join(AGENT_MODEL_CHOICES)}, "
+            f"or an http(s) chat-completions endpoint URL")
+    return slug
+
+
+def agent_model_label(model: str) -> str:
+    """A short label for a model choice (endpoint URLs are not repeated)."""
+    return "custom-endpoint" if agent_model_is_endpoint(model) else str(model)
+
+
+def agent_pair_supported(harness: str, model: str) -> bool:
+    """Can `harness` reach `model` over a protocol it speaks?"""
+    if agent_model_is_endpoint(model):
+        # An arbitrary endpoint is the OpenAI Chat Completions protocol; dsh's
+        # llm-pi-ai route is the harness that speaks it directly. Codex can only
+        # use a Responses custom provider, and Claude Code only Anthropic
+        # Messages, so neither can be guessed from a chat-completions URL.
+        return harness == "dsh"
+    info = AGENT_MODELS.get(model) or {}
+    return harness in (info.get("harnesses") or ())
+
+
+def agent_model_for_harness(harness: str) -> str:
+    """The model a harness uses when only the harness was chosen."""
+    return (AGENT_HARNESSES.get(harness) or {}).get("default_model", DEFAULT_AGENT_MODEL)
+
+
+def agent_harness_for_model(model: str) -> str:
+    """The harness a model uses when only the model was chosen."""
+    if agent_model_is_endpoint(model):
+        return "dsh"
+    return (AGENT_MODELS.get(model) or {}).get("default_harness", DEFAULT_AGENT_HARNESS)
+
+
+def agent_selection_label(harness: str, model: str) -> str:
+    if harness and model:
+        return f"{harness}/{agent_model_label(model)}"
+    return harness or (agent_model_label(model) if model else "manual")
 
 MARKER_FILE = "_pipeline_done.json"
 SCORES_FILE = "scores.json"

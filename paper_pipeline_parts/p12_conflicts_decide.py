@@ -8575,7 +8575,8 @@ def cmd_sync_code(args) -> None:
     root keeps running the old bundle until the operator deliberately replaces
     it. This command is that deliberate replacement: it copies the maintained
     `paper_pipeline.py`, `paper_docx_format.py`, `paper_redlines_adapter.py`,
-    `paper_qwen_agent.py`, `docx2pdf.sh` and `docxcompare.sh` into the root
+    `paper_qwen_agent.py`, `paper_dots_agent.py`, `paper_model_agent.py`,
+    `docx2pdf.sh` and `docxcompare.sh` into the root
     (preserving each source file's mode, so the shell shims stay executable),
     records their new digests (so `refuse_foreign_pipeline` can
     tell a synced root from a drifted one) and prints what changed. It never

@@ -662,9 +662,49 @@ USAGE
     including every stage of one round and the artifacts it produces, run
     `python paper_pipeline.py -h` and read the WORKED EXAMPLE section.
 
-AGENT BACKENDS
---------------
-    --agent codex    (default) `codex exec -` (prompt piped via stdin, cwd =
+MODEL / HARNESS SELECTION
+-------------------------
+    --agent-harness  dsh (DeepSeek Harness, default) | gpt-codex (OpenAI
+                     Codex) | claude-code (Claude Code).
+    --agent-model    deepseek-flash (default) | gpt-sol | gpt-terra |
+                     claude-opus | claude-sonnet | qwen38-27b |
+                     dots3-note-preview, OR an http(s) OpenAI-compatible
+                     chat-completions endpoint URL (the dsh harness only).
+                     --agent-model-api-key / PAPER_AGENT_MODEL_API_KEY supplies
+                     a custom endpoint's key (exported through the environment,
+                     never written into the provider config or run record) and
+                     --agent-model-name / PAPER_AGENT_MODEL_NAME names the
+                     model when the endpoint serves more than one, and
+                     --agent-model-prep-json merges an incomplete JSON object
+                     (temperature, max_tokens, reasoning_effort, ...) into each
+                     request after the harness builds it (custom endpoints only;
+                     nested objects merge, omitted keys keep the defaults).
+                     The axes are independent only where the wire protocol
+                     supports the pair. Only the harness given -> its default
+                     model (dsh->deepseek-flash, gpt-codex->gpt-sol,
+                     claude-code->claude-sonnet); only the model given -> its
+                     default harness (GPT->gpt-codex, Claude->claude-code,
+                     DeepSeek/Qwen/Dots->dsh). The defaults are dsh +
+                     deepseek-flash. Unsupported pairs are refused before a
+                     session starts. `--judge-agent-harness` /
+                     `--judge-agent-model` select the judge pair (default: the
+                     producer's pair). Native model routing is implemented by
+                     `paper_model_agent.py` (a DSH agent-default-model patch,
+                     Codex -m/DeepSeek Responses provider, or Claude Code's
+                     --model/DeepSeek Anthropic environment); qwen/dots keep
+                     their adapters.
+    --agent-cmd      a custom JSON argv still overrides either form, and
+                     PAPER_AGENT_CMD remains its environment equivalent.
+                     `--agent` and `--judge-agent` are the legacy shortcuts and
+                     cannot be combined with the new pair. EVERY --agent-* flag
+                     has a --judge-agent-* equivalent: --judge-agent-harness,
+                     --judge-agent-model, --judge-agent-model-api-key,
+                     --judge-agent-model-name, --judge-agent-model-prep-json and
+                     --judge-agent-cmd.
+
+LEGACY AGENT BACKENDS (exact old commands; kept for backward compatibility)
+----------------------------------------------------------------------------
+    --agent codex    `codex exec -` (prompt piped via stdin, cwd =
                      the sandbox), plus one `-c` override per MCP server the
                      prompts drive, so that server's tools are callable without
                      an operator: `codex exec` runs with approval policy
@@ -691,8 +731,9 @@ AGENT BACKENDS
                      wrapped around the harness the operator already uses. The
                      adapter (`paper_qwen_agent.py`, copied beside the driver)
                      defaults to `PAPER_QWEN_HARNESS=codex`; `dsh` generates an
-                     `llm-pi-ai` provider patch for its headless profile, and
-                     `chat` is a text-only completion mode. The endpoint is
+                     `llm-pi-ai` provider patch for its headless profile,
+                     `claude` uses vLLM's Anthropic Messages endpoint when the
+                     server serves it, and `chat` is a text-only completion mode. The endpoint is
                      `PAPER_QWEN_BASE_URL` (default
                      http://127.0.0.1:18000/v1), model
                      `PAPER_QWEN_MODEL` (default qwen3.8-27b), key
@@ -707,6 +748,26 @@ AGENT BACKENDS
                      `tool_choice=auto`: the agentic harness needs that; a
                      server started without `--enable-auto-tool-choice
                      --tool-call-parser` fails a tool-using turn.
+    --agent dots     dots3-note-prev through the Dots API
+                     (https://dots.ai/platform/docs), wrapped around the
+                     harness the operator already uses. The adapter
+                     (`paper_dots_agent.py`, copied beside the driver) defaults
+                     to `PAPER_DOTS_HARNESS=codex` (the platform's documented
+                     OpenAI Responses route: `model_provider=dots`,
+                     `wire_api="responses"`, `DOTS_API_KEY`, web search
+                     disabled, 512K context window declared); `dsh` generates
+                     an `llm-pi-ai` route over the platform's OpenAI-compatible
+                     Chat Completions endpoint, `claude` uses the platform's
+                     Anthropic Messages endpoint, and `chat` is a text-only
+                     completion mode. The endpoint is `PAPER_DOTS_BASE_URL`
+                     (default https://note3-prev-api.askdiandian.com/v1), the
+                     model `PAPER_DOTS_MODEL` (default dots3-note-prev), and the
+                     key `DOTS_API_KEY` (exported to the harness by the
+                     adapter). `python3 paper_dots_agent.py --probe` reports
+                     endpoint/model/key/tool-call support, and `--check-tools`
+                     exits 0/1 on whether the endpoint accepts
+                     `tool_choice=auto`. There is no tunnel: the platform is a
+                     remote service.
     --agent manual   the orchestrator builds every sandbox + PROMPT.md, prints
                      each prompt's path, and polls for the completion signal;
                      you paste each prompt into your agent yourself. Staging is

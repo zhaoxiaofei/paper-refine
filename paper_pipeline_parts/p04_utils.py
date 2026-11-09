@@ -195,6 +195,11 @@ def redact_secrets(text: str) -> str:
     characters, so a manuscript word cannot be rewritten by accident.
     """
     text = "" if text is None else str(text)
+    # The new custom-endpoint key is a command-line option as well as an
+    # environment value: mask the option's argument before anything else so a
+    # run-log `argv:` header cannot capture it.
+    text = re.sub(r"(--(?:judge-)?agent-model-api-key)([ =])(\S+)",
+                  r"\1\2[REDACTED]", text)
     for value in secret_env_values():
         text = text.replace(value, "[REDACTED]")
     return text
@@ -238,7 +243,7 @@ def start_run_log(cmd: str, root, argv=None) -> Path:
                 n += 1
         header = (f"# paper_pipeline {cmd} -- {utcnow()}\n"
                   f"# root: {Path(root).resolve()}\n"
-                  f"# argv: {' '.join(redact_secrets(str(a)) for a in (argv or []))}\n")
+                  f"# argv: {redact_secrets(' '.join(str(a) for a in (argv or [])))}\n")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(header)
         return path
@@ -654,7 +659,8 @@ def pipeline_snapshot_note(ctx: Ctx) -> str:
                 f"executes the frozen code, so fixes committed since the snapshot will NOT run "
                 f"in this root. Re-create the root from the maintained tree (same `--source`), "
                 f"or copy the current `paper_pipeline.py`, `paper_docx_format.py` and "
-                f"`paper_redlines_adapter.py` and `paper_qwen_agent.py` beside this "
+                f"`paper_redlines_adapter.py` and the `paper_qwen_agent.py`/"
+                f"`paper_dots_agent.py`/`paper_model_agent.py` adapters beside this "
                 f"root's `state.json`.")
     if st.get("frozen_differs"):
         # The record and the FILE disagree: state.json says one sha256, the
@@ -724,7 +730,8 @@ def refuse_foreign_pipeline(ctx: Ctx, command: str) -> None:
     """Refuse a state-changing command driven by another copy of the script.
 
     2026-10-19: the root also freezes `paper_docx_format.py` and
-    `paper_redlines_adapter.py` and `paper_qwen_agent.py`. A root created after the module manifest
+    `paper_redlines_adapter.py`, and the provider adapters
+    `paper_qwen_agent.py`/`paper_dots_agent.py`/`paper_model_agent.py`. A root created after the module manifest
     existed (`state.pipeline.modules`) must not run when the maintained tree's
     formatter or adapter differs from the frozen one: the round-2 roots ran an
     old formatter while the workspace already carried FMT-AV3/IM5/TB5/T6h, so

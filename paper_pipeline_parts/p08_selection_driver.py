@@ -1500,7 +1500,8 @@ def decide_advisories(ctx: Ctx) -> dict:
 # EXECUTION ENGINE
 # =====================================================================
 
-def resolve_agent_cmd(agent_name: str, agent_cmd_arg: str, use_env: bool = True):
+def _agent_cmd_override(agent_cmd_arg: str, use_env: bool = True):
+    """The explicitly supplied command ('' -> None), validated as a JSON argv."""
     if agent_cmd_arg:
         try:
             cmd = json.loads(agent_cmd_arg)
@@ -1518,6 +1519,33 @@ def resolve_agent_cmd(agent_name: str, agent_cmd_arg: str, use_env: bool = True)
         except ValueError:
             pass
         die("PAPER_AGENT_CMD is set but is not a valid JSON argv list")
+    return None
+
+
+def _adapter_missing(argv: list, label: str) -> None:
+    """Die when a provider adapter expected beside the driver is absent."""
+    if not argv or Path(argv[0]).is_file():
+        return
+    # A frozen root's own driver cannot run sync-code (it refuses by design),
+    # so name the maintained checkout when we can identify it.
+    _snap = frozen_snapshot_root()
+    _origin = str((_snap or {}).get("origin_path") or "")
+    _where = (f"python3 {shlex.quote(_origin)} sync-code --root <root>"
+              if _origin and Path(_origin).is_file()
+              and not frozen_snapshot_root(_origin)
+              else "run `sync-code` from the maintained checkout -- not from this "
+                   "root's frozen paper_pipeline.py")
+    die(f"the {label} adapter is missing next to the driver: {argv[0]}\n"
+        f"       A root created before the adapter existed must be synced first:\n"
+        f"       {_where}\n"
+        f"       (or recreate the root from the maintained tree).")
+
+
+def resolve_agent_cmd(agent_name: str, agent_cmd_arg: str, use_env: bool = True):
+    """Resolve a LEGACY `--agent` name to its command (unchanged behaviour)."""
+    override = _agent_cmd_override(agent_cmd_arg, use_env=use_env)
+    if override:
+        return override
     if agent_name in AGENT_PRESETS:
         # Not AGENT_PRESETS directly: a codex session also needs the MCP
         # approval overrides, or its tools are denied before the model can use
@@ -1525,26 +1553,39 @@ def resolve_agent_cmd(agent_name: str, agent_cmd_arg: str, use_env: bool = True)
         # capability a preset cannot express as a flag: the DeepSeek Harness's
         # one-shot form (see dsh_harness_problem).
         argv = agent_argv(agent_name)
-        if agent_name == "qwen" and argv and not Path(argv[0]).is_file():
-            # A frozen root's own driver cannot run sync-code (it refuses by
-            # design), so name the maintained checkout when we can identify it.
-            _snap = frozen_snapshot_root()
-            _origin = str((_snap or {}).get("origin_path") or "")
-            _where = (f"python3 {shlex.quote(_origin)} sync-code --root <root>"
-                      if _origin and Path(_origin).is_file()
-                      and not frozen_snapshot_root(_origin)
-                      else "run `sync-code` from the maintained checkout -- not from this "
-                           "root's frozen paper_pipeline.py")
-            die(f"the qwen adapter is missing next to the driver: {argv[0]}\n"
-                f"       A root created before the adapter existed must be synced first:\n"
-                f"       {_where}\n"
-                f"       (or recreate the root from the maintained tree).")
+        if agent_name in ("qwen", "dots"):
+            _adapter_missing(argv, agent_name)
         harness_problem = dsh_harness_problem(argv)
         if harness_problem:
             die(harness_problem)
         return argv
     die(f"unknown agent '{agent_name}'; use {'|'.join(AGENT_CHOICES)}, PAPER_AGENT_CMD, "
         f"or --agent-cmd")
+
+
+def resolve_agent_model_cmd(harness: str, model: str, agent_cmd_arg: str,
+                            use_env: bool = True, api_key_env: str = None,
+                            model_name: str = None, prep_json: str = None):
+    """Resolve an explicit `--agent-harness`/`--agent-model` pair to a command.
+
+    A custom `--agent-cmd`/`PAPER_AGENT_CMD` wins, exactly as it does for the
+    legacy names; the pair then only labels the run. Otherwise the pair is
+    validated against the wire-protocol support matrix before a session starts
+    (so an unsupported combination fails once, not once per stage).
+    """
+    override = _agent_cmd_override(agent_cmd_arg, use_env=use_env)
+    if override:
+        return override
+    argv = agent_argv_for(harness, model, api_key_env=api_key_env,
+                          model_name=model_name, prep_json=prep_json)
+    if (AGENT_MODELS.get(model) or {}).get("family") in ("qwen", "dots"):
+        _adapter_missing(argv, model)
+    else:
+        _adapter_missing(argv, f"{harness}/{model}")
+    harness_problem = dsh_harness_problem(argv)
+    if harness_problem:
+        die(harness_problem)
+    return argv
 
 
 def _probe_dsh_headless(exe: str) -> str:
@@ -1836,19 +1877,57 @@ def install_agent_interrupt_handlers() -> bool:
 def effective_agent_model(cmd) -> dict:
     """A best-effort, secret-free label for the model a session will use.
 
-    The Codex/Claude/DSH presets own their model in the operator's CLI config;
-    the pipeline cannot read it reliably and must not invent it. The Qwen
-    adapter's model is selected by `PAPER_QWEN_MODEL`/`PAPER_QWEN_HARNESS`, so
-    those are recorded exactly. The returned dict is stored on the run record;
-    `source` says whether the value is the effective model or a declaration that
-    the CLI owns it.
+    The legacy Codex/Claude/DSH presets own their model in the operator's CLI
+    config; the pipeline cannot read it reliably and must not invent it. The
+    native-model router and the Qwen/Dots adapters receive the model on their
+    command line (or via their own environment variables), so those are
+    recorded exactly. The returned dict is stored on the run record; `source`
+    says whether the value is the effective model or a declaration that the CLI
+    owns it.
     """
     argv = [str(x) for x in (cmd or [])]
     exe = os.path.basename(argv[0]).lower() if argv else ""
+
+    def _arg(name: str, default: str = "") -> str:
+        try:
+            i = argv.index(name)
+        except ValueError:
+            return default
+        return argv[i + 1] if i + 1 < len(argv) else default
+
+    def _public_harness(name: str) -> str:
+        return {"codex": "gpt-codex", "dsh": "dsh", "claude": "claude-code"}.get(
+            name, name)
+
+    if exe == "paper_model_agent.py" or "paper_model_agent" in exe:
+        endpoint = _arg("--endpoint")
+        if endpoint:
+            prep = _arg("--prep-json", "")
+            try:
+                prep_keys = sorted(json.loads(prep)) if prep else []
+            except (TypeError, ValueError):
+                prep_keys = []
+            return {"name": _arg("--model-name") or "default",
+                    "endpoint": endpoint,
+                    "harness": _arg("--harness", "dsh"),
+                    "api_key_env": _arg("--api-key-env", "PAPER_AGENT_MODEL_API_KEY"),
+                    "prep_keys": prep_keys,
+                    "source": "--agent-model(custom endpoint)/--agent-model-api-key"}
+        model = _arg("--model", os.environ.get("PAPER_AGENT_MODEL") or "deepseek-flash")
+        info = AGENT_MODELS.get(model) or {}
+        return {"name": model, "id": info.get("id") or model,
+                "harness": _arg("--harness", "dsh"),
+                "source": "--agent-model/--agent-harness"}
     if exe == "paper_qwen_agent.py" or "paper_qwen_agent" in exe:
-        return {"name": os.environ.get("PAPER_QWEN_MODEL") or "qwen3.8-27b",
-                "harness": os.environ.get("PAPER_QWEN_HARNESS") or "codex",
-                "source": "PAPER_QWEN_MODEL/PAPER_QWEN_HARNESS"}
+        harness = _arg("--harness") or os.environ.get("PAPER_QWEN_HARNESS") or "codex"
+        return {"name": _arg("--model") or os.environ.get("PAPER_QWEN_MODEL") or "qwen3.8-27b",
+                "harness": _public_harness(harness),
+                "source": "PAPER_QWEN_MODEL/PAPER_QWEN_HARNESS or --agent-model/--agent-harness"}
+    if exe == "paper_dots_agent.py" or "paper_dots_agent" in exe:
+        harness = _arg("--harness") or os.environ.get("PAPER_DOTS_HARNESS") or "codex"
+        return {"name": _arg("--model") or os.environ.get("PAPER_DOTS_MODEL") or "dots3-note-prev",
+                "harness": _public_harness(harness),
+                "source": "PAPER_DOTS_MODEL/PAPER_DOTS_HARNESS or --agent-model/--agent-harness"}
     return {"name": None, "harness": None,
             "source": "external CLI config (not recorded; the CLI owns the model)"}
 

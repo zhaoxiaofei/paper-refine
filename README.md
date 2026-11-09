@@ -40,6 +40,7 @@ profile. Running it needs Python 3.9+ and no third-party packages.
 | run it for the first time | *Quick start*, then *Requirements* |
 | read the result of a run | *What you get* |
 | look up a command or flag | *Everyday commands*, *Exit codes*, *Operational notes* |
+| choose the model and CLI harness | *Choosing the model and harness* |
 | choose how to run: own rounds, new submission, or a real journal decision | *Revision modes* |
 | enforce a specific venue's rules | *Venues and journals* |
 | see how one round is built | *Round model* |
@@ -55,8 +56,10 @@ separation of finding generation from repair — are summarized under
 ## Quick start
 
 No install step: the pipeline is standard-library only, but it needs Python 3.9+ and an
-agent CLI for its sessions — `codex` (default), `claude`, `dsh`, `qwen`, or `manual` for a
-human-driven run; see *Requirements*. The shortest path:
+agent CLI for its sessions — by default the DeepSeek Harness (`dsh`) running
+DeepSeek Flash, or another `--agent-harness`/`--agent-model` pair, the legacy
+`--agent` names, or `manual` for a human-driven run; see *Requirements*. The
+shortest path:
 
 ```bash
 # 1. create a pipeline root from the pristine submission directory
@@ -99,10 +102,12 @@ last two cases — see *Exit codes*.
 * Python 3.9+ (the pipeline and both companion tools are standard-library only,
   except that `pairwise_scores.py` imports `openpyxl` to write its workbook; the
   pipeline itself and score collection do not need it).
-* An agent CLI for the stage sessions: `codex` (default), `claude`, the
-  DeepSeek Harness (`dsh`, the CLI of the same name), Qwen3.8-27B through an
-  OpenAI-compatible vLLM endpoint (`--agent qwen`), or a custom command via
-  `--agent-cmd`; `--agent manual` stages prompts for a human.
+* An agent CLI for the stage sessions. The new pair selects the two axes
+  independently: `--agent-harness dsh|gpt-codex|claude-code` (default `dsh`)
+  and `--agent-model deepseek-flash|gpt-sol|gpt-terra|claude-opus|claude-sonnet|
+  qwen38-27b|dots3-note-preview` (default `deepseek-flash`). The legacy
+  `--agent codex|claude|dsh|qwen|dots` and `--agent manual` remain available,
+  as does a custom command via `--agent-cmd`.
 * Optional, probed at runtime and never required: the `docx` CLI (read/render/
   diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
   `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
@@ -154,7 +159,7 @@ custom `--agent-cmd` instead (e.g. the npx form, for a machine with no global
 install), the sessions run exactly the same way but keep the custom-command
 rule: no continuation form, so a stopped session gets a fresh attempt.
 
-### `--agent qwen`: Qwen3.8-27B through an OpenAI-compatible vLLM endpoint
+### `--agent qwen`: Qwen3.8-27B through an OpenAI-compatible vLLM endpoint (and Claude Code's Anthropic route)
 
 `--agent qwen` points an existing harness at a vLLM server instead of
 reimplementing the agent loop. The adapter, `paper_qwen_agent.py`, is copied
@@ -167,6 +172,8 @@ the harness with `PAPER_QWEN_HARNESS`:
   effort; the adapter defaults to `low` (`PAPER_QWEN_REASONING_EFFORT`).
 * `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` provider patch
   and an `agent-default-model` override for the qwen route.
+* `claude` — `claude --print` against vLLM's Anthropic Messages endpoint (when
+  the server serves it).
 * `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
 
 The endpoint is `PAPER_QWEN_BASE_URL` (default
@@ -199,6 +206,201 @@ pipeline stage that must write artifacts. Set `PAPER_QWEN_REQUIRE_TOOLS=1` to
 make the tool probe a hard preflight for a production run (the default is
 warn-and-run so the adapter can still be exercised against a text-only
 endpoint).
+
+### `--agent dots`: dots3-note-prev through the Dots API
+
+`--agent dots` keeps the harness and points it at the Dots API instead of
+reimplementing the agent loop; the platform's documentation is
+<https://dots.ai/platform/docs>. The adapter, `paper_dots_agent.py`, is copied
+beside the root's driver at `setup` and travels through `sync-code`. Create a
+key on the platform and export it as `DOTS_API_KEY`; the default endpoint is
+`https://note3-prev-api.askdiandian.com/v1` and the model is
+`dots3-note-prev`. It chooses the harness with `PAPER_DOTS_HARNESS`:
+
+* `codex` (default) — `codex exec` with a custom `model_provider=dots` route:
+  the platform's documented Responses protocol (`wire_api="responses"`),
+  `DOTS_API_KEY` read from the environment, web search disabled, and the
+  model's 512K context window declared explicitly (it is not in Codex's
+  built-in catalog). The reasoning effort defaults to `medium`
+  (`PAPER_DOTS_REASONING_EFFORT`).
+* `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` route over the
+  platform's OpenAI-compatible Chat Completions endpoint and an
+  `agent-default-model` override. The route declares the 512K context window
+  and the output cap, and does not invent a reasoning parameter the platform
+  does not document.
+* `claude` — `claude --print` against the platform's Anthropic Messages
+  endpoint (its documented Claude Code route).
+* `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
+
+The endpoint and model are `PAPER_DOTS_BASE_URL` and `PAPER_DOTS_MODEL`; the
+capacity defaults are `PAPER_DOTS_CONTEXT_WINDOW=524288` and
+`PAPER_DOTS_MAX_TOKENS=32768`. `PAPER_DOTS_SKIP_PROBE=1` skips the
+`/v1/models` preflight for a gateway that does not expose that listing. Check
+the route without running a session:
+
+```
+python3 paper_dots_agent.py --probe          # endpoint, model, key, tool support
+python3 paper_dots_agent.py --check-tools    # exit 0/1 on tool_choice=auto
+printf 'Summarize this file: ...' | python3 paper_dots_agent.py --chat
+```
+
+**Agentic sessions need tool calls.** The hosted route supports them; the
+adapter checks `tool_choice=auto` before a dsh session and warns if the
+endpoint refuses it. `--harness chat` is a text-only route and does not
+complete a pipeline stage that must write artifacts. Set
+`PAPER_DOTS_REQUIRE_TOOLS=1` (or `PAPER_DOTS_CHECK_TOOLS=1`) to make the tool
+probe a hard preflight for a production run. The platform applies per-key RPM
+and TPM limits; keep `--jobs` modest when the key is rate-limited (the
+pipeline's normal retry/backoff policy applies to a 429). The optional LLM
+audits have their own backends: the defect audit defaults to `codex-lite` and
+the conflict audit is off; pass `--defect-audit dots` / `--conflict-agent dots`
+to keep those passes on Dots too (the judge panel already defaults to
+the producer's harness/model pair).
+
+### Choosing the model and harness (`--agent-harness` / `--agent-model`)
+
+`run`/`run-decide` now split the old `--agent` choice into two independent
+options. The defaults are **`dsh` + `deepseek-flash`**:
+
+| model (`--agent-model`) | latest model id | default harness | supported harnesses |
+| --- | --- | --- | --- |
+| `deepseek-flash` | `deepseek-flash` | `dsh` | `dsh`, `gpt-codex`, `claude-code` |
+| `gpt-sol` | `gpt-6.1-sol` | `gpt-codex` | `dsh`, `gpt-codex` |
+| `gpt-terra` | `gpt-6.1-terra` | `gpt-codex` | `dsh`, `gpt-codex` |
+| `claude-opus` | Claude Code alias `opus` / `claude-opus-5-5` | `claude-code` | `dsh`, `claude-code` |
+| `claude-sonnet` | Claude Code alias `sonnet` / `claude-sonnet-5-5` | `claude-code` | `dsh`, `claude-code` |
+| `qwen38-27b` | `qwen3.8-27b` (local vLLM) | `dsh` | `dsh`, `gpt-codex`, `claude-code` |
+| `dots3-note-preview` | `dots3-note-prev` (Dots API) | `dsh` | `dsh`, `gpt-codex`, `claude-code` |
+
+| harness (`--agent-harness`) | CLI | default model |
+| --- | --- | --- |
+| `dsh` | DeepSeek Harness (`dsh --profile headless --json -`) | `deepseek-flash` |
+| `gpt-codex` | OpenAI Codex (`codex exec`) | `gpt-sol` |
+| `claude-code` | Claude Code (`claude --permission-mode bypassPermissions --print`) | `claude-sonnet` |
+
+`qwen38-27b` through `claude-code` requires a vLLM server that serves the
+Anthropic Messages API; on a server that only serves the OpenAI routes the
+first request fails rather than silently switching protocols.
+`qwen38-27b` through `gpt-codex` uses the qwen adapter's Codex route, which
+needs a vLLM server that serves `/v1/responses`; a server with only Chat
+Completions should use `dsh` for that model (or the Codex chat-completions
+bridge in the reference evaluation harness).
+
+The two axes are independent only where the wire protocol supports the pair.
+If only the harness is given, its default model is used; if only the model is
+given, its default harness is used. An unsupported pair (GPT through Claude
+Code, Claude through Codex) is refused before any session starts, never once
+per stage. `--judge-agent-harness` and
+`--judge-agent-model` select the same pair for the judge panel and default to
+the producer's pair; `--judge-agent` remains the legacy shortcut.
+`PAPER_AGENT_HARNESS` / `PAPER_AGENT_MODEL` (and the `PAPER_JUDGE_AGENT_*`
+equivalents) supply defaults when the flags are absent.
+
+#### Arbitrary OpenAI-compatible endpoints
+
+`--agent-model` also accepts an `http://` or `https://` chat-completions URL.
+A custom endpoint runs on **`dsh`** (the default harness): Codex only speaks the
+Responses protocol and Claude Code only Anthropic Messages, so an arbitrary
+chat-completions URL is refused on those two rather than silently translated.
+
+```bash
+# a local vLLM/OpenAI-compatible server
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-model http://127.0.0.1:18000/v1/chat/completions \
+    --agent-model-api-key "$LOCAL_KEY"
+
+# OpenRouter (it hosts many models, so name the one to use)
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-model https://openrouter.ai/api/v1/chat/completions \
+    --agent-model-api-key "$OPENROUTER_API_KEY" \
+    --agent-model-name "anthropic/claude-sonnet-4.5"
+```
+
+The key is exported to the adapter through `PAPER_AGENT_MODEL_API_KEY` (the
+judge equivalent uses `PAPER_JUDGE_AGENT_MODEL_API_KEY`); it is never written
+into the generated DSH provider patch or the run record, and the option's
+value is redacted from the run log. Prefer the environment variable when the
+process list must not show the key. `--agent-model-name` /
+`PAPER_AGENT_MODEL_NAME` is required when the endpoint's `/v1/models` listing
+has more than one model; a single-model endpoint (such as a local vLLM) is
+detected automatically. The adapter reuses the endpoint's advertised context
+window when its catalog carries one, and otherwise uses
+`PAPER_AGENT_CONTEXT_WINDOW` (default 32768) and `PAPER_AGENT_MAX_TOKENS`
+(default 8192).
+
+`--agent-model-prep-json` merges a JSON object into every request to the
+custom endpoint, after the harness has built its normal payload:
+
+```bash
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-model http://127.0.0.1:18000/v1/chat/completions \
+    --agent-model-api-key "$LOCAL_KEY" \
+    --agent-model-prep-json '{"temperature": 0.2, "max_tokens": 8192, "reasoning_effort": "high"}'
+```
+
+The merge is recursive and the object may be incomplete: keys it omits keep
+the harness defaults (including nested keys such as `reasoning.summary`), and
+a key it carries replaces that default; provider-specific spellings (such as
+`max_token_len`) are passed through verbatim. It applies only to a custom
+endpoint URL, so to use it with a model that also has a shorthand (for example
+qwen38-27b) pass that model's endpoint URL and `--agent-model-name` instead of
+the shorthand. `PAPER_AGENT_MODEL_PREP_JSON` supplies the same object from the
+environment. Every `--agent-*` option has a `--judge-agent-*` equivalent, so
+the judge side uses `--judge-agent-model`, `--judge-agent-model-api-key`,
+`--judge-agent-model-name`, `--judge-agent-model-prep-json` (or
+`PAPER_JUDGE_AGENT_MODEL_PREP_JSON`) and `--judge-agent-cmd` in the same way.
+
+**Credentials.** The native harnesses use their own configuration first:
+`dsh` uses its `$DSH_HOME` credentials (its GPT/Claude routes use
+`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` or the stored DSH sign-in); `gpt-codex`
+uses the Codex login or `OPENAI_API_KEY`; `claude-code` uses the Claude Code
+login or `ANTHROPIC_API_KEY`. `gpt-codex` and `claude-code` running
+`deepseek-flash` use DeepSeek's documented Responses and Anthropic-compatible
+endpoints and require `DEEPSEEK_API_KEY`. `qwen38-27b` keeps the
+`PAPER_QWEN_*` vLLM settings and `dots3-note-preview` keeps `DOTS_API_KEY`.
+The "latest" ids above were read from Codex 0.167.0 and the DSH catalog on
+2026-11-10; a newer harness release can be supported by updating the small
+registry in `paper_model_agent.py` / `paper_pipeline_parts/p01_venues.py`.
+The optional `--defect-audit` and `--conflict-agent` passes keep their own
+legacy backend choices (`codex-lite`, `codex`, `claude`, `dsh`, `qwen`,
+`dots`, `manual`); pass the family that matches the run (e.g.
+`--defect-audit dsh`) when those passes should not fall back to ChatGPT.
+
+Examples:
+
+```bash
+# the new default: DeepSeek Harness + DeepSeek Flash
+python paper_pipeline.py run --root ./paper_rounds
+
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness gpt-codex --agent-model gpt-sol
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness claude-code --agent-model claude-opus
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness dsh --agent-model gpt-terra
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness gpt-codex --agent-model deepseek-flash
+# a different, cheaper judge pair
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness claude-code --agent-model claude-sonnet \
+    --judge-agent-harness gpt-codex --judge-agent-model gpt-terra
+```
+
+**Legacy `--agent` / `--judge-agent`.** The old names keep their exact old
+commands and cannot be combined with the new pair. They map to:
+
+| legacy name | effective pair | note |
+| --- | --- | --- |
+| `codex` | `gpt-codex` + the CLI's own model | exact old `codex exec` command |
+| `claude` | `claude-code` + the CLI's own model | exact old `claude` command |
+| `dsh` | `dsh` + `deepseek-flash` | exact old `dsh` command |
+| `qwen` | `gpt-codex` + `qwen38-27b` | still honours `PAPER_QWEN_HARNESS` |
+| `dots` | `gpt-codex` + `dots3-note-preview` | still honours `PAPER_DOTS_HARNESS` |
+| `manual` | manual | stages every prompt for a human |
+
+The `--agent qwen` and `--agent dots` sections above remain the detailed
+reference for their adapters; the new pair is the preferred route because it
+selects the harness explicitly.
 
 ## What you get
 
@@ -338,7 +540,7 @@ evidence pack.
 | `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: `off` = no Zotero tooling, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
 | `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant. The pair carries `2*judges` scores, so the sign rule needs at least 3 judges: at 2 judges the smallest attainable one-sided p (4/4 losses) is 0.0625, and `setup` refuses that combination rather than shipping a gate that can never reject |
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
-| `--judge-agent {codex,claude,dsh,qwen,manual}` / `--judge-agent-cmd JSON` (`run`) | run the judge panel only on a different (e.g. cheaper) backend; defaults to `--agent` / `--agent-cmd` |
+| `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. The legacy `--judge-agent {codex,claude,dsh,qwen,dots,manual}` / `--judge-agent-cmd JSON` remain |
 | `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
 | `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
@@ -922,10 +1124,12 @@ schedule: `2 3` = two rounds following the schedule's rounds 2 and 3, `3`/`-1`
 `--judges N[,N…]`, `--rewrites M[,M…]`, `--revises N[,N…]`,
 `--integrators MASK[,MASK…]`,
 `--caption-limit N` (default: the venue profile's own),
-`--jobs N`, `--agent {codex,claude,dsh,qwen,manual}`, `--agent-cmd JSON`, `--retries N`,
+`--jobs N`, `--agent-harness NAME`, `--agent-model NAME_OR_URL`,
+`--agent-model-api-key KEY`, `--agent-model-name MODEL`,
+`--agent {codex,claude,dsh,qwen,dots,manual}` (legacy), `--agent-cmd JSON`, `--retries N`,
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
 2; see *Running only some of the steps*). Opt-in audits:
-`--defect-audit {codex-lite,codex,claude,dsh,manual}`, `--defect-audit-cmd JSON`,
+`--defect-audit {codex-lite,codex,claude,dsh,qwen,dots,manual}`, `--defect-audit-cmd JSON`,
 `--no-defect-audit` and `--conflict-agent {…}`, `--conflict-agent-cmd JSON`,
 `--no-conflict-agent` select the two optional LLM audits (the defect audit is
 on by default with an agent backend; the conflict LLM pass is off by default).
@@ -1974,7 +2178,8 @@ sentence-local rule missed. These rules now enumerate them; the tests are in
   Reporting Summary are PDFs; the scan previously opened only DOCX/text).
 * **`sync-code --root <root>`** copies the maintained module bundle
   (`paper_pipeline.py`, `paper_docx_format.py`, `paper_redlines_adapter.py`,
-  `paper_qwen_agent.py`) into a root and records their digests. A
+  `paper_qwen_agent.py`, `paper_dots_agent.py`, `paper_model_agent.py`) into a
+  root and records their digests. A
   post-manifest root whose maintained modules have changed refuses a
   state-changing command until it is synced or recreated; `status` prints the
   same warning. `setup` records the module manifest, so a new driver with an
@@ -2395,15 +2600,15 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 114 KB | 47 KB | 59% |
-| cold_start_review | 57 KB | 22 KB | 61% |
-| audit | 84 KB | 41 KB | 51% |
-| revise | 112 KB | 58 KB | 48% |
-| integrate | 111 KB | 58 KB | 47% |
-| rewrite | 104 KB | 55 KB | 47% |
-| judge | 99 KB | 69 KB | 30% |
-| revision_audit | 21 KB | 11 KB | 45% |
-| revision_repair | 21 KB | 7 KB | 62% |
+| review | 116 KB | 48 KB | 58% |
+| cold_start_review | 59 KB | 24 KB | 59% |
+| audit | 86 KB | 43 KB | 49% |
+| revise | 114 KB | 60 KB | 47% |
+| integrate | 113 KB | 60 KB | 46% |
+| rewrite | 106 KB | 56 KB | 46% |
+| judge | 101 KB | 71 KB | 30% |
+| revision_audit | 23 KB | 13 KB | 41% |
+| revision_repair | 22 KB | 9 KB | 57% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
@@ -3100,7 +3305,7 @@ a clean panel. Each round's judge wave is followed by ITS OWN audit (two
 rounds produce two audits; `decide` only back-fills a round that has no audit
 yet). The LLM conflict auditor is OFF by default: only the mechanical conflicts
 are written, and every row keeps `origin: mechanical`. `--conflict-agent
-{codex-lite|codex|claude|dsh}` / `--conflict-agent-cmd JSON` (or the audit-specific
+{codex-lite|codex|claude|dsh|qwen|dots}` / `--conflict-agent-cmd JSON` (or the audit-specific
 `PAPER_CONFLICT_AGENT_CMD`) turn the LLM pass on for that invocation; its
 semantic candidates are schema-checked and merged, never trusted blindly
 (`--no-conflict-agent` and `--conflict-agent manual` keep it off). The separate
@@ -3132,8 +3337,8 @@ severity totals re-counted over the TP rows only. **The champion selection
 still reads the non-audited aggregation**: the audited dict is a copy, `sel` is
 computed before it, and neither the pin nor the winner is touched. The audit is
 ON by default with a real agent backend (the judge-side
-`codex`/`claude`/`dsh` preset); `--defect-audit
-{codex-lite|codex|claude|dsh}`, `--defect-audit-cmd JSON`
+`codex`/`claude`/`dsh`/`qwen`/`dots` preset); `--defect-audit
+{codex-lite|codex|claude|dsh|qwen|dots}`, `--defect-audit-cmd JSON`
 or `PAPER_DEFECT_AUDIT_CMD` choose/force a backend, and `--no-defect-audit`
 (or `--defect-audit manual`) writes only the non-audited reports. A manual or
 custom/stub judge backend does not silently get a second protocol -- opt in
@@ -3466,6 +3671,7 @@ its four integration runs never started.
 | `paper_docx_format.py` | thin loader for the OOXML style/formatting scanner, fixer and blank-page checker |
 | `paper_docx_format_parts/` | the formatter's implementation (core XML/field primitives, text rules, layout/edit rules, report + CLI) — every file is under 10,000 lines |
 | `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
+| `paper_qwen_agent.py` / `paper_dots_agent.py` / `paper_model_agent.py` | provider adapters behind `--agent-model` and the legacy `--agent qwen`/`--agent dots`; all are frozen into a root by `setup` and carried by `sync-code` |
 | `AGENTS.md` | the agent-facing contract (rules the sessions and reviewers are held to) |
 | `revision_history/` | the dated working records — audit findings, revision plans, validation ledgers and the history log; repository bookkeeping, never submitted |
 | `revision_history/REMAINING_ISSUES_TRIAGE_2026-1009.md` | the 2026-10-09 human triage of the two audited final packages |
@@ -3535,7 +3741,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 193 suites (a few
+any failure. They are independent, so run them in parallel — 195 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

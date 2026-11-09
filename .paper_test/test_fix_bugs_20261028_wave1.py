@@ -80,10 +80,11 @@ def test_f01_f36_f43() -> None:
           bool(m) and int(m.group(1)) == suites, f"README={m and m.group(1)} tree={suites}")
 
     helped = run_py(WS / "paper_pipeline.py", "--help").stdout
-    check("F36 --help accepts the qwen agent the parser accepts",
-          "[--agent codex|claude|dsh|qwen|manual]" in helped
-          and "[--judge-agent codex|claude|dsh|qwen|manual]" in helped)
-    check("F36 AGENT_CHOICES still carries qwen", "qwen" in pp.AGENT_CHOICES)
+    check("F36 --help accepts the qwen and dots agents the parser accepts",
+          "[--agent codex|claude|dsh|qwen|dots|manual]" in helped
+          and "[--judge-agent codex|claude|dsh|qwen|dots|manual]" in helped)
+    check("F36 AGENT_CHOICES still carries qwen and dots",
+          "qwen" in pp.AGENT_CHOICES and "dots" in pp.AGENT_CHOICES)
 
     spec = pp.parse_only_spec("1,3:merge")
     check("F43 1,3:merge parses as round 1 full + round 3 integrate",

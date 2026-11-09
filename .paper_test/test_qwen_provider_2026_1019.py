@@ -177,6 +177,39 @@ def test_tunnel_off_error():
     check("the probe reports an unreachable endpoint", not ok and bool(perr), perr)
 
 
+def test_claude_harness():
+    print()
+    print("== qwen through Claude Code's Anthropic Messages route ==")
+    c = cfg("http://127.0.0.1:18000/v1", harness="claude")
+    env = qwen.claude_env(c)
+    check("the Anthropic root is the vLLM base without /v1",
+          env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:18000"
+          and env["ANTHROPIC_AUTH_TOKEN"] == "dummy"
+          and env["ANTHROPIC_MODEL"] == "qwen3.8-27b")
+    check("the Claude command is the documented print form",
+          qwen.claude_argv(c)[:2] == ["claude", "--permission-mode"])
+    check("the public harness name normalizes to the adapter spelling",
+          qwen.config(type("A", (), {"harness": "claude-code"})())["harness"]
+          == "claude")
+
+
+def test_dsh_turn_events():
+    print()
+    print("== the dsh turn-end event shapes ==")
+    check("the older /turn_end/ status=ok is a completed turn",
+          qwen._dsh_turn_failed(b'{"type":"turn_end","status":"ok"}') is False)
+    check("the older /turn_end/ status=cancelled is a failed turn",
+          qwen._dsh_turn_failed(b'{"type":"turn_end","status":"cancelled"}') is True)
+    check("the current /status phase=turn_end kind=completed/ is completed",
+          qwen._dsh_turn_failed(
+              b'{"type":"status","phase":"turn_end","reason":{"kind":"completed"}}'
+          ) is False)
+    check("the current /reason kind=error/ is a failed turn",
+          qwen._dsh_turn_failed(
+              b'{"type":"status","phase":"turn_end","reason":{"kind":"error"}}'
+          ) is True)
+
+
 def test_live_probe():
     if os.environ.get("PAPER_QWEN_LIVE") not in ("1", "true", "yes"):
         print("[skip] live endpoint probe  -- set PAPER_QWEN_LIVE=1 to enable")
@@ -188,7 +221,8 @@ def test_live_probe():
 
 def main():
     for fn in (test_argv_and_patch, test_probe_chat_and_tools,
-               test_tunnel_off_error, test_pipeline_integration, test_live_probe):
+               test_tunnel_off_error, test_pipeline_integration,
+               test_claude_harness, test_dsh_turn_events, test_live_probe):
         try:
             fn()
         except Exception as e:                                        # noqa: BLE001

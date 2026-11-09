@@ -15,6 +15,8 @@ pipeline_config.json). The harness is chosen with PAPER_QWEN_HARNESS:
 
     codex  (default)  `codex exec` with a custom `model_provider=qwen` route
     dsh               `dsh --profile headless` with a generated llm-pi-ai patch
+    claude            `claude --print` against vLLM's Anthropic Messages
+                      endpoint (when the server serves it)
     chat              a direct /v1/chat/completions call (text-only; no tools)
 
 The SSH tunnel is started only when the endpoint is not already reachable. A
@@ -26,7 +28,7 @@ Environment (all optional):
     PAPER_QWEN_BASE_URL        default http://127.0.0.1:18000/v1
     PAPER_QWEN_MODEL           default qwen3.8-27b
     PAPER_QWEN_API_KEY         default `dummy` (vLLM usually needs no key)
-    PAPER_QWEN_HARNESS         codex | dsh | chat (default codex)
+    PAPER_QWEN_HARNESS         codex | dsh | claude | chat (default codex)
     PAPER_QWEN_REASONING_EFFORT low | medium | xhigh (default low; qwen
                                 rejects codex's `max`)
     PAPER_QWEN_TUNNEL          auto | off | require (default auto)
@@ -95,6 +97,12 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _normalize_harness(value: str) -> str:
+    """Accept both the public harness names and the adapter spellings."""
+    name = str(value).strip().lower().replace("_", "-").replace(" ", "-")
+    return {"gpt-codex": "codex", "claude-code": "claude"}.get(name, name)
+
+
 def config(args=None) -> dict:
     """Resolve the effective endpoint/harness configuration (args > env)."""
     args = args or argparse.Namespace()
@@ -105,8 +113,8 @@ def config(args=None) -> dict:
         "model": getattr(args, "model", None) or _env("PAPER_QWEN_MODEL", DEFAULT_MODEL),
         "api_key": getattr(args, "api_key", None) or _env("PAPER_QWEN_API_KEY",
                                                           DEFAULT_API_KEY),
-        "harness": (getattr(args, "harness", None)
-                    or _env("PAPER_QWEN_HARNESS", DEFAULT_HARNESS)).lower(),
+        "harness": _normalize_harness(getattr(args, "harness", None)
+                                       or _env("PAPER_QWEN_HARNESS", DEFAULT_HARNESS)),
         "effort": (getattr(args, "reasoning_effort", None)
                    or _env("PAPER_QWEN_REASONING_EFFORT", DEFAULT_EFFORT)).lower(),
         "tunnel": (getattr(args, "tunnel", None)
@@ -347,6 +355,29 @@ def dsh_patch_text(cfg: dict) -> str:
 """
 
 
+def claude_argv(cfg: dict) -> list:
+    """`claude --print` against vLLM's Anthropic Messages endpoint."""
+    return ["claude", "--permission-mode", "bypassPermissions", "--print"]
+
+
+def claude_env(cfg: dict) -> dict:
+    """Point Claude Code at the same vLLM server (Anthropic Messages)."""
+    root = cfg["base_url"]
+    if root.endswith("/v1"):
+        root = root[:-3]
+    return dict(
+        os.environ,
+        ANTHROPIC_BASE_URL=root,
+        ANTHROPIC_AUTH_TOKEN=cfg["api_key"] or "dummy",
+        ANTHROPIC_API_KEY=cfg["api_key"] or "dummy",
+        ANTHROPIC_MODEL=cfg["model"],
+        ANTHROPIC_DEFAULT_SONNET_MODEL=cfg["model"],
+        ANTHROPIC_DEFAULT_OPUS_MODEL=cfg["model"],
+        ANTHROPIC_DEFAULT_HAIKU_MODEL=cfg["model"],
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+    )
+
+
 def _writable(path: Path) -> bool:
     try:
         probe = path / ".paper_qwen_write_test"
@@ -499,7 +530,14 @@ def _echo_stdout(data: bytes) -> None:
 
 
 def _dsh_turn_failed(line: bytes):
-    """True/False for a `turn_end` event line, None for every other line."""
+    """True/False for a turn-end event line, None for every other line.
+
+    Two shapes are accepted because the harness has emitted both: the older
+    `{"type":"turn_end","status":...}` record and the current
+    `{"type":"status","phase":"turn_end","reason":{"kind":...}}` record. A
+    completion the adapter cannot parse must not turn a provider error into a
+    successful stage, so the allowlist is explicit either way.
+    """
     s = line.strip()
     if not s.startswith(b"{"):
         return None
@@ -507,18 +545,28 @@ def _dsh_turn_failed(line: bytes):
         event = json.loads(s)
     except ValueError:
         return None
-    if not isinstance(event, dict) or event.get("type") != "turn_end":
+    if not isinstance(event, dict):
+        return None
+    phase = str(event.get("phase") or "").lower()
+    if event.get("type") != "turn_end" and not (
+            event.get("type") == "status" and phase == "turn_end"):
         return None
     status = str(event.get("status") or "").lower()
-    kind = str(event.get("kind") or "").lower()
+    reason = event.get("reason")
+    reason_kind = ""
+    if isinstance(reason, dict):
+        reason_kind = str(reason.get("kind") or "").lower()
+    kind = str(event.get("kind") or reason_kind).lower()
     if kind in ("error", "failed"):
         return True
     # An explicit allowlist, not a denylist: `cancelled`, `interrupted`,
     # `aborted`, `timeout` and any future non-success status are incomplete.
-    # Treating every status except error/failed as success let a cancelled
-    # turn pass as a completed deliverable (F71).
-    return status not in ("", "ok", "success", "succeeded", "completed",
-                          "complete", "done", "finished")
+    ok = ("ok", "success", "succeeded", "completed", "complete", "done", "finished")
+    if status:
+        return status not in ok
+    if kind:
+        return kind not in ok
+    return False
 
 
 def run_dsh_streaming(cmd: list, env: dict) -> tuple:
@@ -577,7 +625,9 @@ def run_dsh_streaming(cmd: list, env: dict) -> tuple:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--harness", choices=("codex", "dsh", "chat"), default=None,
+    p.add_argument("--harness",
+                   choices=("codex", "gpt-codex", "dsh", "claude", "claude-code", "chat"),
+                   type=_normalize_harness, default=None,
                    help="which harness to point at qwen (default: PAPER_QWEN_HARNESS or codex)")
     p.add_argument("--model", default=None)
     p.add_argument("--base-url", default=None)
@@ -603,8 +653,8 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     cfg = config(args)
     atexit.register(_cleanup)
-    if cfg["harness"] not in ("codex", "dsh", "chat"):
-        print(f"qwen: unknown harness {cfg['harness']!r}; use codex, dsh or chat",
+    if cfg["harness"] not in ("codex", "dsh", "claude", "chat"):
+        print(f"qwen: unknown harness {cfg['harness']!r}; use codex, dsh, claude or chat",
               file=sys.stderr)
         return 2
     if args.probe:
@@ -682,6 +732,11 @@ def main(argv=None) -> int:
             return 2
         env.update(denv)
         print(f"[qwen] {cfg['base_url']} model={cfg['model']} harness=dsh "
+              f"effort={cfg['effort']}", file=sys.stderr)
+    elif cfg["harness"] == "claude":
+        cmd = claude_argv(cfg)
+        env = claude_env(cfg)
+        print(f"[qwen] {cfg['base_url']} model={cfg['model']} harness=claude "
               f"effort={cfg['effort']}", file=sys.stderr)
     else:
         print(f"qwen: unknown harness {cfg['harness']!r}", file=sys.stderr)
