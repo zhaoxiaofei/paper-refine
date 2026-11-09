@@ -193,8 +193,8 @@ What that means for you:
 def execution_profile_of(ctx) -> str:
     """The root's recorded execution profile (`high` when the key is absent).
 
-    A root created before the feature carries no key and keeps the pipeline's
-    original behaviour, which is what `high` means.
+    A root created before the feature carries no key and keeps the inline
+    profile, which is what `high` means.
     """
     raw = str((getattr(ctx, "cfg", None) or {}).get("execution_profile") or "").strip().lower()
     return raw if raw in (PROFILE_HIGH, PROFILE_MEDIUM) else PROFILE_HIGH
@@ -311,7 +311,7 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     break a judge's blinding).
     """
     if profile != PROFILE_MEDIUM:
-        return CONTRADICTION_RULE + text
+        return ensure_external_content_rule(CONTRADICTION_RULE + text)
     from pathlib import Path
 
     sb = Path(sandbox)
@@ -380,7 +380,7 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
         # default path in the contract's example rather than naming a sidecar
         # that does not exist.
         contract = contract.replace(PROFILE_RULES_REL, rel if sections else PROFILE_RULES_REL)
-    return contract + CONTRADICTION_RULE + text
+    return contract + ensure_external_content_rule(CONTRADICTION_RULE + text)
 
 
 # ---------------------------------------------------------------------------

@@ -1694,7 +1694,7 @@ def _read_stream_capped(stream, cap: int) -> tuple:
     return "".join(kept), size
 
 
-def _terminate_agent_tree(proc: subprocess.Popen) -> None:
+def _terminate_agent_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
     """Kill an agent session's WHOLE process group (see _execute_attempt_in).
 
     A timeout used to kill only the direct child: a codex/claude helper, a
@@ -1703,6 +1703,10 @@ def _terminate_agent_tree(proc: subprocess.Popen) -> None:
     been renamed aside and a fresh attempt started. The session is started with
     `start_new_session=True`, so SIGTERM (then SIGKILL) to its process group
     reaches every descendant that did not deliberately leave the group.
+
+    `grace` is the SIGTERM-to-SIGKILL window. The timeout path uses the
+    five-second default; the Ctrl-C/SIGTERM handler uses a short window because
+    the operator asked to stop now.
     """
     # os.getpgid/os.killpg are POSIX-only: on native Windows the attribute is
     # MISSING (AttributeError, not OSError), so a timed-out agent raised out of
@@ -1726,7 +1730,7 @@ def _terminate_agent_tree(proc: subprocess.Popen) -> None:
     except OSError:
         pass
     try:
-        proc.wait(timeout=5)
+        proc.wait(timeout=grace)
     except subprocess.TimeoutExpired:
         pass
     # The LEADER exiting does not mean the group is gone: a child may ignore
@@ -1745,6 +1749,131 @@ def _terminate_agent_tree(proc: subprocess.Popen) -> None:
         pass
 
 
+# Every agent process currently in flight. A terminal Ctrl-C sends SIGINT to
+# the orchestrator's foreground process group, but each session is deliberately
+# started in its OWN session (`start_new_session=True`) so a timeout can kill
+# its descendants. That isolation also means a Ctrl-C does NOT reach the agent:
+# without this registry the orchestrator exits and the agent keeps writing into
+# a sandbox the next `run` will rebuild. The signal handler below terminates
+# the registered trees and then re-raises, so cancellation is actually a stop.
+_ACTIVE_AGENT_PROCS = set()
+_ACTIVE_AGENT_LOCK = threading.RLock()
+_AGENT_INTERRUPT_INSTALLED = False
+
+
+def _register_active_agent(proc: subprocess.Popen) -> None:
+    with _ACTIVE_AGENT_LOCK:
+        _ACTIVE_AGENT_PROCS.add(proc)
+
+
+def _unregister_active_agent(proc: subprocess.Popen) -> None:
+    with _ACTIVE_AGENT_LOCK:
+        _ACTIVE_AGENT_PROCS.discard(proc)
+
+
+def _active_agents_snapshot() -> list:
+    with _ACTIVE_AGENT_LOCK:
+        return list(_ACTIVE_AGENT_PROCS)
+
+
+def terminate_active_agents(grace: float = 0.5) -> int:
+    """Terminate every in-flight agent process tree; return how many were found.
+
+    Idempotent: a process that the timeout path already killed is still in the
+    registry until its worker's `finally` removes it, and a second kill is a
+    no-op (the Popen pid is gone).
+    """
+    procs = _active_agents_snapshot()
+    for proc in procs:
+        _terminate_agent_tree(proc, grace=grace)
+    return len(procs)
+
+
+def install_agent_interrupt_handlers() -> bool:
+    """Make Ctrl-C/SIGTERM terminate in-flight agent trees before exiting.
+
+    Only the main thread may install signal handlers. The previous handlers are
+    restored before the exception is raised, so a second Ctrl-C keeps its normal
+    meaning (the first one has already stopped the agents). Returns True when
+    this call installed them, False when they were already installed or the
+    platform/thread cannot install them.
+    """
+    global _AGENT_INTERRUPT_INSTALLED
+    if _AGENT_INTERRUPT_INSTALLED:
+        return False
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    previous = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous[signum] = signal.getsignal(signum)
+        except (OSError, ValueError):
+            previous[signum] = signal.SIG_DFL
+
+    def _handler(signum, _frame):
+        terminate_active_agents()
+        try:
+            prev = previous.get(signum, signal.SIG_DFL)
+            signal.signal(signum, prev if (callable(prev) or prev == signal.SIG_IGN)
+                          else signal.SIG_DFL)
+        except (OSError, ValueError):
+            pass
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(128 + int(signum))
+
+    installed = False
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(signum, _handler)
+            installed = True
+        except (OSError, ValueError):
+            continue
+    _AGENT_INTERRUPT_INSTALLED = installed
+    return installed
+
+
+def effective_agent_model(cmd) -> dict:
+    """A best-effort, secret-free label for the model a session will use.
+
+    The Codex/Claude/DSH presets own their model in the operator's CLI config;
+    the pipeline cannot read it reliably and must not invent it. The Qwen
+    adapter's model is selected by `PAPER_QWEN_MODEL`/`PAPER_QWEN_HARNESS`, so
+    those are recorded exactly. The returned dict is stored on the run record;
+    `source` says whether the value is the effective model or a declaration that
+    the CLI owns it.
+    """
+    argv = [str(x) for x in (cmd or [])]
+    exe = os.path.basename(argv[0]).lower() if argv else ""
+    if exe == "paper_qwen_agent.py" or "paper_qwen_agent" in exe:
+        return {"name": os.environ.get("PAPER_QWEN_MODEL") or "qwen3.8-27b",
+                "harness": os.environ.get("PAPER_QWEN_HARNESS") or "codex",
+                "source": "PAPER_QWEN_MODEL/PAPER_QWEN_HARNESS"}
+    return {"name": None, "harness": None,
+            "source": "external CLI config (not recorded; the CLI owns the model)"}
+
+
+def agent_session_env(sb: Path) -> dict:
+    """Environment for one agent session, with MCP containment made explicit.
+
+    The two DOCX MCP servers read `DOCX_MCP_ALLOWED_ROOTS`; unset means no
+    containment (their README says so). The pipeline is the process that drives
+    those servers, so it adds the session's own sandbox to whatever roots the
+    operator configured (or sets the list to the sandbox when there is none).
+    This cannot be a full OS sandbox: the agent CLI still needs its provider
+    credential, and the pipeline must not guess which backend-specific
+    variables are required. It does close the file-access hole the MCP tools
+    otherwise leave open by default.
+    """
+    env = dict(os.environ)
+    sandbox = str(Path(sb).resolve())
+    roots = [p for p in (env.get("DOCX_MCP_ALLOWED_ROOTS") or "").split(os.pathsep) if p]
+    if sandbox not in roots:
+        roots.append(sandbox)
+    env["DOCX_MCP_ALLOWED_ROOTS"] = os.pathsep.join(roots)
+    return env
+
+
 def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
                         prompt_name: str = PROMPT_FILE, log_name: str = "_agent.log",
                         archive_marker: bool = True) -> dict:
@@ -1759,11 +1888,20 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     # start: an unbounded `read_text()` on a planted huge file OOMed the
     # orchestrator and a FIFO blocked it before the agent launched (F38).
     logf = sb / log_name
+    # What the model actually received and which command produced it: a run
+    # record used to name only the agent PRESET, so a prompt edit or a different
+    # model configuration left no trace on the attempt. The digest is over the
+    # bytes read here (the same bytes piped to the CLI), not over PROMPT.md as
+    # it may look later -- the sandbox is agent-writable.
+    rec["agent_command"] = [redact_secrets(str(x)) for x in cmd]
+    rec["prompt_file"] = prompt_name
+    rec["agent_model"] = effective_agent_model(cmd)
     prompt = read_text_bounded(sb / prompt_name)
     if prompt is None:
         return {"rc": None, "dur": 0.0, "log": str(logf), "failure_kind": "",
                 "error": (f"{prompt_name} could not be read (a symlink/non-regular file, "
                           f"unreadable, or over the byte budget); the attempt was not launched")}
+    rec["prompt_sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     if archive_marker:
         # A previous attempt's marker must never be mistaken for this attempt's result.
         archive_stale_marker(sb, rec["id"])
@@ -1782,6 +1920,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, cwd=str(sb), text=True,
                                 encoding="utf-8", errors="replace",
+                                env=agent_session_env(sb),
                                 start_new_session=True)
     except FileNotFoundError as e:
         proc = None
@@ -1795,6 +1934,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         proc = None
         rc, exc = None, f"execution error: {e}"
     if proc is not None:
+        _register_active_agent(proc)
         # Stream both pipes through capped readers instead of `communicate()`:
         # the whole transcript used to be held in memory before it was appended
         # to _agent.log (F39).
@@ -1819,15 +1959,18 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
             reader.start()
             readers.append(reader)
         try:
-            rc, exc = proc.wait(timeout=(timeout or None)), None
-        except subprocess.TimeoutExpired:
-            _terminate_agent_tree(proc)
-            rc, exc = None, f"TIMEOUT after {timeout}s"
-        except Exception as e:  # noqa: BLE001
-            _terminate_agent_tree(proc)
-            rc, exc = None, f"execution error: {e}"
-        for reader in readers:
-            reader.join(15)
+            try:
+                rc, exc = proc.wait(timeout=(timeout or None)), None
+            except subprocess.TimeoutExpired:
+                _terminate_agent_tree(proc)
+                rc, exc = None, f"TIMEOUT after {timeout}s"
+            except Exception as e:  # noqa: BLE001
+                _terminate_agent_tree(proc)
+                rc, exc = None, f"execution error: {e}"
+            for reader in readers:
+                reader.join(15)
+        finally:
+            _unregister_active_agent(proc)
         out, out_total = captured.get("out", ("", 0))
         err, err_total = captured.get("err", ("", 0))
         dropped = []
@@ -1839,11 +1982,20 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
             truncation = ("\n[OUTPUT TRUNCATED at " + f"{MAX_TOOL_OUTPUT_BYTES} chars per "
                           f"stream: " + ", ".join(dropped) + "]\n")
     dur = time.time() - t0
+    # The transcript is the audit trail the operator reads after a failure, and
+    # an agent can print anything (including a provider key) before it is
+    # stopped. Redact known secret-shaped environment values, never the prompt or
+    # the package text. The state record's argv is redacted at the same time.
+    safe_cmd = redact_secrets(" ".join(cmd))
+    safe_out = redact_secrets(out)
+    safe_err = redact_secrets(err)
+    safe_exc = exc if exc is None else redact_secrets(exc)
     try:
         append_text_no_follow(logf,
                               f"\n===== attempt {next_attempt_number(rec)} start {started_at} =====\n"
-                              f"cmd: {' '.join(cmd)}{truncation}\n--- stdout ---\n{out}\n--- stderr ---\n{err}\n"
-                              f"===== rc={rc} dur={dur:.1f}s error={exc} =====\n")
+                              f"cmd: {safe_cmd}{truncation}\n--- stdout ---\n{safe_out}\n"
+                              f"--- stderr ---\n{safe_err}\n"
+                              f"===== rc={rc} dur={dur:.1f}s error={safe_exc} =====\n")
     except OSError:
         pass
     failure_kind = ""
@@ -1859,6 +2011,10 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         exc = ("the agent request exceeded the provider's payload/context limit "
                "(HTTP 413 / request too large); a continuation would resend the same "
                "oversized context, so a fresh attempt is required")
+    # The same redaction applies to the error the run record and the console
+    # keep: a process failure can quote a command line or a provider response.
+    if exc is not None:
+        exc = redact_secrets(exc)
     return {"rc": rc, "dur": dur, "error": exc, "log": str(logf),
             "failure_kind": failure_kind}
 
@@ -2180,7 +2336,13 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
             delay = backoff_delay(retry_backoff, failures, retry_backoff_max)
             if delay:
                 wait_backoff(delay, retry_backoff_max, label, to_execute, ctx)
-            results = execute_wave(ctx, to_execute, cmd, timeout, jobs)
+            try:
+                results = execute_wave(ctx, to_execute, cmd, timeout, jobs)
+            except KeyboardInterrupt:
+                ctx.save_state()
+                print("\n[run] interrupted: active agent sessions were terminated; "
+                      "state saved. Resume with `run` (or reset one run with `retry`).")
+                raise
             apply_results(ctx, results)
             for rid in to_execute:
                 rec = ctx.run(rid)
@@ -4203,7 +4365,13 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
             mark = "" if k in arms else "  [SKIPPED: integrators bit clear]"
             print(f"[run] r{r}   {integrate_vid(k)} = {src} <- "
                   f"({', '.join(v for v in pool if v != src)}){mark}")
-    ok, paused = run_round_runs(ctx, r, label=f"r{r}", only=only, **ph)
+    try:
+        ok, paused = run_round_runs(ctx, r, label=f"r{r}", only=only, **ph)
+    except KeyboardInterrupt:
+        ctx.save_state()
+        print("\n[run] interrupted: active agent sessions were terminated; state saved. "
+              "Resume with `run` (or reset one run with `retry`).")
+        raise
     if not ok:
         return False, paused
 

@@ -3486,7 +3486,8 @@ def materialize_feedback(ctx: Ctx, r: int) -> dict:
     if not prompt.is_file():
         _copy_session_tools(sb)
         write_text_atomic(prompt,
-                          feedback_prompt(ctx, sb, r, seed) + note + shared_blocks())
+                          ensure_external_content_rule(
+                              feedback_prompt(ctx, sb, r, seed) + note + shared_blocks()))
     rec = ctx.register(rid, "feedback", r, f"runs/{rid}", produces=rid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
@@ -3515,7 +3516,8 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
     if not prompt.is_file():
         _copy_session_tools(sb)
         write_text_atomic(prompt,
-                          concerns_prompt(ctx, sb, r, seed) + note + shared_blocks())
+                          ensure_external_content_rule(
+                              concerns_prompt(ctx, sb, r, seed) + note + shared_blocks()))
     rec = ctx.register(rid, "concerns", r, f"runs/{rid}", produces=rid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
@@ -3889,8 +3891,9 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
     if not prompt.is_file():
         _copy_session_tools(sb)
         write_text_atomic(prompt,
-                          response_prompt(ctx, sb, r, target_label or target.parent.name,
-                                          ledger) + note + shared_blocks())
+                          ensure_external_content_rule(
+                              response_prompt(ctx, sb, r, target_label or target.parent.name,
+                                              ledger) + note + shared_blocks()))
     ledger_rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
     rec = ctx.register(rid, "response", r, f"runs/{rid}", upstream_run_id=ledger_rid,
                        package_run_id=package_rid,

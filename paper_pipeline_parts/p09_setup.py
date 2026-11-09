@@ -3567,9 +3567,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if args.timeout is None and manual and not judge_manual:
         judge_timeout = DEFAULTS["timeout"]
     if not manual:
-        print(f"[run] agent command: {' '.join(cmd)}")
+        print(f"[run] agent command: {redact_secrets(' '.join(cmd))}")
     if judge_manual or judge_cmd != cmd:
-        print("[run] judge sessions: " + ("manual" if judge_manual else " ".join(judge_cmd)))
+        print("[run] judge sessions: " + ("manual" if judge_manual else redact_secrets(" ".join(judge_cmd))))
     retries = max(0, int(args.retries))
     retry_backoff = max(0, int(getattr(args, "retry_backoff", DEFAULTS["retry_backoff"])))
     retry_backoff_max = max(0, int(getattr(args, "retry_backoff_max",

@@ -169,6 +169,37 @@ FOREIGN_GUARD_COMMANDS = (
 CURRENT_RUN_LOG = None
 
 
+_SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|secret|token|password|passwd|credential)")
+
+
+def secret_env_values() -> list:
+    """Long environment values whose NAMES look secret; never the names/values.
+
+    The list is used only to redact a transcript before it is written to disk.
+    A value must be at least eight characters so an ordinary short word that
+    happens to be an environment value is not replaced throughout a log.
+    """
+    values = set()
+    for name, value in os.environ.items():
+        if value and len(value) >= 8 and _SECRET_ENV_NAME_RE.search(name):
+            values.add(value)
+    return sorted(values, key=len, reverse=True)
+
+
+def redact_secrets(text: str) -> str:
+    """Mask known secret environment values in a transcript before logging it.
+
+    The prompt tells agents never to print credentials; this is the backstop
+    for a session that does. It is deliberately conservative: only values of
+    secret-named environment variables, and only values of eight or more
+    characters, so a manuscript word cannot be rewritten by accident.
+    """
+    text = "" if text is None else str(text)
+    for value in secret_env_values():
+        text = text.replace(value, "[REDACTED]")
+    return text
+
+
 def start_run_log(cmd: str, root, argv=None) -> Path:
     """Open `reports/<cmd>-<stamp>.log` and mirror stdout/stderr into it.
 
@@ -207,7 +238,7 @@ def start_run_log(cmd: str, root, argv=None) -> Path:
                 n += 1
         header = (f"# paper_pipeline {cmd} -- {utcnow()}\n"
                   f"# root: {Path(root).resolve()}\n"
-                  f"# argv: {' '.join(str(a) for a in (argv or []))}\n")
+                  f"# argv: {' '.join(redact_secrets(str(a)) for a in (argv or []))}\n")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(header)
         return path

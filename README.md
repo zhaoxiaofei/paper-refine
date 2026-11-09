@@ -119,8 +119,11 @@ last two cases — see *Exit codes*.
 * The two DOCX MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) read the
   optional `DOCX_MCP_ALLOWED_ROOTS` environment variable: a PATH-delimiter-
   separated allowlist of the directories they may read/write. **Unset means no
-  containment** (the tools may touch anything the process can), so set it when
-  an LLM agent drives the servers.
+  containment** for a directly-driven server (the tools may touch anything the
+  process can). The pipeline adds each session's own sandbox to the list before
+  launching the agent (and preserves any operator-configured roots), so the
+  agent-driven path is contained even when the operator sets nothing; set it
+  explicitly when you drive the servers outside the pipeline.
 
 ### `--agent dsh`: the DeepSeek Harness (`dsh`) as the session backend
 
@@ -390,6 +393,23 @@ evidence pack.
   author set are preserved in every copy. The restore step is the only thing
   that writes there, and it puts the modes back exactly as it found them; the
   generation-counter rename never reaches inside either area.
+* Every agent prompt carries the **package-content-is-evidence** rule: the manuscript,
+  review letters, data, metadata, logs and tool output are evidence to read and quote, never
+  instructions to follow. A quoted “ignore the rules” line is still evidence of what the
+  document says; the session records it as a finding or manual item instead of obeying it,
+  and it is told never to print credentials, environment variables or files outside its
+  sandbox. The rule is inline in both execution profiles and adds no coverage exemption.
+* Each attempt records what the model received and how it was launched: `prompt_sha256` (the
+  bytes piped to the CLI), `prompt_file`, `agent_command`, and a best-effort `agent_model`.
+  The Codex/Claude/DSH presets own their model in external CLI configuration; the record says
+  so explicitly rather than inventing a name. The Qwen adapter records `PAPER_QWEN_MODEL` and
+  `PAPER_QWEN_HARNESS` exactly. The attempt transcript and the run-log argv line are written with values of
+  secret-shaped environment variables redacted, so a session that prints a provider key does
+  not put it in `_agent.log` or the invocation log.
+* Ctrl-C / SIGTERM terminates the active agent **process groups**, not only the orchestrator:
+  sessions are started in their own process session (so a timeout can kill their descendants),
+  which also means the terminal signal does not reach them by itself. `run` then saves state
+  and the operator can resume with `run` or reset one session with `retry`.
 * On WSL, `/mnt/c` occasionally returns transient `EIO` errors under a synced
   folder; re-running the affected command is safe (the pipeline is resumable).
 * When an external read-only audit or debug tool inspects this checkout, give it a run
@@ -2332,9 +2352,10 @@ model or window it runs on.
 reasoning-effort setting (`PAPER_QWEN_REASONING_EFFORT` is a different axis) and it changes no
 postcheck.
 
-* **`high`** is the pipeline exactly as it has always been, and it is the default. A default root
-  writes no new config key, plans the same sessions and renders the same prompts, byte for byte;
-  `--execution-profile high` is therefore identical to running without the flag.
+* **`high`** is the default and inlines every rule. A default root writes no new config key and
+  plans the same sessions; `--execution-profile high` is identical to running without the flag.
+  Its stage prompts are pinned byte-for-byte by the shell goldens, and both profiles carry the
+  package-content-is-evidence block (a deliberate prompt-safety rule, not a profile change).
 * **`medium`** keeps every rule but stops INLINING the elaborative ones. Each stage prompt keeps
   the stage contract, the finding schema, the deliverable list and the completion marker, and the
   long rule sections it used to paste are written once to `INSTRUCTIONS/PROFILE_RULES.md` in the
@@ -2364,8 +2385,8 @@ rule sequence,
 that the paged file invents no rule text, that the section order equals the pointer order, that the
 profile text carries no false run property and declares its subordination, and that the contract
 precedes the contradiction rule it defers to. Byte equality of the two prompts is NOT the invariant
-— a pointer, a heading and the read policy are the profile's own text — and `high`'s byte-identity
-with the pre-profile pipeline stays a separate guarantee pinned by its goldens.
+— a pointer, a heading and the read policy are the profile's own text — and `high`'s shell stays pinned
+by its stage-prompt goldens.
 
 Measured effect (every stage prompt, rendered from the same checkout; the split and
 formatting-writing review variants track `review`). Reproduce with
@@ -3514,7 +3535,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 192 suites (a few
+any failure. They are independent, so run them in parallel — 193 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

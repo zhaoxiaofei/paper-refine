@@ -1482,6 +1482,13 @@ def main() -> None:
     # run's log is readable.
     args = parser.parse_args()
     install_timestamped_streams()
+    # Agent sessions are started in their own process session (so a timeout can
+    # kill their descendants). That also means a terminal Ctrl-C does not reach
+    # them: without this handler the orchestrator exits and the agent keeps
+    # writing into a sandbox the next run will rebuild. Install once, before any
+    # command can launch a session; the handler terminates the registered trees
+    # and then re-raises the interrupt.
+    install_agent_interrupt_handlers()
     cmd = getattr(args, "cmd", "")
     # A path is a pipeline root only when it is an existing directory carrying
     # one of the root's OWN files. `Ctx.load` creates `runs/` and `reports/` on
@@ -1533,4 +1540,11 @@ def main() -> None:
     skip_note = configure_hash_checks(bool(getattr(args, "skip_hash", False)))
     if skip_note:
         print(f"[{args.cmd}] WARNING: {skip_note}")
-    args.func(args)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        # Ctrl-C is an operator action, not a crash. The owning command saves
+        # its checkpoint before re-raising (see run_phase/drive_round), and the
+        # signal handler has already terminated the agent process groups; exit
+        # with the shell's interrupt status instead of a traceback.
+        sys.exit(130)

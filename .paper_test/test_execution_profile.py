@@ -9,8 +9,7 @@ What this suite pins:
     prompts render to the frozen sha256 below (a golden regenerated only by a
     deliberate prompt change), a default root's
     `pipeline_config.json` carries NO new key, and the round plan is the
-    documented one.  `high` is the default, so an untouched root is byte-
-    identical to the old code's.
+    documented one.  `high` is the default; its shell is the byte pin.
   * `medium` keeps every rule but pages the elaborative ones: each stage prompt
     is materially smaller, the paged text really ships in the sandbox
     (`INSTRUCTIONS/PROFILE_RULES.md`), and the stage contract is stated inline.
@@ -53,17 +52,17 @@ FAILS = []
 #     python .paper_test/render_stage_prompts.py .
 # and paste the hashes here in the SAME commit that changes the prompts.
 GOLDEN = {
-    "review": "6e6353b27c50b2c1",
-    "review_split_a": "327d5b54cb4f164d",
-    "review_scoped": "678b136a86ba9813",
-    "cold_start_review": "441812b4842dd7ca",
-    "audit": "0e889d016965104d",
-    "revise": "76f8589a2326339d",
-    "integrate": "be638a78417c4713",
-    "rewrite": "1b04625feaf3dc22",
-    "judge": "9459c8ecf39f6671",
-    "revision_audit": "471787f86df695ea",
-    "revision_repair": "547b6e25bf4f1260",
+    "review": "b264d0c8444ea4d8",
+    "review_split_a": "b068c62e2c9ac64a",
+    "review_scoped": "44111249aea66a69",
+    "cold_start_review": "075f65b2fc792ad3",
+    "audit": "40c484cd7a8c7432",
+    "revise": "66c5a88527cdf1ab",
+    "integrate": "30524801b7bf213e",
+    "rewrite": "66f4e302a3051e11",
+    "judge": "fec1c76129b9631f",
+    "revision_audit": "ebc0d2e2cf01e3cb",
+    "revision_repair": "e2b4b5bff262d0bf",
 }
 
 
@@ -124,8 +123,9 @@ def _render_sandbox(prefix: str) -> Path:
     return (Path(tempfile.mkdtemp(prefix=prefix)) / "r1_guided_review").resolve()
 
 
-def test_high_profile_is_the_old_pipeline() -> None:
-    """`high` renders the pre-profile prompts, byte for byte."""
+def test_high_profile_is_the_frozen_shell() -> None:
+    """`high` renders the frozen shell golden (regenerated only for a deliberate
+    prompt change; the package-content-is-evidence block is such a change)."""
     texts = render_prompts()
     bad = []
     for name, want in GOLDEN.items():
@@ -527,10 +527,27 @@ def test_medium_end_to_end() -> None:
     check("e2e/medium: every stage prompt states the medium profile", not small, str(small))
 
 
+def test_external_content_rule_everywhere() -> None:
+    """The untrusted-package rule is in every prompt, exactly once."""
+    P = pipeline_module()
+    rule = P.EXTERNAL_CONTENT_RULE
+    texts = render_prompts()
+    missing = [name for name, text in texts.items() if text.count(rule) != 1]
+    check("every stage prompt carries the content-is-evidence rule exactly once",
+          not missing, f"missing/duplicated: {missing}")
+    check("the rule labels package content as evidence, not instructions",
+          "EVIDENCE" in rule and "not an instruction" in rule
+          and "credentials" in rule and "environment variables" in rule)
+    one_shot = P.with_context_budget("TASK")
+    check("the one-shot prompt wrapper carries the content-is-evidence rule once",
+          one_shot.count(rule) == 1, f"count={one_shot.count(rule)}")
+
+
 if __name__ == "__main__":
-    test_high_profile_is_the_old_pipeline()
+    test_high_profile_is_the_frozen_shell()
     test_medium_profile_pages_the_elaborations()
     test_medium_matches_high_rules()
+    test_external_content_rule_everywhere()
     test_config_records_the_policy()
     test_plan_drops_the_guided_review()
     test_setup_refuses_a_round_with_no_finding_source()
