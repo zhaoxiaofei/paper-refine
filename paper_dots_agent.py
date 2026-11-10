@@ -67,7 +67,6 @@ import contextlib
 import json
 import math
 import os
-import random
 import shutil
 import subprocess
 import sys
@@ -116,46 +115,10 @@ DEFAULT_CHAT_MAX_TOKENS = _catalog_capacity(
 )
 DOCS_URL = "https://dots.ai/platform/docs"
 
-#: Per-LLM-call retry schedule.  The canonical policy is
-#: ``repos/common/llm_policy.json``; these constants are duplicated here because
-#: a paper-refine root freezes each adapter as one standalone file (rule 11), so
-#: the adapter cannot rely on a sibling module or JSON file existing at run time.
-_RETRY_INITIAL_SECONDS = 10.0
-_RETRY_MAX_SECONDS = 3600.0
-_RETRY_MULTIPLIER = 2.0
-_RETRY_MAX_RETRIES = 10
-_RETRY_JITTER_RATIO = 0.1
-_RETRY_HTTP_STATUSES = frozenset(
-    {408, 409, 425, 429, 500, 502, 503, 504, 529}
-)
-
-
-def _retry_delay(attempt: int) -> float:
-    """Seconds before retry ``attempt`` (1 = first retry), capped at one hour."""
-    exponent = max(0, int(attempt) - 1)
-    delay = _RETRY_INITIAL_SECONDS * (_RETRY_MULTIPLIER ** exponent)
-    delay = min(delay, _RETRY_MAX_SECONDS)
-    if _RETRY_JITTER_RATIO:
-        factor = (
-            1.0
-            - _RETRY_JITTER_RATIO
-            + 2.0 * _RETRY_JITTER_RATIO * random.random()
-        )
-        delay = min(delay * factor, _RETRY_MAX_SECONDS)
-    return max(0.0, delay)
-
-
-def _announce_retry(action: str, attempt: int, delay: float, detail: str) -> None:
-    print(
-        "[paper-dots] %s failed (%s); retry %d/%d in %.0fs"
-        % (action, detail, attempt, _RETRY_MAX_RETRIES, delay),
-        file=sys.stderr,
-        flush=True,
-    )
-
-
-_DSH_HOME_TMP = None    # a temporary DSH_HOME copy for a read-only ~/.dsh
-_PATCH_TMP = None       # the generated dsh patch file
+#: The per-LLM-call policy is owned by the shared ``model_runtime`` module
+#: (whose ``llm_retry`` copy reads ``llm_policy.json``).  Keeping one schedule
+#: here means the direct-chat client and the generated DSH ``retryPolicy``
+#: cannot drift.
 
 
 def _env(name: str, default: str = "") -> str:
@@ -171,9 +134,9 @@ def _int_env(name: str, default: int) -> int:
 
 
 def _normalize_harness(value: str) -> str:
-    """Accept both the public harness names and the adapter spellings."""
-    name = str(value).strip().lower().replace("_", "-").replace(" ", "-")
-    return {"gpt-codex": "codex", "claude-code": "claude"}.get(name, name)
+    """Accept the pipeline's harness spellings; only the three are valid."""
+    text = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+    return {"gpt-codex": "codex", "claude-code": "claude"}.get(text, text)
 
 
 def config(args=None) -> dict:
@@ -271,16 +234,17 @@ def _request_with_retry(
     conversation are untouched.  4xx answers other than the retryable set are
     returned immediately: resending a malformed request only burns time.
     """
+    schedule = rt.RETRY_SCHEDULE
     attempt = 0
     while True:
         status, body, err = _request(
             method, url, payload=payload, api_key=api_key, timeout=timeout
         )
-        retryable = bool(err) or status in _RETRY_HTTP_STATUSES
-        if not retryable or attempt >= _RETRY_MAX_RETRIES:
+        retryable = bool(err) or schedule.status_is_retryable(status)
+        if not retryable or attempt >= schedule.max_retries:
             return status, body, err
         attempt += 1
-        delay = _retry_delay(attempt)
+        delay = schedule.delay(attempt)
         detail = err or "HTTP %s" % status
         _announce_retry("%s %s" % (method, url.rsplit("/", 1)[-1]),
                         attempt, delay, detail)

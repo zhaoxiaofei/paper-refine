@@ -216,6 +216,35 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
         return 0, None, f"{type(e).__name__}: {e}"
 
 
+def _request_with_retry(
+    method: str,
+    url: str,
+    payload: dict = None,
+    api_key: str = "",
+    timeout: float = 10.0,
+) -> tuple:
+    """(status, body, error), retrying per-LLM-call failures with backoff."""
+    schedule = rt.RETRY_SCHEDULE
+    attempt = 0
+    while True:
+        status, body, err = _request(
+            method, url, payload=payload, api_key=api_key, timeout=timeout
+        )
+        retryable = bool(err) or status in schedule.retryable_statuses
+        if not retryable or attempt >= schedule.max_retries:
+            return status, body, err
+        attempt += 1
+        delay = schedule.delay(attempt)
+        print(
+            "[paper-qwen] %s %s failed (%s); retry %d/%d in %.0fs"
+            % (method, url.rsplit("/", 1)[-1], err or "HTTP %s" % status,
+               attempt, schedule.max_retries, delay),
+            file=sys.stderr,
+            flush=True,
+        )
+        time.sleep(delay)
+
+
 def probe_endpoint(cfg: dict, timeout: float = 4.0) -> tuple:
     """(ok, model_ids, error) from GET {base}/models."""
     status, body, err = _request("GET", f"{cfg['base_url']}/models",
@@ -520,9 +549,9 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
                # Reasoning is required for every completion: the chat budget
                # above covers the thinking trace plus the answer.
                "chat_template_kwargs": {"enable_thinking": True}}
-    status, body, err = _request("POST", f"{cfg['base_url']}/chat/completions",
-                                 payload=payload, api_key=cfg["api_key"],
-                                 timeout=600.0)
+    status, body, err = _request_with_retry(
+        "POST", f"{cfg['base_url']}/chat/completions",
+        payload=payload, api_key=cfg["api_key"], timeout=600.0)
     if err or status != 200 or not isinstance(body, dict):
         return "", err or f"HTTP {status}: {str(body)[:400]}"
     try:
