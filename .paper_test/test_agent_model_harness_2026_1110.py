@@ -84,10 +84,10 @@ def test_parser():
                              "--agent", "dsh", "--judge-agent", "codex"])
     check("the legacy options still parse",
           got.agent == "dsh" and got.judge_agent == "codex")
-    check("the model choices are the requested seven",
+    check("the model choices include the harness-default sentinel",
           tuple(pipe.AGENT_MODEL_CHOICES) == (
               "deepseek-flash", "gpt-sol", "gpt-terra", "claude-opus",
-              "claude-sonnet", "qwen38-27b", "dots3-note-preview"),
+              "claude-sonnet", "qwen38-27b", "dots3-note-preview", "default"),
           str(pipe.AGENT_MODEL_CHOICES))
     check("the harness choices are the requested three",
           tuple(pipe.AGENT_HARNESS_CHOICES) == ("dsh", "gpt-codex", "claude-code"),

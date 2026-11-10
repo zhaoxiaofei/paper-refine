@@ -3352,6 +3352,11 @@ AGENT_MODELS = {
         "default_harness": "dsh",
         "harnesses": ("dsh", "gpt-codex", "claude-code"),
     },
+    "default": {
+        "label": "Harness default", "id": "default", "family": "default",
+        "default_harness": "dsh",
+        "harnesses": ("dsh", "gpt-codex", "claude-code"),
+    },
 }
 AGENT_MODEL_CHOICES = tuple(AGENT_MODELS)
 AGENT_HARNESSES = {

@@ -358,6 +358,7 @@ STATE_VERSION = 3
 PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
                          "paper_redlines_adapter.py", "paper_qwen_agent.py",
                          "paper_dots_agent.py", "paper_model_agent.py",
+                         "model_runtime.py", "llm_retry.py", "llm_policy.json",
                          # The render/track shims are read beside the running
                          # driver (`visual_renderer_choices`), so a root that
                          # lacks them silently loses the highest-fidelity

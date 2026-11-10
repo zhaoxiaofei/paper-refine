@@ -674,7 +674,8 @@ def cmd_setup(args) -> None:
     # that preset; copy it at setup and let the module manifest gate a later
     # drift.
     for _adapter_name in ("paper_qwen_agent.py", "paper_dots_agent.py",
-                          "paper_model_agent.py"):
+                          "paper_model_agent.py", "model_runtime.py",
+                          "llm_retry.py", "llm_policy.json"):
         _adapter = script.with_name(_adapter_name)
         if _adapter.is_file():
             shutil.copy(_adapter, root / _adapter_name)
