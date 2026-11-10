@@ -298,6 +298,48 @@ QWEN_DEFAULT_EFFORT = "low"
 DOTS_DEFAULT_BASE_URL = "https://note3-prev-api.askdiandian.com/v1"
 DOTS_DEFAULT_MODEL = "dots3-note-prev"
 DOTS_DEFAULT_EFFORT = "medium"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_MODEL = "recursive/flint-v1.0:free"
+OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_XAI_MODEL = "grok-4.5"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+
+#: Every direct (non-harness) model API the three repos know about.  A
+#: ``key_env`` of ``None`` means the endpoint is local and keyless.
+API_PROVIDER_DEFAULTS: Dict[str, Dict[str, Optional[str]]] = {
+    "qwen": {
+        "base_url": QWEN_DEFAULT_BASE_URL,
+        "model": QWEN_DEFAULT_MODEL,
+        "key_env": None,
+        "api_key": QWEN_DEFAULT_API_KEY,
+    },
+    "dots": {
+        "base_url": DOTS_DEFAULT_BASE_URL,
+        "model": DOTS_DEFAULT_MODEL,
+        "key_env": "DOTS_API_KEY",
+        "api_key": None,
+    },
+    "openrouter": {
+        "base_url": DEFAULT_OPENROUTER_BASE_URL,
+        "model": DEFAULT_OPENROUTER_MODEL,
+        "key_env": OPENROUTER_KEY_ENV,
+        "api_key": None,
+    },
+    "xai": {
+        "base_url": DEFAULT_XAI_BASE_URL,
+        "model": DEFAULT_XAI_MODEL,
+        "key_env": "XAI_API_KEY",
+        "api_key": None,
+    },
+    "openai": {
+        "base_url": DEFAULT_OPENAI_BASE_URL,
+        "model": DEFAULT_OPENAI_MODEL,
+        "key_env": "OPENAI_API_KEY",
+        "api_key": None,
+    },
+}
 
 #: Environment variable the generated provider config names for a custom
 #: endpoint's key.  The reference implementation uses the PAPER_ spelling; the
