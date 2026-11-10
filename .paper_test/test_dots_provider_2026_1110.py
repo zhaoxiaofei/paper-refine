@@ -148,6 +148,13 @@ def test_argv_and_patch():
     check("dsh patch sets the default model",
           "agent-default-model" in patch and 'provider: dots' in patch
           and 'model: "dots3-note-prev"' in patch)
+    check("dsh patch retries each LLM call with 10s-to-3600s backoff",
+          "retryPolicy:" in patch and "initialDelayMs: 10000" in patch
+          and "maxDelayMs: 3600000" in patch and "RATE_LIMIT" in patch)
+    check("dsh patch routes compaction through a second Dots key",
+          "dots-compaction:" in patch
+          and "apiKeyEnv: DOTS_API_KEY_1474" in patch
+          and "summarizationProvider: dots-compaction" in patch)
 
 
 def test_probe_chat_and_tools():
