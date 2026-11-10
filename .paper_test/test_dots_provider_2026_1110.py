@@ -140,7 +140,7 @@ def test_argv_and_patch():
           'baseURL: "https://note3-prev-api.askdiandian.com/v1"' in patch
           and 'id: "dots3-note-prev"' in patch and "apiKeyEnv: DOTS_API_KEY" in patch)
     check("dsh patch declares the context/output caps",
-          "contextWindow: 393000" in patch and "maxTokens: 32768" in patch)
+          "contextWindow: 393000" in patch and "maxTokens: 65536" in patch)
     check("dsh patch does not invent a reasoning parameter",
           "reasoningEfforts: false" in patch)
     check("dsh patch stays on the documented token field",

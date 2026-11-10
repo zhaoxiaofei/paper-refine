@@ -38,8 +38,8 @@ Environment (all optional except the key):
     PAPER_DOTS_CONTEXT_WINDOW  default 393000 (the window the endpoint
                                enforces; 512K is advertised, but requests
                                above 393000 are rejected)
-    PAPER_DOTS_MAX_TOKENS      default 32768 (harness replies)
-    PAPER_DOTS_CHAT_MAX_TOKENS  default 80000 (single-shot)
+    PAPER_DOTS_MAX_TOKENS      default 65536 (harness replies)
+    PAPER_DOTS_CHAT_MAX_TOKENS  default 160000 (single-shot)
     PAPER_DOTS_CHECK_TOOLS     1 = probe tool_choice=auto before a session
     PAPER_DOTS_REQUIRE_TOOLS   same, but a missing tool capability fails instead
                                of warning
@@ -100,10 +100,10 @@ DEFAULT_CONTEXT_WINDOW = _catalog_capacity(
     "dots3-note-prev", "context_window", 393000
 )
 DEFAULT_MAX_TOKENS = _catalog_capacity(
-    "dots3-note-prev", "max_tokens", 32768
+    "dots3-note-prev", "max_tokens", 65536
 )
 DEFAULT_CHAT_MAX_TOKENS = _catalog_capacity(
-    "dots3-note-prev", "chat_max_tokens", 80000
+    "dots3-note-prev", "chat_max_tokens", 160000
 )
 DOCS_URL = "https://dots.ai/platform/docs"
 

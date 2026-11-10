@@ -234,7 +234,7 @@ key on the platform and export it as `DOTS_API_KEY`; the default endpoint is
 
 The endpoint and model are `PAPER_DOTS_BASE_URL` and `PAPER_DOTS_MODEL`; the
 capacity defaults are `PAPER_DOTS_CONTEXT_WINDOW=393000` and
-`PAPER_DOTS_MAX_TOKENS=32768`. `PAPER_DOTS_SKIP_PROBE=1` skips the
+`PAPER_DOTS_MAX_TOKENS=65536`. `PAPER_DOTS_SKIP_PROBE=1` skips the
 `/v1/models` preflight for a gateway that does not expose that listing. Check
 the route without running a session:
 

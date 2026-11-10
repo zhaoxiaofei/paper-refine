@@ -93,16 +93,16 @@
       "id": "dots3-note-prev",
       "provider": "dots",
       "context_window": 393000,
-      "max_tokens": 32768,
+      "max_tokens": 65536,
       "base_url": "https://note3-prev-api.askdiandian.com/v1",
       "api_key_env": "DOTS_API_KEY",
-      "chat_max_tokens": 80000,
+      "chat_max_tokens": 160000,
       "verified_at": "2026-11-10",
       "source": [
         "https://dots.ai/platform/docs \u2014 platform documentation; the page is JavaScript-only, so the advertised 512K window is taken from the operator's notes in these repos rather than read here.",
         "Enforced ceiling measured 2026-11-10: three gdp runs were rejected with HTTP 400 once prompt + max_tokens crossed 393,000 (traceIds 2f68..., ad38..., 43385...); the DSH headless profile declares contextWindow: 393000."
       ],
-      "notes": "512K is advertised, 393,000 is enforced; max_tokens 32,768 and chat_max_tokens 80,000 are harness policies."
+      "notes": "512K is advertised, 393,000 is enforced; max_tokens 65,536 and chat_max_tokens 160,000 are harness policies."
     }
   ]
 }
