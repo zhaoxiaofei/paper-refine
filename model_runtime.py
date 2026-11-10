@@ -1171,6 +1171,7 @@ def dsh_patch_text(
     provider_override: Optional[str] = None,
     context_window_override: Optional[int] = None,
     max_tokens_override: Optional[int] = None,
+    effort_override: Optional[str] = None,
     compaction_base_url: Optional[str] = None,
     endpoint_api_key_env: Optional[str] = None,
 ) -> str:
@@ -1272,7 +1273,7 @@ def dsh_patch_text(
                 int(settings["context_window"] or QWEN_CONTEXT_WINDOW),
                 int(settings["max_tokens"] or QWEN_MAX_TOKENS),
                 json.dumps(model),
-                json.dumps(settings["effort"] or QWEN_DEFAULT_EFFORT),
+                json.dumps(effort_override or settings["effort"] or QWEN_DEFAULT_EFFORT),
             )
         )
     if family == "dots":

@@ -510,11 +510,15 @@ def dsh_patch_text(cfg: dict) -> str:
         return ""
     selection = _selection(cfg)
     context_override = cfg.get("context") if cfg.get("context_explicit") else None
+    provider_override = None
+    if cfg.get("family") == "deepseek":
+        provider_override = _env("PAPER_DSH_DEEPSEEK_PROVIDER", "") or None
     return rt.dsh_patch_text(
         selection,
         base_url_override=cfg.get("dsh_base_url") or None,
         context_window_override=context_override,
         max_tokens_override=cfg.get("max_tokens"),
+        provider_override=provider_override,
         endpoint_api_key_env=cfg.get("api_key_env"),
     )
 

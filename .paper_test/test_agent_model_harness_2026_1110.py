@@ -186,6 +186,18 @@ def test_router_configs():
     patch = router.dsh_patch_text(c)
     check("dsh claude uses the anthropic route",
           'provider: "anthropic"' in patch and 'model: "claude-opus-5-5"' in patch)
+    old_provider = os.environ.get("PAPER_DSH_DEEPSEEK_PROVIDER")
+    os.environ["PAPER_DSH_DEEPSEEK_PROVIDER"] = "custom-deepseek"
+    try:
+        c = router.config(type("A", (), {"harness": "dsh", "model": "deepseek-flash"})())
+        patch = router.dsh_patch_text(c)
+        check("dsh deepseek honours PAPER_DSH_DEEPSEEK_PROVIDER",
+              'provider: "custom-deepseek"' in patch, patch)
+    finally:
+        if old_provider is None:
+            os.environ.pop("PAPER_DSH_DEEPSEEK_PROVIDER", None)
+        else:
+            os.environ["PAPER_DSH_DEEPSEEK_PROVIDER"] = old_provider
     c = router.config(type("A", (), {"harness": "gpt-codex", "model": "gpt-sol"})())
     argv = router.codex_argv(c)
     check("codex gpt selects the model with -m",
