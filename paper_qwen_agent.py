@@ -6,8 +6,8 @@ The pipeline normally launches a coding harness (`codex exec`, `dsh
 --profile headless`, ...). This adapter keeps that harness and points it at an
 OpenAI-compatible vLLM server:
 
-    ssh -p 52080 -N -L 18000:127.0.0.1:8000 zxf@101.6.31.113
-    curl http://127.0.0.1:18000/v1/models
+    ssh -p 52080 -N -L 8000:127.0.0.1:8000 zxf@101.6.31.113
+    curl http://127.0.0.1:8000/v1/models
     {"data":[{"id":"qwen3.8-27b", ...}]}
 
 It is selected with `--agent qwen` (or `"agent": "qwen"` in
@@ -25,7 +25,7 @@ had is left alone.
 
 Environment (all optional):
 
-    PAPER_QWEN_BASE_URL        default http://127.0.0.1:18000/v1
+    PAPER_QWEN_BASE_URL        default http://127.0.0.1:8000/v1
     PAPER_QWEN_MODEL           default qwen3.8-27b
     PAPER_QWEN_API_KEY         default `dummy` (vLLM usually needs no key)
     PAPER_QWEN_HARNESS         codex | dsh | claude | chat (default codex)
@@ -34,7 +34,7 @@ Environment (all optional):
     PAPER_QWEN_TUNNEL          auto | off | require (default auto)
     PAPER_QWEN_SSH_HOST        default zxf@101.6.31.113
     PAPER_QWEN_SSH_PORT        default 52080
-    PAPER_QWEN_TUNNEL_LOCAL    default 18000
+    PAPER_QWEN_TUNNEL_LOCAL    default 8000
     PAPER_QWEN_TUNNEL_REMOTE   default 127.0.0.1:8000
     PAPER_QWEN_CONTEXT_WINDOW  default 150000 (the deployment's window)
     PAPER_QWEN_MAX_TOKENS      default 32768 (harness replies; reasoning
@@ -72,14 +72,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_BASE_URL = "http://127.0.0.1:18000/v1"
+DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_MODEL = "qwen3.8-27b"
 DEFAULT_API_KEY = "dummy"
 DEFAULT_HARNESS = "codex"
 DEFAULT_EFFORT = "low"
 DEFAULT_SSH_HOST = "zxf@101.6.31.113"
 DEFAULT_SSH_PORT = "52080"
-DEFAULT_LOCAL_PORT = "18000"
+DEFAULT_LOCAL_PORT = "8000"
 DEFAULT_REMOTE = "127.0.0.1:8000"
 
 #: The shared model catalog (canonical: ``repos/common/model_catalog.json``;

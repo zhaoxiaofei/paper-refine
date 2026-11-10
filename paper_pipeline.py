@@ -735,11 +735,11 @@ LEGACY AGENT BACKENDS (exact old commands; kept for backward compatibility)
                      `claude` uses vLLM's Anthropic Messages endpoint when the
                      server serves it, and `chat` is a text-only completion mode. The endpoint is
                      `PAPER_QWEN_BASE_URL` (default
-                     http://127.0.0.1:18000/v1), model
+                     http://127.0.0.1:8000/v1), model
                      `PAPER_QWEN_MODEL` (default qwen3.8-27b), key
                      `PAPER_QWEN_API_KEY` (default `dummy`). When the endpoint
                      is not already reachable the adapter starts the SSH tunnel
-                     `ssh -p 52080 -N -L 18000:127.0.0.1:8000
+                     `ssh -p 52080 -N -L 8000:127.0.0.1:8000
                      zxf@101.6.31.113` (configurable with PAPER_QWEN_SSH_HOST/
                      PORT/TUNNEL_LOCAL/TUNNEL_REMOTE; PAPER_QWEN_TUNNEL=off
                      forbids starting it). `python3 paper_qwen_agent.py

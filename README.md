@@ -177,13 +177,13 @@ the harness with `PAPER_QWEN_HARNESS`:
 * `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
 
 The endpoint is `PAPER_QWEN_BASE_URL` (default
-`http://127.0.0.1:18000/v1`), model `PAPER_QWEN_MODEL` (default
+`http://127.0.0.1:8000/v1`), model `PAPER_QWEN_MODEL` (default
 `qwen3.8-27b`), and key `PAPER_QWEN_API_KEY` (default `dummy`; vLLM usually
 needs none). When the endpoint is not reachable the adapter starts the SSH
 tunnel:
 
 ```
-ssh -p 52080 -N -L 18000:127.0.0.1:8000 zxf@101.6.31.113
+ssh -p 52080 -N -L 8000:127.0.0.1:8000 zxf@101.6.31.113
 ```
 
 (`PAPER_QWEN_SSH_HOST`, `PAPER_QWEN_SSH_PORT`, `PAPER_QWEN_TUNNEL_LOCAL`,
@@ -306,7 +306,7 @@ chat-completions URL is refused on those two rather than silently translated.
 ```bash
 # a local vLLM/OpenAI-compatible server
 python paper_pipeline.py run --root ./paper_rounds \
-    --agent-model http://127.0.0.1:18000/v1/chat/completions \
+    --agent-model http://127.0.0.1:8000/v1/chat/completions \
     --agent-model-api-key "$LOCAL_KEY"
 
 # OpenRouter (it hosts many models, so name the one to use)
@@ -333,7 +333,7 @@ custom endpoint, after the harness has built its normal payload:
 
 ```bash
 python paper_pipeline.py run --root ./paper_rounds \
-    --agent-model http://127.0.0.1:18000/v1/chat/completions \
+    --agent-model http://127.0.0.1:8000/v1/chat/completions \
     --agent-model-api-key "$LOCAL_KEY" \
     --agent-model-prep-json '{"temperature": 0.2, "max_tokens": 8192, "reasoning_effort": "high"}'
 ```

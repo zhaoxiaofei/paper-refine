@@ -100,19 +100,19 @@ def cfg(base_url, harness="codex"):
     a.tunnel = "off"
     a.ssh_host = "zxf@101.6.31.113"
     a.ssh_port = "52080"
-    a.local_port = "18000"
+    a.local_port = "8000"
     a.remote = "127.0.0.1:8000"
     return qwen.config(a)
 
 
 def test_argv_and_patch():
-    c = cfg("http://127.0.0.1:18000/v1")
+    c = cfg("http://127.0.0.1:8000/v1")
     argv = qwen.codex_argv(c, extra=["-c", 'mcp_servers.x.approval_policy="approve"'])
     text = " ".join(argv)
     check("codex argv selects the qwen provider", 'model_provider="qwen"' in text)
     check("codex argv names the model", 'model="qwen3.8-27b"' in text)
     check("codex argv uses the vLLM base URL",
-          'model_providers.qwen.base_url="http://127.0.0.1:18000/v1"' in text)
+          'model_providers.qwen.base_url="http://127.0.0.1:8000/v1"' in text)
     check("codex argv uses the responses wire API",
           'model_providers.qwen.wire_api="responses"' in text)
     check("codex argv sets qwen-supported effort", 'model_reasoning_effort="low"' in text)
@@ -122,7 +122,7 @@ def test_argv_and_patch():
     check("dsh patch declares the llm-pi-ai route", "llm-pi-ai" in patch
           and "openai-completions" in patch)
     check("dsh patch names the endpoint and model",
-          'baseURL: "http://127.0.0.1:18000/v1"' in patch
+          'baseURL: "http://127.0.0.1:8000/v1"' in patch
           and 'id: "qwen3.8-27b"' in patch)
     check("dsh patch declares reasoning efforts and default",
           "reasoningEfforts" in patch and 'reasoningEffort: "low"' in patch)
@@ -180,10 +180,10 @@ def test_tunnel_off_error():
 def test_claude_harness():
     print()
     print("== qwen through Claude Code's Anthropic Messages route ==")
-    c = cfg("http://127.0.0.1:18000/v1", harness="claude")
+    c = cfg("http://127.0.0.1:8000/v1", harness="claude")
     env = qwen.claude_env(c)
     check("the Anthropic root is the vLLM base without /v1",
-          env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:18000"
+          env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
           and env["ANTHROPIC_AUTH_TOKEN"] == "dummy"
           and env["ANTHROPIC_MODEL"] == "qwen3.8-27b")
     check("the Claude command is the documented print form",

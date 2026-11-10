@@ -398,7 +398,7 @@ model/harness selection:
   learned `--harness claude` for Claude Code (qwen needs a vLLM server that
   serves the Anthropic Messages API).
   --agent-model may instead be an http(s) OpenAI-compatible chat-completions
-  endpoint URL (for example http://127.0.0.1:18000/v1/chat/completions or
+  endpoint URL (for example http://127.0.0.1:8000/v1/chat/completions or
   https://openrouter.ai/api/v1/chat/completions). A custom endpoint runs on
   dsh; pass --agent-model-api-key (or PAPER_AGENT_MODEL_API_KEY) for its key
   and --agent-model-name (or PAPER_AGENT_MODEL_NAME) when the endpoint lists
@@ -1046,7 +1046,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "gpt-terra, claude-opus, claude-sonnet, qwen38-27b, "
                          "dots3-note-preview, OR an http(s) OpenAI-compatible "
                          "chat-completions endpoint URL (e.g. "
-                         "http://127.0.0.1:18000/v1/chat/completions). A URL requires "
+                         "http://127.0.0.1:8000/v1/chat/completions). A URL requires "
                          "dsh (the default harness) and --agent-model-api-key (or "
                          "PAPER_AGENT_MODEL_API_KEY) when the endpoint needs a key; "
                          "--agent-model-name names "

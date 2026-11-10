@@ -64,15 +64,15 @@ def test_parser():
           got.judge_agent is None and got.judge_agent_harness == "gpt-codex"
           and got.judge_agent_model == "gpt-sol")
     got = parser.parse_args(["run", "--root", "/tmp/x",
-                             "--agent-model", "http://127.0.0.1:18000/v1/chat/completions",
+                             "--agent-model", "http://127.0.0.1:8000/v1/chat/completions",
                              "--agent-model-api-key", "sk-local",
                              "--agent-model-name", "qwen3.8-27b"])
     check("an arbitrary endpoint, key and model name parse",
-          got.agent_model == "http://127.0.0.1:18000/v1/chat/completions"
+          got.agent_model == "http://127.0.0.1:8000/v1/chat/completions"
           and got.agent_model_api_key == "sk-local"
           and got.agent_model_name == "qwen3.8-27b")
     got = parser.parse_args(["run", "--root", "/tmp/x",
-                             "--agent-model", "http://127.0.0.1:18000/v1/chat/completions",
+                             "--agent-model", "http://127.0.0.1:8000/v1/chat/completions",
                              "--agent-model-prep-json",
                              '{"temperature":0.2,"max_tokens":4096}',
                              "--judge-agent-model-prep-json",
@@ -112,7 +112,7 @@ def test_resolution():
         argv = pipe.agent_argv_for(harness, model)
         check(f"{harness}/{model} resolves",
               bool(argv) and Path(argv[0]).is_file(), str(argv[:4]))
-    url = "http://127.0.0.1:18000/v1/chat/completions"
+    url = "http://127.0.0.1:8000/v1/chat/completions"
     argv = pipe.agent_argv_for("dsh", url, api_key_env="PAPER_AGENT_MODEL_API_KEY",
                                model_name="local-model",
                                prep_json='{"temperature":0.2}')
@@ -213,17 +213,17 @@ def test_router_configs():
     c = router.config(type("A", (), {"harness": "claude-code", "model": "gpt-sol"})())
     check("the router refuses an impossible pair",
           "cannot run on" in router._pair_problem(c))
-    url = "http://127.0.0.1:18000/v1/chat/completions"
+    url = "http://127.0.0.1:8000/v1/chat/completions"
     c = router.config(type("A", (), {
         "harness": "dsh", "endpoint": url,
         "api_key_env": "PAPER_AGENT_MODEL_API_KEY",
         "model_name": "local-model", "model": None})())
     check("the custom endpoint base strips /chat/completions",
-          c["base_url"] == "http://127.0.0.1:18000/v1", c["base_url"])
+          c["base_url"] == "http://127.0.0.1:8000/v1", c["base_url"])
     patch = router.dsh_patch_text(c)
     check("the custom endpoint patch uses the provider and key env",
           "provider: endpoint" in patch and "apiKeyEnv: PAPER_AGENT_MODEL_API_KEY" in patch
-          and 'baseURL: "http://127.0.0.1:18000/v1"' in patch
+          and 'baseURL: "http://127.0.0.1:8000/v1"' in patch
           and 'model: "local-model"' in patch, patch[:300])
     default_request = {"model": "m", "temperature": 0.7,
                        "reasoning": {"summary": "auto"}}
