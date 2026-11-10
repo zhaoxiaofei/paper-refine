@@ -1,28 +1,21 @@
-"""Model and harness selection for the agent sessions.
+"""Shared model, harness and provider runtime for all three repositories.
 
-The pipeline used to expose one option, ``--agent``, whose value named the whole
-backend (``codex`` or ``dsh``).  This module splits that choice into two axes:
+The canonical copy lives in ``repos/common``; ``update_model_catalog.sh``
+installs byte-identical copies into ``gdp``, ``paper-refine`` and
+``paper-refine-eval``.  A checkout must not edit its copy.
 
-* ``--agent-harness`` -- the CLI that runs a session: ``dsh`` (DeepSeek Harness,
-  the default), ``gpt-codex`` (OpenAI Codex), or ``claude-code`` (Claude Code);
-* ``--agent-model`` -- the model the harness runs: one of the native model
-  names below, or an arbitrary OpenAI-compatible ``/chat/completions`` URL.
+The two axes are:
 
-The legacy ``--agent`` names remain shortcuts (see :data:`LEGACY_AGENT_PAIRS`)
-and keep their historical commands.  The axes are independent only where the
-wire protocol supports the pair; :func:`agent_pair_supported` is the single
-support matrix.
+* ``--agent-harness`` -- the CLI that runs a session: ``dsh`` (DeepSeek
+  Harness), ``gpt-codex`` (OpenAI Codex), or ``claude-code`` (Claude Code);
+* ``--agent-model`` -- a known model, the ``default`` sentinel (pass no model
+  and let the harness profile/CLI own it), or an arbitrary OpenAI-compatible
+  ``/chat/completions`` URL.
 
-The module also owns the provider configuration the runner needs:
-
-* a ``dsh --patch`` overlay (``dsh_patch_text``) that selects a native provider
-  or installs an ``llm-pi-ai`` route for qwen/dots/custom endpoints;
-* the Codex ``-c`` overrides for DeepSeek/Qwen/Dots custom providers;
-* the Claude Code environment for DeepSeek/Qwen/Dots; and
-* the local request-preparation proxy used by ``--agent-model-prep-json``.
-
-It is a leaf module: it imports only the standard library and ``gdp.errors`` so
-the runner, the CLI and the orchestrator can share it without an import cycle.
+The module owns the model catalog, the wire-protocol support matrix, the DSH
+``--patch`` overlays, the Codex ``-c`` overrides, the Claude Code environment,
+and the request-preparation proxy.  It is a leaf module: standard library plus
+the sibling ``llm_retry`` module.
 """
 
 from __future__ import annotations
