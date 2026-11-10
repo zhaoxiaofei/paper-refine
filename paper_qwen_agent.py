@@ -36,8 +36,10 @@ Environment (all optional):
     PAPER_QWEN_SSH_PORT        default 52080
     PAPER_QWEN_TUNNEL_LOCAL    default 18000
     PAPER_QWEN_TUNNEL_REMOTE   default 127.0.0.1:8000
-    PAPER_QWEN_CONTEXT_WINDOW  default 32768
-    PAPER_QWEN_MAX_TOKENS      default 8192
+    PAPER_QWEN_CONTEXT_WINDOW  default 150000 (the deployment's window)
+    PAPER_QWEN_MAX_TOKENS      default 32768 (harness replies; reasoning
+                               tokens count toward it)
+    PAPER_QWEN_CHAT_MAX_TOKENS  default 80000 (single-shot: reasoning + answer)
     PAPER_QWEN_CHECK_TOOLS     1 = probe tool-call support before the harness
 
 `python3 paper_qwen_agent.py --probe` reports the endpoint, model, tunnel and
@@ -57,6 +59,7 @@ import argparse
 import atexit
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -78,6 +81,30 @@ DEFAULT_SSH_HOST = "zxf@101.6.31.113"
 DEFAULT_SSH_PORT = "52080"
 DEFAULT_LOCAL_PORT = "18000"
 DEFAULT_REMOTE = "127.0.0.1:8000"
+
+#: The shared model catalog (canonical: ``repos/common/model_catalog.json``;
+#: this checkout carries an identical copy).  The fallback keeps a checkout
+#: refreshed from upstream, which may not have the copy yet, working.
+_CATALOG_PATH = Path(__file__).with_name("model_catalog.json")
+
+
+def _catalog_capacity(model_id: str, field: str, fallback: int) -> int:
+    """One capacity from the shared catalog, or ``fallback`` when absent."""
+    try:
+        with _CATALOG_PATH.open(encoding="utf-8") as handle:
+            for entry in json.load(handle)["models"]:
+                if entry["id"] == model_id:
+                    return int(entry[field])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return fallback
+
+
+DEFAULT_CONTEXT_WINDOW = _catalog_capacity("qwen3.8-27b", "context_window", 150000)
+DEFAULT_MAX_TOKENS = _catalog_capacity("qwen3.8-27b", "max_tokens", 32768)
+DEFAULT_CHAT_MAX_TOKENS = _catalog_capacity(
+    "qwen3.8-27b", "chat_max_tokens", 80000
+)
 
 _TUNNEL = None          # the ssh process THIS adapter started
 _TUNNEL_STDERR = None   # a temporary file holding its stderr
@@ -127,8 +154,13 @@ def config(args=None) -> dict:
                           or _env("PAPER_QWEN_TUNNEL_LOCAL", DEFAULT_LOCAL_PORT)),
         "remote": getattr(args, "remote", None) or _env("PAPER_QWEN_TUNNEL_REMOTE",
                                                        DEFAULT_REMOTE),
-        "context_window": _int_env("PAPER_QWEN_CONTEXT_WINDOW", 32768),
-        "max_tokens": _int_env("PAPER_QWEN_MAX_TOKENS", 8192),
+        "context_window": _int_env(
+            "PAPER_QWEN_CONTEXT_WINDOW", DEFAULT_CONTEXT_WINDOW
+        ),
+        "max_tokens": _int_env("PAPER_QWEN_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+        "chat_max_tokens": _int_env(
+            "PAPER_QWEN_CHAT_MAX_TOKENS", DEFAULT_CHAT_MAX_TOKENS
+        ),
         "check_tools": bool(_int_env("PAPER_QWEN_CHECK_TOOLS", 0)),
     }
 
@@ -448,14 +480,39 @@ def dsh_argv(cfg: dict) -> tuple:
             env, "")
 
 
+def _chat_output_budget(cfg: dict, prompt: str, system: str = "") -> int:
+    """The single-shot output cap, or 0 when the prompt cannot fit.
+
+    A direct completion has no harness to continue a truncated reply: one
+    response must hold the reasoning trace plus the answer, so it uses the
+    model's ``chat_max_tokens`` instead of the smaller harness ``max_tokens``.
+    Code and JSON run closer to 3.4 characters per token than to four, so this
+    estimate matches paper-refine-eval's; dividing by four underestimates a
+    long prompt and lets ``prompt + max_tokens`` cross the window.
+    """
+    cap = int(cfg.get("chat_max_tokens") or cfg["max_tokens"])
+    prompt_tokens = int(math.ceil((len(prompt) + len(system)) / 3.4))
+    room = int(cfg.get("context_window") or 0) - prompt_tokens - 2048
+    if room <= 0:
+        return 0
+    return max(1, min(cap, room))
+
+
 def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
     """(text, error) from one /v1/chat/completions call."""
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
+    budget = _chat_output_budget(cfg, prompt, system)
+    if budget <= 0:
+        return "", ("the prompt does not fit the %s-token context window"
+                    % cfg.get("context_window"))
     payload = {"model": cfg["model"], "messages": messages,
-               "temperature": 0, "max_tokens": cfg["max_tokens"]}
+               "temperature": 0, "max_tokens": budget,
+               # Reasoning is required for every completion: the chat budget
+               # above covers the thinking trace plus the answer.
+               "chat_template_kwargs": {"enable_thinking": True}}
     status, body, err = _request("POST", f"{cfg['base_url']}/chat/completions",
                                  payload=payload, api_key=cfg["api_key"],
                                  timeout=600.0)
@@ -469,7 +526,7 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
         finish_reason = choice.get("finish_reason")
         if finish_reason == "length":
             return "", (f"the chat completion was truncated (finish_reason='length', "
-                        f"max_tokens={cfg.get('max_tokens')}): the answer is incomplete")
+                        f"max_tokens={budget}): the answer is incomplete")
         if finish_reason not in (None, "stop", "end_turn", "stop_sequence",
                                  "tool_calls", "function_call"):
             return "", (f"the chat completion did not finish normally "

@@ -220,12 +220,12 @@ key on the platform and export it as `DOTS_API_KEY`; the default endpoint is
 * `codex` (default) — `codex exec` with a custom `model_provider=dots` route:
   the platform's documented Responses protocol (`wire_api="responses"`),
   `DOTS_API_KEY` read from the environment, web search disabled, and the
-  model's 512K context window declared explicitly (it is not in Codex's
+  model's enforced 393,000-token window declared explicitly (it is not in Codex's
   built-in catalog). The reasoning effort defaults to `medium`
   (`PAPER_DOTS_REASONING_EFFORT`).
 * `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` route over the
   platform's OpenAI-compatible Chat Completions endpoint and an
-  `agent-default-model` override. The route declares the 512K context window
+  `agent-default-model` override. The route declares the 393,000-token window
   and the output cap, and does not invent a reasoning parameter the platform
   does not document.
 * `claude` — `claude --print` against the platform's Anthropic Messages
@@ -233,7 +233,7 @@ key on the platform and export it as `DOTS_API_KEY`; the default endpoint is
 * `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
 
 The endpoint and model are `PAPER_DOTS_BASE_URL` and `PAPER_DOTS_MODEL`; the
-capacity defaults are `PAPER_DOTS_CONTEXT_WINDOW=524288` and
+capacity defaults are `PAPER_DOTS_CONTEXT_WINDOW=393000` and
 `PAPER_DOTS_MAX_TOKENS=32768`. `PAPER_DOTS_SKIP_PROBE=1` skips the
 `/v1/models` preflight for a gateway that does not expose that listing. Check
 the route without running a session:

@@ -112,8 +112,8 @@ def test_argv_and_patch():
     check("codex argv uses the documented Responses wire API",
           'model_providers.dots.wire_api="responses"' in text)
     check("codex argv disables the hosted web-search tool", 'web_search="disabled"' in text)
-    check("codex argv declares the 512K context window",
-          "model_context_window=524288" in text)
+    check("codex argv declares the enforced context window",
+          "model_context_window=393000" in text)
     check("codex argv keeps the MCP overrides and the final stdin prompt",
           "mcp_servers.x.approval_policy" in text and argv[-1] == "-")
     claude = dots.claude_env(dots.config(type("A", (), {
@@ -140,7 +140,7 @@ def test_argv_and_patch():
           'baseURL: "https://note3-prev-api.askdiandian.com/v1"' in patch
           and 'id: "dots3-note-prev"' in patch and "apiKeyEnv: DOTS_API_KEY" in patch)
     check("dsh patch declares the context/output caps",
-          "contextWindow: 524288" in patch and "maxTokens: 32768" in patch)
+          "contextWindow: 393000" in patch and "maxTokens: 32768" in patch)
     check("dsh patch does not invent a reasoning parameter",
           "reasoningEfforts: false" in patch)
     check("dsh patch stays on the documented token field",
