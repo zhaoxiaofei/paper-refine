@@ -5,6 +5,18 @@
 # the single-file source.
 from __future__ import annotations
 
+try:
+    import model_runtime as _model_runtime
+except ImportError:  # a test loader may not put the checkout root on sys.path
+    import sys as _sys
+    from pathlib import Path as _Path
+    for _candidate in (_Path(__file__).resolve().parent,
+                       _Path(__file__).resolve().parent.parent):
+        if (_candidate / "model_runtime.py").is_file():
+            _sys.path.insert(0, str(_candidate))
+            break
+    import model_runtime as _model_runtime
+
 # =====================================================================
 # VENUES AND JOURNALS
 # =====================================================================
@@ -3316,60 +3328,37 @@ CONFLICT_AGENT_CHOICES = ("codex-lite", *AGENT_CHOICES)
 # the latest Anthropic models. `qwen38-27b` is the local vLLM checkpoint name
 # the qwen adapter already used (qwen3.8-27b); `dots3-note-preview` is the
 # operator-facing name for the Dots API model `dots3-note-prev`.
+# The model and harness registries are owned by ``repos/common/model_runtime.py``
+# and copied beside this file by ``repos/common/update_model_catalog.sh``.  The
+# pipeline keeps only the operator-facing aliases and legacy shortcuts.
 AGENT_MODELS = {
-    "deepseek-flash": {
-        "label": "DeepSeek Flash", "id": "deepseek-flash", "family": "deepseek",
-        "default_harness": "dsh",
-        "harnesses": ("dsh", "gpt-codex", "claude-code"),
-    },
-    "gpt-sol": {
-        "label": "GPT Sol", "id": "gpt-6.1-sol", "family": "gpt",
-        "default_harness": "gpt-codex",
-        "harnesses": ("dsh", "gpt-codex"),
-    },
-    "gpt-terra": {
-        "label": "GPT Terra", "id": "gpt-6.1-terra", "family": "gpt",
-        "default_harness": "gpt-codex",
-        "harnesses": ("dsh", "gpt-codex"),
-    },
-    "claude-opus": {
-        "label": "Claude Opus", "id": "claude-opus-5-5", "alias": "opus",
-        "family": "claude", "default_harness": "claude-code",
-        "harnesses": ("dsh", "claude-code"),
-    },
-    "claude-sonnet": {
-        "label": "Claude Sonnet", "id": "claude-sonnet-5-5", "alias": "sonnet",
-        "family": "claude", "default_harness": "claude-code",
-        "harnesses": ("dsh", "claude-code"),
-    },
-    "qwen38-27b": {
-        "label": "Qwen3.8-27B", "id": "qwen3.8-27b", "family": "qwen",
-        "default_harness": "dsh",
-        "harnesses": ("dsh", "gpt-codex", "claude-code"),
-    },
-    "dots3-note-preview": {
-        "label": "Dots3 Note Preview", "id": "dots3-note-prev", "family": "dots",
-        "default_harness": "dsh",
-        "harnesses": ("dsh", "gpt-codex", "claude-code"),
-    },
-    "default": {
-        "label": "Harness default", "id": "default", "family": "default",
-        "default_harness": "dsh",
-        "harnesses": ("dsh", "gpt-codex", "claude-code"),
-    },
+    name: {
+        "label": info.get("label") or name,
+        "id": info.get("id") or name,
+        "family": info.get("family") or "",
+        "default_harness": info.get("default_harness") or "dsh",
+        "harnesses": tuple(info.get("harnesses") or ()),
+        **({"alias": info["alias"]} if info.get("alias") else {}),
+    }
+    for name, info in _model_runtime.AGENT_MODELS.items()
+}
+AGENT_MODELS["default"] = {
+    "label": "Harness default", "id": "default", "family": "default",
+    "default_harness": _model_runtime.DEFAULT_AGENT_HARNESS,
+    "harnesses": _model_runtime.AGENT_HARNESS_CHOICES,
 }
 AGENT_MODEL_CHOICES = tuple(AGENT_MODELS)
 AGENT_HARNESSES = {
-    "dsh": {"label": "DeepSeek Harness", "binary": "dsh",
-            "default_model": "deepseek-flash"},
-    "gpt-codex": {"label": "GPT Codex", "binary": "codex",
-                  "default_model": "gpt-sol"},
-    "claude-code": {"label": "Claude Code", "binary": "claude",
-                    "default_model": "claude-sonnet"},
+    name: {
+        "label": info.get("label") or name,
+        "binary": info.get("binary") or name,
+        "default_model": info.get("default_model") or _model_runtime.DEFAULT_AGENT_MODEL,
+    }
+    for name, info in _model_runtime.AGENT_HARNESSES.items()
 }
 AGENT_HARNESS_CHOICES = tuple(AGENT_HARNESSES)
-DEFAULT_AGENT_MODEL = "deepseek-flash"
-DEFAULT_AGENT_HARNESS = "dsh"
+DEFAULT_AGENT_MODEL = _model_runtime.DEFAULT_AGENT_MODEL
+DEFAULT_AGENT_HARNESS = _model_runtime.DEFAULT_AGENT_HARNESS
 # The legacy `--agent` shortcuts keep their old commands (resolve_agent_cmd),
 # but these pairs are what the helper records/reports for them. `None` means
 # "the operator's CLI config owns the model" (legacy codex/claude).

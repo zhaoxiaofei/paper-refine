@@ -177,15 +177,15 @@ def test_router_configs():
     c = router.config(type("A", (), {"harness": "dsh", "model": "deepseek-flash"})())
     patch = router.dsh_patch_text(c)
     check("dsh deepseek uses the official provider",
-          "provider: deepseek-official" in patch and 'model: "deepseek-flash"' in patch)
+          'provider: "deepseek-official"' in patch and 'model: "deepseek-flash"' in patch)
     c = router.config(type("A", (), {"harness": "dsh", "model": "gpt-sol"})())
     patch = router.dsh_patch_text(c)
     check("dsh gpt uses the openai route",
-          "provider: openai" in patch and 'model: "gpt-6.1-sol"' in patch)
+          'provider: "openai"' in patch and 'model: "gpt-6.1-sol"' in patch)
     c = router.config(type("A", (), {"harness": "dsh", "model": "claude-opus"})())
     patch = router.dsh_patch_text(c)
     check("dsh claude uses the anthropic route",
-          "provider: anthropic" in patch and 'model: "claude-opus-5-5"' in patch)
+          'provider: "anthropic"' in patch and 'model: "claude-opus-5-5"' in patch)
     c = router.config(type("A", (), {"harness": "gpt-codex", "model": "gpt-sol"})())
     argv = router.codex_argv(c)
     check("codex gpt selects the model with -m",

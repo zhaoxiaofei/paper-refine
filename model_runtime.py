@@ -1177,6 +1177,7 @@ def dsh_patch_text(
     model_name_override: Optional[str] = None,
     provider_override: Optional[str] = None,
     context_window_override: Optional[int] = None,
+    max_tokens_override: Optional[int] = None,
     compaction_base_url: Optional[str] = None,
     endpoint_api_key_env: Optional[str] = None,
 ) -> str:
@@ -1234,7 +1235,11 @@ def dsh_patch_text(
                     or settings["context_window"]
                     or DEFAULT_ENDPOINT_CONTEXT
                 ),
-                int(settings["max_tokens"] or DEFAULT_ENDPOINT_MAX_TOKENS),
+                int(
+                    max_tokens_override
+                    or settings["max_tokens"]
+                    or DEFAULT_ENDPOINT_MAX_TOKENS
+                ),
                 json.dumps(model_name),
             )
         )
