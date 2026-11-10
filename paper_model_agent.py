@@ -64,11 +64,11 @@ MODELS = {
     },
     "gpt-sol": {
         "id": "gpt-6.1-sol", "family": "gpt", "dsh_provider": "openai",
-        "context": 272000, "max_tokens": 128000, "label": "GPT Sol",
+        "context": 1050000, "max_tokens": 128000, "label": "GPT Sol",
     },
     "gpt-terra": {
         "id": "gpt-6.1-terra", "family": "gpt", "dsh_provider": "openai",
-        "context": 272000, "max_tokens": 128000, "label": "GPT Terra",
+        "context": 1050000, "max_tokens": 128000, "label": "GPT Terra",
     },
     "claude-opus": {
         "id": "claude-opus-5-5", "alias": "opus", "family": "claude",
