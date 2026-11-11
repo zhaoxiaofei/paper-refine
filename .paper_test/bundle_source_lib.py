@@ -18,7 +18,7 @@ MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
                 "paper_redlines_adapter.py", "paper_qwen_agent.py",
                 "paper_dots_agent.py", "paper_model_agent.py",
                 "docx2pdf.sh", "docxcompare.sh")
-ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent_common")
+ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent-common")
 
 
 def bundle_files(path) -> list:

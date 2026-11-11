@@ -1214,7 +1214,7 @@ def build_parser() -> argparse.ArgumentParser:
         "sync-code", parents=[common],
         help="copy the maintained module bundle (paper_pipeline.py, "
              "paper_docx_format.py, paper_redlines_adapter.py, the "
-             "qwen/dots/model adapters, the agent_common/ runtime files "
+             "qwen/dots/model adapters, the agent-common/agent_common/ runtime files "
              "(model_runtime.py, llm_retry.py, llm_policy.json, "
              "model_catalog.json), and the docx shims) into a "
              "root and record their digests")

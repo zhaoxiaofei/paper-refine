@@ -906,13 +906,14 @@ def _missing_bundle_assets() -> list:
     for dirname in globals().get("PIPELINE_ASSET_DIRS") or ():
         if not (here / dirname).is_dir():
             missing.append(f"{dirname}/")
-    # `agent_common/` is an asset directory, but its four files are individually
-    # required: an empty directory would satisfy the check above and then fail
-    # in p01's import with a raw ModuleNotFoundError.
+    # `agent-common/` is an asset directory, but the four files of its inner
+    # `agent_common` package are individually required: an empty directory
+    # would satisfy the check above and then fail in p01's import with a raw
+    # ModuleNotFoundError.
     for name in ("model_runtime.py", "llm_retry.py", "llm_policy.json",
                  "model_catalog.json"):
-        if not (here / "agent_common" / name).is_file():
-            missing.append(f"agent_common/{name}")
+        if not (here / "agent-common" / "agent_common" / name).is_file():
+            missing.append(f"agent-common/agent_common/{name}")
     for name in globals().get("PIPELINE_MODULE_FILES") or ():
         if name != _Path(__file__).name and not (here / name).is_file():
             missing.append(str(name))

@@ -637,10 +637,10 @@ def cmd_setup(args) -> None:
     _missing_assets = [f"{name}/" for name in PIPELINE_ASSET_DIRS
                        if not (script.parent / name).is_dir()]
     _missing_assets += [
-        f"agent_common/{name}"
+        f"agent-common/agent_common/{name}"
         for name in ("model_runtime.py", "llm_retry.py", "llm_policy.json",
                      "model_catalog.json")
-        if not (script.parent / "agent_common" / name).is_file()
+        if not (script.parent / "agent-common" / "agent_common" / name).is_file()
     ]
     # The companion MODULES are just as required: the agent commands call
     # `python paper_docx_format.py scan ...`, the redline backend resolves the

@@ -368,11 +368,12 @@ PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
 # The two loaders above are thin; their implementation lives in ordered parts
 # directories. The copies of the shared runtime (`model_runtime.py`,
 # `llm_retry.py`, `llm_policy.json`, `model_catalog.json`) live beside each
-# other in `agent_common/`, which is a frozen asset directory like the parts trees.
+# other in `agent-common/agent_common/`, and `agent-common/` is a frozen asset
+# directory like the parts trees.
 # A root/stage is self-contained only when it carries all of them, and the
 # module manifest records each directory as ONE digest (name + sha256 of every
 # file), so a partial or stale bundle is visible to `status`/`sync-code`.
-PIPELINE_ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent_common")
+PIPELINE_ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent-common")
 # venue_profiles/ is a RUNTIME asset too (load_precedence reads the root's copy
 # before the maintained one), but a trimmed checkout may legitimately omit it
 # (the config snapshot is then authoritative). It is frozen and manifested when

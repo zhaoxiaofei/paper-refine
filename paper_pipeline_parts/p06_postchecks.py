@@ -288,10 +288,13 @@ def _copy_session_tools(sb: Path, stamp: float = None,
                 parts_name = "paper_pipeline_parts"
                 if (driver_src.parent / parts_name).is_dir():
                     copy_asset_dirs(driver_src.parent, tool_dir, names=(parts_name,))
-                # The shared runtime lives in `agent_common/` beside the driver and
-                # resolves its catalog/policy relative to `__file__`.
-                if (driver_src.parent / "agent_common").is_dir():
-                    copy_asset_dirs(driver_src.parent, tool_dir, names=("agent_common",))
+                # The shared runtime lives in `agent-common/agent_common/` beside
+                # the driver and resolves its catalog/policy relative to
+                # `__file__`.
+                if (driver_src.parent / "agent-common").is_dir():
+                    copy_asset_dirs(
+                        driver_src.parent, tool_dir, names=("agent-common",)
+                    )
                 # The staged DRIVER also loads its companion formatter from
                 # beside ITSELF (`_format_module()`), and the package-stage
                 # self-check runs the format-regression family. Staging only

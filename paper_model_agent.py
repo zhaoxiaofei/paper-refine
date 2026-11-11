@@ -56,9 +56,9 @@ from pathlib import Path
 
 try:
     from agent_common import model_runtime as rt
-except ImportError:  # a test loader may not put this script's directory on sys.path
+except ImportError:  # a test loader may not put the submodule root on sys.path
     import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent-common"))
     from agent_common import model_runtime as rt
 
 DEFAULT_HARNESS = rt.DEFAULT_AGENT_HARNESS

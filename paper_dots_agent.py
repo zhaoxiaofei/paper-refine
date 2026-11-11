@@ -79,9 +79,9 @@ from pathlib import Path
 
 try:
     from agent_common import model_runtime as rt
-except ImportError:  # a test loader may not put this file's directory on sys.path
+except ImportError:  # a test loader may not put the submodule root on sys.path
     import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent-common"))
     from agent_common import model_runtime as rt
 
 DEFAULT_BASE_URL = "https://note3-prev-api.askdiandian.com/v1"
@@ -89,10 +89,10 @@ DEFAULT_MODEL = "dots3-note-prev"
 DEFAULT_HARNESS = "codex"
 DEFAULT_EFFORT = "medium"
 
-#: The shared model catalog (canonical: ``repos/agent_common/model_catalog.json``;
+#: The shared model catalog (canonical: ``repos/agent-common/model_catalog.json``;
 #: this checkout carries an identical copy).  The fallback keeps a checkout
 #: refreshed from upstream, which may not have the copy yet, working.
-_CATALOG_PATH = Path(__file__).with_name("agent_common") / "model_catalog.json"
+_CATALOG_PATH = Path(rt.__file__).with_name("model_catalog.json")
 
 
 def _catalog_capacity(model_id: str, field: str, fallback: int) -> int:
