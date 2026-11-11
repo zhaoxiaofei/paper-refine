@@ -896,7 +896,7 @@ def _missing_bundle_assets() -> list:
     """Companion modules/dirs the ordered parts import before `setup` can check.
 
     The p00 prelude carries the manifest; p01 already imports
-    `agent_common.model_runtime`, so a tree missing `agent_common/` (or
+    `agent_common.model_runtime`, so a tree missing `agent-common/agent_common/` (or
     `paper_docx_format.py`) used to die in a
     raw ModuleNotFoundError/ConfigError before setup's own friendly missing-asset
     diagnostic. The preflight runs after p00 and before the rest.

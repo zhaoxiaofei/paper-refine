@@ -89,7 +89,7 @@ DEFAULT_MODEL = "dots3-note-prev"
 DEFAULT_HARNESS = "codex"
 DEFAULT_EFFORT = "medium"
 
-#: The shared model catalog (canonical: ``repos/agent-common/model_catalog.json``;
+#: The shared model catalog (canonical: ``repos/agent-common/agent_common/model_catalog.json``;
 #: this checkout carries an identical copy).  The fallback keeps a checkout
 #: refreshed from upstream, which may not have the copy yet, working.
 _CATALOG_PATH = Path(rt.__file__).with_name("model_catalog.json")

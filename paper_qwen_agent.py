@@ -81,7 +81,7 @@ except ImportError:  # a test loader may not put the submodule root on sys.path
     _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent-common"))
     from agent_common import model_runtime as rt
 
-#: The shared model catalog (canonical: ``repos/agent-common/model_catalog.json``;
+#: The shared model catalog (canonical: ``repos/agent-common/agent_common/model_catalog.json``;
 #: this checkout carries an identical copy).  The fallback keeps a checkout
 #: refreshed from upstream, which may not have the copy yet, working.
 _CATALOG_PATH = Path(rt.__file__).with_name("model_catalog.json")
