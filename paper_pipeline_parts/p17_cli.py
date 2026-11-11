@@ -883,7 +883,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "limited-context model (one GPU, ~100k tokens or less); the "
                          "postchecks, the coverage table and every deliverable are UNCHANGED. "
                          "Not to be confused with the model's reasoning effort (see "
-                         "PAPER_QWEN_REASONING_EFFORT), which this flag does not touch")
+                         "PAPER_AGENT_REASONING_EFFORT), which this flag does not touch")
     ps.add_argument("--cold-start-review",
                     dest="cold_start_review", choices=list(COLD_START_REVIEW_MODES),
                     default=COLD_START_REVIEW_DEFAULT,

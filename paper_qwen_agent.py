@@ -29,9 +29,9 @@ Environment (all optional):
     PAPER_QWEN_MODEL           default qwen3.8-27b
     PAPER_QWEN_API_KEY         default `dummy` (vLLM usually needs no key)
     PAPER_QWEN_HARNESS         codex | dsh | claude | chat (default codex)
-    PAPER_QWEN_REASONING_EFFORT low | medium | xhigh (default from the shared
-                                model catalog, currently medium; qwen rejects
-                                codex's `max`)
+    PAPER_AGENT_REASONING_EFFORT  shared override (low | medium | high | xhigh |
+                                max; default from the model catalog, currently
+                                medium)
     PAPER_QWEN_TUNNEL          auto | off | require (default auto)
     PAPER_QWEN_SSH_HOST        default zxf@101.6.31.113
     PAPER_QWEN_SSH_PORT        default 52080
@@ -148,8 +148,7 @@ def config(args=None) -> dict:
         "effort": rt.normalize_reasoning_effort(
             "qwen38-27b",
             getattr(args, "reasoning_effort", None)
-            or _env("PAPER_AGENT_REASONING_EFFORT", "")
-            or _env("PAPER_QWEN_REASONING_EFFORT", DEFAULT_EFFORT),
+            or _env("PAPER_AGENT_REASONING_EFFORT", DEFAULT_EFFORT),
         ),
         "tunnel": (getattr(args, "tunnel", None)
                    or _env("PAPER_QWEN_TUNNEL", "auto")).lower(),

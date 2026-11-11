@@ -33,10 +33,9 @@ Environment (all optional except the key):
     PAPER_DOTS_BASE_URL        default https://note3-prev-api.askdiandian.com/v1
     PAPER_DOTS_MODEL           default dots3-note-prev
     PAPER_DOTS_HARNESS         codex | dsh | claude | chat (default codex)
-    PAPER_DOTS_REASONING_EFFORT  minimal | low | medium | high | xhigh | max
-                               (default from the shared model catalog,
-                               currently high; applied to the generated
-                               Codex and DSH routes)
+    PAPER_AGENT_REASONING_EFFORT  shared override (off | minimal | low | medium |
+                               high | xhigh | max; default from the model
+                               catalog, currently high)
     PAPER_DOTS_CONTEXT_WINDOW  default from the shared model catalog (the
                                window the endpoint enforces; 512K is
                                advertised, but requests above it are rejected)
@@ -167,8 +166,7 @@ def config(args=None) -> dict:
         "effort": rt.normalize_reasoning_effort(
             "dots3-note-preview",
             getattr(args, "reasoning_effort", None)
-            or _env("PAPER_AGENT_REASONING_EFFORT", "")
-            or _env("PAPER_DOTS_REASONING_EFFORT", DEFAULT_EFFORT),
+            or _env("PAPER_AGENT_REASONING_EFFORT", DEFAULT_EFFORT),
         ),
         "context_window": _int_env("PAPER_DOTS_CONTEXT_WINDOW",
                                    DEFAULT_CONTEXT_WINDOW),

@@ -202,7 +202,8 @@ the harness with `PAPER_QWEN_HARNESS`:
 * `codex` (default) — `codex exec` with a custom `model_provider=qwen` route.
   The installed codex accepts only `wire_api="responses"`; vLLM exposes
   `/v1/responses`, so the route uses it. Qwen rejects codex's `max` reasoning
-  effort; the adapter defaults to `medium` (`PAPER_QWEN_REASONING_EFFORT`).
+  effort; the adapter defaults to the catalog's level (`PAPER_AGENT_REASONING_EFFORT`
+  overrides it).
 * `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` provider patch
   and an `agent-default-model` override for the qwen route.
 * `claude` — `claude --print` against vLLM's Anthropic Messages endpoint (when
@@ -254,8 +255,8 @@ key on the platform and export it as `DOTS_API_KEY`; the default endpoint is
   the platform's documented Responses protocol (`wire_api="responses"`),
   `DOTS_API_KEY` read from the environment, web search disabled, and the
   model's enforced 393,000-token window declared explicitly (it is not in Codex's
-  built-in catalog). The reasoning effort defaults to `medium`
-  (`PAPER_DOTS_REASONING_EFFORT`).
+  built-in catalog). The reasoning effort defaults to the catalog's `high`
+  (`PAPER_AGENT_REASONING_EFFORT` overrides it).
 * `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` route over the
   platform's OpenAI-compatible Chat Completions endpoint and an
   `agent-default-model` override. The route declares the 393,000-token window
@@ -2587,7 +2588,7 @@ call, a cost or latency budget), and neither the profile contract nor the paged 
 model or window it runs on.
 
 `--execution-profile {high,medium}` (default `high`) selects the instruction profile. It is NOT a
-reasoning-effort setting (`PAPER_QWEN_REASONING_EFFORT` is a different axis) and it changes no
+reasoning-effort setting (`PAPER_AGENT_REASONING_EFFORT` is a different axis) and it changes no
 postcheck.
 
 * **`high`** is the default and inlines every rule. A default root writes no new config key and
