@@ -161,8 +161,15 @@ def config(args=None) -> dict:
         "compaction_api_key": compaction_key,
         "harness": _normalize_harness(getattr(args, "harness", None)
                                        or _env("PAPER_DOTS_HARNESS", DEFAULT_HARNESS)),
-        "effort": (getattr(args, "reasoning_effort", None)
-                   or _env("PAPER_DOTS_REASONING_EFFORT", DEFAULT_EFFORT)).lower(),
+        # An explicit --reasoning-effort/flag wins, then the shared
+        # PAPER_AGENT_REASONING_EFFORT override, then the adapter's family
+        # variable; the shared table validates the level.
+        "effort": rt.normalize_reasoning_effort(
+            "dots3-note-preview",
+            getattr(args, "reasoning_effort", None)
+            or _env("PAPER_AGENT_REASONING_EFFORT", "")
+            or _env("PAPER_DOTS_REASONING_EFFORT", DEFAULT_EFFORT),
+        ),
         "context_window": _int_env("PAPER_DOTS_CONTEXT_WINDOW",
                                    DEFAULT_CONTEXT_WINDOW),
         "max_tokens": _int_env("PAPER_DOTS_MAX_TOKENS", DEFAULT_MAX_TOKENS),

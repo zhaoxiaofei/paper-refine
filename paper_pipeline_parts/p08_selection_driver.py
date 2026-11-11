@@ -1951,6 +1951,12 @@ def agent_session_env(sb: Path) -> dict:
     otherwise leave open by default.
     """
     env = dict(os.environ)
+    # An explicit --reasoning-effort reaches Claude Code through this variable
+    # for every preset (the legacy preset and the adapters' claude route); the
+    # other harnesses read the same variable from the shared runtime instead.
+    _effort = _model_runtime.reasoning_effort_override()
+    if _effort:
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = _effort
     sandbox = str(Path(sb).resolve())
     roots = [p for p in (env.get("DOCX_MCP_ALLOWED_ROOTS") or "").split(os.pathsep) if p]
     if sandbox not in roots:

@@ -3032,7 +3032,13 @@ def agent_argv(agent_name: str) -> list:
     argv = list(AGENT_PRESETS[agent_name])
     if agent_name != "codex" or len(argv) < 2:
         return argv
-    return [*argv[:2], *codex_mcp_overrides(), *argv[2:]]
+    overrides = list(codex_mcp_overrides())
+    effort = _model_runtime.reasoning_effort_override()
+    if effort:
+        # The legacy codex preset is config-owned; an explicit level still
+        # reaches it through codex's own `-c` override.
+        overrides.append('model_reasoning_effort="%s"' % effort)
+    return [*argv[:2], *overrides, *argv[2:]]
 
 
 # The adapter harness names: the public `--agent-harness` names are the

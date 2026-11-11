@@ -115,7 +115,7 @@ USAGE_EXAMPLES = """usage:
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent-harness dsh|gpt-codex|claude-code] [--agent-model NAME_OR_URL]
           [--agent-model-api-key KEY] [--agent-model-name MODEL]
-          [--agent-model-prep-json JSON]
+          [--agent-model-prep-json JSON] [--reasoning-effort LEVEL]
           [--judge-agent-harness dsh|gpt-codex|claude-code] [--judge-agent-model NAME_OR_URL]
           [--judge-agent-model-api-key KEY] [--judge-agent-model-name MODEL]
           [--judge-agent-model-prep-json JSON]
@@ -1077,6 +1077,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "reasoning_effort, ...). It may be incomplete: keys it omits keep "
                          "the harness defaults, and nested objects merge key by key. "
                          "Applies only to a custom endpoint URL")
+    run_opts.add_argument("--reasoning-effort", type=str.lower, default=None,
+                    choices=list(_model_runtime.REASONING_EFFORT_LEVELS),
+                    metavar="LEVEL",
+                    help="reasoning level every session requests from the selected model: "
+                         "off, minimal, low, medium, high, xhigh or max. It overrides the "
+                         "model's shared default and the per-family overrides, and it also "
+                         "reaches GPT/Claude, whose default is otherwise the model's own. "
+                         "A level the model's wire does not document maps to its nearest one "
+                         "(deepseek medium->high; qwen high/max->xhigh). The legacy "
+                         "--agent dsh shortcut is refused (the DSH profile owns the model); "
+                         "use --agent-harness dsh --agent-model deepseek-flash. Also "
+                         "$PAPER_AGENT_REASONING_EFFORT")
     run_opts.add_argument("--no-template-stage", action="store_true",
                           help="do NOT author the package inside the journal's Word templates "
                                "before the round (the default is to run that stage first in "

@@ -64,6 +64,10 @@ def test_parser():
           got.judge_agent is None and got.judge_agent_harness == "gpt-codex"
           and got.judge_agent_model == "gpt-sol")
     got = parser.parse_args(["run", "--root", "/tmp/x",
+                             "--reasoning-effort", "HIGH"])
+    check("--reasoning-effort parses and lowercases",
+          got.reasoning_effort == "high")
+    got = parser.parse_args(["run", "--root", "/tmp/x",
                              "--agent-model", "http://127.0.0.1:8000/v1/chat/completions",
                              "--agent-model-api-key", "sk-local",
                              "--agent-model-name", "qwen3.8-27b"])
@@ -92,6 +96,56 @@ def test_parser():
     check("the harness choices are the requested three",
           tuple(pipe.AGENT_HARNESS_CHOICES) == ("dsh", "gpt-codex", "claude-code"),
           str(pipe.AGENT_HARNESS_CHOICES))
+
+
+def test_reasoning_effort():
+    print()
+    print("== the shared --reasoning-effort override ==")
+    parser = pipe.build_parser()
+    saved = os.environ.get("PAPER_AGENT_REASONING_EFFORT")
+    os.environ.pop("PAPER_AGENT_REASONING_EFFORT", None)
+    try:
+        got = parser.parse_args(["run", "--root", "/tmp/x",
+                                 "--reasoning-effort", "high"])
+        pipe._apply_reasoning_effort(got)
+        check("the option exports the shared override",
+              os.environ.get("PAPER_AGENT_REASONING_EFFORT") == "high")
+        rt = pipe._model_runtime
+        deepseek = rt.dsh_patch_text(
+            rt.resolve_agent_selection(harness="dsh", model="deepseek-flash"))
+        check("the DeepSeek dsh route applies it",
+              'reasoningEffort: "high"' in deepseek)
+        gpt = rt.codex_provider_args(
+            rt.resolve_agent_selection(harness="gpt-codex", model="gpt-sol"))
+        check("the GPT/Codex route applies it",
+              'model_reasoning_effort="high"' in gpt)
+        claude = rt.claude_environment(
+            rt.resolve_agent_selection(harness="claude-code", model="claude-opus"))
+        check("the Claude route applies it",
+              claude.get("CLAUDE_CODE_EFFORT_LEVEL") == "high")
+        dcfg = dots.config(type("A", (), {"harness": "dsh"})())
+        check("the dots adapter inherits the override", dcfg["effort"] == "high")
+        got = parser.parse_args(["run", "--root", "/tmp/x",
+                                 "--reasoning-effort", "max"])
+        pipe._apply_reasoning_effort(got)
+        qwen = rt.dsh_patch_text(
+            rt.resolve_agent_selection(harness="dsh", model="qwen38-27b"))
+        check("qwen maps max to its highest wire level",
+              'reasoningEffort: "xhigh"' in qwen)
+        legacy = parser.parse_args(["run", "--root", "/tmp/x",
+                                    "--agent", "dsh",
+                                    "--reasoning-effort", "high"])
+        refused = False
+        try:
+            pipe._apply_reasoning_effort(legacy)
+        except SystemExit as exc:
+            refused = exc.code == 2
+        check("the legacy --agent dsh shortcut refuses it", refused)
+    finally:
+        if saved is None:
+            os.environ.pop("PAPER_AGENT_REASONING_EFFORT", None)
+        else:
+            os.environ["PAPER_AGENT_REASONING_EFFORT"] = saved
 
 
 def test_resolution():
@@ -363,7 +417,7 @@ def test_help():
                          capture_output=True, text=True, timeout=120).stdout
     for flag in ("--agent-harness", "--agent-model",
                  "--agent-model-api-key", "--agent-model-name",
-                 "--agent-model-prep-json",
+                 "--agent-model-prep-json", "--reasoning-effort",
                  "--judge-agent-harness", "--judge-agent-model",
                  "--judge-agent-model-api-key", "--judge-agent-model-name",
                  "--judge-agent-model-prep-json"):
@@ -375,7 +429,8 @@ def test_help():
 
 
 def main():
-    for fn in (test_parser, test_resolution, test_registry_agreement,
+    for fn in (test_parser, test_reasoning_effort, test_resolution,
+               test_registry_agreement,
                test_router_configs, test_prep_proxy, test_run_policy, test_help):
         try:
             fn()

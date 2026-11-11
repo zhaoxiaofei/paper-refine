@@ -3377,8 +3377,32 @@ def _agent_pair_from_options(harness: str, model: str,
     return harness, model
 
 
+def _apply_reasoning_effort(args) -> None:
+    """Export --reasoning-effort for every generated provider route.
+
+    The shared runtime reads PAPER_AGENT_REASONING_EFFORT when it writes a DSH
+    patch, a Codex ``-c`` override or the Claude Code environment, so the
+    option is applied once here; child adapters inherit it.  The legacy
+    ``--agent dsh`` shortcut is refused: it boots the shipped profile, which
+    owns its own ``reasoningEffort``, so the flag could not be honoured.
+    """
+    value = getattr(args, "reasoning_effort", None)
+    if not value:
+        return
+    legacy_agent = getattr(args, "agent", None)
+    if legacy_agent == "dsh" and not (
+        getattr(args, "agent_harness", None) or getattr(args, "agent_model", None)
+    ):
+        die("--reasoning-effort cannot override the legacy --agent dsh shortcut: the "
+            "DSH profile owns the model's reasoningEffort. Use --agent-harness dsh "
+            "--agent-model deepseek-flash (or another explicit model), or set the level "
+            "in the DSH profile.", code=2)
+    os.environ[_model_runtime.AGENT_REASONING_EFFORT_ENV] = str(value).strip().lower()
+
+
 def cmd_run(args) -> None:
     """`run` entry point: take the root lock, then drive the rounds."""
+    _apply_reasoning_effort(args)
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()

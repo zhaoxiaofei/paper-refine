@@ -141,8 +141,16 @@ def config(args=None) -> dict:
                                                           DEFAULT_API_KEY),
         "harness": _normalize_harness(getattr(args, "harness", None)
                                        or _env("PAPER_QWEN_HARNESS", DEFAULT_HARNESS)),
-        "effort": (getattr(args, "reasoning_effort", None)
-                   or _env("PAPER_QWEN_REASONING_EFFORT", DEFAULT_EFFORT)).lower(),
+        # An explicit --reasoning-effort/flag wins, then the shared
+        # PAPER_AGENT_REASONING_EFFORT override, then the adapter's family
+        # variable; the shared table maps a level qwen's wire lacks (high/max
+        # -> its highest, xhigh).
+        "effort": rt.normalize_reasoning_effort(
+            "qwen38-27b",
+            getattr(args, "reasoning_effort", None)
+            or _env("PAPER_AGENT_REASONING_EFFORT", "")
+            or _env("PAPER_QWEN_REASONING_EFFORT", DEFAULT_EFFORT),
+        ),
         "tunnel": (getattr(args, "tunnel", None)
                    or _env("PAPER_QWEN_TUNNEL", "auto")).lower(),
         "ssh_host": getattr(args, "ssh_host", None) or _env("PAPER_QWEN_SSH_HOST",
