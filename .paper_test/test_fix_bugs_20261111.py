@@ -26,6 +26,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 WS = Path(os.environ.get("PAPER_WS") or HERE.parent)
+# The shared runtime now lives in agent_common/; a direct module load needs its
+# siblings (`llm_retry`) importable.
+sys.path.insert(0, str(WS / "agent_common"))
 FAILS = []
 
 
@@ -52,11 +55,11 @@ def attempt(name, fn):
 
 
 pipe = load("paper_fixbugs_pipe", WS / "paper_pipeline.py")
-rt = load("paper_fixbugs_runtime", WS / "model_runtime.py")
+rt = load("paper_fixbugs_runtime", WS / "agent_common" / "model_runtime.py")
 dots = load("paper_fixbugs_dots", WS / "paper_dots_agent.py")
 qwen = load("paper_fixbugs_qwen", WS / "paper_qwen_agent.py")
 router = load("paper_fixbugs_model", WS / "paper_model_agent.py")
-retry = load("paper_fixbugs_retry", WS / "llm_retry.py")
+retry = load("paper_fixbugs_retry", WS / "agent_common" / "llm_retry.py")
 
 
 def test_dots_exit_and_retry():
@@ -357,9 +360,9 @@ def test_catalog_and_registry():
         os.symlink(WS / "paper_docx_format_parts", scratch / "paper_docx_format_parts")
         for name in ("paper_redlines_adapter.py", "paper_qwen_agent.py",
                      "paper_dots_agent.py", "paper_model_agent.py",
-                     "model_runtime.py", "llm_retry.py", "llm_policy.json",
-                     "model_catalog.json", "docx2pdf.sh", "docxcompare.sh"):
+                     "docx2pdf.sh", "docxcompare.sh"):
             os.symlink(WS / name, scratch / name)
+        os.symlink(WS / "agent_common", scratch / "agent_common")
         proc = subprocess.run([sys.executable, str(scratch / "paper_pipeline.py"),
                                "--version"], capture_output=True, text=True, timeout=120)
         output = proc.stdout + proc.stderr

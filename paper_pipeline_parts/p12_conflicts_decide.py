@@ -8576,9 +8576,10 @@ def cmd_sync_code(args) -> None:
     it. That replacement copies the `PIPELINE_MODULE_FILES` bundle --
     `paper_pipeline.py`, `paper_docx_format.py`, `paper_redlines_adapter.py`,
     `paper_qwen_agent.py`, `paper_dots_agent.py`, `paper_model_agent.py`,
-    `model_runtime.py`, `llm_retry.py`, `llm_policy.json`, `model_catalog.json`,
-    `docx2pdf.sh` and `docxcompare.sh` -- into the root, preserving each mode and
-    recording the new digests; it never touches the package or pinned bytes.
+    `docx2pdf.sh` and `docxcompare.sh` -- plus the `agent_common/` runtime asset
+    directory (`model_runtime.py`, `llm_retry.py`, `llm_policy.json`,
+    `model_catalog.json`) into the root, preserving each mode and recording the
+    new digests; it never touches the package or pinned bytes.
     """
     root = Path(args.root).resolve()
     if not (root / "state.json").is_file():

@@ -288,6 +288,10 @@ def _copy_session_tools(sb: Path, stamp: float = None,
                 parts_name = "paper_pipeline_parts"
                 if (driver_src.parent / parts_name).is_dir():
                     copy_asset_dirs(driver_src.parent, tool_dir, names=(parts_name,))
+                # The shared runtime lives in `agent_common/` beside the driver and
+                # resolves its catalog/policy relative to `__file__`.
+                if (driver_src.parent / "agent_common").is_dir():
+                    copy_asset_dirs(driver_src.parent, tool_dir, names=("agent_common",))
                 # The staged DRIVER also loads its companion formatter from
                 # beside ITSELF (`_format_module()`), and the package-stage
                 # self-check runs the format-regression family. Staging only
@@ -303,11 +307,10 @@ def _copy_session_tools(sb: Path, stamp: float = None,
                 if (driver_src.parent / DOCX_FORMAT_PARTS_DIR).is_dir():
                     copy_asset_dirs(driver_src.parent, tool_dir,
                                     names=(DOCX_FORMAT_PARTS_DIR,))
-                # The staged driver imports its companion modules and reads the
-                # model catalog/policy BESIDE ITSELF (`model_runtime` resolves
-                # both relative to `__file__`). Staging only the driver + parts
-                # made the pre-flight fail with ModuleNotFoundError; copy the
-                # whole frozen module set next to the staged driver.
+                # The staged driver imports its companion modules too.
+                # Staging only the driver + parts made the pre-flight fail
+                # with ModuleNotFoundError; copy the whole frozen module set
+                # next to the staged driver.
                 for _name in PIPELINE_MODULE_FILES:
                     if _name in (SELFCHECK_DRIVER, DOCX_FORMAT_MODULE):
                         continue

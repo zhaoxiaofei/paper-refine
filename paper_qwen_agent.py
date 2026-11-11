@@ -29,7 +29,7 @@ Environment (all optional):
     PAPER_QWEN_MODEL           default qwen3.8-27b
     PAPER_QWEN_API_KEY         default `dummy` (vLLM usually needs no key)
     PAPER_QWEN_HARNESS         codex | dsh | claude | chat (default codex)
-    PAPER_QWEN_REASONING_EFFORT low | medium | xhigh (default low; qwen
+    PAPER_QWEN_REASONING_EFFORT low | medium | xhigh (default medium; qwen
                                 rejects codex's `max`)
     PAPER_QWEN_TUNNEL          auto | off | require (default auto)
     PAPER_QWEN_SSH_HOST        default zxf@101.6.31.113
@@ -75,26 +75,16 @@ import urllib.request
 from pathlib import Path
 
 try:
-    import model_runtime as rt
+    from agent_common import model_runtime as rt
 except ImportError:  # a test loader may not put this file's directory on sys.path
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import model_runtime as rt
+    from agent_common import model_runtime as rt
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
-DEFAULT_MODEL = "qwen3.8-27b"
-DEFAULT_API_KEY = "dummy"
-DEFAULT_HARNESS = "codex"
-DEFAULT_EFFORT = "low"
-DEFAULT_SSH_HOST = "zxf@101.6.31.113"
-DEFAULT_SSH_PORT = "52080"
-DEFAULT_LOCAL_PORT = "8000"
-DEFAULT_REMOTE = "127.0.0.1:8000"
-
-#: The shared model catalog (canonical: ``repos/common/model_catalog.json``;
+#: The shared model catalog (canonical: ``repos/agent_common/model_catalog.json``;
 #: this checkout carries an identical copy).  The fallback keeps a checkout
 #: refreshed from upstream, which may not have the copy yet, working.
-_CATALOG_PATH = Path(__file__).with_name("model_catalog.json")
+_CATALOG_PATH = Path(__file__).with_name("agent_common") / "model_catalog.json"
 
 
 def _catalog_capacity(model_id: str, field: str, fallback: int) -> int:
@@ -108,6 +98,32 @@ def _catalog_capacity(model_id: str, field: str, fallback: int) -> int:
         pass
     return fallback
 
+
+def _catalog_text(model_id: str, field: str, fallback: str) -> str:
+    """One string fact from the shared catalog, or ``fallback`` when absent."""
+    try:
+        with _CATALOG_PATH.open(encoding="utf-8") as handle:
+            for entry in json.load(handle)["models"]:
+                if entry["id"] == model_id:
+                    value = entry.get(field)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return fallback
+
+
+DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
+DEFAULT_MODEL = "qwen3.8-27b"
+DEFAULT_API_KEY = "dummy"
+DEFAULT_HARNESS = "codex"
+#: qwen3.8-27b's default reasoning level is a model fact in the shared catalog
+#: (``default_reasoning_level``); PAPER_QWEN_REASONING_EFFORT overrides it.
+DEFAULT_EFFORT = _catalog_text("qwen3.8-27b", "default_reasoning_level", "medium")
+DEFAULT_SSH_HOST = "zxf@101.6.31.113"
+DEFAULT_SSH_PORT = "52080"
+DEFAULT_LOCAL_PORT = "8000"
+DEFAULT_REMOTE = "127.0.0.1:8000"
 
 DEFAULT_CONTEXT_WINDOW = _catalog_capacity("qwen3.8-27b", "context_window", 150000)
 DEFAULT_MAX_TOKENS = _catalog_capacity("qwen3.8-27b", "max_tokens", 32768)
@@ -409,8 +425,8 @@ def codex_argv(cfg: dict, extra: list = None) -> list:
 
     The installed codex (0.163) accepts only `wire_api = "responses"`; the vLLM
     server exposes `/v1/responses`, so the route is wired to that API. Qwen
-    rejects codex's `max` reasoning effort; the adapter defaults to `low` and
-    passes it explicitly.
+    rejects codex's `max` reasoning effort; the adapter defaults to the
+    balanced `medium` and passes it explicitly.
     """
     overrides = [
         'model_provider="qwen"',

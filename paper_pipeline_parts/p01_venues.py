@@ -6,16 +6,16 @@
 from __future__ import annotations
 
 try:
-    import model_runtime as _model_runtime
+    from agent_common import model_runtime as _model_runtime
 except ImportError:  # a test loader may not put the checkout root on sys.path
     import sys as _sys
     from pathlib import Path as _Path
     for _candidate in (_Path(__file__).resolve().parent,
                        _Path(__file__).resolve().parent.parent):
-        if (_candidate / "model_runtime.py").is_file():
+        if (_candidate / "agent_common" / "model_runtime.py").is_file():
             _sys.path.insert(0, str(_candidate))
             break
-    import model_runtime as _model_runtime
+    from agent_common import model_runtime as _model_runtime
 
 # =====================================================================
 # VENUES AND JOURNALS
@@ -3328,8 +3328,8 @@ CONFLICT_AGENT_CHOICES = ("codex-lite", *AGENT_CHOICES)
 # the latest Anthropic models. `qwen38-27b` is the local vLLM checkpoint name
 # the qwen adapter already used (qwen3.8-27b); `dots3-note-preview` is the
 # operator-facing name for the Dots API model `dots3-note-prev`.
-# The model and harness registries are owned by ``repos/common/model_runtime.py``
-# and copied beside this file by ``repos/common/update_model_catalog.sh``.  The
+# The model and harness registries are owned by ``repos/agent_common/model_runtime.py``
+# and mounted at ``agent_common/`` by the git submodule.  The
 # pipeline keeps only the operator-facing aliases and legacy shortcuts.
 AGENT_MODELS = {
     name: {

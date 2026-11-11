@@ -895,8 +895,9 @@ def _parts_dir() -> _Path:
 def _missing_bundle_assets() -> list:
     """Companion modules/dirs the ordered parts import before `setup` can check.
 
-    The p00 prelude carries the manifest; p01 already imports `model_runtime`,
-    so a tree missing that module (or `paper_docx_format.py`) used to die in a
+    The p00 prelude carries the manifest; p01 already imports
+    `agent_common.model_runtime`, so a tree missing `agent_common/` (or
+    `paper_docx_format.py`) used to die in a
     raw ModuleNotFoundError/ConfigError before setup's own friendly missing-asset
     diagnostic. The preflight runs after p00 and before the rest.
     """
@@ -905,6 +906,13 @@ def _missing_bundle_assets() -> list:
     for dirname in globals().get("PIPELINE_ASSET_DIRS") or ():
         if not (here / dirname).is_dir():
             missing.append(f"{dirname}/")
+    # `agent_common/` is an asset directory, but its four files are individually
+    # required: an empty directory would satisfy the check above and then fail
+    # in p01's import with a raw ModuleNotFoundError.
+    for name in ("model_runtime.py", "llm_retry.py", "llm_policy.json",
+                 "model_catalog.json"):
+        if not (here / "agent_common" / name).is_file():
+            missing.append(f"agent_common/{name}")
     for name in globals().get("PIPELINE_MODULE_FILES") or ():
         if name != _Path(__file__).name and not (here / name).is_file():
             missing.append(str(name))

@@ -634,8 +634,14 @@ def cmd_setup(args) -> None:
     # The loaders above are thin: their ordered implementation parts must travel
     # with them, or the frozen bundle cannot start. Refuse to create a root that
     # would freeze a loader without its implementation.
-    _missing_assets = [name for name in PIPELINE_ASSET_DIRS
+    _missing_assets = [f"{name}/" for name in PIPELINE_ASSET_DIRS
                        if not (script.parent / name).is_dir()]
+    _missing_assets += [
+        f"agent_common/{name}"
+        for name in ("model_runtime.py", "llm_retry.py", "llm_policy.json",
+                     "model_catalog.json")
+        if not (script.parent / "agent_common" / name).is_file()
+    ]
     # The companion MODULES are just as required: the agent commands call
     # `python paper_docx_format.py scan ...`, the redline backend resolves the
     # adapter beside the driver, the `qwen`/`dots` presets execute their
@@ -646,7 +652,7 @@ def cmd_setup(args) -> None:
     _missing_modules = [name for name in PIPELINE_MODULE_FILES
                         if name != script.name and not (script.parent / name).is_file()]
     if _missing_assets or _missing_modules:
-        _missing = [f"{n}/" for n in _missing_assets] + list(_missing_modules)
+        _missing = list(_missing_assets) + list(_missing_modules)
         die(f"setup: the running tree is missing {', '.join(_missing)} beside "
             f"{script.name}; refusing to freeze a bundle whose stages cannot run. Run setup "
             f"from the maintained checkout (the tree that carries the loaders, their parts "
@@ -674,9 +680,7 @@ def cmd_setup(args) -> None:
     # that preset; copy it at setup and let the module manifest gate a later
     # drift.
     for _adapter_name in ("paper_qwen_agent.py", "paper_dots_agent.py",
-                          "paper_model_agent.py", "model_runtime.py",
-                          "llm_retry.py", "llm_policy.json",
-                          "model_catalog.json"):
+                          "paper_model_agent.py"):
         _adapter = script.with_name(_adapter_name)
         if _adapter.is_file():
             shutil.copy(_adapter, root / _adapter_name)

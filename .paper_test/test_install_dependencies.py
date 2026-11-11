@@ -82,7 +82,7 @@ def main() -> int:
               not re.search(r"/mnt/d/software/plugins|/home/[A-Za-z0-9_.-]+/", body))
     prelude = read(WS / "paper_pipeline_parts" / "p00_prelude.py")
     check("the frozen module list carries the model catalog data file",
-          '"model_catalog.json"' in prelude)
+          "model_catalog.json" in prelude)
     prompts = read(prompt_sources[1])
     check("the stage prompts name the exported Zotero helper",
           "$ZOTERO_SKILL" in prompts)
