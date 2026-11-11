@@ -380,7 +380,11 @@ def ensure_conform_quality(sb: Path, args, verify_only: bool = False, command=No
     if not problem:
         return
     agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
-    if not command and agent == "manual" and not getattr(args, "agent_cmd", None):
+    # `run --manual` stages the writer session for the operator: without an
+    # independent auditor command there is nothing that may audit the bytes, so
+    # adoption is blocked (an explicit --agent-cmd is that auditor).
+    manual = agent == "manual" or bool(getattr(args, "manual", False))
+    if not command and manual and not getattr(args, "agent_cmd", None):
         die("conform adoption blocked: " + problem +
             "; rerun conform with --agent/--agent-cmd for independent verification")
     rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "round": 0}

@@ -77,9 +77,9 @@ USAGE_EXAMPLES = """usage:
           Legend length never makes a version ineligible, reorders a ranking or
           fails a decision.
           --zotero is the reference-tooling policy for every agent session
-          (off|read|edit|apply; default edit). The prompts try the Zotero MCP
-          service first, then the Zotero skill, and use the `zot` CLI
-          (pyzotero-cli) only as the fallback when both are unavailable. off
+          (off|read|edit|apply; default edit). The prompts try the `zot` CLI
+          (pyzotero-cli) first, then the Zotero MCP service, and use the
+          Zotero skill only as the fallback when both are unavailable. off
           disables all three; read resolves and verifies references only; edit
           also lets the revision and integration stages add, remove or relink
           citations in their revised copy (the Zotero library stays read-only);
@@ -115,7 +115,7 @@ USAGE_EXAMPLES = """usage:
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent-harness dsh|gpt-codex|claude-code] [--agent-model NAME_OR_URL]
           [--agent-model-api-key KEY] [--agent-model-name MODEL]
-          [--agent-model-prep-json JSON]
+          [--agent-model-prep-json JSON] [--reasoning-effort LEVEL]
           [--judge-agent-harness dsh|gpt-codex|claude-code] [--judge-agent-model NAME_OR_URL]
           [--judge-agent-model-api-key KEY] [--judge-agent-model-name MODEL]
           [--judge-agent-model-prep-json JSON]
@@ -806,11 +806,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "byte-identical to --source and reports formatting only")
     ps.add_argument("--zotero", choices=list(ZOTERO_MODES), default=DEFAULT_ZOTERO_MODE,
                     help="Zotero reference-tooling policy for every agent session. The stage "
-                         "prompts try the Zotero MCP service first, then the Zotero skill, and "
-                         "use the `zot` CLI (pyzotero-cli) only as the fallback when both are "
+                         "prompts try the `zot` CLI (pyzotero-cli) first, then the Zotero MCP "
+                         "service, and use the Zotero skill only as the fallback when both are "
                          "unavailable. "
-                         "off = the run policy forbids all Zotero tooling (MCP service, "
-                         "skill or `zot` CLI) and every stage prompt says so; the pipeline "
+                         "off = the run policy forbids all Zotero tooling (`zot` CLI, "
+                         "MCP service or skill) and every stage prompt says so; the pipeline "
                          "does not uninstall the harness's MCP registration or skill, so "
                          "install with --no-zotero-mcp --no-external to remove them. Live "
                          "fields stay on the skills' manual route. "
@@ -880,7 +880,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "limited-context model (one GPU, ~100k tokens or less); the "
                          "postchecks, the coverage table and every deliverable are UNCHANGED. "
                          "Not to be confused with the model's reasoning effort (see "
-                         "PAPER_QWEN_REASONING_EFFORT), which this flag does not touch")
+                         "PAPER_AGENT_REASONING_EFFORT), which this flag does not touch")
     ps.add_argument("--cold-start-review",
                     dest="cold_start_review", choices=list(COLD_START_REVIEW_MODES),
                     default=COLD_START_REVIEW_DEFAULT,
@@ -1033,12 +1033,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--retry-backoff-max", type=int, default=DEFAULTS["retry_backoff_max"],
                     help=f"cap on a single backoff wait in seconds (default: "
                          f"{DEFAULTS['retry_backoff_max']})")
-    run_opts.add_argument("--agent", choices=list(AGENT_CHOICES), default=None,
-                    help="LEGACY shortcut for --agent-harness + --agent-model (codex, claude, "
-                         "dsh, qwen, dots, manual). It keeps the old command exactly; do not "
-                         "combine it with the new --agent-harness/--agent-model/--agent-model-* "
-                         "options. Omit the new options to use the default: dsh + "
-                         "deepseek-flash")
+    run_opts.add_argument(
+        "--manual", action="store_true",
+        help="stage every session prompt for manual completion instead of launching an "
+             "agent (the former `--agent manual`)")
     run_opts.add_argument("--agent-harness", choices=list(AGENT_HARNESS_CHOICES),
                     type=agent_choice, default=None, metavar="NAME",
                     help="the CLI that runs the sessions: dsh (DeepSeek Harness, the default), "
@@ -1074,6 +1072,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "reasoning_effort, ...). It may be incomplete: keys it omits keep "
                          "the harness defaults, and nested objects merge key by key. "
                          "Applies only to a custom endpoint URL")
+    run_opts.add_argument("--reasoning-effort", type=str.lower, default=None,
+                    choices=list(_model_runtime.REASONING_EFFORT_LEVELS),
+                    metavar="LEVEL",
+                    help="reasoning level every session requests from the selected model: "
+                         "off, minimal, low, medium, high, xhigh or max. It overrides the "
+                         "model's shared default and the per-family overrides, and it also "
+                         "reaches GPT/Claude, whose default is otherwise the model's own. "
+                         "A level the model's wire does not document maps to its nearest one "
+                         "(deepseek medium->high; qwen high/max->xhigh). Also "
+                         "$PAPER_AGENT_REASONING_EFFORT")
     run_opts.add_argument("--no-template-stage", action="store_true",
                           help="do NOT author the package inside the journal's Word templates "
                                "before the round (the default is to run that stage first in "
@@ -1081,11 +1089,10 @@ def build_parser() -> argparse.ArgumentParser:
                                "submission the round starts from)")
     run_opts.add_argument("--agent-cmd", default=None,
                     help="JSON argv list overriding the agent command")
-    run_opts.add_argument("--judge-agent", choices=list(AGENT_CHOICES), default=None,
-                    help="LEGACY shortcut for --judge-agent-harness + --judge-agent-model; "
-                         "keeps the old judge command exactly. Do not combine with the new "
-                         "--judge-agent-harness/--judge-agent-model/--judge-agent-model-* "
-                         "options")
+    run_opts.add_argument(
+        "--judge-manual", action="store_true",
+        help="stage the judge session prompts for manual completion (the former "
+             "`--judge-agent manual`)")
     run_opts.add_argument("--judge-agent-harness", choices=list(AGENT_HARNESS_CHOICES),
                     type=agent_choice, default=None, metavar="NAME",
                     help="the CLI for judge sessions only. When neither judge option is "

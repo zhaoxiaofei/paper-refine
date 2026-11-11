@@ -1063,9 +1063,9 @@ def cmd_setup(args) -> None:
     print("[setup] OOXML formatting scan:   " + format_note(ctx.state["original_format"])
           + "  (code-side proxy; the agents' category-4 formatting sweep is authoritative)")
     _zot_note = {
-        "off": "no Zotero tooling (MCP service, skill or `zot` CLI); live fields stay on the "
+        "off": "no Zotero tooling (`zot` CLI, MCP service or skill); live fields stay on the "
                "skills' manual route",
-        "read": "read-only reference resolution (MCP service, then skill, then `zot`); citation "
+        "read": "read-only reference resolution (`zot` CLI, then MCP service, then skill); citation "
                 "fields are not edited",
         "edit": "citation edits in the revised copy are allowed; the Zotero library stays "
                 "read-only",
@@ -1073,7 +1073,7 @@ def cmd_setup(args) -> None:
                  "YOUR REMOTE ZOTERO ACCOUNT (propose-then-verify protocol via the `zot` CLI)",
     }[zotero]
     print(f"[setup] zotero policy:           {zotero}: {_zot_note}"
-          + (f" (`zot` fallback {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
+          + (f" (route 1 `zot` CLI: {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
              if zotero != "off" else ""))
     print(f"[setup] corpus rule:             the difference-tracking auxiliaries "
           f"(\"*.tracking-<token>.<ext>\" and their \"*.logging-<token>.<ext>\" fallbacks, "
@@ -2087,13 +2087,20 @@ def _ensure_template_stage_for_run(ctx: Ctx, args, *, agent_command=None,
     if not templates:
         print("[run] template-first stage: no applicable Word template -- conforming to "
               "the journal's own author guidelines, then to academic convention")
-    agent = agent_label or str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
+    # `--manual` names a session the operator fills in; otherwise the
+    # harness/model pair (or an explicit --agent-cmd) labels an automated one.
+    # The legacy --agent shortcut is gone.
+    manual_requested = bool(getattr(args, "manual", False))
+    agent = agent_label or ("manual" if manual_requested
+                            else "the model/harness pair")
     sb = ctx.root / TEMPLATE_REWRITE_DIRNAME
-    if agent == "manual" and sb.is_dir() and any(sb.iterdir()) and (sb / PROMPT_FILE).is_file():
+    if (agent == "manual" or manual_requested) and sb.is_dir() and any(sb.iterdir()) \
+            and (sb / PROMPT_FILE).is_file():
         # Re-entering the stage by hand CHECKS the session the operator filled
-        # (`--agent manual` told them to do exactly that). Rebuilding it with
-        # force=True deleted the hand-filled out/ and never recorded the stage,
-        # so `run` looped forever and the operator's work was lost.
+        # (`--manual` told them to do exactly that); an explicit --agent-cmd is
+        # the independent auditor of those bytes. Rebuilding it with force=True
+        # deleted the hand-filled out/ and never recorded the stage, so `run`
+        # looped forever and the operator's work was lost.
         require_conform_context(ctx, sb, ctx.pristine)
         ensure_conform_quality(sb, args, command=agent_command)
         report = template_rewrite_postcheck(sb, ctx.pristine, templates,
@@ -2128,7 +2135,18 @@ def _ensure_template_stage_for_run(ctx: Ctx, args, *, agent_command=None,
         die(f"{mode} mode conforms the submission before any other stage: fill {sb / 'out'} "
             f"using {sb / PROMPT_FILE}, then re-run `run` (or check it with "
             f"`conform --root {ctx.root} --agent manual`)")
-    cmd = agent_command or resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
+    cmd = agent_command
+    if not cmd:
+        # The caller resolved no command: build the pair's command here (the
+        # legacy --agent preset path is gone).
+        _t_h = agent_choice(getattr(args, "agent_harness", None)
+                            or os.environ.get("PAPER_AGENT_HARNESS", ""))
+        _t_m = getattr(args, "agent_model", None) or os.environ.get("PAPER_AGENT_MODEL") or ""
+        _t_h, _t_m = _agent_pair_from_options(_t_h or None, _t_m or None)
+        agent = agent_selection_label(_t_h, _t_m)
+        cmd = resolve_agent_model_cmd(
+            _t_h, _t_m, getattr(args, "agent_cmd", None),
+            api_key_env="PAPER_AGENT_MODEL_API_KEY")
     rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
            "sandbox": str(sb), "round": 0}
     timeout = _timeout_seconds(args, DEFAULTS.get("timeout", 14400))
@@ -3369,28 +3387,6 @@ def no_progress_measure(row: dict):
     )
 
 
-def _legacy_agent_pair(name: str) -> tuple:
-    """(harness, model) reported for a legacy --agent name.
-
-    The legacy COMMAND is still resolved by resolve_agent_cmd(); this pair is
-    only what the run record and the console say the shortcut means. `None`
-    means the operator's CLI config owns that side (legacy codex/claude).
-    """
-    if name == "qwen":
-        h = agent_choice(os.environ.get("PAPER_QWEN_HARNESS") or "codex")
-        h = {"codex": "gpt-codex", "gpt-codex": "gpt-codex", "dsh": "dsh",
-             "claude": "claude-code", "claude-code": "claude-code",
-             "chat": None}.get(h)
-        return h, "qwen38-27b"
-    if name == "dots":
-        h = agent_choice(os.environ.get("PAPER_DOTS_HARNESS") or "codex")
-        h = {"codex": "gpt-codex", "gpt-codex": "gpt-codex", "dsh": "dsh",
-             "claude": "claude-code", "claude-code": "claude-code",
-             "chat": None}.get(h)
-        return h, "dots3-note-preview"
-    return LEGACY_AGENT_PAIRS.get(name, (None, None))
-
-
 def _agent_pair_from_options(harness: str, model: str,
                              fallback_harness: str = None,
                              fallback_model: str = None) -> tuple:
@@ -3412,8 +3408,24 @@ def _agent_pair_from_options(harness: str, model: str,
     return harness, model
 
 
+def _apply_reasoning_effort(args) -> None:
+    """Export --reasoning-effort for every generated provider route.
+
+    The shared runtime reads PAPER_AGENT_REASONING_EFFORT when it writes a DSH
+    patch, a Codex ``-c`` override or the Claude Code environment, so the
+    option is applied once here; child adapters inherit it.  The legacy
+    ``--agent dsh`` shortcut is refused: it boots the shipped profile, which
+    owns its own ``reasoningEffort``, so the flag could not be honoured.
+    """
+    value = getattr(args, "reasoning_effort", None)
+    if not value:
+        return
+    os.environ[_model_runtime.AGENT_REASONING_EFFORT_ENV] = str(value).strip().lower()
+
+
 def cmd_run(args) -> None:
     """`run` entry point: take the root lock, then drive the rounds."""
+    _apply_reasoning_effort(args)
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
@@ -3495,40 +3507,26 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         print(f"[run] {len(stale)} run(s) marked stale by the content check: {', '.join(stale)}")
         ctx.save_state()
     backfill_round_raw_scores(ctx)
-    # --- producer selection: legacy --agent OR the new model/harness pair ----
-    _legacy_agent = getattr(args, "agent", None)
+    # --- producer selection: the model/harness pair (the --agent shortcut is gone) ----
     _cli_harness = getattr(args, "agent_harness", None)
     _cli_model = getattr(args, "agent_model", None)
     _cli_model_name = getattr(args, "agent_model_name", None)
     _cli_api_key = getattr(args, "agent_model_api_key", None)
     _cli_prep = getattr(args, "agent_model_prep_json", None)
-    if _legacy_agent and (_cli_harness or _cli_model or _cli_model_name
-                          or _cli_api_key or _cli_prep):
-        die("--agent is the legacy shortcut and cannot be combined with "
-            "--agent-harness/--agent-model/--agent-model-api-key/"
-            "--agent-model-name/--agent-model-prep-json; use one form or the other")
-    # A legacy --agent keeps its exact old command and ignores the new
-    # environment defaults, so an exported PAPER_AGENT_* cannot break an old
-    # script. The CLI flags are the only conflict (handled above).
-    _new_harness = None if _legacy_agent else (
-        agent_choice(_cli_harness) if _cli_harness
-        else agent_choice(os.environ.get("PAPER_AGENT_HARNESS", "")))
-    _raw_model = (None if _legacy_agent else
-                  (_cli_model or os.environ.get("PAPER_AGENT_MODEL")))
+    _new_harness = (agent_choice(_cli_harness) if _cli_harness
+                    else agent_choice(os.environ.get("PAPER_AGENT_HARNESS", "")))
+    _raw_model = _cli_model or os.environ.get("PAPER_AGENT_MODEL")
     try:
         _new_model = agent_model_choice(_raw_model) if _raw_model else ""
     except ValueError as _model_exc:
         die(f"--agent-model: {_model_exc}", code=2)
-    _new_model_name = (None if _legacy_agent else
-                       (_cli_model_name or os.environ.get("PAPER_AGENT_MODEL_NAME")))
-    _new_api_key = (None if _legacy_agent else
-                    (_cli_api_key or os.environ.get("PAPER_AGENT_MODEL_API_KEY")))
+    _new_model_name = _cli_model_name or os.environ.get("PAPER_AGENT_MODEL_NAME")
+    _new_api_key = _cli_api_key or os.environ.get("PAPER_AGENT_MODEL_API_KEY")
     if (_cli_model_name or _cli_api_key or _cli_prep) and not _new_model:
         die("--agent-model-api-key / --agent-model-name / --agent-model-prep-json "
             "require an --agent-model endpoint URL")
     _new_prep = {}
-    _new_prep_raw = (None if _legacy_agent else
-                     (_cli_prep or os.environ.get("PAPER_AGENT_MODEL_PREP_JSON")))
+    _new_prep_raw = _cli_prep or os.environ.get("PAPER_AGENT_MODEL_PREP_JSON")
     if _new_model and not agent_model_is_endpoint(_new_model):
         if _cli_model_name or _cli_api_key or _cli_prep:
             die("--agent-model-api-key / --agent-model-name / "
@@ -3549,19 +3547,14 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 die(f"--agent-model-prep-json is not valid JSON: {exc}")
             if not isinstance(_new_prep, dict):
                 die("--agent-model-prep-json must be a JSON object")
-    if _legacy_agent == "manual":
-        manual = True
-        agent_harness, agent_model = _legacy_agent_pair("manual")
+    agent_harness, agent_model = _agent_pair_from_options(_new_harness, _new_model)
+    # An explicit --agent-cmd wins over --manual: a command the operator spelled
+    # must never be silently replaced by manual waiting (same rule as the judge).
+    manual = bool(getattr(args, "manual", False)) and not args.agent_cmd
+    if manual:
         agent_label = "manual"
         cmd = None
-    elif _legacy_agent:
-        manual = False
-        agent_harness, agent_model = _legacy_agent_pair(_legacy_agent)
-        agent_label = _legacy_agent
-        cmd = resolve_agent_cmd(_legacy_agent, args.agent_cmd)
     else:
-        manual = False
-        agent_harness, agent_model = _agent_pair_from_options(_new_harness, _new_model)
         agent_label = agent_selection_label(agent_harness, agent_model)
         cmd = resolve_agent_model_cmd(
             agent_harness, agent_model, args.agent_cmd,
@@ -3643,38 +3636,28 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                f"--champion-select {_csel_run} auto-promotes the revised submission "
                "(PROVISIONAL; no panel scores are produced)"))
     else:
-        _legacy_judge = getattr(args, "judge_agent", None)
         _judge_cli_h = getattr(args, "judge_agent_harness", None)
         _judge_cli_m = getattr(args, "judge_agent_model", None)
         _judge_cli_name = getattr(args, "judge_agent_model_name", None)
         _judge_cli_key = getattr(args, "judge_agent_model_api_key", None)
         _judge_cli_prep = getattr(args, "judge_agent_model_prep_json", None)
-        if _legacy_judge and (_judge_cli_h or _judge_cli_m or _judge_cli_name
-                              or _judge_cli_key or _judge_cli_prep):
-            die("--judge-agent is the legacy shortcut and cannot be combined with "
-                "--judge-agent-harness/--judge-agent-model/"
-                "--judge-agent-model-api-key/--judge-agent-model-name/"
-                "--judge-agent-model-prep-json; use one form or the other")
-        _judge_h = (None if _legacy_judge else (
+        _judge_h = (
             agent_choice(_judge_cli_h) if _judge_cli_h
-            else agent_choice(os.environ.get("PAPER_JUDGE_AGENT_HARNESS", ""))))
-        _raw_jm = (None if _legacy_judge else
-                   (_judge_cli_m or os.environ.get("PAPER_JUDGE_AGENT_MODEL")))
+            else agent_choice(os.environ.get("PAPER_JUDGE_AGENT_HARNESS", "")))
+        _raw_jm = _judge_cli_m or os.environ.get("PAPER_JUDGE_AGENT_MODEL")
         if agent_model_is_endpoint(_raw_jm):
             _judge_m = str(_raw_jm).strip()
         else:
             _judge_m = agent_choice(_raw_jm) if _raw_jm else ""
-        _judge_name = (None if _legacy_judge else
-                       (_judge_cli_name or os.environ.get("PAPER_JUDGE_AGENT_MODEL_NAME")))
-        _judge_key = (None if _legacy_judge else
-                      (_judge_cli_key or os.environ.get("PAPER_JUDGE_AGENT_MODEL_API_KEY")))
+        _judge_name = _judge_cli_name or os.environ.get("PAPER_JUDGE_AGENT_MODEL_NAME")
+        _judge_key = _judge_cli_key or os.environ.get("PAPER_JUDGE_AGENT_MODEL_API_KEY")
         if (_judge_cli_name or _judge_cli_key or _judge_cli_prep) and not _judge_m:
             die("--judge-agent-model-api-key / --judge-agent-model-name / "
                 "--judge-agent-model-prep-json require a --judge-agent-model endpoint URL")
         _judge_prep = {}
-        _judge_prep_raw = (None if _legacy_judge else
-                           (_judge_cli_prep
-                            or os.environ.get("PAPER_JUDGE_AGENT_MODEL_PREP_JSON")))
+        _judge_prep_raw = _judge_cli_prep or os.environ.get(
+            "PAPER_JUDGE_AGENT_MODEL_PREP_JSON"
+        )
         if _judge_m and not agent_model_is_endpoint(_judge_m):
             if _judge_cli_name or _judge_cli_key or _judge_cli_prep:
                 die("--judge-agent-model-api-key / --judge-agent-model-name / "
@@ -3695,21 +3678,12 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 if not isinstance(_judge_prep, dict):
                     die("--judge-agent-model-prep-json must be a JSON object")
         judge_manual = False
-        if _legacy_judge == "manual" and not args.judge_agent_cmd:
-            # An explicit --judge-agent-cmd wins over --judge-agent manual: it must
+        if getattr(args, "judge_manual", False) and not args.judge_agent_cmd:
+            # An explicit --judge-agent-cmd wins over --judge-manual: it must
             # never be silently replaced by manual waiting.
             judge_manual = True
             judge_cmd = None
             judge_label = "manual"
-        elif _legacy_judge:
-            judge_harness, judge_model = _legacy_agent_pair(_legacy_judge)
-            judge_label = _legacy_judge
-            if args.judge_agent_cmd:
-                judge_cmd = resolve_agent_cmd(_legacy_judge, args.judge_agent_cmd)
-            else:
-                # An explicit --judge-agent must win over --agent-cmd and over
-                # PAPER_AGENT_CMD; otherwise the flag silently has no effect on the panel.
-                judge_cmd = resolve_agent_cmd(_legacy_judge, None, use_env=False)
         elif _judge_h or _judge_m:
             judge_harness, judge_model = _agent_pair_from_options(_judge_h, _judge_m)
             judge_label = agent_selection_label(judge_harness, judge_model)
@@ -3725,15 +3699,12 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             if agent_model_is_endpoint(agent_model):
                 _judge_name = _new_model_name
                 _judge_prep = _new_prep
-            if _legacy_agent:
-                judge_cmd = resolve_agent_cmd(_legacy_agent, args.judge_agent_cmd)
-            else:
-                judge_cmd = resolve_agent_model_cmd(
-                    agent_harness, agent_model, args.judge_agent_cmd,
-                    api_key_env="PAPER_AGENT_MODEL_API_KEY",
-                    model_name=_new_model_name if agent_model_is_endpoint(agent_model) else None,
-                    prep_json=(json.dumps(_new_prep) if _new_prep
-                               and agent_model_is_endpoint(agent_model) else None))
+            judge_cmd = resolve_agent_model_cmd(
+                agent_harness, agent_model, args.judge_agent_cmd,
+                api_key_env="PAPER_AGENT_MODEL_API_KEY",
+                model_name=_new_model_name if agent_model_is_endpoint(agent_model) else None,
+                prep_json=(json.dumps(_new_prep) if _new_prep
+                           and agent_model_is_endpoint(agent_model) else None))
         else:
             judge_cmd = list(cmd) if cmd else None
             judge_manual = manual
@@ -3857,7 +3828,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         "agent_endpoint": (_record_agent_model
                            if agent_model_is_endpoint(agent_model) else None),
         "agent_model_prep_keys": sorted(_new_prep) if _new_prep else [],
-        "agent_legacy": _legacy_agent,
+        "agent_legacy": None,
         "judge_agent": judge_label,
         "judge_agent_harness": judge_harness,
         "judge_agent_model": _record_judge_model,
@@ -3893,11 +3864,11 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # remote library -- says so loudly.
     _zot_mode = zotero_mode_of(ctx)
     if _zot_mode == "off":
-        _zot_note = ("off -- no Zotero tooling (MCP service, skill or `zot` CLI); live fields "
+        _zot_note = ("off -- no Zotero tooling (`zot` CLI, MCP service or skill); live fields "
                      "stay on the skills' manual route")
     else:
-        _zot_on_path = ("the `zot` CLI fallback is on PATH" if zot_cli_available()
-                        else "the `zot` CLI fallback is NOT on PATH")
+        _zot_on_path = ("the `zot` CLI (route 1) is on PATH" if zot_cli_available()
+                        else "the `zot` CLI (route 1) is NOT on PATH")
         if _zot_mode == "apply":
             _zot_note = ("apply -- citation edits AND single-field library updates are allowed "
                          "(propose-then-verify via the `zot` CLI, --last-modified auto); this "
@@ -3906,12 +3877,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             _zot_note = ("edit -- citation edits in the revised copy are allowed; the Zotero "
                          f"library stays read-only ({_zot_on_path})")
         else:
-            _zot_note = ("read -- read-only reference resolution (MCP service, then skill, then "
-                         f"`zot`); no citation edits ({_zot_on_path})")
+            _zot_note = ("read -- read-only reference resolution (`zot` CLI, then MCP service, "
+                         f"then skill); no citation edits ({_zot_on_path})")
     print(f"[run] zotero reference tooling:  {_zot_note}")
     # The docx->pdf converter the prompts ask for FIRST (see the visual rule):
-    # the docx-converter MCP tool, falling back to the other renderers.
-    if mcp_server_configured(DOCX_MCP_SERVER):
+    # `docx2pdf.sh`, falling back to the docx-converter MCP tool and then to
+    # the other renderers.
+    if shutil.which("docx2pdf.sh"):
+        first_choice = ("docx2pdf.sh -- agents run it before any other converter")
+    elif mcp_server_configured(DOCX_MCP_SERVER):
         argv = [str(a) for a in (cmd or [])]
         if manual:
             note = "; manual mode: YOUR session approves the call, so no override is needed"
@@ -3931,11 +3905,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                         f"carries no MCP approval override (only the codex one adds them; a CLI's "
                         f"own configuration decides which MCP servers it reaches), so the call "
                         f"may be denied")
-        first_choice = (f"the {DOCX_MCP_SERVER} MCP tool (`{DOCX_MCP_TOOL}`) -- agents call it "
-                        f"before any other converter{note}")
-    elif shutil.which("docx2pdf.sh"):
-        first_choice = ("docx2pdf.sh (the docx-converter MCP tool is not configured in "
-                        f"{codex_config_path()})")
+        first_choice = (f"the {DOCX_MCP_SERVER} MCP tool (`{DOCX_MCP_TOOL}`) -- the fallback when "
+                        f"docx2pdf.sh is not on PATH{note}")
     else:
         first_choice = ("NONE of the Word-fidelity converters is available -- the prompts tell the "
                         "agents to record the limitation instead of claiming a visual check")
