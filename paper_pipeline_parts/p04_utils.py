@@ -355,7 +355,8 @@ def asset_dir_digest(base_dir: Path, name: str):
     reference tables change a stage's behaviour as much as a script does. Only
     `__pycache__`/`.pyc` are skipped -- execution by-products differ between a
     checkout that ran and a fresh copy and must never make a frozen bundle look
-    edited.
+    edited -- plus the `.git` metadata of a submodule asset directory, which is
+    not runtime code.
     """
     dirp = Path(base_dir) / name
     if not dirp.is_dir():
@@ -364,6 +365,7 @@ def asset_dir_digest(base_dir: Path, name: str):
         paths = sorted(p for p in dirp.rglob("*")
                        if p.is_file()
                        and "__pycache__" not in p.parts
+                       and ".git" not in p.parts
                        and ".add-venue" not in p.parts
                        and p.suffix.lower() not in (".pyc", ".pyo"))
         digest = hashlib.sha256()
@@ -419,7 +421,7 @@ def copy_asset_dirs(src_dir, dst_dir, names=None) -> list:
             # and made the asset digest depend on a previous operator run.
             shutil.copytree(src, tmp,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo",
-                                                          ".add-venue"))
+                                                          ".add-venue", ".git"))
             if dst.exists() or dst.is_symlink():
                 # Move the live bundle aside instead of deleting it: a failed
                 # replace can then put the old tree back, so an interrupted
