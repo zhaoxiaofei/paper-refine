@@ -202,7 +202,7 @@ the harness with `PAPER_QWEN_HARNESS`:
 * `codex` (default) — `codex exec` with a custom `model_provider=qwen` route.
   The installed codex accepts only `wire_api="responses"`; vLLM exposes
   `/v1/responses`, so the route uses it. Qwen rejects codex's `max` reasoning
-  effort; the adapter defaults to `low` (`PAPER_QWEN_REASONING_EFFORT`).
+  effort; the adapter defaults to `medium` (`PAPER_QWEN_REASONING_EFFORT`).
 * `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` provider patch
   and an `agent-default-model` override for the qwen route.
 * `claude` — `claude --print` against vLLM's Anthropic Messages endpoint (when

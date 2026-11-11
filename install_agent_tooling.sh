@@ -3,8 +3,11 @@
 # agent harness present on this machine:
 #
 #   * Codex ($CODEX_HOME, default ~/.codex): the versioned paper-skills-*
-#     package, the two MCP server trees, and one [mcp_servers.<name>] entry
-#     per server that points at those trees.
+#     package and one [mcp_servers.<name>] entry per server. The entries
+#     point at the server trees, which live OUTSIDE $CODEX_HOME (in
+#     $MCP_TOOLS_DIR, default ~/mcp-servers): .codex is the harness's
+#     configuration directory (config.toml, skill discovery), not an
+#     installation root for server code.
 #   * DeepSeek Harness ($DSH_HOME, default ~/.dsh): both skills in its flat
 #     skills directory (one copy per frontmatter `name`), and the same two
 #     servers in EVERY profile's cordis.patch.yml.
@@ -34,6 +37,12 @@
 # mixed skills/new-converter/old-comparer tree (F-094). Harness registrations
 # (Codex config, dsh profile rows) happen LAST, against the freshly switched-in
 # trees, and each one is verified before it is accepted.
+#
+# A dsh profile's managed MCP block is reconciled before its row writer runs:
+# an entry an operator pasted between the markers makes the writer refuse to
+# --merge (it would silently drop that entry), which used to abort the install
+# after the switch-in. The installer moves such entries back outside the
+# markers, with a backup, instead of failing; see repair_dsh_managed_block.
 set -euo pipefail
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -73,9 +82,17 @@ resolve_file() {
 codex_home="${CODEX_HOME:-$HOME/.codex}"
 skills_dir="$codex_home/skills"
 backup_dir="$codex_home/backup"
-# Where the two MCP servers are deployed. BOTH harnesses run this copy -- the
-# dsh rows name it explicitly -- so the default keeps the historical path.
-tools_dir="${MCP_TOOLS_DIR:-$codex_home/mcp-tools}"
+# Where the two MCP servers are deployed. They are private servers shipped by
+# this checkout, not published packages, so the recommended shape is a
+# dedicated directory OUTSIDE the harness configuration directory, referenced
+# by absolute path from each config: $MCP_TOOLS_DIR, default ~/mcp-servers.
+# `.codex` is a configuration hub; installing server code (and its
+# node_modules) under it mixes the two concerns, clutters config backups and
+# makes the config less portable. BOTH harnesses run this copy -- the dsh rows
+# name it explicitly. Older versions of this script defaulted to
+# $CODEX_HOME/mcp-tools; a successful install moves that legacy tree out (see
+# the migration at the end of this script).
+tools_dir="${MCP_TOOLS_DIR:-$HOME/mcp-servers}"
 
 # Where the DeepSeek Harness discovers skills: $DSH_HOME/skills (default
 # ~/.dsh/skills), the same directory `dshx skill add` writes to. dsh ALSO reads
@@ -154,6 +171,23 @@ codex_home=$(resolve_dir "$codex_home")
 skills_dir="$codex_home/skills"
 backup_dir="$codex_home/backup"
 tools_dir=$(resolve_dir "$tools_dir")
+# Expand a leading `~` in DSH_HOME even when the dsh half is skipped: the
+# legacy-install migration at the end reads the profiles to decide whether a
+# registration still points at server code it must not move.
+case "$dsh_home" in
+    "~") dsh_home="$HOME" ;;
+    "~/"*) dsh_home="$HOME/${dsh_home#\~/}" ;;
+esac
+# The pre-recommendation install root: server code used to be installed inside
+# the Codex configuration directory. Kept so a completed install can move this
+# script's own trees out of it (see the migration at the end).
+legacy_tools_dir="$codex_home/mcp-tools"
+case "$tools_dir/" in
+    "$codex_home"/*)
+        echo "warning: MCP_TOOLS_DIR ($tools_dir) is inside the Codex configuration directory" >&2
+        echo "         ($codex_home); a directory of its own, outside it, is recommended" >&2
+        ;;
+esac
 if [ "$dsh_enabled" = 1 ]; then
     dsh_home=$(resolve_dir "$dsh_home")
     dsh_skills_dir="$dsh_home/skills"
@@ -490,12 +524,367 @@ if [ "$dsh_enabled" = 1 ]; then
     echo "dsh hot-reloads its skills directory; no restart needed."
 fi
 
+# ---- reconcile each dsh profile's managed block ----------------------------
+# The row writer owns everything between its two markers and rewrites it on
+# every run: `--merge` re-reads the block as its own rows (a 4-space `- id:`
+# row carrying an 8-space `serverName:`) and REFUSES the whole merge when the
+# block holds anything else, because rewriting it would silently drop that
+# content. That guard is correct, but the block is a comment-delimited region
+# in a file operators edit, so an entry pasted in before the closing marker
+# makes the writer refuse and the install abort half-finished. The headless
+# profile in debug run 261111-195659 was exactly that: a top-level
+# `- id: llm-pi-ai` patch entry (and its nested model row) sat inside the
+# markers, so the writer counted 5 `- id:` rows but could read only 3 rows of
+# its own and exited 1 after the skills and tools had already been switched in.
+#
+# The installer therefore reconciles every block BEFORE the writer sees it:
+# only the writer's own rows stay between the markers. Everything else the
+# writer would drop is preserved byte for byte outside the markers, in place
+# or as its own top-level entry: another top-level entry, an insert item with
+# no serverName (kept under its own `- insert:` entry), a commented-out entry,
+# or comment lines that sat before the rows. Nothing is edited, re-indented,
+# renamed or deleted; the file is backed up and written atomically first. A
+# block that cannot be reconciled without guessing (a serverName row at a
+# drifted indentation, a duplicate serverName, an unclosed block, several
+# blocks) is refused with a message and left untouched, never silently
+# trimmed. A clean profile stays byte-identical, so a re-run is a no-op.
+repair_dsh_managed_block() {
+    local patch_file=$1
+    "$node_bin" -e '
+        const fs = require("fs");
+        const path = require("path");
+        const crypto = require("crypto");
+
+        const BEGIN = "# >>> codex-mcp-import (managed block; regenerate with install-codex-mcp.mjs) >>>";
+        const END = "# <<< codex-mcp-import <<<";
+        const patchFile = process.argv[1];
+
+        function fail(message) {
+            process.stderr.write(`install_agent_tooling: ${patchFile}: ${message}\n`);
+            process.exit(3);
+        }
+
+        function note(message) {
+            process.stdout.write(`install_agent_tooling: ${patchFile}: ${message}\n`);
+        }
+
+        let stat;
+        try {
+            stat = fs.lstatSync(patchFile);
+        } catch (error) {
+            fail(`cannot read it (${error.code || error.message})`);
+        }
+        if (stat.isSymbolicLink()) fail("is a symlink; refusing to rewrite it");
+
+        const text = fs.readFileSync(patchFile, "utf8");
+        const blocks = text.split(BEGIN).length - 1;
+        if (blocks === 0) {
+            note("no managed block; the row writer will add one");
+            process.exit(0);
+        }
+        if (blocks > 1) {
+            fail(`carries ${blocks} managed blocks; --merge reads only the first and would drop the rest (restore it from a backup first)`);
+        }
+        const begin = text.indexOf(BEGIN);
+        const end = text.indexOf(END);
+        if (end < begin) {
+            fail("the managed block opens but has no closing marker (restore it from a backup first)");
+        }
+
+        const head = text.slice(0, begin);
+        const body = text.slice(begin + BEGIN.length, end);
+        const tail = text.slice(end + END.length);
+        if (body.trim() === "") {
+            note("managed block is empty; the row writer will fill it");
+            process.exit(0);
+        }
+
+        const lines = body.split("\n");
+        const isTopLevel = (line) => /^-(?:[ \t]|$)/.test(line);
+        const isWriterRow = (line) => /^ {4}- id: /.test(line);
+
+        // A managed block is a sequence of TOP-LEVEL YAML entries. The writer emits
+        // exactly one `- insert:` entry whose items are 4-space rows carrying an
+        // 8-space serverName; anything else in the block is content the writer would
+        // drop, so it is preserved outside the markers instead of being rewritten.
+        const pre = [];
+        const sections = [];
+        let section = null;
+        for (const line of lines) {
+            if (isTopLevel(line)) {
+                section = { lines: [line], items: [] };
+                sections.push(section);
+            } else if (section) {
+                section.lines.push(line);
+            } else {
+                pre.push(line);
+            }
+        }
+
+        const writerSections = [];
+        for (const candidate of sections) {
+            if (!/^- insert:\s*$/.test(candidate.lines[0])) continue;
+            const between = [];
+            let item = null;
+            for (const line of candidate.lines.slice(1)) {
+                if (isWriterRow(line)) {
+                    item = [line];
+                    candidate.items.push(item);
+                } else if (item) {
+                    item.push(line);
+                } else {
+                    between.push(line);
+                }
+            }
+            candidate.between = between;
+            if (candidate.items.length === 0) {
+                if (/^\s*serverName: /m.test(candidate.lines.join("\n"))) {
+                    fail("an \"- insert:\" list inside the managed block carries a serverName row that is not at the writer indentation (4 spaces before \"- id:\", 8 before \"serverName:\"); normalising it would guess the row shape, so it is left untouched (fix the indentation or move the list out of the markers and re-run)");
+                }
+                continue;
+            }
+            // The writer re-emits only 4-space "- id:" items carrying an 8-space
+            // serverName. Every other item in the list is content it would drop, so
+            // it is preserved verbatim as its own "- insert:" entry outside the
+            // markers; an item that does carry a serverName at another indentation is
+            // refused, because registering it beside the managed rows could duplicate
+            // a server.
+            const named = [];
+            const stray = [];
+            for (const linesOfItem of candidate.items) {
+                if (linesOfItem.some((line) => /^ {8}serverName: /.test(line))) {
+                    named.push(linesOfItem);
+                } else if (linesOfItem.some((line) => /^\s*serverName:\s*/.test(line))) {
+                    fail("an \"- insert:\" item inside the managed block carries a serverName at the wrong indentation; the writer would not manage it and registering it beside the managed row could duplicate a server, so it is left untouched (fix the indentation or move the item out of the markers and re-run)");
+                } else {
+                    stray.push(linesOfItem);
+                }
+            }
+            if (named.length === 0) continue;   // an insert list with no MCP row is operator content: move it out verbatim
+            candidate.items = named;
+            candidate.strayItems = stray;
+            writerSections.push(candidate);
+        }
+        if (writerSections.length > 1) {
+            fail(`the managed block carries ${writerSections.length} "- insert:" lists of MCP rows; only one can be the writer block, and rewriting either would register the rows twice (move all but one out of the markers first)`);
+        }
+
+        const stripBlankEdges = (chunk) => {
+            const out = chunk.slice();
+            while (out.length > 0 && out[out.length - 1].trim() === "") out.pop();
+            while (out.length > 0 && out[0].trim() === "") out.shift();
+            return out;
+        };
+
+        const writeBackup = () => {
+            try {
+                const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").replace("Z", "");
+                let target = `${patchFile}.bak-install-agent-tooling-${stamp}`;
+                let suffix = 2;
+                while (fs.existsSync(target)) target = `${patchFile}.bak-install-agent-tooling-${stamp}-${suffix++}`;
+                fs.writeFileSync(target, text, { mode: 0o600 });
+                return target;
+            } catch (error) {
+                fail(`could not back it up before the repair (${error.message || error.code}); the file is untouched`);
+            }
+        };
+
+        const writeAtomic = (next) => {
+            const dir = path.dirname(patchFile);
+            const base = path.basename(patchFile);
+            let tmp = null;
+            try {
+                for (let attempt = 0; attempt < 20; attempt += 1) {
+                    tmp = path.join(dir, `.${base}.repair-${process.pid}-${crypto.randomBytes(6).toString("hex")}`);
+                    try {
+                        fs.writeFileSync(tmp, next, { flag: "wx", mode: 0o600 });
+                        break;
+                    } catch (error) {
+                        tmp = null;
+                        if (error.code !== "EEXIST") throw error;
+                    }
+                }
+                if (!tmp) throw new Error("could not create a unique temporary beside the patch file");
+                try { fs.chmodSync(tmp, stat.mode & 0o777); } catch { /* keep 0600 */ }
+                fs.renameSync(tmp, patchFile);
+                tmp = null;
+            } catch (error) {
+                if (tmp) {
+                    try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+                    tmp = null;
+                }
+                fail(`could not rewrite it atomically (${error.message || error.code})`);
+            }
+        };
+
+        const writer = writerSections[0] || null;
+        if (writer === null) {
+            const next = `${head}${body}${tail}`;
+            if (next === text) {
+                note("managed block is already mergeable");
+                process.exit(0);
+            }
+            note("the managed block carries no MCP row; removing its empty markers and leaving the entries in place");
+            const saved = writeBackup();
+            writeAtomic(next);
+            note(`backup: ${saved}`);
+            process.exit(0);
+        }
+
+        const names = writer.items.map((linesOfItem) => {
+            const found = linesOfItem.join("\n").match(/^ {8}serverName: (.*)$/m);
+            return found[1].trim().replace(/^"|"$/g, "");
+        });
+        const duplicates = [...new Set(names.filter((name, index) => names.indexOf(name) !== index))];
+        if (duplicates.length > 0) {
+            fail(`the managed block carries duplicate serverName row(s) ${duplicates.map((name) => JSON.stringify(name)).join(", ")}; --merge keys the kept rows by serverName, so it would drop one (remove or rename the duplicate first)`);
+        }
+
+        const extractCommentedEntries = (chunk) => {
+            const kept = [];
+            const runs = [];
+            for (let index = 0; index < chunk.length; index += 1) {
+                if (!/^\s*#\s*-\s+id:\s*/.test(chunk[index])) {
+                    kept.push(chunk[index]);
+                    continue;
+                }
+                const run = [];
+                while (index < chunk.length && /^\s*#/.test(chunk[index])) {
+                    run.push(chunk[index]);
+                    index += 1;
+                }
+                index -= 1;
+                runs.push(run);
+            }
+            return { kept, runs };
+        };
+
+        const isCommentOnly = (chunk) => chunk.every((line) => line.trim() === "" || line.trim().startsWith("#"));
+        const blockPreamble = stripBlankEdges(pre);
+        const between = stripBlankEdges(writer.between || []);
+        if (!isCommentOnly(blockPreamble) || !isCommentOnly(between)) {
+            fail("the managed block carries content before its writer rows that the writer would drop; this script cannot move it out without guessing, so it is left untouched (move it out of the markers and re-run)");
+        }
+        const strayLines = [];
+        if (writer.strayItems && writer.strayItems.length > 0) {
+            strayLines.push("- insert:");
+            for (const linesOfItem of writer.strayItems) strayLines.push(...stripBlankEdges(linesOfItem));
+        }
+        const blockLines = [writer.lines[0]];
+        for (const linesOfItem of writer.items) blockLines.push(...stripBlankEdges(linesOfItem));
+        const block = extractCommentedEntries(blockLines);
+        const blockBody = block.kept.join("\n");
+        const rows = (blockBody.match(/^\s*-\s+id:/gm) || []).length;
+        if (rows !== writer.items.length) {
+            fail(`the managed block would still carry ${rows} "- id:" row(s) for ${writer.items.length} server row(s); cannot separate them safely (move the extra row out of the markers and re-run)`);
+        }
+
+        const foreign = sections.filter((candidate) => candidate !== writer);
+        const foreignBefore = foreign.filter((candidate) => sections.indexOf(candidate) < sections.indexOf(writer));
+        const foreignAfter = foreign.filter((candidate) => sections.indexOf(candidate) > sections.indexOf(writer));
+
+        const renderSections = (chunks) => chunks
+            .map((chunk) => stripBlankEdges(chunk.lines).join("\n"))
+            .filter((chunk) => chunk !== "")
+            .join("\n\n");
+
+        const preservedBlocks = [];
+        if (blockPreamble.length > 0) preservedBlocks.push(blockPreamble.join("\n"));
+        if (between.length > 0) preservedBlocks.push(between.join("\n"));
+        for (const run of block.runs) preservedBlocks.push(run.join("\n"));
+
+        const movedEntries = foreign.length + (writer.strayItems ? writer.strayItems.length : 0);
+        const movedBlocks = preservedBlocks.length;
+        if (movedEntries === 0 && movedBlocks === 0) {
+            note("managed block is already mergeable");
+            process.exit(0);
+        }
+
+        const pieces = [];
+        const headText = head.replace(/\s+$/, "");
+        if (headText !== "") pieces.push(headText);
+        const fore = renderSections(foreignBefore);
+        if (fore !== "") pieces.push(fore);
+        pieces.push(`${BEGIN}\n${blockBody}\n${END}`);
+        const strayText = strayLines.join("\n");
+        if (strayText !== "") pieces.push(strayText);
+        for (const blockText of preservedBlocks) {
+            if (blockText.trim() !== "") pieces.push(blockText);
+        }
+        const aft = renderSections(foreignAfter);
+        if (aft !== "") pieces.push(aft);
+        const tailText = tail.replace(/^\s+/, "");
+        if (tailText !== "") pieces.push(tailText);
+        const next = `${pieces.join("\n\n")}\n`;
+
+        if (next === text) {
+            note("managed block is already mergeable");
+            process.exit(0);
+        }
+
+        const saved = writeBackup();
+        writeAtomic(next);
+        if (movedEntries > 0) {
+            note(`moved ${movedEntries} non-writer entr${movedEntries === 1 ? "y" : "ies"} out of the managed block; text preserved verbatim`);
+        }
+        for (const chunk of [...foreignBefore, ...foreignAfter]) {
+            note(`  moved out: ${chunk.lines[0].trim()}`);
+        }
+        if (writer.strayItems && writer.strayItems.length > 0) {
+            for (const linesOfItem of writer.strayItems) {
+                note(`  moved out (kept as an "- insert:" item): ${linesOfItem[0].trim()}`);
+            }
+        }
+        for (const run of block.runs) {
+            note(`  moved out (commented-out entry): ${run[0].trim()}`);
+        }
+        if (blockPreamble.length > 0 || between.length > 0) {
+            note("  moved out the comment lines that sat before the writer rows");
+        }
+        note(`backup: ${saved}`);
+        note("the row writer owns the two markers; anything it would drop is preserved outside them, byte for byte");
+    ' "$patch_file"
+}
+
+# Confirm a profile really carries both rows this installer owns, pointing at
+# the freshly switched-in trees. The row writer validates the composed profile,
+# but it only reports what it wrote; this check reads the file that will be
+# loaded next time a session starts.
+verify_dsh_profile_rows() {
+    local profile=$1 patch_file=$2
+    "$node_bin" -e '
+        const fs = require("fs");
+        const [file, toolsDir] = process.argv.slice(1);
+        const text = fs.readFileSync(file, "utf8");
+        const wanted = [["docx-compare", "mcp-docx-compare"],
+                        ["docx-converter", "mcp-docx-converter"]];
+        const missing = [];
+        for (const [name, dir] of wanted) {
+            const script = `${toolsDir}/${dir}/index.js`;
+            if (!text.includes(`serverName: "${name}"`) || !text.includes(script)) missing.push(name);
+        }
+        if (missing.length > 0) {
+            process.stderr.write(`missing MCP row(s): ${missing.join(", ")}\n`);
+            process.exit(1);
+        }
+    ' "$patch_file" "$tools_dir" || {
+        echo "error: dsh profile ${profile} does not carry both docx MCP rows pointing at ${tools_dir} after the update" >&2
+        exit 1
+    }
+}
+
 # ---- install the two servers into every dsh profile ------------------------
 # Native install: this checkout's own server list is written into the profile,
 # not a copy of Codex's configuration. `--merge` keeps rows for servers this
 # run does not mention, so a profile that also carries other MCP servers keeps
 # them. The row writer installs the MCP client plugin in the profile when it is
 # missing and validates the composed profile before accepting the change.
+#
+# Two passes: reconcile EVERY block first (so a block that cannot be
+# reconciled stops the run before the row writer touches any profile), then
+# invoke the writer on each. The reconciliation itself is a safe, backed-up,
+# in-place edit; if a later profile cannot be reconciled, the earlier repairs
+# stay in place and the rerun after fixing it is idempotent.
 if [ "$dsh_enabled" = 1 ]; then
     if [ -z "$dsh_cli" ]; then
         echo "skipped the dsh MCP install: the dsh CLI is not on PATH (skills were still installed)" >&2
@@ -524,19 +913,28 @@ if [ "$dsh_enabled" = 1 ]; then
             fs.writeFileSync(out, `${JSON.stringify(servers, null, 2)}\n`);
         ' "$servers_json" "$node_bin" "$tools_dir"
 
-        profiles=0
+        profile_dirs=()
         for profile_dir in "$dsh_home"/profiles/*/; do
             [ -f "$profile_dir/cordis.patch.yml" ] || continue
-            profile=$(basename -- "$profile_dir")
-            profiles=$((profiles + 1))
-            echo "installing MCP servers into dsh profile: $profile"
-            "$node_bin" "$repo_dir/scripts/install-codex-mcp.mjs" \
-                --profile "$profile" \
-                --dsh-home "$dsh_home" \
-                --servers-json "$servers_json" \
-                --merge
+            profile_dirs+=("${profile_dir%/}")
         done
-        if [ "$profiles" = 0 ]; then
+        if [ "${#profile_dirs[@]}" -gt 0 ]; then
+            for profile_dir in "${profile_dirs[@]}"; do
+                profile=$(basename -- "$profile_dir")
+                echo "checking the managed MCP block in dsh profile: $profile"
+                repair_dsh_managed_block "$profile_dir/cordis.patch.yml"
+            done
+            for profile_dir in "${profile_dirs[@]}"; do
+                profile=$(basename -- "$profile_dir")
+                echo "installing MCP servers into dsh profile: $profile"
+                "$node_bin" "$repo_dir/scripts/install-codex-mcp.mjs" \
+                    --profile "$profile" \
+                    --dsh-home "$dsh_home" \
+                    --servers-json "$servers_json" \
+                    --merge
+                verify_dsh_profile_rows "$profile" "$profile_dir/cordis.patch.yml"
+            done
+        else
             echo "skipped the dsh MCP install: no profile with a cordis.patch.yml under $dsh_home/profiles" >&2
         fi
         rm -f -- "$servers_json"
@@ -550,4 +948,94 @@ else
     fi
 fi
 
-echo "install complete: ${new_version}"
+# ---- move this script's old install out of the config directory ------------
+# `$CODEX_HOME` is a configuration hub: config.toml and skill discovery belong
+# there, server code does not. Older versions of this script installed the two
+# trees (plus their versioned copies and companion scripts) under
+# $CODEX_HOME/mcp-tools. Once this run has switched them to $MCP_TOOLS_DIR and
+# repointed every registration, the old copies are dead weight in the config
+# directory, so this script's own items are moved into
+# $MCP_TOOLS_DIR/.legacy/ -- never deleted. Moving is refused while a
+# registration this installer knows about (the user Codex config, a project
+# Codex config, or a dsh profile) still names a live item: a half-skipped
+# install must not break the entries it did not repoint. Items another tool
+# installed under that directory (a bridge, for example) are left untouched.
+legacy_tool_path_referenced() {
+    local needle=$1 file
+    for file in "$codex_home/config.toml" "$PWD/.codex/config.toml"; do
+        if [ -f "$file" ] && grep -Fq -- "$needle" "$file" 2>/dev/null; then
+            return 0
+        fi
+    done
+    for file in "$dsh_home/cordis.patch.yml" "$dsh_home"/profiles/*/cordis.patch.yml; do
+        [ -f "$file" ] || continue
+        if grep -Fq -- "$needle" "$file" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -d "$legacy_tools_dir" ] && [ "$tools_dir" != "$legacy_tools_dir" ]; then
+    legacy_items=()
+    shopt -s nullglob
+    for tool_name in mcp-docx-converter mcp-docx-compare; do
+        for p in "$legacy_tools_dir/$tool_name" "$legacy_tools_dir/$tool_name"-* "$legacy_tools_dir/$tool_name".stage.*; do
+            [ -e "$p" ] && legacy_items+=("$p")
+        done
+    done
+    for companion in docx2pdf.sh docxcompare.sh; do
+        for p in "$legacy_tools_dir/$companion" "$legacy_tools_dir/.$companion".stage.*; do
+            [ -e "$p" ] && legacy_items+=("$p")
+        done
+    done
+    shopt -u nullglob
+    if [ "${#legacy_items[@]}" -eq 0 ]; then
+        echo "nothing of this script's install remains in $legacy_tools_dir"
+    else
+        referenced=0
+        for p in "${legacy_items[@]}"; do
+            case "$(basename -- "$p")" in
+                mcp-docx-converter|mcp-docx-compare|docx2pdf.sh|docxcompare.sh) ;;
+                *) continue ;;
+            esac
+            if legacy_tool_path_referenced "$p"; then
+                referenced=1
+            fi
+        done
+        if [ "$referenced" = 1 ]; then
+            echo "note: left this script's previous trees in $legacy_tools_dir; a config or dsh" >&2
+            echo "      profile still names them. Server code does not belong in the config" >&2
+            echo "      directory: remove them once nothing points there." >&2
+        else
+            legacy_backup_dir="$tools_dir/.legacy"
+            stamp="$(date +%Y%m%d%H%M%S)"
+            target_dir="$legacy_backup_dir/mcp-tools.$stamp"
+            suffix=0
+            while [ -e "$target_dir" ]; do
+                suffix=$((suffix + 1))
+                target_dir="$legacy_backup_dir/mcp-tools.$stamp.$suffix"
+            done
+            if mkdir -p -- "$target_dir"; then
+                for p in "${legacy_items[@]}"; do
+                    if mv -- "$p" "$target_dir/"; then
+                        echo "moved out of the config directory: $p -> $target_dir/"
+                    else
+                        echo "warning: could not move $p out of $legacy_tools_dir" >&2
+                    fi
+                done
+                if [ -d "$legacy_tools_dir" ]; then
+                    if rmdir -- "$legacy_tools_dir" 2>/dev/null; then
+                        echo "removed the now-empty $legacy_tools_dir"
+                    else
+                        echo "note: $legacy_tools_dir still holds files this script does not install; left in place"
+                    fi
+                fi
+            else
+                echo "warning: could not create $target_dir; the previous trees stay in $legacy_tools_dir" >&2
+            fi
+        fi
+    fi
+fi
+
+echo "install complete: ${new_version} (MCP server code in ${tools_dir})"
