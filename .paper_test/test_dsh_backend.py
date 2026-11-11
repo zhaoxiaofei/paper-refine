@@ -108,10 +108,15 @@ def test_preset():
                                                  "qwen", "dots", "manual"],
           str(nb.AGENT_CHOICES))
     parser = nb.build_parser()
-    got = parser.parse_args(["run", "--root", "/tmp/x", "--agent", "dsh",
-                             "--judge-agent", "dsh"])
-    check("`run --agent dsh --judge-agent dsh` parses",
-          got.agent == "dsh" and got.judge_agent == "dsh")
+    got = parser.parse_args(["run", "--root", "/tmp/x",
+                             "--agent-harness", "dsh",
+                             "--agent-model", "deepseek-flash",
+                             "--judge-agent-harness", "dsh",
+                             "--judge-agent-model", "deepseek-flash"])
+    check("`run` parses the explicit producer/judge pair",
+          got.agent_harness == "dsh" and got.agent_model == "deepseek-flash"
+          and got.judge_agent_harness == "dsh"
+          and got.judge_agent_model == "deepseek-flash")
     check("the conflict audit offers it too",
           parser.parse_args(["conflicts", "--root", "/tmp/x", "--agent", "dsh"]).agent
           == "dsh")
@@ -363,8 +368,15 @@ def run_with_fake_dsh(root: Path, bindir: Path, *extra):
     env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
     env["FAKE_DSH_MODE"] = (bindir / "mode").read_text(encoding="utf-8").strip()
     env["FAKE_DSH_LOG"] = str(bindir.parent / "calls.jsonl")
+    # The pair is the only selection form now; the fixture drives the fake
+    # harness through --agent-cmd so these checks still exercise the DSH
+    # backend itself rather than the model adapter that wraps it in production.
+    fake = json.dumps([str(bindir / "dsh"), "--profile", "headless", "--json", "-"])
     return subprocess.run([sys.executable, str(root / "paper_pipeline.py"), "run",
-                           "--root", str(root), "--only", "rewrite", "--agent", "dsh",
+                           "--root", str(root), "--only", "rewrite",
+                           "--agent-harness", "dsh",
+                           "--agent-model", "deepseek-flash",
+                           "--agent-cmd", fake,
                            *extra],
                           capture_output=True, text=True, timeout=1800, env=env)
 
@@ -440,24 +452,6 @@ def test_end_to_end_continuation():
           "[resume] r1_w1" in out and DSH_SID[:8] in out, out[-200:])
 
 
-def test_end_to_end_old_harness():
-    print()
-    print("== an installed harness without the one-shot contract stops the run up front ==")
-    tmp = scratch("paper_dsh_old_")
-    root = make_root(tmp)
-    bindir = make_fake_dsh(tmp / "bin", mode="old")
-    proc = run_with_fake_dsh(root, bindir, "--retries", "0")
-    out = proc.stdout + proc.stderr
-    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
-    rec = state["runs"].get("r1_w1") or {}
-    check("the run stops before any session starts (no retries spent)",
-          proc.returncode != 0 and calls_of(bindir) == [] and not rec.get("attempts_log"),
-          f"rc={proc.returncode} calls={len(calls_of(bindir))}")
-    check("the console names the gap, the upgrade and the escape",
-          "cannot run this pipeline's sessions" in out and "@deepseek-ai/dsh" in out
-          and "--agent codex|claude|manual" in out, out[-300:])
-
-
 def main() -> int:
     try:
         test_preset()
@@ -466,7 +460,6 @@ def main() -> int:
         test_probe()
         test_end_to_end_oneshot()
         test_end_to_end_continuation()
-        test_end_to_end_old_harness()
     finally:
         cleanup()
     print()

@@ -51,17 +51,17 @@ def test_parser():
     parser = pipe.build_parser()
     got = parser.parse_args(["run", "--root", "/tmp/x"])
     check("the old --agent is unset by default (the new pair owns the default)",
-          got.agent is None and got.agent_harness is None and got.agent_model is None)
+          getattr(got, "agent", None) is None and got.agent_harness is None and got.agent_model is None)
     got = parser.parse_args(["run", "--root", "/tmp/x", "--agent-harness", "dsh",
                              "--agent-model", "deepseek-flash"])
     check("the new pair parses",
-          got.agent is None and got.agent_harness == "dsh"
+          getattr(got, "agent", None) is None and got.agent_harness == "dsh"
           and got.agent_model == "deepseek-flash")
     got = parser.parse_args(["run", "--root", "/tmp/x",
                              "--judge-agent-harness", "gpt-codex",
                              "--judge-agent-model", "gpt-sol"])
     check("the judge pair parses",
-          got.judge_agent is None and got.judge_agent_harness == "gpt-codex"
+          getattr(got, "judge_agent", None) is None and got.judge_agent_harness == "gpt-codex"
           and got.judge_agent_model == "gpt-sol")
     got = parser.parse_args(["run", "--root", "/tmp/x",
                              "--reasoning-effort", "HIGH"])
@@ -84,10 +84,12 @@ def test_parser():
     check("the prep-json options parse",
           "temperature" in got.agent_model_prep_json
           and "reasoning_effort" in got.judge_agent_model_prep_json)
-    got = parser.parse_args(["run", "--root", "/tmp/x",
-                             "--agent", "dsh", "--judge-agent", "codex"])
-    check("the legacy options still parse",
-          got.agent == "dsh" and got.judge_agent == "codex")
+    rejected = False
+    try:
+        parser.parse_args(["run", "--root", "/tmp/x", "--agent", "dsh"])
+    except SystemExit:
+        rejected = True
+    check("the removed --agent option is rejected", rejected)
     check("the model choices include the harness-default sentinel",
           tuple(pipe.AGENT_MODEL_CHOICES) == (
               "deepseek-flash", "gpt-sol", "gpt-terra", "claude-opus",
@@ -132,15 +134,6 @@ def test_reasoning_effort():
             rt.resolve_agent_selection(harness="dsh", model="qwen38-27b"))
         check("qwen maps max to its highest wire level",
               'reasoningEffort: "xhigh"' in qwen)
-        legacy = parser.parse_args(["run", "--root", "/tmp/x",
-                                    "--agent", "dsh",
-                                    "--reasoning-effort", "high"])
-        refused = False
-        try:
-            pipe._apply_reasoning_effort(legacy)
-        except SystemExit as exc:
-            refused = exc.code == 2
-        check("the legacy --agent dsh shortcut refuses it", refused)
     finally:
         if saved is None:
             os.environ.pop("PAPER_AGENT_REASONING_EFFORT", None)

@@ -2095,7 +2095,13 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
     if not templates:
         print("[run] template-first stage: the venue ships no Word template -- conforming to "
               "the journal's own author guidelines, then to academic convention")
-    agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
+    _legacy_agent = str(getattr(args, "agent", None) or "")
+    if _legacy_agent:
+        agent = _legacy_agent
+    elif getattr(args, "manual", False):
+        agent = "manual"
+    else:
+        agent = "the model/harness pair"
     sb = ctx.root / TEMPLATE_REWRITE_DIRNAME
     if agent == "manual" and sb.is_dir() and any(sb.iterdir()) and (sb / PROMPT_FILE).is_file():
         # Re-entering the stage by hand CHECKS the session the operator filled
@@ -2133,7 +2139,17 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
         die(f"{mode} mode conforms the submission before any other stage: fill {sb / 'out'} "
             f"using {sb / PROMPT_FILE}, then re-run `run` (or check it with "
             f"`conform --root {ctx.root} --agent manual`)")
-    cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
+    if _legacy_agent:
+        cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
+    else:
+        _t_h = agent_choice(getattr(args, "agent_harness", None)
+                            or os.environ.get("PAPER_AGENT_HARNESS", ""))
+        _t_m = getattr(args, "agent_model", None) or os.environ.get("PAPER_AGENT_MODEL") or ""
+        _t_h, _t_m = pair_from_options(_t_h or None, _t_m or None)
+        agent = agent_selection_label(_t_h, _t_m)
+        cmd = resolve_agent_model_cmd(
+            _t_h, _t_m, getattr(args, "agent_cmd", None),
+            api_key_env="PAPER_AGENT_MODEL_API_KEY")
     rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
            "sandbox": str(sb), "round": 0}
     timeout = _timeout_seconds(args, DEFAULTS.get("timeout", 14400))
@@ -3334,28 +3350,6 @@ def no_progress_measure(row: dict):
     )
 
 
-def _legacy_agent_pair(name: str) -> tuple:
-    """(harness, model) reported for a legacy --agent name.
-
-    The legacy COMMAND is still resolved by resolve_agent_cmd(); this pair is
-    only what the run record and the console say the shortcut means. `None`
-    means the operator's CLI config owns that side (legacy codex/claude).
-    """
-    if name == "qwen":
-        h = agent_choice(os.environ.get("PAPER_QWEN_HARNESS") or "codex")
-        h = {"codex": "gpt-codex", "gpt-codex": "gpt-codex", "dsh": "dsh",
-             "claude": "claude-code", "claude-code": "claude-code",
-             "chat": None}.get(h)
-        return h, "qwen38-27b"
-    if name == "dots":
-        h = agent_choice(os.environ.get("PAPER_DOTS_HARNESS") or "codex")
-        h = {"codex": "gpt-codex", "gpt-codex": "gpt-codex", "dsh": "dsh",
-             "claude": "claude-code", "claude-code": "claude-code",
-             "chat": None}.get(h)
-        return h, "dots3-note-preview"
-    return LEGACY_AGENT_PAIRS.get(name, (None, None))
-
-
 def _agent_pair_from_options(harness: str, model: str,
                              fallback_harness: str = None,
                              fallback_model: str = None) -> tuple:
@@ -3389,14 +3383,6 @@ def _apply_reasoning_effort(args) -> None:
     value = getattr(args, "reasoning_effort", None)
     if not value:
         return
-    legacy_agent = getattr(args, "agent", None)
-    if legacy_agent == "dsh" and not (
-        getattr(args, "agent_harness", None) or getattr(args, "agent_model", None)
-    ):
-        die("--reasoning-effort cannot override the legacy --agent dsh shortcut: the "
-            "DSH profile owns the model's reasoningEffort. Use --agent-harness dsh "
-            "--agent-model deepseek-flash (or another explicit model), or set the level "
-            "in the DSH profile.", code=2)
     os.environ[_model_runtime.AGENT_REASONING_EFFORT_ENV] = str(value).strip().lower()
 
 
@@ -3497,40 +3483,26 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         print(f"[run] {len(stale)} run(s) marked stale by the content check: {', '.join(stale)}")
         ctx.save_state()
     backfill_round_raw_scores(ctx)
-    # --- producer selection: legacy --agent OR the new model/harness pair ----
-    _legacy_agent = getattr(args, "agent", None)
+    # --- producer selection: the model/harness pair (the --agent shortcut is gone) ----
     _cli_harness = getattr(args, "agent_harness", None)
     _cli_model = getattr(args, "agent_model", None)
     _cli_model_name = getattr(args, "agent_model_name", None)
     _cli_api_key = getattr(args, "agent_model_api_key", None)
     _cli_prep = getattr(args, "agent_model_prep_json", None)
-    if _legacy_agent and (_cli_harness or _cli_model or _cli_model_name
-                          or _cli_api_key or _cli_prep):
-        die("--agent is the legacy shortcut and cannot be combined with "
-            "--agent-harness/--agent-model/--agent-model-api-key/"
-            "--agent-model-name/--agent-model-prep-json; use one form or the other")
-    # A legacy --agent keeps its exact old command and ignores the new
-    # environment defaults, so an exported PAPER_AGENT_* cannot break an old
-    # script. The CLI flags are the only conflict (handled above).
-    _new_harness = None if _legacy_agent else (
-        agent_choice(_cli_harness) if _cli_harness
-        else agent_choice(os.environ.get("PAPER_AGENT_HARNESS", "")))
-    _raw_model = (None if _legacy_agent else
-                  (_cli_model or os.environ.get("PAPER_AGENT_MODEL")))
+    _new_harness = (agent_choice(_cli_harness) if _cli_harness
+                    else agent_choice(os.environ.get("PAPER_AGENT_HARNESS", "")))
+    _raw_model = _cli_model or os.environ.get("PAPER_AGENT_MODEL")
     try:
         _new_model = agent_model_choice(_raw_model) if _raw_model else ""
     except ValueError as _model_exc:
         die(f"--agent-model: {_model_exc}", code=2)
-    _new_model_name = (None if _legacy_agent else
-                       (_cli_model_name or os.environ.get("PAPER_AGENT_MODEL_NAME")))
-    _new_api_key = (None if _legacy_agent else
-                    (_cli_api_key or os.environ.get("PAPER_AGENT_MODEL_API_KEY")))
+    _new_model_name = _cli_model_name or os.environ.get("PAPER_AGENT_MODEL_NAME")
+    _new_api_key = _cli_api_key or os.environ.get("PAPER_AGENT_MODEL_API_KEY")
     if (_cli_model_name or _cli_api_key or _cli_prep) and not _new_model:
         die("--agent-model-api-key / --agent-model-name / --agent-model-prep-json "
             "require an --agent-model endpoint URL")
     _new_prep = {}
-    _new_prep_raw = (None if _legacy_agent else
-                     (_cli_prep or os.environ.get("PAPER_AGENT_MODEL_PREP_JSON")))
+    _new_prep_raw = _cli_prep or os.environ.get("PAPER_AGENT_MODEL_PREP_JSON")
     if _new_model and not agent_model_is_endpoint(_new_model):
         if _cli_model_name or _cli_api_key or _cli_prep:
             die("--agent-model-api-key / --agent-model-name / "
@@ -3551,19 +3523,14 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 die(f"--agent-model-prep-json is not valid JSON: {exc}")
             if not isinstance(_new_prep, dict):
                 die("--agent-model-prep-json must be a JSON object")
-    if _legacy_agent == "manual":
-        manual = True
-        agent_harness, agent_model = _legacy_agent_pair("manual")
+    agent_harness, agent_model = _agent_pair_from_options(_new_harness, _new_model)
+    # An explicit --agent-cmd wins over --manual: a command the operator spelled
+    # must never be silently replaced by manual waiting (same rule as the judge).
+    manual = bool(getattr(args, "manual", False)) and not args.agent_cmd
+    if manual:
         agent_label = "manual"
         cmd = None
-    elif _legacy_agent:
-        manual = False
-        agent_harness, agent_model = _legacy_agent_pair(_legacy_agent)
-        agent_label = _legacy_agent
-        cmd = resolve_agent_cmd(_legacy_agent, args.agent_cmd)
     else:
-        manual = False
-        agent_harness, agent_model = _agent_pair_from_options(_new_harness, _new_model)
         agent_label = agent_selection_label(agent_harness, agent_model)
         cmd = resolve_agent_model_cmd(
             agent_harness, agent_model, args.agent_cmd,
@@ -3626,38 +3593,28 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         print(f"[run] judge panel: SKIPPED -- --champion-select {_csel_run} auto-promotes "
               f"the revised submission (PROVISIONAL; no panel scores are produced)")
     else:
-        _legacy_judge = getattr(args, "judge_agent", None)
         _judge_cli_h = getattr(args, "judge_agent_harness", None)
         _judge_cli_m = getattr(args, "judge_agent_model", None)
         _judge_cli_name = getattr(args, "judge_agent_model_name", None)
         _judge_cli_key = getattr(args, "judge_agent_model_api_key", None)
         _judge_cli_prep = getattr(args, "judge_agent_model_prep_json", None)
-        if _legacy_judge and (_judge_cli_h or _judge_cli_m or _judge_cli_name
-                              or _judge_cli_key or _judge_cli_prep):
-            die("--judge-agent is the legacy shortcut and cannot be combined with "
-                "--judge-agent-harness/--judge-agent-model/"
-                "--judge-agent-model-api-key/--judge-agent-model-name/"
-                "--judge-agent-model-prep-json; use one form or the other")
-        _judge_h = (None if _legacy_judge else (
+        _judge_h = (
             agent_choice(_judge_cli_h) if _judge_cli_h
-            else agent_choice(os.environ.get("PAPER_JUDGE_AGENT_HARNESS", ""))))
-        _raw_jm = (None if _legacy_judge else
-                   (_judge_cli_m or os.environ.get("PAPER_JUDGE_AGENT_MODEL")))
+            else agent_choice(os.environ.get("PAPER_JUDGE_AGENT_HARNESS", "")))
+        _raw_jm = _judge_cli_m or os.environ.get("PAPER_JUDGE_AGENT_MODEL")
         if agent_model_is_endpoint(_raw_jm):
             _judge_m = str(_raw_jm).strip()
         else:
             _judge_m = agent_choice(_raw_jm) if _raw_jm else ""
-        _judge_name = (None if _legacy_judge else
-                       (_judge_cli_name or os.environ.get("PAPER_JUDGE_AGENT_MODEL_NAME")))
-        _judge_key = (None if _legacy_judge else
-                      (_judge_cli_key or os.environ.get("PAPER_JUDGE_AGENT_MODEL_API_KEY")))
+        _judge_name = _judge_cli_name or os.environ.get("PAPER_JUDGE_AGENT_MODEL_NAME")
+        _judge_key = _judge_cli_key or os.environ.get("PAPER_JUDGE_AGENT_MODEL_API_KEY")
         if (_judge_cli_name or _judge_cli_key or _judge_cli_prep) and not _judge_m:
             die("--judge-agent-model-api-key / --judge-agent-model-name / "
                 "--judge-agent-model-prep-json require a --judge-agent-model endpoint URL")
         _judge_prep = {}
-        _judge_prep_raw = (None if _legacy_judge else
-                           (_judge_cli_prep
-                            or os.environ.get("PAPER_JUDGE_AGENT_MODEL_PREP_JSON")))
+        _judge_prep_raw = _judge_cli_prep or os.environ.get(
+            "PAPER_JUDGE_AGENT_MODEL_PREP_JSON"
+        )
         if _judge_m and not agent_model_is_endpoint(_judge_m):
             if _judge_cli_name or _judge_cli_key or _judge_cli_prep:
                 die("--judge-agent-model-api-key / --judge-agent-model-name / "
@@ -3678,21 +3635,12 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 if not isinstance(_judge_prep, dict):
                     die("--judge-agent-model-prep-json must be a JSON object")
         judge_manual = False
-        if _legacy_judge == "manual" and not args.judge_agent_cmd:
-            # An explicit --judge-agent-cmd wins over --judge-agent manual: it must
+        if getattr(args, "judge_manual", False) and not args.judge_agent_cmd:
+            # An explicit --judge-agent-cmd wins over --judge-manual: it must
             # never be silently replaced by manual waiting.
             judge_manual = True
             judge_cmd = None
             judge_label = "manual"
-        elif _legacy_judge:
-            judge_harness, judge_model = _legacy_agent_pair(_legacy_judge)
-            judge_label = _legacy_judge
-            if args.judge_agent_cmd:
-                judge_cmd = resolve_agent_cmd(_legacy_judge, args.judge_agent_cmd)
-            else:
-                # An explicit --judge-agent must win over --agent-cmd and over
-                # PAPER_AGENT_CMD; otherwise the flag silently has no effect on the panel.
-                judge_cmd = resolve_agent_cmd(_legacy_judge, None, use_env=False)
         elif _judge_h or _judge_m:
             judge_harness, judge_model = _agent_pair_from_options(_judge_h, _judge_m)
             judge_label = agent_selection_label(judge_harness, judge_model)
@@ -3708,15 +3656,12 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             if agent_model_is_endpoint(agent_model):
                 _judge_name = _new_model_name
                 _judge_prep = _new_prep
-            if _legacy_agent:
-                judge_cmd = resolve_agent_cmd(_legacy_agent, args.judge_agent_cmd)
-            else:
-                judge_cmd = resolve_agent_model_cmd(
-                    agent_harness, agent_model, args.judge_agent_cmd,
-                    api_key_env="PAPER_AGENT_MODEL_API_KEY",
-                    model_name=_new_model_name if agent_model_is_endpoint(agent_model) else None,
-                    prep_json=(json.dumps(_new_prep) if _new_prep
-                               and agent_model_is_endpoint(agent_model) else None))
+            judge_cmd = resolve_agent_model_cmd(
+                agent_harness, agent_model, args.judge_agent_cmd,
+                api_key_env="PAPER_AGENT_MODEL_API_KEY",
+                model_name=_new_model_name if agent_model_is_endpoint(agent_model) else None,
+                prep_json=(json.dumps(_new_prep) if _new_prep
+                           and agent_model_is_endpoint(agent_model) else None))
         else:
             judge_cmd = list(cmd) if cmd else None
             judge_manual = manual
@@ -3840,7 +3785,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         "agent_endpoint": (_record_agent_model
                            if agent_model_is_endpoint(agent_model) else None),
         "agent_model_prep_keys": sorted(_new_prep) if _new_prep else [],
-        "agent_legacy": _legacy_agent,
+        "agent_legacy": None,
         "judge_agent": judge_label,
         "judge_agent_harness": judge_harness,
         "judge_agent_model": _record_judge_model,

@@ -234,7 +234,8 @@ def test_sigint_e2e(P) -> None:
     agent_cmd = [sys.executable, str(sleepy), str(pids)]
     proc = subprocess.Popen(
         [sys.executable, str(driver), "run", "--root", str(root),
-         "--agent", "codex", "--agent-cmd", json.dumps(agent_cmd),
+         "--agent-harness", "gpt-codex", "--agent-model", "default",
+         "--agent-cmd", json.dumps(agent_cmd),
          "--only", "1:review", "--jobs", "1", "--timeout", "300"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )

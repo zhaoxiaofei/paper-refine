@@ -210,11 +210,11 @@ def test_judge_agent_cmd_precedence():
     root = completed_round_root(tmp)
     cmd_json = json.dumps([sys.executable, "-c", "pass"])
     proc = subprocess.run([sys.executable, str(NP_PATH), "run", "--root", str(root),
-                           "--agent", "manual", "--judge-agent", "manual",
+                           "--manual", "--judge-manual",
                            "--judge-agent-cmd", cmd_json],
                           capture_output=True, text=True, timeout=180, cwd="/tmp")
     lines = [ln for ln in (proc.stdout or "").splitlines() if "judge sessions" in ln]
-    check("R4 --judge-agent-cmd is honoured next to --judge-agent manual",
+    check("R4 --judge-agent-cmd is honoured next to --judge-manual",
           bool(lines) and "manual" not in lines[0] and "-c" in lines[0],
           f"rc={proc.returncode} lines={lines}")
 

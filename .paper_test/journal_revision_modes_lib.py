@@ -362,7 +362,7 @@ def test_init_manual_conform_stage_reentry():
     tmp = scratch("paper_jr_manual_")
     root = setup_init_root(tmp / "a", "The root submission introduction")
     sb = root / "template_rewrite"
-    r1 = run_cli("run", "--root", str(root), "--only", "conform", "--agent", "manual",
+    r1 = run_cli("run", "--root", str(root), "--only", "conform", "--manual",
                  "--retries", "0")
     check("C01 the manual conform stage stages the session and stops with instructions",
           r1.returncode != 0 and (sb / "PROMPT.md").is_file() and (sb / "out").is_dir()
@@ -370,7 +370,7 @@ def test_init_manual_conform_stage_reentry():
           (r1.stdout + r1.stderr)[-200:])
     marker = sb / "out" / "OPERATOR_WORK.txt"
     marker.write_text("hand-filled, still incomplete\n", encoding="utf-8")
-    r2 = run_cli("run", "--root", str(root), "--only", "conform", "--agent", "manual",
+    r2 = run_cli("run", "--root", str(root), "--only", "conform", "--manual",
                  "--retries", "0")
     check("C01 re-entering an UNFILLED manual session checks it and keeps the operator's work",
           r2.returncode != 0 and marker.is_file()
@@ -383,7 +383,7 @@ def test_init_manual_conform_stage_reentry():
     shutil.copy(sb / "source" / "mainText.docx", sb / "out" / "mainText.docx")
     (sb / "out" / "REPLACEMENT_LEDGER.md").write_text("# ledger: no parity exceptions\n",
                                                       encoding="utf-8")
-    r3 = run_cli("run", "--root", str(root), "--only", "conform", "--agent", "manual",
+    r3 = run_cli("run", "--root", str(root), "--only", "conform", "--manual",
                  "--retries", "0")
     st = (json.loads((root / "state.json").read_text(encoding="utf-8"))
           .get("template_stage") or {})
@@ -736,7 +736,7 @@ def test_j6b_narrative():
           nb.journal_revise_block(ctx) == "")
     # The conform stage runs BEFORE round 1, with no .official directory: it
     # falls back to the journal's guidelines and then academic convention.
-    r = run_cli("run", "--root", str(root), "--agent", "manual", "--retries", "0")
+    r = run_cli("run", "--root", str(root), "--manual", "--retries", "0")
     out = r.stdout + r.stderr
     prompt_path = root / "template_rewrite" / "PROMPT.md"
     check("J6b init conforms before round 1 via the guidelines/convention fallback",

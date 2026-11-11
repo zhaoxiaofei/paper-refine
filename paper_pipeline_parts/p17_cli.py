@@ -1036,12 +1036,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--retry-backoff-max", type=int, default=DEFAULTS["retry_backoff_max"],
                     help=f"cap on a single backoff wait in seconds (default: "
                          f"{DEFAULTS['retry_backoff_max']})")
-    run_opts.add_argument("--agent", choices=list(AGENT_CHOICES), default=None,
-                    help="LEGACY shortcut for --agent-harness + --agent-model (codex, claude, "
-                         "dsh, qwen, dots, manual). It keeps the old command exactly; do not "
-                         "combine it with the new --agent-harness/--agent-model/--agent-model-* "
-                         "options. Omit the new options to use the default: dsh + "
-                         "deepseek-flash")
+    run_opts.add_argument(
+        "--manual", action="store_true",
+        help="stage every session prompt for manual completion instead of launching an "
+             "agent (the former `--agent manual`)")
     run_opts.add_argument("--agent-harness", choices=list(AGENT_HARNESS_CHOICES),
                     type=agent_choice, default=None, metavar="NAME",
                     help="the CLI that runs the sessions: dsh (DeepSeek Harness, the default), "
@@ -1085,9 +1083,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "model's shared default and the per-family overrides, and it also "
                          "reaches GPT/Claude, whose default is otherwise the model's own. "
                          "A level the model's wire does not document maps to its nearest one "
-                         "(deepseek medium->high; qwen high/max->xhigh). The legacy "
-                         "--agent dsh shortcut is refused (the DSH profile owns the model); "
-                         "use --agent-harness dsh --agent-model deepseek-flash. Also "
+                         "(deepseek medium->high; qwen high/max->xhigh). Also "
                          "$PAPER_AGENT_REASONING_EFFORT")
     run_opts.add_argument("--no-template-stage", action="store_true",
                           help="do NOT author the package inside the journal's Word templates "
@@ -1096,11 +1092,10 @@ def build_parser() -> argparse.ArgumentParser:
                                "submission the round starts from)")
     run_opts.add_argument("--agent-cmd", default=None,
                     help="JSON argv list overriding the agent command")
-    run_opts.add_argument("--judge-agent", choices=list(AGENT_CHOICES), default=None,
-                    help="LEGACY shortcut for --judge-agent-harness + --judge-agent-model; "
-                         "keeps the old judge command exactly. Do not combine with the new "
-                         "--judge-agent-harness/--judge-agent-model/--judge-agent-model-* "
-                         "options")
+    run_opts.add_argument(
+        "--judge-manual", action="store_true",
+        help="stage the judge session prompts for manual completion (the former "
+             "`--judge-agent manual`)")
     run_opts.add_argument("--judge-agent-harness", choices=list(AGENT_HARNESS_CHOICES),
                     type=agent_choice, default=None, metavar="NAME",
                     help="the CLI for judge sessions only. When neither judge option is "
