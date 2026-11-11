@@ -290,6 +290,9 @@ if [ "$zotero_enabled" = 1 ]; then
     mcp_row_commands+=("$python_bin")
     mcp_row_scripts+=("$zotero_bridge_script")
 fi
+# Set once a harness row for the bridge has actually been written (or confirmed
+# current): the pairing note at the end is only useful when there is a row.
+zotero_rows=0
 
 if [ "$codex_enabled" = 1 ]; then
     mkdir -p -- "$skills_dir" "$backup_dir"
@@ -574,6 +577,7 @@ if [ "$codex_enabled" = 1 ]; then
             echo "error: codex still does not report $name -> $script after writing it (state: $state)" >&2
             exit 1
         }
+        if [ "$name" = zotero ]; then zotero_rows=1; fi
     done
 else
     if [ "$install_codex" = auto ]; then
@@ -1049,6 +1053,7 @@ if [ "$dsh_enabled" = 1 ]; then
                     --servers-json "$servers_json" \
                     --merge
                 verify_dsh_profile_rows "$profile" "$profile_dir/cordis.patch.yml" "${verify_args[@]}"
+                if [ "$zotero_enabled" = 1 ]; then zotero_rows=1; fi
             done
         else
             echo "skipped the dsh MCP install: no profile with a cordis.patch.yml under $dsh_home/profiles" >&2
@@ -1154,9 +1159,10 @@ if [ -d "$legacy_tools_dir" ] && [ "$tools_dir" != "$legacy_tools_dir" ]; then
     fi
 fi
 
-if [ "$zotero_enabled" = 1 ]; then
-    # The row is registered, but the bridge still needs its one-time pairing:
-    # say so here, where the row was written, instead of only in documentation.
+if [ "$zotero_rows" = 1 ]; then
+    # A harness row now runs the bridge, but the bridge still needs its one-time
+    # pairing: say so here, where the row was written, instead of only in
+    # documentation.
     echo "Zotero pairing: in Zotero choose Tools > Codex Zotero Bridge > Pair Codex,"
     echo "then call the zotero_pair tool with the one-time 8-digit code."
 fi
