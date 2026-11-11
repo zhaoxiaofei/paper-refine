@@ -10,12 +10,17 @@
 #   * the Node dependencies of both shipped MCP servers;
 #   * the two paper skills and both shipped MCP servers in every agent harness
 #     present on this machine (through `install_agent_tooling.sh`), plus the
-#     Zotero MCP service when its checkout is present;
-#   * the external Zotero checkouts under `external/`:
+#     `zotero` MCP row when the Zotero bridge is installed;
+#   * the external Zotero checkouts:
 #       - `zotero-use`                 the `zot` skill / CLI source
 #       - `openai-plugins`             the Zotero helper (`ZOTERO_SKILL`)
-#       - `codex-zotero-bridge`        the Zotero MCP service
-#   * `deps.env` and `activate-deps.sh`, both RELATIVE to this checkout.
+#     under `external/`, and the Zotero MCP service
+#       - `zotero-bridge`              the Zotero MCP service
+#     (upstream: codex-zotero-bridge) under `$MCP_TOOLS_DIR`, default
+#     `~/mcp-servers`, NEXT TO the two docx MCP servers
+#     `install_agent_tooling.sh` deploys there;
+#   * `deps.env` and `activate-deps.sh` -- checkout-relative paths, or absolute
+#     for a dependency installed outside the checkout (the Zotero bridge).
 #
 # What it does not install
 #   System packages (Zotero Desktop, Microsoft Word, LibreOffice, Poppler,
@@ -36,9 +41,18 @@
 #   ./install_dependencies.sh --no-zotero-mcp     # do not register the Zotero MCP server
 #   ./install_dependencies.sh --strict-external   # fail when an external repo fails
 #
-# Every path this script writes into a generated file is relative to this
-# checkout; `activate-deps.sh` turns those into absolute paths for the current
-# shell only. Nothing in this script names a machine's home directory.
+# Environment overrides
+#   PAPER_REFINE_DEPS   where the external/ checkouts live (default ./external)
+#   MCP_TOOLS_DIR       where the MCP server trees live (default ~/mcp-servers)
+#   ZOTERO_BRIDGE_DIR   the Zotero MCP service checkout
+#                       (default $MCP_TOOLS_DIR/zotero-bridge)
+#
+# Paths inside this checkout are written relative to it; the Zotero bridge is
+# installed outside (under `$MCP_TOOLS_DIR`) and recorded by absolute path.
+# `activate-deps.sh` resolves both forms for the current shell only. Nothing in
+# this script names a machine's home directory: the MCP tools directory is
+# `$MCP_TOOLS_DIR`, the same variable and default `install_agent_tooling.sh`
+# uses, so the bridge lands next to the servers it configures.
 set -euo pipefail
 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -59,7 +73,9 @@ MISSING_TOOLS=()
 REPOS_INSTALLED=()
 
 usage() {
-    sed -n '2,41p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # Print the header comment block; ending at the `set` line keeps the range
+    # from drifting every time the header grows.
+    sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
 note() { printf '[install] %s\n' "$*"; }
@@ -76,6 +92,27 @@ run() {
 }
 relpath() {
     python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$1" "$2"
+}
+# Absolute, normalized path for a directory that need not exist yet: a leading
+# `~` is expanded and a relative value is resolved against this checkout. The
+# directory is NOT created here (`mkdir` is the caller's job, because a
+# pre-created empty destination would look like a foreign install to
+# install_repo and block the clone).
+# `python3` is one of the prerequisites probed below; using it unconditionally
+# here made a machine without it die with "python3: command not found" before
+# the script could print the required-command guidance.
+abspath_dir() {
+    local dir=$1
+    case "$dir" in
+        "~") dir="$HOME" ;;
+        "~/"*) dir="$HOME/${dir#\~/}" ;;
+        /*) ;;
+        *) dir="$REPO_ROOT/$dir" ;;
+    esac
+    if have python3; then
+        dir=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$dir")
+    fi
+    printf '%s\n' "$dir"
 }
 
 # `create-test-env.sh` may fall back to a prefix under the checkout when
@@ -122,20 +159,21 @@ if [ "$DO_AGENT" = 0 ]; then
     REGISTER_ZOTERO_MCP=0
 fi
 
-case "$DEPS_DIR" in
-    "~") DEPS_DIR="$HOME" ;;
-    "~/"*) DEPS_DIR="$HOME/${DEPS_DIR#\~/}" ;;
-    /*) ;;
-    *) DEPS_DIR="$REPO_ROOT/$DEPS_DIR" ;;
-esac
-# `python3` is one of the prerequisites probed below; using it unconditionally
-# here made a machine without it die with "python3: command not found" before
-# the script could print the required-command guidance.
-if have python3; then
-    DEPS_DIR=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$DEPS_DIR")
-fi
+DEPS_DIR=$(abspath_dir "$DEPS_DIR")
+# Where the MCP server trees live. `install_agent_tooling.sh` uses the same
+# variable and the same default, and this script passes its value through, so
+# the Zotero bridge and the two docx servers always sit in one directory.
+MCP_TOOLS_DIR=$(abspath_dir "${MCP_TOOLS_DIR:-$HOME/mcp-servers}")
+# The Zotero MCP service (upstream: codex-zotero-bridge). It is installed
+# OUTSIDE this checkout, next to the docx servers, because both harnesses run
+# it by absolute path -- and install_agent_tooling.sh writes the `zotero` MCP
+# row that points at exactly this copy.
+ZOTERO_BRIDGE_DIR=$(abspath_dir "${ZOTERO_BRIDGE_DIR:-$MCP_TOOLS_DIR/zotero-bridge}")
 if [ "$DRY_RUN" = 0 ] && [ "$DO_EXTERNAL" = 1 ]; then
     mkdir -p -- "$DEPS_DIR"
+    # The bridge's own directory is never pre-created: install_repo treats an
+    # existing non-git directory as a foreign install and leaves it untouched.
+    mkdir -p -- "$(dirname -- "$ZOTERO_BRIDGE_DIR")"
 fi
 
 # ---- prerequisite probes ---------------------------------------------------
@@ -268,7 +306,7 @@ install_repo() {
 }
 
 if [ "$DO_EXTERNAL" = 1 ]; then
-    step "external Zotero checkouts under ${DEPS_DIR#"$REPO_ROOT"/}"
+    step "external Zotero checkouts"
     if ! have git; then
         fail_step "git is not on PATH; cannot clone the external checkouts"
     else
@@ -278,9 +316,24 @@ if [ "$DO_EXTERNAL" = 1 ]; then
         install_repo "openai-plugins" \
             "https://github.com/openai/plugins.git" \
             "$DEPS_DIR/openai-plugins" "${OPENAI_PLUGINS_REF:-main}" || true
-        install_repo "codex-zotero-bridge" \
-            "https://github.com/GuoXin-Ink/codex-zotero-bridge.git" \
-            "$DEPS_DIR/codex-zotero-bridge" "${ZOTERO_BRIDGE_REF:-main}" || true
+        # The bridge is installed as a plain tree on machines where the Codex
+        # plugin installer (or a previous manual install) put it there: that
+        # copy is kept and configured, not shadowed by a clone into a path it
+        # could not occupy.
+        if [ -f "$ZOTERO_BRIDGE_DIR/scripts/zotero_mcp.py" ] \
+                && [ ! -d "$ZOTERO_BRIDGE_DIR/.git" ]; then
+            note "using the Zotero bridge already installed at $ZOTERO_BRIDGE_DIR"
+            note "  (not a git checkout; it is not refreshed)"
+            [ "$STRICT_EXTERNAL" = 1 ] && \
+                fail_step "the Zotero bridge at $ZOTERO_BRIDGE_DIR is not a git checkout"
+        else
+            install_repo "zotero-bridge" \
+                "https://github.com/GuoXin-Ink/codex-zotero-bridge.git" \
+                "$ZOTERO_BRIDGE_DIR" "${ZOTERO_BRIDGE_REF:-main}" || true
+            if [ -f "$ZOTERO_BRIDGE_DIR/scripts/zotero_mcp.py" ]; then
+                note "Zotero bridge: $ZOTERO_BRIDGE_DIR"
+            fi
+        fi
     fi
 else
     warn "skipped the external Zotero checkouts (--no-external)"
@@ -293,105 +346,49 @@ if [ "$DO_AGENT" = 1 ]; then
         fail_step "node is not on PATH; cannot register the MCP servers"
     elif ! have codex && ! have dsh && ! have dshx; then
         warn "no codex/dsh CLI detected; keeping the local skills and servers only"
-    elif ! run env INSTALL_CODEX=auto INSTALL_DSH=auto \
-            bash "$REPO_ROOT/install_agent_tooling.sh"; then
-        fail_step "install_agent_tooling.sh failed"
+    else
+        # install_agent_tooling.sh owns the harness configuration, including the
+        # `zotero` row: it is given the same MCP tools/bridge directories this
+        # script installed into, and `--no-zotero-mcp` travels as
+        # INSTALL_ZOTERO_MCP=0 (the tooling script's default is `auto`, so it
+        # also leaves the rows alone when no bridge is installed).
+        agent_env=(INSTALL_CODEX=auto INSTALL_DSH=auto
+                   MCP_TOOLS_DIR="$MCP_TOOLS_DIR"
+                   ZOTERO_BRIDGE_DIR="$ZOTERO_BRIDGE_DIR")
+        if [ "$REGISTER_ZOTERO_MCP" = 0 ]; then
+            agent_env+=(INSTALL_ZOTERO_MCP=0)
+        fi
+        if ! run env "${agent_env[@]}" bash "$REPO_ROOT/install_agent_tooling.sh"; then
+            fail_step "install_agent_tooling.sh failed"
+        fi
     fi
 else
     warn "skipped agent-tooling registration (--no-agent-tooling/--no-node)"
 fi
 
 # ---- the Zotero MCP service ------------------------------------------------
-if [ "$DO_EXTERNAL" = 1 ] && [ "$REGISTER_ZOTERO_MCP" = 1 ]; then
-    step "Zotero MCP service registration"
-    bridge="$DEPS_DIR/codex-zotero-bridge/scripts/zotero_mcp.py"
-    if [ "$DRY_RUN" = 1 ]; then
-        note "would register the Zotero MCP server from $bridge when a harness is present"
-    elif [ ! -f "$bridge" ]; then
-        warn "the Zotero bridge is not installed at $bridge; skipping its MCP row"
-    elif ! have python3; then
-        warn "python3 is not on PATH; skipping the Zotero MCP row"
+# The `zotero` MCP row is NOT written here any more: install_agent_tooling.sh
+# owns both harnesses' configuration, and it adds or repoints that row from the
+# bridge directory this script installs into (an existing row that points at an
+# older location -- $CODEX_HOME/mcp-tools, for example -- is repointed there).
+# This step reports what the row will point at, so a skipped bridge is visible
+# in the install log instead of only in the harness config.
+step "Zotero MCP service"
+bridge="$ZOTERO_BRIDGE_DIR/scripts/zotero_mcp.py"
+if [ -f "$bridge" ]; then
+    note "bridge:    $ZOTERO_BRIDGE_DIR"
+elif [ "$DRY_RUN" = 1 ]; then
+    note "would install the bridge at $ZOTERO_BRIDGE_DIR"
+else
+    warn "the Zotero bridge is not installed at $ZOTERO_BRIDGE_DIR; no MCP row will be written"
+fi
+if [ "$REGISTER_ZOTERO_MCP" = 1 ]; then
+    if [ "$DO_AGENT" = 1 ]; then
+        note "the 'zotero' MCP row is installed/repointed by install_agent_tooling.sh"
     else
-        python_bin=$(command -v python3)
-        codex_has_zotero() {
-            CODEX_HOME="$1" codex mcp list --json 2>/dev/null | python3 -c 'import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-if isinstance(data, list):
-    rows = data
-elif isinstance(data, dict) and isinstance(data.get("servers"), list):
-    rows = data["servers"]
-else:
-    rows = []
-sys.exit(0 if any((row or {}).get("name") == "zotero" for row in rows) else 1)'
-        }
-        if have codex; then
-            codex_home="${CODEX_HOME:-$HOME/.codex}"
-            if codex_has_zotero "$codex_home"; then
-                note "codex already knows a 'zotero' MCP server; leaving it untouched"
-            else
-                if [ -f "$codex_home/config.toml" ]; then
-                    cp -p -- "$codex_home/config.toml" \
-                        "$codex_home/config.toml.bak-zotero-$(date +%Y%m%d%H%M%S)"
-                fi
-                if run env CODEX_HOME="$codex_home" codex mcp add zotero -- \
-                        "$python_bin" "$bridge" && codex_has_zotero "$codex_home"; then
-                    note "registered codex MCP server: zotero"
-                else
-                    fail_step "could not register the Zotero MCP server with codex"
-                fi
-            fi
-        fi
-        if have dsh; then
-            dsh_home="${DSH_HOME:-$HOME/.dsh}"
-            if ! have node || [ ! -d "$dsh_home/profiles" ]; then
-                warn "dsh is present but node or its profiles directory is missing; skipped the dsh Zotero row"
-            else
-                servers_json=$(mktemp)
-                node -e '
-                    const fs = require("fs");
-                    const [out, python, script] = process.argv.slice(1);
-                    const row = {
-                        name: "zotero",
-                        enabled: true,
-                        transport: {
-                            type: "stdio",
-                            command: python,
-                            args: [script],
-                            env: null,
-                            env_vars: [],
-                            cwd: null,
-                        },
-                    };
-                    fs.writeFileSync(out, `${JSON.stringify([row], null, 2)}\n`);
-                ' "$servers_json" "$python_bin" "$bridge"
-                profiles=0
-                for profile_dir in "$dsh_home"/profiles/*/; do
-                    [ -f "$profile_dir/cordis.patch.yml" ] || continue
-                    profile=$(basename -- "$profile_dir")
-                    if grep -Eq '^[[:space:]]*serverName:[[:space:]]*["'"'"']?zotero["'"'"']?[[:space:]]*(#.*)?$' \
-                            "$profile_dir/cordis.patch.yml"; then
-                        note "dsh profile $profile already carries a zotero row; leaving it untouched"
-                        profiles=$((profiles + 1))
-                        continue
-                    fi
-                    profiles=$((profiles + 1))
-                    if ! run node "$REPO_ROOT/scripts/install-codex-mcp.mjs" \
-                            --profile "$profile" --dsh-home "$dsh_home" \
-                            --servers-json "$servers_json" --merge; then
-                        fail_step "could not register the Zotero MCP server in dsh profile $profile"
-                    fi
-                done
-                rm -f -- "$servers_json"
-                [ "$profiles" -gt 0 ] || warn "no dsh profile with cordis.patch.yml found"
-            fi
-        fi
-        note "manual pairing: in Zotero choose Tools > Codex Zotero Bridge > Pair Codex,"
-        note "then call the zotero_pair tool with the one-time 8-digit code"
+        note "the 'zotero' MCP row was skipped with agent-tooling registration"
     fi
-elif [ "$REGISTER_ZOTERO_MCP" = 0 ]; then
+else
     warn "skipped the Zotero MCP registration (--no-zotero-mcp/--no-node/--no-agent-tooling)"
 fi
 
@@ -401,7 +398,8 @@ if [ "$DRY_RUN" = 0 ]; then
     DEPS_REL=$(relpath "$DEPS_DIR" "$REPO_ROOT")
     {
         printf '# Generated by ./install_dependencies.sh -- do not edit.\n'
-        printf '# Values are RELATIVE to the checkout root; source activate-deps.sh to export them.\n'
+        printf '# Values are RELATIVE to the checkout root, or ABSOLUTE for a dependency\n'
+        printf '# installed outside it (the Zotero bridge); source activate-deps.sh to export them.\n'
         printf 'PAPER_REFINE_DEPS=%s\n' "$DEPS_REL"
         write_optional_var() {
             local key=$1 path=$2 kind=${3:-file}
@@ -427,22 +425,29 @@ if [ "$DRY_RUN" = 0 ]; then
             printf '# ZOTERO_USE_ROOT not installed (%s)\n' \
                 "$(relpath "$DEPS_DIR/zotero-use" "$REPO_ROOT")"
         fi
-        if [ -d "$DEPS_DIR/codex-zotero-bridge" ]; then
-            printf 'ZOTERO_BRIDGE_ROOT=%s\n' \
-                "$(relpath "$DEPS_DIR/codex-zotero-bridge" "$REPO_ROOT")"
-            write_optional_var "ZOTERO_BRIDGE_MCP" \
-                "$DEPS_DIR/codex-zotero-bridge/scripts/zotero_mcp.py"
+        # The bridge lives outside the checkout, so both values are absolute:
+        # a `../../mcp-servers/...` relative form would only work while the
+        # checkout keeps its place, and activate-deps.sh resolves both forms.
+        if [ -d "$ZOTERO_BRIDGE_DIR" ]; then
+            printf 'ZOTERO_BRIDGE_ROOT=%s\n' "$ZOTERO_BRIDGE_DIR"
+            if [ -f "$ZOTERO_BRIDGE_DIR/scripts/zotero_mcp.py" ]; then
+                printf 'ZOTERO_BRIDGE_MCP=%s\n' \
+                    "$ZOTERO_BRIDGE_DIR/scripts/zotero_mcp.py"
+            else
+                printf '# ZOTERO_BRIDGE_MCP not installed (%s)\n' \
+                    "$ZOTERO_BRIDGE_DIR/scripts/zotero_mcp.py"
+            fi
         else
-            printf '# ZOTERO_BRIDGE_ROOT not installed (%s)\n' \
-                "$(relpath "$DEPS_DIR/codex-zotero-bridge" "$REPO_ROOT")"
+            printf '# ZOTERO_BRIDGE_ROOT not installed (%s)\n' "$ZOTERO_BRIDGE_DIR"
         fi
     } > "$REPO_ROOT/deps.env"
 
     cat > "$REPO_ROOT/activate-deps.sh" <<'EOF'
 #!/usr/bin/env bash
 # Source this file to export this checkout's dependency paths for the current shell.
-# The values in deps.env are relative to this directory; nothing is written
-# into the checkout's source tree.
+# The values in deps.env are relative to this directory (absolute for a
+# dependency installed outside the checkout); nothing is written into the
+# checkout's source tree.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     echo "activate-deps.sh must be sourced: source ./activate-deps.sh" >&2
     exit 2
@@ -481,7 +486,7 @@ EOF
             printf '\n  }\n}\n'
         } > "$DEPS_DIR/INSTALLED.json"
     fi
-    note "wrote deps.env and activate-deps.sh (relative paths)"
+    note "wrote deps.env and activate-deps.sh (checkout-relative paths; absolute for the Zotero bridge)"
 
     if [ "$DO_EXTERNAL" = 1 ]; then
     cat > "$DEPS_DIR/README.md" <<'EOF'
@@ -496,9 +501,15 @@ checkout; `activate-deps.sh` exports the resolved values for the current shell.
 |---|---|---|
 | `openai-plugins/` | the Zotero helper plugin (from https://github.com/openai/plugins.git) | `ZOTERO_SKILL` |
 | `zotero-use/` | the `$zotero-use` skill and `zot` CLI source (from https://github.com/drguptavivek/zotero-use) | `ZOTERO_USE_ROOT` |
-| `codex-zotero-bridge/` | the Zotero MCP service (from https://github.com/GuoXin-Ink/codex-zotero-bridge) | `ZOTERO_BRIDGE_ROOT` |
 
 `INSTALLED.json` records the commit checked out for each repository that could be installed.
+
+The Zotero MCP service (`codex-zotero-bridge`) is NOT stored here: it is
+installed next to the docx MCP servers, at `$ZOTERO_BRIDGE_DIR` (default
+`$MCP_TOOLS_DIR/zotero-bridge`, i.e. `~/mcp-servers/zotero-bridge`), and
+`install_agent_tooling.sh` points every harness's `zotero` MCP row at that copy.
+`deps.env` records its `$ZOTERO_BRIDGE_ROOT` and `$ZOTERO_BRIDGE_MCP` values as
+absolute paths.
 
 The Zotero MCP service is registered with each harness when a harness is
 present. It still needs the Zotero Desktop extension: in Zotero choose
@@ -513,6 +524,7 @@ fi
 step "summary"
 note "checkout:  $REPO_ROOT"
 note "deps:      ${DEPS_DIR#"$REPO_ROOT"/}"
+note "mcp tools: ${MCP_TOOLS_DIR/#$HOME/\~} (docx servers and the Zotero bridge)"
 if [ "$DO_CONDA" = 1 ]; then
     note "conda env: $ENV_NAME (activate with: conda activate $ENV_NAME)"
 else

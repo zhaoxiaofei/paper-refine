@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Install this checkout's two skills AND its two MCP docx servers into every
-# agent harness present on this machine:
+# Install this checkout's two skills, its two MCP docx servers, and -- when the
+# Zotero bridge is installed -- the `zotero` MCP row into every agent harness
+# present on this machine:
 #
 #   * Codex ($CODEX_HOME, default ~/.codex): the versioned paper-skills-*
 #     package and one [mcp_servers.<name>] entry per server. The entries
@@ -11,6 +12,17 @@
 #   * DeepSeek Harness ($DSH_HOME, default ~/.dsh): both skills in its flat
 #     skills directory (one copy per frontmatter `name`), and the same two
 #     servers in EVERY profile's cordis.patch.yml.
+#
+# The `zotero` row is conditional and is REPOINTED, not merely added:
+# install_dependencies.sh installs the Zotero bridge (upstream:
+# codex-zotero-bridge) at $ZOTERO_BRIDGE_DIR, default
+# $MCP_TOOLS_DIR/zotero-bridge, and this script makes both harnesses run that
+# copy. An entry that points at an older install location -- the legacy
+# $CODEX_HOME/mcp-tools tree, for example -- is what "stale" means below, so a
+# bridge that moved is picked up instead of silently left behind. When the
+# bridge is absent, every existing zotero row is left exactly as it is;
+# INSTALL_ZOTERO_MCP=0 skips the row, INSTALL_ZOTERO_MCP=1 forces it (and is
+# an error when the bridge or python3 is missing).
 #
 # Each side is installed NATIVELY from this checkout. Nothing is ported from
 # Codex to dsh (or back): the dsh rows name this script's own servers and
@@ -82,16 +94,17 @@ resolve_file() {
 codex_home="${CODEX_HOME:-$HOME/.codex}"
 skills_dir="$codex_home/skills"
 backup_dir="$codex_home/backup"
-# Where the two MCP servers are deployed. They are private servers shipped by
-# this checkout, not published packages, so the recommended shape is a
-# dedicated directory OUTSIDE the harness configuration directory, referenced
+# Where the MCP server trees are deployed. The docx servers are private servers
+# shipped by this checkout, not published packages, so the recommended shape is
+# a dedicated directory OUTSIDE the harness configuration directory, referenced
 # by absolute path from each config: $MCP_TOOLS_DIR, default ~/mcp-servers.
-# `.codex` is a configuration hub; installing server code (and its
-# node_modules) under it mixes the two concerns, clutters config backups and
-# makes the config less portable. BOTH harnesses run this copy -- the dsh rows
-# name it explicitly. Older versions of this script defaulted to
-# $CODEX_HOME/mcp-tools; a successful install moves that legacy tree out (see
-# the migration at the end of this script).
+# `.codex` is a configuration hub; installing server code (and its node_modules)
+# under it mixes the two concerns, clutters config backups and makes the config
+# less portable. BOTH harnesses run this copy -- the dsh rows name it
+# explicitly. The Zotero bridge that install_dependencies.sh installs lands in
+# the same directory (see $ZOTERO_BRIDGE_DIR below). Older versions of this
+# script defaulted to $CODEX_HOME/mcp-tools; a successful install moves that
+# legacy tree out (see the migration at the end of this script).
 tools_dir="${MCP_TOOLS_DIR:-$HOME/mcp-servers}"
 
 # Where the DeepSeek Harness discovers skills: $DSH_HOME/skills (default
@@ -107,6 +120,11 @@ dsh_cli=""
 if command -v dsh >/dev/null 2>&1; then dsh_cli=$(command -v dsh); fi
 node_bin=""
 if command -v node >/dev/null 2>&1; then node_bin=$(command -v node); fi
+# Only the Zotero row needs Python. The two docx servers do not, so a machine
+# without python3 still gets the whole docx installation; the zotero row is
+# skipped (or is an error when INSTALL_ZOTERO_MCP=1) further down.
+python_bin=""
+if command -v python3 >/dev/null 2>&1; then python_bin=$(command -v python3); fi
 
 # ---- decide which halves run ----------------------------------------------
 # Codex: "available" means its CLI is on PATH, because the MCP registration
@@ -194,6 +212,84 @@ if [ "$dsh_enabled" = 1 ]; then
     dsh_backup_dir="$dsh_home/backup"
 fi
 node_bin=$(resolve_file "$node_bin")
+if [ -n "$python_bin" ]; then
+    python_bin=$(resolve_file "$python_bin")
+fi
+
+# ---- the Zotero MCP row (conditional) --------------------------------------
+# install_dependencies.sh installs the Zotero bridge (upstream:
+# codex-zotero-bridge) at $ZOTERO_BRIDGE_DIR, default
+# $MCP_TOOLS_DIR/zotero-bridge, next to the docx servers, and passes its value
+# through here. This directory is NEVER created by this script: an empty
+# pre-created destination is a non-git directory, which install_dependencies
+# reports as a foreign install and refuses to clone over -- creating it would
+# break the very install it is meant to configure. The row is written only when
+# the bridge's server script is already there; an INSTALL_ZOTERO_MCP=1 that
+# names a missing bridge is an error instead of a silent no-op.
+zotero_bridge_dir="${ZOTERO_BRIDGE_DIR:-$tools_dir/zotero-bridge}"
+case "$zotero_bridge_dir" in
+    "~") zotero_bridge_dir="$HOME" ;;
+    "~/"*) zotero_bridge_dir="$HOME/${zotero_bridge_dir#\~/}" ;;
+esac
+zotero_bridge_script="$zotero_bridge_dir/scripts/zotero_mcp.py"
+install_zotero="${INSTALL_ZOTERO_MCP:-auto}"
+zotero_enabled=0
+case "$install_zotero" in
+    auto)
+        if [ -f "$zotero_bridge_script" ]; then
+            if [ -n "$python_bin" ]; then
+                zotero_enabled=1
+            else
+                echo "warning: the Zotero bridge needs python3, which is not on PATH;" >&2
+                echo "         leaving the zotero MCP rows unchanged" >&2
+            fi
+        else
+            echo "no Zotero bridge at $zotero_bridge_script; leaving the zotero MCP rows unchanged"
+            echo "  (install_dependencies.sh installs it; INSTALL_ZOTERO_MCP=1 forces a row)"
+        fi
+        ;;
+    1|yes|true|on) zotero_enabled=1 ;;
+    0|no|false|off) zotero_enabled=0 ;;
+    *)
+        echo "error: INSTALL_ZOTERO_MCP=$install_zotero is not one of auto, 1 (force), 0 (skip)" >&2
+        exit 2
+        ;;
+esac
+if [ "$zotero_enabled" = 1 ]; then
+    # Forced (`INSTALL_ZOTERO_MCP=1`) or auto-detected: either way the row is
+    # written only against a bridge and an interpreter that exist, so a forced
+    # row cannot register a command that fails on every start.
+    if [ ! -f "$zotero_bridge_script" ]; then
+        echo "error: INSTALL_ZOTERO_MCP=1 but the Zotero bridge is not installed at $zotero_bridge_script" >&2
+        echo "       (run ./install_dependencies.sh, or set ZOTERO_BRIDGE_DIR)" >&2
+        exit 1
+    fi
+    if [ -z "$python_bin" ]; then
+        echo "error: the Zotero bridge needs python3, and it was not found on PATH" >&2
+        exit 1
+    fi
+    zotero_bridge_dir=$(resolve_dir "$zotero_bridge_dir")
+    zotero_bridge_script="$zotero_bridge_dir/scripts/zotero_mcp.py"
+elif [ "$install_zotero" != auto ]; then
+    echo "skipped the Zotero MCP row: INSTALL_ZOTERO_MCP=$install_zotero"
+fi
+
+# ---- the MCP rows this installer owns --------------------------------------
+# One list for both harnesses: the Codex entries and the dsh rows are written
+# from the same names, commands and scripts, so a harness can never be pointed
+# at a tree the other one does not use. `install_dependencies.sh` installs the
+# docx servers and the Zotero bridge; this script only registers them.
+mcp_row_names=(docx-compare docx-converter)
+mcp_row_commands=("$node_bin" "$node_bin")
+mcp_row_scripts=(
+    "$tools_dir/mcp-docx-compare/index.js"
+    "$tools_dir/mcp-docx-converter/index.js"
+)
+if [ "$zotero_enabled" = 1 ]; then
+    mcp_row_names+=(zotero)
+    mcp_row_commands+=("$python_bin")
+    mcp_row_scripts+=("$zotero_bridge_script")
+fi
 
 if [ "$codex_enabled" = 1 ]; then
     mkdir -p -- "$skills_dir" "$backup_dir"
@@ -389,7 +485,7 @@ for i in "${!tool_names[@]}"; do
     stage_companions[$i]=""
 done
 
-# ---- register the two servers with Codex -----------------------------------
+# ---- register the MCP rows with Codex --------------------------------------
 # `codex mcp add` is the CLI's own native registration. It rewrites the whole
 # [mcp_servers.<name>] table, so it is only run when the entry is missing or
 # points somewhere else: a correct entry keeps whatever else the operator set
@@ -445,24 +541,27 @@ if [ "$codex_enabled" = 1 ]; then
         echo "backed up: $codex_home/config.toml -> $target"
     }
 
-    for docx_tool in compare converter; do
-        name="docx-${docx_tool}"
-        script="$tools_dir/mcp-docx-${docx_tool}/index.js"
-        state=$(codex_mcp_state "$name" "$node_bin" "$script")
+    for i in "${!mcp_row_names[@]}"; do
+        name="${mcp_row_names[$i]}"
+        command="${mcp_row_commands[$i]}"
+        script="${mcp_row_scripts[$i]}"
+        state=$(codex_mcp_state "$name" "$command" "$script")
         case "$state" in
             ok)
                 echo "codex MCP server already current: $name -> $script"
                 ;;
             missing)
                 backup_codex_config
-                CODEX_HOME="$codex_home" codex mcp add "$name" -- "$node_bin" "$script"
+                CODEX_HOME="$codex_home" codex mcp add "$name" -- "$command" "$script"
                 echo "registered codex MCP server: $name -> $script"
                 ;;
             stale)
-                # The entry runs a copy this install replaced; replace the entry.
+                # The entry runs a copy this install replaced, or an older
+                # install location (the bridge that used to live under
+                # $CODEX_HOME/mcp-tools): replace the entry.
                 backup_codex_config
                 CODEX_HOME="$codex_home" codex mcp remove "$name" >/dev/null
-                CODEX_HOME="$codex_home" codex mcp add "$name" -- "$node_bin" "$script"
+                CODEX_HOME="$codex_home" codex mcp add "$name" -- "$command" "$script"
                 echo "repointed codex MCP server: $name -> $script"
                 ;;
             *)
@@ -470,7 +569,7 @@ if [ "$codex_enabled" = 1 ]; then
                 exit 1
                 ;;
         esac
-        state=$(codex_mcp_state "$name" "$node_bin" "$script")
+        state=$(codex_mcp_state "$name" "$command" "$script")
         [ "$state" = ok ] || {
             echo "error: codex still does not report $name -> $script after writing it (state: $state)" >&2
             exit 1
@@ -846,38 +945,41 @@ repair_dsh_managed_block() {
     ' "$patch_file"
 }
 
-# Confirm a profile really carries both rows this installer owns, pointing at
-# the freshly switched-in trees. The row writer validates the composed profile,
-# but it only reports what it wrote; this check reads the file that will be
-# loaded next time a session starts.
+# Confirm a profile really carries every row this installer owns, pointing at
+# the trees this run just switched in (the docx servers) or at the installed
+# Zotero bridge. The row writer validates the composed profile, but it only
+# reports what it wrote; this check reads the file that will be loaded next time
+# a session starts.
 verify_dsh_profile_rows() {
     local profile=$1 patch_file=$2
+    shift 2
     "$node_bin" -e '
         const fs = require("fs");
-        const [file, toolsDir] = process.argv.slice(1);
+        const argv = process.argv.slice(1);
+        const file = argv.shift();
         const text = fs.readFileSync(file, "utf8");
-        const wanted = [["docx-compare", "mcp-docx-compare"],
-                        ["docx-converter", "mcp-docx-converter"]];
         const missing = [];
-        for (const [name, dir] of wanted) {
-            const script = `${toolsDir}/${dir}/index.js`;
+        for (let i = 0; i < argv.length; i += 2) {
+            const [name, script] = argv.slice(i, i + 2);
             if (!text.includes(`serverName: "${name}"`) || !text.includes(script)) missing.push(name);
         }
         if (missing.length > 0) {
             process.stderr.write(`missing MCP row(s): ${missing.join(", ")}\n`);
             process.exit(1);
         }
-    ' "$patch_file" "$tools_dir" || {
-        echo "error: dsh profile ${profile} does not carry both docx MCP rows pointing at ${tools_dir} after the update" >&2
+    ' "$patch_file" "$@" || {
+        echo "error: dsh profile ${profile} does not carry the MCP row(s) this installer wrote after the update" >&2
         exit 1
     }
 }
 
-# ---- install the two servers into every dsh profile ------------------------
+# ---- install the MCP rows into every dsh profile ---------------------------
 # Native install: this checkout's own server list is written into the profile,
 # not a copy of Codex's configuration. `--merge` keeps rows for servers this
 # run does not mention, so a profile that also carries other MCP servers keeps
-# them. The row writer installs the MCP client plugin in the profile when it is
+# them (and REPLACES the rows it does mention, keyed by serverName -- which is
+# how an existing zotero row that names an older bridge location is repointed).
+# The row writer installs the MCP client plugin in the profile when it is
 # missing and validates the composed profile before accepting the change.
 #
 # Two passes: reconcile EVERY block first (so a block that cannot be
@@ -892,31 +994,45 @@ if [ "$dsh_enabled" = 1 ]; then
         echo "skipped the dsh MCP install: no profiles under $dsh_home/profiles" >&2
     else
         servers_json="$dsh_home/.paper-skills-servers.$$.json"
+        # The rows are passed as name/command/script triples, the same arrays
+        # the Codex half uses, so both harnesses are written from one list.
+        row_args=()
+        for i in "${!mcp_row_names[@]}"; do
+            row_args+=("${mcp_row_names[$i]}" "${mcp_row_commands[$i]}" "${mcp_row_scripts[$i]}")
+        done
         "$node_bin" -e '
             const fs = require("fs");
-            const [out, nodeBin, toolsDir] = process.argv.slice(1);
-            const servers = [
-                ["docx-compare", "mcp-docx-compare"],
-                ["docx-converter", "mcp-docx-converter"],
-            ].map(([name, dir]) => ({
-                name,
-                enabled: true,
-                transport: {
-                    type: "stdio",
-                    command: nodeBin,
-                    args: [`${toolsDir}/${dir}/index.js`],
-                    env: null,
-                    env_vars: [],
-                    cwd: null,
-                },
-            }));
+            const argv = process.argv.slice(1);
+            const out = argv.shift();
+            const servers = [];
+            for (let i = 0; i < argv.length; i += 3) {
+                const [name, command, script] = argv.slice(i, i + 3);
+                servers.push({
+                    name,
+                    enabled: true,
+                    transport: {
+                        type: "stdio",
+                        command,
+                        args: [script],
+                        env: null,
+                        env_vars: [],
+                        cwd: null,
+                    },
+                });
+            }
             fs.writeFileSync(out, `${JSON.stringify(servers, null, 2)}\n`);
-        ' "$servers_json" "$node_bin" "$tools_dir"
+        ' "$servers_json" "${row_args[@]}"
 
         profile_dirs=()
         for profile_dir in "$dsh_home"/profiles/*/; do
             [ -f "$profile_dir/cordis.patch.yml" ] || continue
             profile_dirs+=("${profile_dir%/}")
+        done
+        # What the verification reads back: the same name/script pairs the
+        # writer was just given.
+        verify_args=()
+        for i in "${!mcp_row_names[@]}"; do
+            verify_args+=("${mcp_row_names[$i]}" "${mcp_row_scripts[$i]}")
         done
         if [ "${#profile_dirs[@]}" -gt 0 ]; then
             for profile_dir in "${profile_dirs[@]}"; do
@@ -932,7 +1048,7 @@ if [ "$dsh_enabled" = 1 ]; then
                     --dsh-home "$dsh_home" \
                     --servers-json "$servers_json" \
                     --merge
-                verify_dsh_profile_rows "$profile" "$profile_dir/cordis.patch.yml"
+                verify_dsh_profile_rows "$profile" "$profile_dir/cordis.patch.yml" "${verify_args[@]}"
             done
         else
             echo "skipped the dsh MCP install: no profile with a cordis.patch.yml under $dsh_home/profiles" >&2
@@ -1036,6 +1152,13 @@ if [ -d "$legacy_tools_dir" ] && [ "$tools_dir" != "$legacy_tools_dir" ]; then
             fi
         fi
     fi
+fi
+
+if [ "$zotero_enabled" = 1 ]; then
+    # The row is registered, but the bridge still needs its one-time pairing:
+    # say so here, where the row was written, instead of only in documentation.
+    echo "Zotero pairing: in Zotero choose Tools > Codex Zotero Bridge > Pair Codex,"
+    echo "then call the zotero_pair tool with the one-time 8-digit code."
 fi
 
 echo "install complete: ${new_version} (MCP server code in ${tools_dir})"
