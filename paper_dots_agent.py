@@ -34,12 +34,16 @@ Environment (all optional except the key):
     PAPER_DOTS_MODEL           default dots3-note-prev
     PAPER_DOTS_HARNESS         codex | dsh | claude | chat (default codex)
     PAPER_DOTS_REASONING_EFFORT  minimal | low | medium | high | xhigh | max
-                               (default medium; sent to codex)
-    PAPER_DOTS_CONTEXT_WINDOW  default 393000 (the window the endpoint
-                               enforces; 512K is advertised, but requests
-                               above 393000 are rejected)
-    PAPER_DOTS_MAX_TOKENS      default 65536 (harness replies)
-    PAPER_DOTS_CHAT_MAX_TOKENS  default 160000 (single-shot)
+                               (default from the shared model catalog,
+                               currently high; applied to the generated
+                               Codex and DSH routes)
+    PAPER_DOTS_CONTEXT_WINDOW  default from the shared model catalog (the
+                               window the endpoint enforces; 512K is
+                               advertised, but requests above it are rejected)
+    PAPER_DOTS_MAX_TOKENS      default from the shared model catalog (the
+                               harness reply cap)
+    PAPER_DOTS_CHAT_MAX_TOKENS  default from the shared model catalog (the
+                               single-shot cap)
     PAPER_DOTS_CHECK_TOOLS     1 = probe tool_choice=auto before a session
     PAPER_DOTS_REQUIRE_TOOLS   same, but a missing tool capability fails instead
                                of warning
@@ -73,6 +77,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -87,36 +92,16 @@ from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
 from agent_common.chat import completion_budget, finish_reason_error, message_text
 from agent_common.dsh_events import line_turn_end_failed as _line_turn_end_failed
 
-DEFAULT_BASE_URL = "https://note3-prev-api.askdiandian.com/v1"
-DEFAULT_MODEL = "dots3-note-prev"
+#: Every default below is a shared model setting: the catalog and the runtime
+#: in ``agent-common`` own them, so a revision (reasoning level, context
+#: length, caps) happens there and reaches this adapter without an edit here.
+DEFAULT_BASE_URL = rt.DOTS_DEFAULT_BASE_URL
+DEFAULT_MODEL = rt.DOTS_DEFAULT_MODEL
 DEFAULT_HARNESS = "codex"
-DEFAULT_EFFORT = "medium"
-
-#: The shared model catalog (canonical: ``repos/agent-common/agent_common/model_catalog.json``;
-#: this checkout carries an identical copy).  The fallback keeps a checkout
-#: refreshed from upstream, which may not have the copy yet, working.
-_CATALOG_PATH = Path(rt.__file__).with_name("model_catalog.json")
-
-
-def _catalog_capacity(model_id: str, field: str, fallback: int) -> int:
-    """One capacity from the shared catalog, or ``fallback`` when absent."""
-    try:
-        with _CATALOG_PATH.open(encoding="utf-8") as handle:
-            for entry in json.load(handle)["models"]:
-                if entry["id"] == model_id:
-                    return int(entry[field])
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return fallback
-DEFAULT_CONTEXT_WINDOW = _catalog_capacity(
-    "dots3-note-prev", "context_window", 393000
-)
-DEFAULT_MAX_TOKENS = _catalog_capacity(
-    "dots3-note-prev", "max_tokens", 65536
-)
-DEFAULT_CHAT_MAX_TOKENS = _catalog_capacity(
-    "dots3-note-prev", "chat_max_tokens", 160000
-)
+DEFAULT_EFFORT = rt.DOTS_DEFAULT_EFFORT
+DEFAULT_CONTEXT_WINDOW = rt.DOTS_CONTEXT_WINDOW
+DEFAULT_MAX_TOKENS = rt.DOTS_MAX_TOKENS
+DEFAULT_CHAT_MAX_TOKENS = rt.DOTS_CHAT_MAX_TOKENS
 DOCS_URL = "https://dots.ai/platform/docs"
 
 # Cleanup targets: the temporary DSH_HOME copy and the generated patch file.
@@ -352,6 +337,7 @@ def dsh_patch_text(cfg: dict) -> str:
         base_url_override=cfg["base_url"],
         context_window_override=cfg["context_window"],
         max_tokens_override=cfg["max_tokens"],
+        effort_override=cfg.get("effort"),
         compaction_base_url=cfg.get("compaction_base_url") or None,
     )
 
@@ -600,7 +586,10 @@ def _api_key_problem(cfg: dict) -> str:
     """A missing key is fatal only where the adapter knows one is required."""
     if cfg["api_key"]:
         return ""
-    if cfg["base_url"].startswith("https://note3-prev-api.askdiandian.com"):
+    # The hosted host comes from the shared runtime, so a base-URL revision in
+    # agent-common moves this guard with it instead of stranding a literal.
+    hosted = urllib.parse.urlsplit(rt.DOTS_DEFAULT_BASE_URL).netloc
+    if urllib.parse.urlsplit(cfg["base_url"]).netloc == hosted:
         return (f"DOTS_API_KEY is not set. Create a key on the Dots platform "
                 f"({DOCS_URL}) and export it: `export DOTS_API_KEY=...`")
     return ""

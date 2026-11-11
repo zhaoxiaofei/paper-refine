@@ -141,8 +141,9 @@ def test_argv_and_patch():
           and 'id: "dots3-note-prev"' in patch and "apiKeyEnv: DOTS_API_KEY" in patch)
     check("dsh patch declares the context/output caps",
           "contextWindow: 393000" in patch and "maxTokens: 65536" in patch)
-    check("dsh patch does not invent a reasoning parameter",
-          "reasoningEfforts: false" in patch)
+    check("dsh patch declares the configured thinking level",
+          "reasoningEfforts:" in patch and "medium: max" in patch
+          and 'reasoningEffort: "medium"' in patch)
     check("dsh patch stays on the documented token field",
           "maxTokensField: max_tokens" in patch and "supportsStore: false" in patch)
     check("dsh patch sets the default model",

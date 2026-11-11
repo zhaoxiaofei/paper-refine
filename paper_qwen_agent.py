@@ -29,17 +29,21 @@ Environment (all optional):
     PAPER_QWEN_MODEL           default qwen3.8-27b
     PAPER_QWEN_API_KEY         default `dummy` (vLLM usually needs no key)
     PAPER_QWEN_HARNESS         codex | dsh | claude | chat (default codex)
-    PAPER_QWEN_REASONING_EFFORT low | medium | xhigh (default medium; qwen
-                                rejects codex's `max`)
+    PAPER_QWEN_REASONING_EFFORT low | medium | xhigh (default from the shared
+                                model catalog, currently medium; qwen rejects
+                                codex's `max`)
     PAPER_QWEN_TUNNEL          auto | off | require (default auto)
     PAPER_QWEN_SSH_HOST        default zxf@101.6.31.113
     PAPER_QWEN_SSH_PORT        default 52080
     PAPER_QWEN_TUNNEL_LOCAL    default 8000
     PAPER_QWEN_TUNNEL_REMOTE   default 127.0.0.1:8000
-    PAPER_QWEN_CONTEXT_WINDOW  default 150000 (the deployment's window)
-    PAPER_QWEN_MAX_TOKENS      default 32768 (harness replies; reasoning
-                               tokens count toward it)
-    PAPER_QWEN_CHAT_MAX_TOKENS  default 80000 (single-shot: reasoning + answer)
+    PAPER_QWEN_CONTEXT_WINDOW  default from the shared model catalog (the
+                               deployment's window)
+    PAPER_QWEN_MAX_TOKENS      default from the shared model catalog (the
+                               harness reply cap; reasoning tokens count
+                               toward it)
+    PAPER_QWEN_CHAT_MAX_TOKENS  default from the shared model catalog (the
+                               single-shot cap: reasoning + answer)
     PAPER_QWEN_CHECK_TOOLS     1 = probe tool-call support before the harness
 
 `python3 paper_qwen_agent.py --probe` reports the endpoint, model, tunnel and
@@ -84,55 +88,22 @@ from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
 from agent_common.chat import completion_budget, finish_reason_error, message_text
 from agent_common.dsh_events import line_turn_end_failed as _line_turn_end_failed
 
-#: The shared model catalog (canonical: ``repos/agent-common/agent_common/model_catalog.json``;
-#: this checkout carries an identical copy).  The fallback keeps a checkout
-#: refreshed from upstream, which may not have the copy yet, working.
-_CATALOG_PATH = Path(rt.__file__).with_name("model_catalog.json")
-
-
-def _catalog_capacity(model_id: str, field: str, fallback: int) -> int:
-    """One capacity from the shared catalog, or ``fallback`` when absent."""
-    try:
-        with _CATALOG_PATH.open(encoding="utf-8") as handle:
-            for entry in json.load(handle)["models"]:
-                if entry["id"] == model_id:
-                    return int(entry[field])
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return fallback
-
-
-def _catalog_text(model_id: str, field: str, fallback: str) -> str:
-    """One string fact from the shared catalog, or ``fallback`` when absent."""
-    try:
-        with _CATALOG_PATH.open(encoding="utf-8") as handle:
-            for entry in json.load(handle)["models"]:
-                if entry["id"] == model_id:
-                    value = entry.get(field)
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return fallback
-
-
-DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
-DEFAULT_MODEL = "qwen3.8-27b"
-DEFAULT_API_KEY = "dummy"
+#: Every default below is a shared model setting: the catalog and the runtime
+#: in ``agent-common`` own them, so a revision (reasoning level, context
+#: length, caps) happens there and reaches this adapter without an edit here.
+DEFAULT_BASE_URL = rt.QWEN_DEFAULT_BASE_URL
+DEFAULT_MODEL = rt.QWEN_DEFAULT_MODEL
+DEFAULT_API_KEY = rt.QWEN_DEFAULT_API_KEY
 DEFAULT_HARNESS = "codex"
-#: qwen3.8-27b's default reasoning level is a model fact in the shared catalog
-#: (``default_reasoning_level``); PAPER_QWEN_REASONING_EFFORT overrides it.
-DEFAULT_EFFORT = _catalog_text("qwen3.8-27b", "default_reasoning_level", "medium")
+DEFAULT_EFFORT = rt.QWEN_DEFAULT_EFFORT
 DEFAULT_SSH_HOST = "zxf@101.6.31.113"
 DEFAULT_SSH_PORT = "52080"
 DEFAULT_LOCAL_PORT = "8000"
 DEFAULT_REMOTE = "127.0.0.1:8000"
 
-DEFAULT_CONTEXT_WINDOW = _catalog_capacity("qwen3.8-27b", "context_window", 150000)
-DEFAULT_MAX_TOKENS = _catalog_capacity("qwen3.8-27b", "max_tokens", 32768)
-DEFAULT_CHAT_MAX_TOKENS = _catalog_capacity(
-    "qwen3.8-27b", "chat_max_tokens", 80000
-)
+DEFAULT_CONTEXT_WINDOW = rt.QWEN_CONTEXT_WINDOW
+DEFAULT_MAX_TOKENS = rt.QWEN_MAX_TOKENS
+DEFAULT_CHAT_MAX_TOKENS = rt.QWEN_CHAT_MAX_TOKENS
 
 _TUNNEL = None          # the ssh process THIS adapter started
 _TUNNEL_STDERR = None   # a temporary file holding its stderr
