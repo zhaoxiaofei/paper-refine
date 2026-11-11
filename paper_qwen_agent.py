@@ -60,7 +60,6 @@ import atexit
 import contextlib
 import http.client
 import json
-import math
 import os
 import re
 import shutil

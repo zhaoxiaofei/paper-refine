@@ -66,7 +66,6 @@ import atexit
 import contextlib
 import http.client
 import json
-import math
 import os
 import shutil
 import subprocess
