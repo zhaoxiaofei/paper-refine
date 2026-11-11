@@ -5899,14 +5899,15 @@ VISUAL_INSPECTION_RULE = """VISUAL INSPECTION — RENDER FIRST, THEN LOOK (a DOC
     the converter below, falling back to the next one only if a call fails), RENDER every page to
     an image, and LOOK at those images with your image-viewing capability.
   * Converters available on this machine right now: @@VISUAL_TOOLS@@.
-  * ALWAYS TRY THE `docx-converter` MCP TOOL FIRST, BEFORE ANY OTHER CONVERTER: if your session
-    has MCP tools, call `convert_docx_to_pdf` with the ABSOLUTE WSL path of the .docx (for example
-    `convert_docx_to_pdf(docxPath="/path/to/package/manuscript-c.docx")`). It renders through
-    Microsoft Word via WSL/PowerShell interop, i.e. the highest-fidelity renderer available, and it
-    writes `<name>.pdf` NEXT TO the .docx you pass it. Only if that tool is not available in your
-    session (no MCP support), or the call reports a failure, fall back -- in this order, layout
+  * ALWAYS TRY THE `docx2pdf.sh` CLI FIRST, BEFORE ANY OTHER CONVERTER: run
+    `docx2pdf.sh FILE` (Word COM via PowerShell; it writes the PDF next to FILE). It renders
+    through Microsoft Word, i.e. the highest-fidelity renderer available. Only if the script is
+    not available on PATH, or the call reports a failure, fall back -- in this order, layout
     fidelity first -- to:
-      1. `docx2pdf.sh FILE` (Word COM via PowerShell; writes the PDF next to FILE), then
+      1. the `docx-converter` MCP tool (`convert_docx_to_pdf`), when your session has MCP tools:
+         call it with the ABSOLUTE WSL path of the .docx (for example
+         `convert_docx_to_pdf(docxPath="/path/to/package/manuscript-c.docx")`); it wraps
+         `docx2pdf.sh` and writes `<name>.pdf` NEXT TO the .docx you pass it, then
       2. `docx render FILE --out pages/` (page-001.png, ... -- a render, not a PDF), then
       3. LibreOffice `soffice --headless --convert-to pdf --outdir DIR FILE`, then
       4. Word via Windows PowerShell COM directly when running under WSL, then
@@ -5973,8 +5974,8 @@ DOCX_CLI_RULE = """OPTIONAL TOOLING — the `docx` CLI (you MAY use it, you are 
     text-level view (it cannot see figures, layout or rendered pages), so where your stage says
     "read the packages IN FULL" or "do not rely on a text diff to find differences", that
     instruction still governs; `docx render` plus your own eyes remains the only visual pass.
-  * For a .docx -> .pdf conversion, the `docx-converter` MCP tool comes FIRST (see the visual
-    inspection rule in this prompt): call `convert_docx_to_pdf` before `docx2pdf.sh`, before
+  * For a .docx -> .pdf conversion, `docx2pdf.sh` comes FIRST (see the visual inspection rule in
+    this prompt): run it before the `docx-converter` MCP tool (`convert_docx_to_pdf`), before
     `docx render` and before any other converter.
   * Never point it at a path outside your sandbox, and never let it write into a READ-ONLY input
     directory (its editing subcommands write to the file you name)."""
@@ -5984,10 +5985,10 @@ DOCX_CLI_AVAILABLE = ("available -- the `docx` command is on PATH (bun-docx: `do
 DOCX_CLI_MISSING = ("NOT available -- the `docx` command is not on PATH on this machine; use the "
                     "other tools your stage names")
 
-# Zotero reference work is layered: an agent session uses the Zotero MCP
-# service when its harness exposes it, then an installed Zotero skill, and only
-# when both are unavailable the `zot` CLI (pyzotero-cli; the terminal route of
-# the $zotero-use skill). The CLI is also the ONLY route that may perform the
+# Zotero reference work is layered, terminal tool first: an agent session uses
+# the `zot` CLI (pyzotero-cli) when it is on PATH, then the Zotero MCP service
+# when its harness exposes it, and only when both are unavailable the installed
+# Zotero skill. The CLI is also the ONLY route that may perform the
 # `setup --zotero apply` guarded library write. Within that policy a session may
 # change a citation or, under `apply`, ONE field of ONE existing library item.
 # Reads are ordinary reference lookups; the library is a remote service owned by
@@ -6008,41 +6009,42 @@ ZOT_REMOTE_HINT_UNKNOWN = ("no remote credential was detected by the orchestrato
                            "running Zotero with its\n"
                            "    local API enabled")
 
-ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — MCP service first, then the Zotero skill, then the `zot` CLI fallback:
+ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — `zot` CLI first, then the Zotero MCP service, then the Zotero skill:
   * ROUTE ORDER — use the first route your session has, and fall back to the next only when that
     route is absent or fails. The order is mandatory; it is not a menu:
-      1. THE ZOTERO MCP SERVICE. If your session exposes MCP tools, look for the `zotero` server's
+      1. THE `zot` CLI FROM PYZOTERO-CLI. The read commands below are its command surface. Use
+         them while the CLI works; if the `zot` command is not on PATH, or a call fails, do NOT
+         retry in a loop and do not ask the user to repair it: fall back to route 2.
+      2. THE ZOTERO MCP SERVICE. If your session exposes MCP tools, look for the `zotero` server's
          tools (`zotero_status`, `zotero_search_items`, `zotero_list_items`, `zotero_get_item`,
          `zotero_list_libraries`, `zotero_list_collections`; in a DSH session they appear as
          `mcp__zotero__<tool>`). Call `zotero_status` first. Use the MCP reads while they work. If
          the tools are absent, or `zotero_status` reports the bridge or Zotero offline, Zotero not
          running, the extension not enabled, or the session not paired, or a tool call fails, do
-         NOT retry in a loop and do not ask the user to repair it: fall back to route 2.
-      2. THE ZOTERO SKILL. The Zotero helper (`$ZOTERO_SKILL`), the `$zotero-use` skill, or
-         another installed Zotero skill, when your session has it. Use its read/search/export
-         route.
-      3. THE `zot` CLI FROM PYZOTERO-CLI — THE FALLBACK when the MCP service (route 1) and the
-         Zotero skill (route 2) are both unavailable. The read commands below are its command
-         surface.
+         NOT retry in a loop and do not ask the user to repair it: fall back to route 3.
+      3. THE ZOTERO SKILL — THE FALLBACK when the `zot` CLI (route 1) and the MCP service
+         (route 2) are both unavailable. The Zotero helper (`$ZOTERO_SKILL`), the `$zotero-use`
+         skill, or another installed Zotero skill, when your session has it. Use its
+         read/search/export route.
       4. MANUAL VERIFICATION when none of the three routes works: record the citation or live
          field for the author; never guess and never invent metadata.
-    Library WRITES never use routes 1-2 in any mode: they follow the policy below, and only
+    Library WRITES never use routes 2-3 in any mode: they follow the policy below, and only
     `--zotero apply` reaches the one `zot` guarded update.
-  * Availability of the `zot` CLI (route 3) on this machine right now:
+  * Availability of the `zot` CLI (route 1) on this machine right now:
     @@ZOT_CLI@@.
-    Remote-library access (route 3): @@ZOT_REMOTE@@.
-    A missing `zot` CLI does not by itself make a reference unresolvable: routes 1-2 may still
-    be available in your session. When neither route 1 nor route 2 is available either, do not
+    Remote-library access (route 1): @@ZOT_REMOTE@@.
+    A missing `zot` CLI does not by itself make a reference unresolvable: routes 2-3 may still
+    be available in your session. When neither route 2 nor route 3 is available either, do not
     invent keys or metadata and route every Zotero item to manual verification.
   * If a route fails because the session itself has no network/loopback access (a ConnectError or
     permission error, as opposed to "no such item"), do not retry in a loop: record the limitation,
     say which items could not be verified, and continue with the next route or the corpus +
     manual-verification route.
   * WHAT IT IS FOR: resolving every reference the manuscript cites, by the first route that works.
-    On route 3, the read commands are always allowed: `zot --local --library-id 0 --library-type
+    On route 1, the read commands are always allowed: `zot --local --library-id 0 --library-type
     user items list|get|children`, `zot items list -q WORD` / `--filter-item-type journalArticle`,
     `zot items get KEY`, `zot items citation|bib KEY`, `zot fulltext get ATTACHMENT_KEY`,
-    `zot collections list|items`, `zot tags list`, `zot search`, `zot util`. On routes 1-2 use the
+    `zot collections list|items`, `zot tags list`, `zot search`, `zot util`. On routes 2-3 use the
     equivalent reads. Cite PARENT bibliographic item keys, never attachment keys, and confirm from
     the parent's own metadata (title, creators, year, DOI) that it is the work the sentence needs.
   * NEVER INVENT: no key, DOI, author, year, title or quotation that no library item or full text
@@ -6214,7 +6216,7 @@ ZOTERO_LIBRARY_APPLY = """updates are ENABLED for this run under a two-pass prot
     enabled. This is the pipeline's explicit override of the skill's read-only-Zotero default, and
     it covers exactly the single guarded update described here. The MCP service and the Zotero
     skill remain READ-ONLY for the library in every mode: the one write goes through the `zot` CLI
-    only. If that CLI is unavailable, do NOT attempt the write through routes 1-2: downgrade it to
+    only. If that CLI is unavailable, do NOT attempt the write through routes 2-3: downgrade it to
     a proposal row plus a manual step.
       P1 PROPOSE: before any write, put the proposal row in the ledger: item key, the version you
          read, the field, the current value, the proposed value, the evidence, and the manuscript
@@ -6256,10 +6258,11 @@ ZOTERO_LEDGER_RULE_JUDGE = """name the item keys you checked, and what you concl
     sheet's evidence; do not create a separate Zotero ledger."""
 
 ZOTERO_CLI_RULE_OFF = """ZOTERO TOOLING — SWITCHED OFF for this run:
-  * The pipeline was configured with `--zotero off`. Do NOT use the Zotero MCP service (do not
-    call any `zotero_*` or `mcp__zotero__*` tool), do not use the Zotero skill, do not run the
-    `zot` CLI, and do not attempt a library read or write. The pipeline does not uninstall the
-    harness's MCP registration or skill; they remain present but are OUT OF POLICY for this run.
+  * The pipeline was configured with `--zotero off`. Do NOT run the `zot` CLI.
+    Do NOT use the Zotero MCP service (do not call any `zotero_*` or `mcp__zotero__*` tool),
+    and do not use the Zotero skill. Do not attempt a library read or write. The pipeline does
+    not uninstall the harness's MCP registration or skill; they remain present but are OUT OF
+    POLICY for this run.
     Follow the skills' manual route for
     every live field or citation you cannot verify from the corpus itself: an unreadable or
     unverifiable field goes to the manual-verification list / MANUAL_STEPS.md, never into a guess

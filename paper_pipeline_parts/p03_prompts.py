@@ -95,9 +95,10 @@ it, is installed by this checkout's `install_dependencies.sh`: the Zotero helper
 `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
 `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
 `zot` command from pyzotero-cli -- are available as needed.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
-when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
-the FALLBACK when the MCP service and the skill are both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+pyzotero-cli first when it is available; then the Zotero MCP service when your session
+exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
+both unavailable.
 
 At the end of Phase 1, present the complete findings list and automatically begin the revision (do
 not stop for my confirmation).
@@ -159,9 +160,10 @@ enables it, is installed by this checkout's `install_dependencies.sh`: the Zoter
 `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
 `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
 `zot` command from pyzotero-cli -- are available as needed.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
-when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
-the FALLBACK when the MCP service and the skill are both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+pyzotero-cli first when it is available; then the Zotero MCP service when your session
+exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
+both unavailable.
 
 Final deliverables of Phase 2: the revised/ package (CHANGELOG.md, MANUAL_STEPS.md,
 REVISION_REPORT.md and any other artifacts the skill specifies), the code/ directory and rerun
@@ -666,9 +668,10 @@ enables it, is installed by this checkout's `install_dependencies.sh`: the Zoter
 `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
 `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
 `zot` command from pyzotero-cli -- are available as needed -- read-only.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
-when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
-the FALLBACK when the MCP service and the skill are both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+pyzotero-cli first when it is available; then the Zotero MCP service when your session
+exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
+both unavailable.
 
 === COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
 
@@ -1253,9 +1256,10 @@ Explicit requirements that override skill defaults where they conflict:
      `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
      `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
      `zot` command from pyzotero-cli -- may be read.
-     ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service
-     first when your session exposes it; then the Zotero skill; the `zot` command from
-     pyzotero-cli is the FALLBACK when the MCP service and the skill are both unavailable.
+     ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+     pyzotero-cli first when it is available; then the Zotero MCP service when your session
+     exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service
+     are both unavailable.
   7. @@M18_REVISE_RULE@@
   8. Acronym long-form repetition findings (review check M1, rule (k); evidence: the M1b instance
      table in guided_review/artifacts/M1_acronyms.md, one row per un-abbreviated long-form occurrence that
@@ -1990,9 +1994,10 @@ tooling, when this run enables it, is installed by this checkout's `install_depe
 the Zotero helper is `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other
 installed skills under `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`,
 which provides the `zot` command from pyzotero-cli -- are available as needed -- read-only.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
-when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
-the FALLBACK when the MCP service and the skill are both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+pyzotero-cli first when it is available; then the Zotero MCP service when your session
+exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
+both unavailable.
 
 === CANONICAL OUTPUTS (these exact paths; the pipeline reads them) ===
   rewritten/REWRITE_REPORT.md — REQUIRED. Four sections:
@@ -2741,15 +2746,16 @@ def apply_m18(text: str, limit: int) -> str:
 # Renderers, in the order the prompts tell the agents to try them. A probe value
 # is either a PATH executable (checked with shutil.which) or "mcp:<server>",
 # meaning "the Codex MCP server <server> is configured and its script exists".
-# The FIRST entry is the machine's docx-converter MCP service: it must be tried
-# before any other docx->pdf converter (the call is
-# convert_docx_to_pdf(docxPath), which renders through Microsoft Word). Being
-# installed is not enough for that call to succeed: it also has to be
-# pre-approved for the non-interactive session (MCP_APPROVALS below).
+# The FIRST entry is `docx2pdf.sh`, the terminal Word-fidelity converter: the
+# prompts tell the agents to run it before any other docx->pdf converter. The
+# docx-converter MCP tool that wraps it comes second; being installed is not
+# enough for that call to succeed, it also has to be pre-approved for the
+# non-interactive session (MCP_APPROVALS below).
 DOCX_MCP_SERVER = "docx-converter"
 DOCX_MCP_TOOL = "convert_docx_to_pdf"
-# The machine's Word-native COMPARE MCP service: the FIRST choice whenever the
-# pipeline (or an agent) has to track the differences between two .docx files.
+# The machine's Word-native COMPARE MCP service: the FIRST choice for the
+# pipeline's own redline chain whenever it has to track the differences between
+# two .docx files.
 # The tool wraps `docxcompare.sh`, which drives
 # `Word.Application.CompareDocuments` through COM automation -- the comparison
 # engine of Word itself -- and writes the redline next to the pair it was
@@ -2759,8 +2765,8 @@ DOCX_MCP_TOOL = "convert_docx_to_pdf"
 DOCX_COMPARE_MCP_SERVER = "docx-compare"
 DOCX_COMPARE_MCP_TOOL = "compare_docx"
 VISUAL_TOOL_PROBES = (
-    (f"docx-converter MCP tool (`{DOCX_MCP_TOOL}`)", f"mcp:{DOCX_MCP_SERVER}"),
     ("docx2pdf.sh", "docx2pdf.sh"),
+    (f"docx-converter MCP tool (`{DOCX_MCP_TOOL}`)", f"mcp:{DOCX_MCP_SERVER}"),
     ("docx (`docx render`) command", "docx"),
     ("soffice (LibreOffice)", "soffice"),
     ("libreoffice", "libreoffice"),
@@ -2916,8 +2922,10 @@ def mcp_server_configured(name: str) -> bool:
 
     The MCP tools are used by the AGENT sessions the pipeline launches, which
     inherit the operator's Codex configuration; the orchestrator itself also
-    drives this one server (see `mcp_stdio_tool_call`) so the template renders IT
-    seeds use the same first-choice converter. What the probe answers is
+    drives this one server (see `mcp_stdio_tool_call`) so the template renders
+    IT seeds use the orchestrator's first-choice converter (the agent prompts
+    put `docx2pdf.sh` first, with this MCP tool as their fallback). What the
+    probe answers is
     therefore "can the agents we are about to start actually call this server?",
     by checking the config written by `codex mcp add`
     (`[mcp_servers.<name>]`) and verifying that the files the entry names still

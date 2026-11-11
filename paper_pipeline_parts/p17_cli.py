@@ -77,9 +77,9 @@ USAGE_EXAMPLES = """usage:
           Legend length never makes a version ineligible, reorders a ranking or
           fails a decision.
           --zotero is the reference-tooling policy for every agent session
-          (off|read|edit|apply; default edit). The prompts try the Zotero MCP
-          service first, then the Zotero skill, and use the `zot` CLI
-          (pyzotero-cli) only as the fallback when both are unavailable. off
+          (off|read|edit|apply; default edit). The prompts try the `zot` CLI
+          (pyzotero-cli) first, then the Zotero MCP service, and use the
+          Zotero skill only as the fallback when both are unavailable. off
           disables all three; read resolves and verifies references only; edit
           also lets the revision and integration stages add, remove or relink
           citations in their revised copy (the Zotero library stays read-only);
@@ -806,11 +806,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "byte-identical to --source and reports formatting only")
     ps.add_argument("--zotero", choices=list(ZOTERO_MODES), default=DEFAULT_ZOTERO_MODE,
                     help="Zotero reference-tooling policy for every agent session. The stage "
-                         "prompts try the Zotero MCP service first, then the Zotero skill, and "
-                         "use the `zot` CLI (pyzotero-cli) only as the fallback when both are "
+                         "prompts try the `zot` CLI (pyzotero-cli) first, then the Zotero MCP "
+                         "service, and use the Zotero skill only as the fallback when both are "
                          "unavailable. "
-                         "off = the run policy forbids all Zotero tooling (MCP service, "
-                         "skill or `zot` CLI) and every stage prompt says so; the pipeline "
+                         "off = the run policy forbids all Zotero tooling (`zot` CLI, "
+                         "MCP service or skill) and every stage prompt says so; the pipeline "
                          "does not uninstall the harness's MCP registration or skill, so "
                          "install with --no-zotero-mcp --no-external to remove them. Live "
                          "fields stay on the skills' manual route. "

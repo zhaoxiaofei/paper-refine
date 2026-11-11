@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The docx-converter MCP tool must be tried FIRST for any .docx -> .pdf.
+"""The `docx2pdf.sh` CLI must be tried FIRST for any .docx -> .pdf.
 
 Run:  python3 .paper_test/test_docx_converter.py
 
@@ -7,12 +7,13 @@ Asserts:
   * the Codex config parser recognises `[mcp_servers.docx-converter]` (plain and
     quoted section names, CODEX_HOME aware) and refuses a section whose server
     script is missing;
-  * the probe list puts the MCP tool first and reports it in the
-    "converters available" summary;
+  * the probe list puts `docx2pdf.sh` first, the MCP tool second, and reports
+    them in the "converters available" summary in that order;
   * every prompt (review, rewrite, revise, integration, judge) instructs the
-    agent to call `convert_docx_to_pdf` BEFORE any other converter, in the right
-    order, and to render into a writable work directory instead of the
-    hash-verified read-only views;
+    agent to run `docx2pdf.sh` BEFORE the `docx-converter` MCP tool
+    (`convert_docx_to_pdf`) and before any other converter, in the right order,
+    and to render into a writable work directory instead of the hash-verified
+    read-only views;
   * optionally (`PAPER_TEST_DOCX_MCP=1`), a real stdio handshake with the server
     (tools/list) and a real conversion of a scratch .docx.
 
@@ -147,12 +148,12 @@ def test_probe_order_and_summary():
     print()
     print("== the probe list and the detected-converter summary ==")
     first_label, first_spec = nb.VISUAL_TOOL_PROBES[0]
-    check("the docx-converter MCP tool is the FIRST probe",
-          first_spec == "mcp:docx-converter" and "docx-converter" in first_label
-          and nb.DOCX_MCP_TOOL in first_label,
+    check("docx2pdf.sh is the FIRST probe",
+          first_spec == "docx2pdf.sh" and first_label == "docx2pdf.sh",
           f"{first_label} / {first_spec}")
-    check("docx2pdf.sh is the first FALLBACK (second probe)",
-          nb.VISUAL_TOOL_PROBES[1] == ("docx2pdf.sh", "docx2pdf.sh"),
+    check("the docx-converter MCP tool is the first FALLBACK (second probe)",
+          nb.VISUAL_TOOL_PROBES[1] ==
+          (f"docx-converter MCP tool (`{nb.DOCX_MCP_TOOL}`)", f"mcp:{nb.DOCX_MCP_SERVER}"),
           str(nb.VISUAL_TOOL_PROBES[1]))
     order = [spec for _label, spec in nb.VISUAL_TOOL_PROBES]
     check("the remaining converters keep their layout-fidelity order",
@@ -163,11 +164,14 @@ def test_probe_order_and_summary():
     configured = nb.mcp_server_configured(nb.DOCX_MCP_SERVER)
     check("the summary lists the MCP tool iff the server is configured",
           ("docx-converter" in summary) == configured, summary)
-    if configured:
-        check("the MCP tool is listed FIRST in the summary", summary.startswith("docx-converter"),
-              summary)
+    if configured and "docx2pdf.sh" in summary:
+        check("the summary lists docx2pdf.sh before the MCP tool",
+              summary.find("docx2pdf.sh") < summary.find("docx-converter"), summary)
+    elif "docx2pdf.sh" in summary:
+        skip("docx2pdf.sh is listed before the MCP tool",
+             "the docx-converter MCP tool is not configured")
     else:
-        skip("the MCP tool is listed first", "no docx-converter server on this machine")
+        skip("docx2pdf.sh is listed before the MCP tool", "docx2pdf.sh is not on PATH")
     # a cache rebuild after a config change reflects the new state
     real_path = nb.codex_config_path
     tmp = scratch("paper_mcp_cache_")
@@ -182,12 +186,12 @@ def test_probe_order_and_summary():
 
 
 # =====================================================================
-# The prompts: try the MCP tool before any other converter
+# The prompts: run docx2pdf.sh before the MCP tool and any other converter
 # =====================================================================
 
-def test_prompts_prefer_the_mcp_tool():
+def test_prompts_prefer_the_cli():
     print()
-    print("== every prompt tries convert_docx_to_pdf first (and renders safely) ==")
+    print("== every prompt tries docx2pdf.sh first (and renders safely) ==")
     sb = Path("/tmp/paper_mcp_sb")
     prompts = {
         "review": nb.review_prompt(sb, "r1_guided_review", 1),
@@ -199,33 +203,30 @@ def test_prompts_prefer_the_mcp_tool():
     for name, text in prompts.items():
         flat = " ".join(text.split())
         unresolved = sorted(set(re.findall(r"@@[A-Z0-9_]+@@", text)))
-        check(f"{name}: the prompt names the MCP tool and demands it FIRST",
-              f"`{nb.DOCX_MCP_TOOL}`" in text and "BEFORE ANY OTHER CONVERTER" in flat,
+        check(f"{name}: the prompt names the CLI and demands it FIRST",
+              "ALWAYS TRY THE `docx2pdf.sh` CLI FIRST" in flat
+              and "BEFORE ANY OTHER CONVERTER" in flat,
               f"unresolved={unresolved}")
-        # prompt level: the MCP call must be named before the docx2pdf fallback
-        # (capability lists may mention `docx render` for other purposes, so the
-        # full ordering is asserted on the visual rule itself, below)
-        check(f"{name}: the MCP tool is named BEFORE the docx2pdf.sh fallback",
-              flat.find(nb.DOCX_MCP_TOOL) < flat.find("docx2pdf.sh FILE")
-              and flat.find(nb.DOCX_MCP_TOOL) >= 0,
-              str((flat.find(nb.DOCX_MCP_TOOL), flat.find("docx2pdf.sh FILE"))))
+        check(f"{name}: the MCP tool is named as a converter fallback",
+              f"`{nb.DOCX_MCP_TOOL}`" in text
+              and "the `docx-converter` MCP tool" in flat)
         check(f"{name}: the prompt warns that a read-only view must stay byte-identical",
               "NEVER INTO A READ-ONLY INPUT" in flat
               and "hash-verified" in flat and "work/" in flat)
         check(f"{name}: the prompt has no unresolved tokens", not unresolved, str(unresolved))
-        check(f"{name}: the optional docx CLI block repeats the MCP-first rule",
-              "the `docx-converter` MCP tool comes FIRST" in flat)
+        check(f"{name}: the optional docx CLI block repeats the CLI-first rule",
+              "`docx2pdf.sh` comes FIRST" in flat)
         check(f"{name}: the detected-converter line names the MCP tool when configured",
               ("docx-converter MCP tool" in flat) == nb.mcp_server_configured(nb.DOCX_MCP_SERVER),
               flat[flat.find("Converters available"):][:120])
     # the authoritative converter order, taken from the visual rule itself
     visual = " ".join(nb.visual_inspection_block("X").split())
-    idx = [visual.find(nb.DOCX_MCP_TOOL), visual.find("docx2pdf.sh FILE"),
+    idx = [visual.find("docx2pdf.sh FILE"), visual.find("the `docx-converter` MCP tool"),
            visual.find("docx render FILE --out pages/"), visual.find("soffice --headless")]
-    check("the visual rule orders the converters MCP -> docx2pdf -> docx render -> LibreOffice",
+    check("the visual rule orders the converters docx2pdf -> MCP -> docx render -> LibreOffice",
           all(i >= 0 for i in idx) and idx == sorted(idx), str(idx))
-    check("the visual rule tells the agent the MCP tool is the FIRST choice",
-          "ALWAYS TRY THE `docx-converter` MCP TOOL FIRST" in visual)
+    check("the visual rule tells the agent the CLI is the FIRST choice",
+          "ALWAYS TRY THE `docx2pdf.sh` CLI FIRST" in visual)
 
 
 # =====================================================================
@@ -579,7 +580,7 @@ def test_mcp_client_decodes_utf8_answer():
 def main() -> int:
     sections = (("probe", test_config_probe),
                 ("probe", test_probe_order_and_summary),
-                ("prompts", test_prompts_prefer_the_mcp_tool),
+                ("prompts", test_prompts_prefer_the_cli),
                 ("safety", test_converter_safety_and_timeout_parity),
                 ("refusals", test_refusal_messages_evaluate),
                 ("mcp-client", test_mcp_client_decodes_utf8_answer),

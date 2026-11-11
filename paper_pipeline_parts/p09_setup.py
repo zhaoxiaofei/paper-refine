@@ -1069,9 +1069,9 @@ def cmd_setup(args) -> None:
     print("[setup] OOXML formatting scan:   " + format_note(ctx.state["original_format"])
           + "  (code-side proxy; the agents' category-4 formatting sweep is authoritative)")
     _zot_note = {
-        "off": "no Zotero tooling (MCP service, skill or `zot` CLI); live fields stay on the "
+        "off": "no Zotero tooling (`zot` CLI, MCP service or skill); live fields stay on the "
                "skills' manual route",
-        "read": "read-only reference resolution (MCP service, then skill, then `zot`); citation "
+        "read": "read-only reference resolution (`zot` CLI, then MCP service, then skill); citation "
                 "fields are not edited",
         "edit": "citation edits in the revised copy are allowed; the Zotero library stays "
                 "read-only",
@@ -1079,7 +1079,7 @@ def cmd_setup(args) -> None:
                  "YOUR REMOTE ZOTERO ACCOUNT (propose-then-verify protocol via the `zot` CLI)",
     }[zotero]
     print(f"[setup] zotero policy:           {zotero}: {_zot_note}"
-          + (f" (`zot` fallback {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
+          + (f" (route 1 `zot` CLI: {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
              if zotero != "off" else ""))
     print(f"[setup] corpus rule:             the difference-tracking auxiliaries "
           f"(\"*.tracking-<token>.<ext>\" and their \"*.logging-<token>.<ext>\" fallbacks, "
@@ -3852,11 +3852,11 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # remote library -- says so loudly.
     _zot_mode = zotero_mode_of(ctx)
     if _zot_mode == "off":
-        _zot_note = ("off -- no Zotero tooling (MCP service, skill or `zot` CLI); live fields "
+        _zot_note = ("off -- no Zotero tooling (`zot` CLI, MCP service or skill); live fields "
                      "stay on the skills' manual route")
     else:
-        _zot_on_path = ("the `zot` CLI fallback is on PATH" if zot_cli_available()
-                        else "the `zot` CLI fallback is NOT on PATH")
+        _zot_on_path = ("the `zot` CLI (route 1) is on PATH" if zot_cli_available()
+                        else "the `zot` CLI (route 1) is NOT on PATH")
         if _zot_mode == "apply":
             _zot_note = ("apply -- citation edits AND single-field library updates are allowed "
                          "(propose-then-verify via the `zot` CLI, --last-modified auto); this "
@@ -3865,12 +3865,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             _zot_note = ("edit -- citation edits in the revised copy are allowed; the Zotero "
                          f"library stays read-only ({_zot_on_path})")
         else:
-            _zot_note = ("read -- read-only reference resolution (MCP service, then skill, then "
-                         f"`zot`); no citation edits ({_zot_on_path})")
+            _zot_note = ("read -- read-only reference resolution (`zot` CLI, then MCP service, "
+                         f"then skill); no citation edits ({_zot_on_path})")
     print(f"[run] zotero reference tooling:  {_zot_note}")
     # The docx->pdf converter the prompts ask for FIRST (see the visual rule):
-    # the docx-converter MCP tool, falling back to the other renderers.
-    if mcp_server_configured(DOCX_MCP_SERVER):
+    # `docx2pdf.sh`, falling back to the docx-converter MCP tool and then to
+    # the other renderers.
+    if shutil.which("docx2pdf.sh"):
+        first_choice = ("docx2pdf.sh -- agents run it before any other converter")
+    elif mcp_server_configured(DOCX_MCP_SERVER):
         argv = [str(a) for a in (cmd or [])]
         if manual:
             note = "; manual mode: YOUR session approves the call, so no override is needed"
@@ -3890,11 +3893,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                         f"carries no MCP approval override (only the codex one adds them; a CLI's "
                         f"own configuration decides which MCP servers it reaches), so the call "
                         f"may be denied")
-        first_choice = (f"the {DOCX_MCP_SERVER} MCP tool (`{DOCX_MCP_TOOL}`) -- agents call it "
-                        f"before any other converter{note}")
-    elif shutil.which("docx2pdf.sh"):
-        first_choice = ("docx2pdf.sh (the docx-converter MCP tool is not configured in "
-                        f"{codex_config_path()})")
+        first_choice = (f"the {DOCX_MCP_SERVER} MCP tool (`{DOCX_MCP_TOOL}`) -- the fallback when "
+                        f"docx2pdf.sh is not on PATH{note}")
     else:
         first_choice = ("NONE of the Word-fidelity converters is available -- the prompts tell the "
                         "agents to record the limitation instead of claiming a visual check")

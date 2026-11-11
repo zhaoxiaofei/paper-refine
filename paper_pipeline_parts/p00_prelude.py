@@ -400,9 +400,9 @@ HARNESS_PIPELINE_MOUNT = "/paper-pipeline"
 HARNESS_DRIVER_REL = f"{HARNESS_PIPELINE_MOUNT}/{SELFCHECK_DRIVER}"
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`).
-# The stage prompts try the Zotero MCP service first, then the Zotero skill, and
-# use the `zot` CLI only as the FALLBACK when both are unavailable:
-#   off   -- no Zotero tooling (MCP service, skill or CLI); live fields stay on
+# The stage prompts try the `zot` CLI first, then the Zotero MCP service, and
+# use the Zotero skill only as the FALLBACK when both are unavailable:
+#   off   -- no Zotero tooling (`zot` CLI, MCP service or skill); live fields stay on
 #            the skills' manual route
 #   read  -- read-only reference resolution/verification, no field edits
 #   edit  -- + add/remove/relink citations in the revision/integration copies

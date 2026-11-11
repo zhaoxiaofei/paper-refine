@@ -132,26 +132,26 @@ last two cases — see *Exit codes*.
   `--agent codex|claude|dsh|qwen|dots` and `--agent manual` remain available,
   as does a custom command via `--agent-cmd`.
 * Optional, probed at runtime and never required: the `docx` CLI (read/render/
-  diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
-  `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
-  `pdftoppm`, the `docx-compare` MCP tool / `docxcompare.sh` (Word's own
+  diff/validate), a .docx→PDF converter (`docx2pdf.sh` + Word, the
+  `docx-converter` MCP tool, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
+  `pdftoppm`, `docxcompare.sh` / the `docx-compare` MCP tool (Word's own
   comparison engine for tracked changes), `latexdiff` (LaTeX difference
-  tracking), the `zotero` MCP service (the Zotero bridge's `zotero_status`,
-  `zotero_search_items`, `zotero_get_item` reads), and the `zot` CLI
-  (pyzotero-cli) as the LAST-RESORT route for read-only Zotero reference
-  resolution.
+  tracking), the `zot` CLI (pyzotero-cli) as the FIRST route for read-only
+  Zotero reference resolution, and the `zotero` MCP service (the Zotero
+  bridge's `zotero_status`, `zotero_search_items`, `zotero_get_item` reads).
 * Optional: the external Zotero skill (`$ZOTERO_SKILL` / `$zotero-use`) that the
   Zotero stage prompts name for the skill route and for their
   `validate_zotero_docx.py` proof step. `./install_dependencies.sh` clones the
   helper and the `$zotero-use` skill under `external/`, and `activate-deps.sh`
   exports `$ZOTERO_SKILL` (a checkout-relative path turned absolute only for the
-  current shell). The stage prompts pin the ROUTE ORDER: the Zotero MCP service
-  first when the session exposes it, then this skill, and the `zot` CLI from
-  pyzotero-cli only as the FALLBACK when the MCP service and the skill are both
-  unavailable. When none of the three routes works, the citation or live field
-  goes to manual verification. The skill script is NOT bundled in this
-  repository; when the skill is not installed, the pipeline's own code-side
-  live-field inventory and continuity gate (`paper_docx_format.py`, run by every
+  current shell). The stage prompts pin the ROUTE ORDER: the `zot` CLI from
+  pyzotero-cli first when it is available, then the Zotero MCP service when the
+  session exposes it, and this skill only as the FALLBACK when the CLI and the
+  MCP service are both unavailable. When none of the three routes works, the
+  citation or live field goes to manual verification. The skill script is NOT
+  bundled in this repository; when the skill is not installed, the pipeline's
+  own code-side live-field inventory and continuity gate
+  (`paper_docx_format.py`, run by every
   DOCX stage) is the check that actually enforces field preservation, and the
   prompts' `PROVE IT` step degrades to that gate.
 * The two DOCX MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) read the
@@ -570,7 +570,7 @@ evidence pack.
 | `set-submit-code off\|on` | whether `code/` is part of the submission (`off`, the default: revision content the stages revise and the judges evaluate, but stripped from `journal_submission/` like `raw_data/`, and not citeable by the response letter; `on`: the submission carries it and the letter may cite it) |
 | `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
 | `redline --root ROOT` / `track --root ROOT` | (re)write the tracked-changes `.docx` tree / the difference-tracking copies (`*.tracking-*`) plus the persistent PDF renders |
-| `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: the stage tries the Zotero MCP service first, then the Zotero skill, and the `zot` CLI only as the fallback when both are unavailable; `off` = the run policy forbids all Zotero tooling and every stage prompt says so; the pipeline does NOT uninstall the operator's MCP registration or skill, so a machine that must be incapable of Zotero access should install with `install_dependencies.sh --no-zotero-mcp --no-external`, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write through the `zot` CLI. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
+| `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: the stage tries the `zot` CLI first, then the Zotero MCP service, and the Zotero skill only as the fallback when both are unavailable; `off` = the run policy forbids all Zotero tooling and every stage prompt says so; the pipeline does NOT uninstall the operator's MCP registration or skill, so a machine that must be incapable of Zotero access should install with `install_dependencies.sh --no-zotero-mcp --no-external`, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write through the `zot` CLI. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
 | `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant. The pair carries `2*judges` scores, so the sign rule needs at least 3 judges: at 2 judges the smallest attainable one-sided p (4/4 losses) is 0.0625, and `setup` refuses that combination rather than shipping a gate that can never reject |
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
 | `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. The legacy `--judge-agent {codex,claude,dsh,qwen,dots,manual}` / `--judge-agent-cmd JSON` remain |
@@ -1004,8 +1004,8 @@ those styles are removed — with the document text proven byte-identical or the
   headings imported from another publisher's template). When the venue ships a
   Word template, the orchestrator also **renders it once per root** (the
   operator's `docx-converter` MCP tool first -- the orchestrator drives the
-  configured server over a minimal stdio JSON-RPC client, the same first choice
-  every prompt mandates -- then `docx2pdf.sh`, then LibreOffice: PDF + page
+  configured server over a minimal stdio JSON-RPC client, then `docx2pdf.sh`,
+  then LibreOffice: PDF + page
   images + a
   `manifest.json` naming the renderer and each template document's page count,
   cached by template digest) and seeds that render into every producing/
@@ -3711,7 +3711,7 @@ its four integration runs never started.
 | `revision_history/ZOTERO_REFRESH_FORENSICS_2026-1009.md` | the 2026-10-09 Zotero live-field forensics that M36/FMT-Z grew from |
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
 | `docxcompare.sh` | Word→redline comparison via PowerShell (WSL/Git Bash) |
-| `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
+| `mcp-docx-converter/` | the `docx-converter` MCP tool (the MCP route to Word rendering; the agents' first choice is `docx2pdf.sh`) |
 | `mcp-docx-compare/` | the `docx-compare` MCP tool (Word's own compare engine, first choice for tracked changes) |
 | `paper-skills/` | the bundled review (`paper-review`) and revision (`paper-revise`) skills + prompts |
 | `install_dependencies.sh` | installs the conda env, Node MCP dependencies, agent skills/MCP rows and the external Zotero checkouts; writes checkout-relative `deps.env` + `activate-deps.sh` |

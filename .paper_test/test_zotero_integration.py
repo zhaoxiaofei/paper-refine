@@ -4,10 +4,9 @@
 Run:  python3 .paper_test/test_zotero_integration.py
 
 Asserts:
-  * the ROUTE ORDER is pinned: the Zotero MCP service is tried first, then the
-    Zotero skill, and the `zot` CLI (pyzotero-cli) is the FALLBACK only when
-    both are unavailable; a missing CLI does not by itself disable the other
-    routes;
+  * the ROUTE ORDER is pinned: the `zot` CLI (pyzotero-cli) is tried first,
+    then the Zotero MCP service, and the Zotero skill is the FALLBACK only when
+    both are unavailable; a missing CLI falls through to the other routes;
   * every MCP/skill library-write tool stays READ-ONLY in every mode, and the
     `apply` mode's one guarded write goes through the `zot` CLI only;
   * `setup --zotero {off,read,edit,apply}` parses, defaults to `edit`, persists
@@ -174,17 +173,17 @@ def test_prompt_coverage():
         check(f"ZT2 {name} prompt states the availability honestly",
               "available -- the `zot` command" in text
               or "NOT available -- the `zot` command" in text)
-        check(f"ZT2 {name} prompt puts the Zotero MCP service first",
-              "THE ZOTERO MCP SERVICE" in text and "Call `zotero_status` first" in text)
-        check(f"ZT2 {name} prompt makes the `zot` CLI the fallback",
-              "THE FALLBACK when the MCP service (route 1) and the" in text
+        check(f"ZT2 {name} prompt puts the `zot` CLI first",
+              "THE `zot` CLI FROM PYZOTERO-CLI" in text and "`zot` CLI first" in text)
+        check(f"ZT2 {name} prompt makes the Zotero skill the fallback",
+              "THE FALLBACK when the `zot` CLI (route 1) and the MCP service" in text
               and "both unavailable" in text)
     check("ZT2 a missing `zot` CLI does not close the MCP/skill routes",
           "A missing `zot` CLI does not by itself make a reference" in nb.ZOTERO_CLI_RULE
-          and "routes 1-2 may still" in nb.ZOTERO_CLI_RULE)
+          and "routes 2-3 may still" in nb.ZOTERO_CLI_RULE)
     check("ZT2 the legacy Zotero helper paragraph states the same route order",
           all("ROUTE ORDER (when Zotero tooling is enabled for this run)" in texts[name]
-              and "FALLBACK when the MCP service and the" in texts[name]
+              and "FALLBACK when the `zot` command and the MCP service" in texts[name]
               for name in ("review", "revise", "rewrite")))
     check("ZT2 revise prompt names its ledger path",
           "revised/work/ZOTERO_LIBRARY.md" in texts["revise"])

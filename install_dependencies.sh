@@ -14,11 +14,9 @@
 #   * the external Zotero checkouts:
 #       - `zotero-use`                 the `zot` skill / CLI source
 #       - `openai-plugins`             the Zotero helper (`ZOTERO_SKILL`)
-#     under `external/`, and the Zotero MCP service
-#       - `zotero-bridge`              the Zotero MCP service
-#     (upstream: codex-zotero-bridge) under `$MCP_TOOLS_DIR`, default
-#     `~/mcp-servers`, NEXT TO the two docx MCP servers
-#     `install_agent_tooling.sh` deploys there;
+#     under `external/`, and the Zotero MCP service (`zotero-bridge`, upstream
+#     codex-zotero-bridge) under `$MCP_TOOLS_DIR` -- default `~/mcp-servers`,
+#     next to the two docx MCP servers `install_agent_tooling.sh` deploys there;
 #   * `deps.env` and `activate-deps.sh` -- checkout-relative paths, or absolute
 #     for a dependency installed outside the checkout (the Zotero bridge).
 #
@@ -384,7 +382,7 @@ else
 fi
 if [ "$REGISTER_ZOTERO_MCP" = 1 ]; then
     if [ "$DO_AGENT" = 1 ]; then
-        note "the 'zotero' MCP row is installed/repointed by install_agent_tooling.sh"
+        note "the 'zotero' MCP row is owned by install_agent_tooling.sh (added or repointed there)"
     else
         note "the 'zotero' MCP row was skipped with agent-tooling registration"
     fi
@@ -514,8 +512,9 @@ absolute paths.
 The Zotero MCP service is registered with each harness when a harness is
 present. It still needs the Zotero Desktop extension: in Zotero choose
 **Tools > Codex Zotero Bridge > Pair Codex**, then call the `zotero_pair` MCP
-tool with the one-time 8-digit code. Until it is paired, the stage prompts fall
-back to the Zotero skill and then to the `zot` CLI, exactly as they document.
+tool with the one-time 8-digit code. Until it is paired, the stage prompts use
+the `zot` CLI first and fall back to the Zotero skill when the MCP service
+cannot answer, exactly as they document.
 EOF
     fi
 fi
@@ -542,7 +541,7 @@ if [ "$DRY_RUN" = 1 ]; then
 else
     note "run:       python paper_pipeline.py setup --source <manuscript-dir> --root <run-root>"
 fi
-note "Zotero:    MCP service first, Zotero skill second, \`zot\` CLI fallback;"
+note "Zotero:    \`zot\` CLI first, Zotero MCP service second, Zotero skill fallback;"
 note "           if all three are unavailable, the stage records manual verification."
 if [ "${#FAILED[@]}" -gt 0 ]; then
     printf '\n[install] incomplete:\n' >&2

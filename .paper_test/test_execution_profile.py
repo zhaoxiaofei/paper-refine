@@ -52,15 +52,15 @@ FAILS = []
 #     python .paper_test/render_stage_prompts.py .
 # and paste the hashes here in the SAME commit that changes the prompts.
 GOLDEN = {
-    "review": "280b7ce878451fb7",
-    "review_split_a": "89a5be18dfad282a",
-    "review_scoped": "69cf26ebd1dcce1a",
+    "review": "1ab047e4f5ee0846",
+    "review_split_a": "7b38b03883ea3328",
+    "review_scoped": "82c485a86b874019",
     "cold_start_review": "324bc552a595c5d7",
-    "audit": "a5a6bb9aa9702574",
-    "revise": "6242f03dac0dd5ae",
-    "integrate": "4bee1f09ef8a7637",
-    "rewrite": "c5850e402b60c718",
-    "judge": "bf655683c60e3513",
+    "audit": "dda0ec87b96a86b0",
+    "revise": "a456082732ae58e2",
+    "integrate": "43b9236b75b2506f",
+    "rewrite": "076fc543ddde1449",
+    "judge": "3431531c383827c9",
     "revision_audit": "ebc0d2e2cf01e3cb",
     "revision_repair": "e2b4b5bff262d0bf",
 }

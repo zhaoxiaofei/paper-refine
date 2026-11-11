@@ -2072,10 +2072,10 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
 
     Minimal newline-delimited JSON-RPC: `initialize` ->
     `notifications/initialized` -> `tools/call`. The orchestrator seeds the
-    venue-template renders itself, so it uses the SAME first-choice converter
-    the agent prompts mandate (the operator's docx-converter MCP tool, i.e.
-    Microsoft Word through PowerShell interop) instead of silently falling back
-    to a lower-fidelity shim.
+    venue-template renders itself, so it drives the operator's docx-converter
+    MCP tool directly (Microsoft Word through PowerShell interop) instead of
+    silently falling back to a lower-fidelity shim. This is the ORCHESTRATOR's
+    own render chain; the agent prompts put `docx2pdf.sh` first.
     """
     argv = [str(spec.get("command") or ""), *[str(a) for a in spec.get("args") or []]]
     if not argv[0]:
@@ -2330,12 +2330,16 @@ def mcp_compare_docx(spec: dict, base: Path, revised: Path, out: Path,
 
 
 def visual_renderer_choices() -> list:
-    """Every usable DOCX->PDF renderer, in the order the prompts mandate.
+    """Every usable DOCX->PDF renderer, in the ORCHESTRATOR's own order.
 
     The operator's docx-converter MCP tool comes FIRST (Microsoft Word through
     PowerShell interop, the highest-fidelity renderer); `docx2pdf.sh` -- the
-    script that MCP tool drives internally -- is the fallback when the server is
-    not installed or cannot start, and LibreOffice is the last resort.
+    script that MCP tool drives internally, and the converter the agent prompts
+    tell an agent to run first -- is the fallback when the server is not
+    installed or cannot start, and LibreOffice is the last resort.
+
+    This is the orchestrator's render chain (venue-template renders, PDF
+    staging), not the agents' route order: the prompts put `docx2pdf.sh` first.
     """
     out = []
     if mcp_server_configured(DOCX_MCP_SERVER):

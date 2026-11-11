@@ -89,7 +89,7 @@ def main() -> int:
     check("the stage prompts use the harness skill directories",
           "$CODEX_HOME/skills" in prompts and "$DSH_HOME/skills" in prompts)
     check("the stage prompts still pin the fallback route",
-          "FALLBACK when the MCP service and the" in prompts)
+          "FALLBACK when the `zot` command and the MCP service" in prompts)
 
     for rel in ("paper-skills/paper-review/SKILL.md",
                 "paper-skills/paper-revise/SKILL.md",

@@ -354,26 +354,29 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       whose contract says "read the packages in full" -- that it is an aid, not
       a substitute for that reading. `docx render` is also probed as a
       layout-faithful visual renderer (it drives Word/LibreOffice internally).
-    * THE `docx-converter` MCP TOOL IS THE FIRST-CHOICE DOCX->PDF CONVERTER: the
-      pipeline probes the operator's Codex config (~/.codex/config.toml,
-      `[mcp_servers.docx-converter]`, CODEX_HOME aware) and, when the server is
-      configured with its script still on disk, every prompt tells the agents to
-      call `convert_docx_to_pdf(docxPath)` BEFORE `docx2pdf.sh`, `docx render`,
+    * `docx2pdf.sh` IS THE FIRST-CHOICE DOCX->PDF CONVERTER, THEN THE
+      `docx-converter` MCP TOOL: every prompt tells the agents to run
+      `docx2pdf.sh FILE` BEFORE `convert_docx_to_pdf(docxPath)`, `docx render`,
       LibreOffice or any other converter -- it renders through Microsoft Word
-      via WSL/PowerShell interop, the highest-fidelity renderer available. The
-      prompts also insist that the conversion target is a COPY inside the
-      stage's writable work directory, never a hash-verified read-only view
-      (`target/`, `field/*`, `base/`, `non_revised/`), because
+      via WSL/PowerShell interop, the highest-fidelity renderer available, and
+      the MCP tool wraps the same script. The pipeline probes the operator's
+      Codex config (~/.codex/config.toml, `[mcp_servers.docx-converter]`,
+      CODEX_HOME aware) and names the MCP tool as the fallback when the script
+      is not on PATH. The prompts also insist that the conversion target is a
+      COPY inside the stage's writable work directory, never a hash-verified
+      read-only view (`target/`, `field/*`, `base/`, `non_revised/`), because
       every converter writes its output next to the file it is handed.
-      A prompt to call the tool is not by itself enough: `codex exec` is
+      A prompt to call the MCP tool is not by itself enough: `codex exec` is
       non-interactive and therefore runs with approval policy `never`, which
       DENIES an MCP tool call that wants approval rather than queueing it for a
       human, so the orchestrator hands every codex session the per-server
       override `-c mcp_servers.docx-converter.default_tools_approval_mode=
       "approve"` (see MCP_APPROVALS and codex_mcp_overrides()). Without that
-      override the agents can see the tool and still never be allowed to call
-      it, which is what happened to the first-choice renderer.
-    * THE `zot` CLI (pyzotero-cli) IS THE REFERENCE ROUTE: every prompt documents
+      override the agents can see the MCP fallback and still never be allowed
+      to call it, which is what happened to the first-choice MCP renderer.
+    * THE `zot` CLI (pyzotero-cli) IS THE FIRST REFERENCE ROUTE: every prompt
+      tries it first, then the Zotero MCP service, then the installed Zotero
+      skill; it documents
       the read route (`zot --local ... items list/get/citation/bib`, full text,
       collections, tags), the live-field rules for editing a DOCX citation
       (parent item keys, one unique field per citation location, baseline-
@@ -430,15 +433,15 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           tracked-changes copies under <root>/redlines/ and
                           <root>/tracking/).
     * visual inspection   "visually inspect the document" is enforced as a
-                          RENDER-THEN-LOOK rule: convert Word files to PDF by
-                          calling the `docx-converter` MCP tool
-                          (`convert_docx_to_pdf`, the FIRST choice, probed from
-                          the operator's ~/.codex/config.toml and pre-approved
-                          for the agent with the `-c` override above, because
-                          an unapproved MCP call is denied outright under
-                          `codex exec`) and falling back
-                          to docx2pdf.sh, the `docx render` command, LibreOffice,
-                          ... only when that tool is unavailable,
+                          RENDER-THEN-LOOK rule: convert Word files to PDF with
+                          `docx2pdf.sh` (the FIRST choice, Word COM), falling
+                          back to the `docx-converter` MCP tool
+                          (`convert_docx_to_pdf`, probed from the operator's
+                          ~/.codex/config.toml and pre-approved for the agent
+                          with the `-c` override above, because an unapproved
+                          MCP call is denied outright under `codex exec`) and
+                          then to the `docx render` command, LibreOffice,
+                          ... only when the script or the tool is unavailable,
                           render pages to images (pdftoppm/gs) and inspect them;
                           the pass must be recorded (guided_review/artifacts/VIS_visual.md,
                           judge_review/artifacts/VIS_visual.md,

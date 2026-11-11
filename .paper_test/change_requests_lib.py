@@ -515,8 +515,8 @@ def test_docx_cli():
     check("CR3 docx is probed as a visual renderer",
           ("docx (`docx render`) command", "docx") in probes, str(probes))
     check("CR3 the docx probe sits after docx2pdf.sh and before soffice "
-          "(the docx-converter MCP probe comes first)",
-          [exe for _l, exe in probes[:4]] == ["mcp:docx-converter", "docx2pdf.sh", "docx",
+          "(the docx-converter MCP probe comes second)",
+          [exe for _l, exe in probes[:4]] == ["docx2pdf.sh", "mcp:docx-converter", "docx",
                                               "soffice"],
           str([exe for _l, exe in probes[:4]]))
     import shutil as _sh
