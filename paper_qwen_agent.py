@@ -565,6 +565,8 @@ def _chat_output_budget(cfg: dict, prompt: str, system: str = "") -> int:
         int(cfg.get("chat_max_tokens") or cfg["max_tokens"]),
         len(prompt) + len(system),
     )
+
+
 def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
     """(text, error) from one /v1/chat/completions call."""
     messages = []
@@ -646,6 +648,8 @@ def _echo_stdout(data: bytes) -> None:
 def _dsh_turn_failed(line: bytes):
     """True/False for a turn-end event line, None for every other line."""
     return _line_turn_end_failed(line)
+
+
 def run_dsh_streaming(cmd: list, env: dict) -> tuple:
     """(returncode, turn_failed) with the harness's stdout ECHOED, not buffered.
 

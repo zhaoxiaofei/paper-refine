@@ -619,6 +619,8 @@ def _echo_stdout(data: bytes) -> None:
 def _dsh_turn_failed(line: bytes):
     """True/False for a turn-end event line, None for every other line."""
     return _line_turn_end_failed(line)
+
+
 def run_dsh_streaming(cmd: list, env: dict) -> tuple:
     """(returncode, turn_failed) with the harness's stdout ECHOED, not buffered."""
     proc = subprocess.Popen(cmd, stdin=sys.stdin, stdout=subprocess.PIPE,
