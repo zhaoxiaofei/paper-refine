@@ -322,8 +322,8 @@ def test_repo_surfaces():
     check("docx2pdf.sh is executable in the working tree",
           os.access(WS / "docx2pdf.sh", os.X_OK))
     js = (WS / "mcp-docx-converter/index.js").read_text(encoding="utf-8")
-    check("the hardcoded developer path is gone",
-          "/home/zhaoxiaofei" not in js)
+    check("no user's home path is hard-coded",
+          str(Path.home()) not in js)
     check("an existing-but-non-executable candidate cannot shadow PATH",
           "X_OK" in js and "isExecutable" in js)
     if shutil.which("wslpath") or shutil.which("cygpath"):

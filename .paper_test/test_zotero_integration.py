@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""The `zot` CLI (pyzotero-cli) must be wired into every prompt, safely.
+"""Zotero reference tooling must be wired into every prompt, safely.
 
 Run:  python3 .paper_test/test_zotero_integration.py
 
 Asserts:
+  * the ROUTE ORDER is pinned: the Zotero MCP service is tried first, then the
+    Zotero skill, and the `zot` CLI (pyzotero-cli) is the FALLBACK only when
+    both are unavailable; a missing CLI does not by itself disable the other
+    routes;
+  * every MCP/skill library-write tool stays READ-ONLY in every mode, and the
+    `apply` mode's one guarded write goes through the `zot` CLI only;
   * `setup --zotero {off,read,edit,apply}` parses, defaults to `edit`, persists
     the policy in pipeline_config.json, and documents itself in --help and the
     usage examples;
   * every prompt (review, rewrite, revise, integration, judge) carries the
     Zotero block, with the availability line filled in and no unresolved
     @@TOKEN@@ left behind;
-  * the policy is propagated into the prompt: `off` never names the CLI, `read`
-    resolves references without allowing a field edit, `edit` (the default)
-    adds the citation-edit clause, and only `apply` reaches the
-    propose-then-verify library-update protocol;
+  * the policy is propagated into the prompt: `off` disables the MCP service,
+    the skill and the CLI, `read` resolves references without allowing a field
+    edit, `edit` (the default) adds the citation-edit clause, and only `apply`
+    reaches the propose-then-verify library-update protocol;
   * the WRITE path is unreachable from review, rewrite and judge sessions even
     when the run is configured with `--zotero apply`;
   * an unknown/hand-edited policy value falls back to the default, never to a
@@ -75,11 +81,12 @@ def cleanup():
 
 
 def prompts(mode: str = None) -> dict:
-    """Build all five prompts, optionally with one explicit Zotero policy."""
+    """Build all six Zotero-bearing prompts, optionally with one policy."""
     sb = Path("/tmp/paper_zot_prompt")
     kw = {} if mode is None else {"zotero": mode}
     return {
         "review": nb.review_prompt(sb, "r1_guided_review", 1, **kw),
+        "audit": nb.audit_prompt(sb, "r1_audit", 1, **kw),
         "rewrite": nb.rewrite_prompt(sb, "r1_w1", 1, **kw),
         "revise": nb.revise_prompt(sb, "r1_a2_revise", 1, **kw),
         "integrate": nb.integrate_prompt(sb, "r1_i1", 1, "a1", ["w1"], **kw),
@@ -167,6 +174,18 @@ def test_prompt_coverage():
         check(f"ZT2 {name} prompt states the availability honestly",
               "available -- the `zot` command" in text
               or "NOT available -- the `zot` command" in text)
+        check(f"ZT2 {name} prompt puts the Zotero MCP service first",
+              "THE ZOTERO MCP SERVICE" in text and "Call `zotero_status` first" in text)
+        check(f"ZT2 {name} prompt makes the `zot` CLI the fallback",
+              "THE FALLBACK when the MCP service (route 1) and the" in text
+              and "both unavailable" in text)
+    check("ZT2 a missing `zot` CLI does not close the MCP/skill routes",
+          "A missing `zot` CLI does not by itself make a reference" in nb.ZOTERO_CLI_RULE
+          and "routes 1-2 may still" in nb.ZOTERO_CLI_RULE)
+    check("ZT2 the legacy Zotero helper paragraph states the same route order",
+          all("ROUTE ORDER (when Zotero tooling is enabled for this run)" in texts[name]
+              and "FALLBACK when the MCP service and the" in texts[name]
+              for name in ("review", "revise", "rewrite")))
     check("ZT2 revise prompt names its ledger path",
           "revised/work/ZOTERO_LIBRARY.md" in texts["revise"])
     check("ZT2 integration prompt names its ledger path",
@@ -194,6 +213,9 @@ def test_policy_propagation():
               and "zot items get" not in text)
         check(f"ZT3 off-mode {name} prompt overrides the read-exception sentence",
               "overrides any earlier sentence in this prompt" in text)
+        check(f"ZT3 off-mode {name} prompt disables the MCP service and the skill too",
+              "Do NOT use the Zotero MCP service" in text
+              and "do not use the Zotero skill" in text)
     read = prompts("read")["revise"]
     check("ZT3 read-mode keeps references resolvable",
           "ZOTERO REFERENCE TOOLING" in read and "zot items get" in read)
@@ -202,6 +224,10 @@ def test_policy_propagation():
           and "CITATION EDITS IN YOUR REVISED COPY" not in read)
     check("ZT3 read-mode forbids the library update command",
           "--last-modified auto" not in read and "zot items update" not in read)
+    check("ZT3 read-mode forbids MCP/skill library writes",
+          "Every Zotero call -- `zot` CLI, MCP" in read
+          and "never call a library-write MCP tool" in read
+          and "`zotero_update_item`" in read)
     edit = prompts("edit")["revise"]
     check("ZT3 edit-mode allows citation edits",
           "CITATION EDITS IN YOUR REVISED COPY" in edit
@@ -210,7 +236,7 @@ def test_policy_propagation():
           "the library is READ-ONLY for this run" in edit
           and "zot items update" not in edit and "--last-modified auto" not in edit)
     check("ZT3 edit-mode turns a suspected metadata error into a proposal",
-          "becomes a proposal row in the\n    ledger" in edit
+          "becomes a proposal row in the ledger" in edit
           and "plus a matching manual step" in edit)
     apply_text = prompts("apply")["revise"]
     check("ZT3 apply-mode enables the two-pass write protocol",
@@ -220,6 +246,12 @@ def test_policy_propagation():
           in apply_text)
     check("ZT3 apply-mode re-reads and logs the outcome",
           "RE-READ the item" in apply_text and "append the\n      outcome" in apply_text)
+    check("ZT3 apply-mode routes the one write through `zot`, not MCP/skill",
+          "the one write goes through the `zot` CLI\n    only" in apply_text
+          and "never through an MCP tool or the" in apply_text)
+    check("ZT3 apply-mode downgrades the write when the CLI is unavailable",
+          "If that CLI is unavailable" in apply_text
+          and "downgrade it to\n    a proposal row plus a manual step" in apply_text)
     for name, text in prompts("apply").items():
         if name == "revise" or name == "integrate":
             continue

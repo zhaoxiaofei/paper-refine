@@ -182,45 +182,47 @@ def test_repair_plan_accepts_pure_deletion() -> None:
 # ---------------------------------------------------------------------------
 def test_selfcheck_command_is_shell_quoted() -> None:
     print()
-    print("== self-check: the frozen driver's path is shell-quoted ==")
+    print("== self-check: the ROOT driver is named by env var, not a literal path ==")
     real, real_fb = pp.pipeline_self_path, pp.pipeline_fallback_paths
-    # A legal root path may carry `$` or a backtick. Inside double quotes the
-    # shell expands them; the command must quote for the shell, not for prose.
+    # A legal root path may carry `$` or a backtick. The prompt names the
+    # environment variable; the orchestrator sets its value for the session.
     dangerous = "/tmp/paper-check-$PAPER_SELF_DIR/paper_pipeline.py"
     try:
         pp.pipeline_self_path = lambda: Path(dangerous)
         pp.pipeline_fallback_paths = lambda: []
         block = pp.selfcheck_block("revise", "r1_a2_revise", 1)
+        env = pp.agent_session_env(Path("/tmp/paper-selfcheck-session"))
     finally:
         pp.pipeline_self_path, pp.pipeline_fallback_paths = real, real_fb
-    tokens = re.findall(r"(?m)^\s+python (.*?) selfcheck --sandbox", block)
-    # The block now names the staged sandbox-local copy first; that is a
-    # fixed relative path, not the dangerous ROOT path this check is about.
-    token = next((t for t in tokens if "PAPER_SELF_DIR" in t), "")
-    check("selfcheck: the command names the path", bool(token), block[:160])
-    env = dict(os.environ, PAPER_SELF_DIR="EXPANDED")
-    got = subprocess.run(["bash", "-c", f"printf '%s' {token}"],
+    check("selfcheck: the prompt names the exported ROOT driver",
+          'python "$PAPER_PIPELINE_SELF" selfcheck' in block)
+    check("selfcheck: no machine path is baked into the prompt",
+          dangerous not in block)
+    check("selfcheck: the session environment carries the ROOT driver",
+          env.get("PAPER_PIPELINE_SELF") == dangerous,
+          str(env.get("PAPER_PIPELINE_SELF")))
+    check("selfcheck: the session environment carries the harness mount",
+          env.get("PAPER_PIPELINE_MOUNT") == pp.HARNESS_PIPELINE_MOUNT,
+          str(env.get("PAPER_PIPELINE_MOUNT")))
+    got = subprocess.run(["bash", "-c", 'printf "%s" "$PAPER_PIPELINE_SELF"'],
                          capture_output=True, text=True, env=env)
-    check("selfcheck: a literal `$` in the path is not expanded by the shell",
+    check("selfcheck: a literal `$` in the path survives the shell",
           got.returncode == 0 and got.stdout == dangerous,
           f"{got.stdout!r} != {dangerous!r}")
-    check("selfcheck: the path is not merely double-quoted",
+    check("selfcheck: the path is not merely double-quoted in prose",
           f'python "{dangerous}"' not in block)
 
-    # The judge pre-flight carries the same command and must be quoted too.
+    # The judge pre-flight carries the same env-var command.
     try:
         pp.pipeline_self_path = lambda: Path(dangerous)
         pp.pipeline_fallback_paths = lambda: []
         judge = pp.judge_selfcheck_block("judge_x_j1")
     finally:
         pp.pipeline_self_path, pp.pipeline_fallback_paths = real, real_fb
-    tokens = re.findall(r"(?m)^\s+python (.*?) selfcheck --sandbox", judge)
-    token = next((t for t in tokens if "PAPER_SELF_DIR" in t), "")
-    got = subprocess.run(["bash", "-c", f"printf '%s' {token}"],
-                         capture_output=True, text=True, env=env)
-    check("selfcheck: the judge's pre-flight is quoted the same way",
-          token and got.returncode == 0 and got.stdout == dangerous,
-          f"{got.stdout!r}")
+    check("selfcheck: the judge's pre-flight names the exported ROOT driver",
+          'python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage judge' in judge)
+    check("selfcheck: the judge's prompt carries no machine path",
+          dangerous not in judge)
 
 
 # ---------------------------------------------------------------------------

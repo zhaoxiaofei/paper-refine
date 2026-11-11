@@ -5977,37 +5977,67 @@ DOCX_CLI_AVAILABLE = ("available -- the `docx` command is on PATH (bun-docx: `do
 DOCX_CLI_MISSING = ("NOT available -- the `docx` command is not on PATH on this machine; use the "
                     "other tools your stage names")
 
-# The `zot` CLI (pyzotero-cli; the terminal route of the $zotero-use skill) is how
-# the agent sessions resolve the references a manuscript cites and -- within the
-# `setup --zotero` policy -- change a citation or, under `apply`, ONE field of ONE
-# existing library item. Reads are ordinary reference lookups; the library is a
-# remote service owned by the operator, so the write side is an explicit
-# setup-time choice plus the propose-then-verify protocol below. The block
-# travels with every prompt that produces or judges content, and
-# zotero_cli_block() fills in the availability, ledger and stage tokens.
+# Zotero reference work is layered: an agent session uses the Zotero MCP
+# service when its harness exposes it, then an installed Zotero skill, and only
+# when both are unavailable the `zot` CLI (pyzotero-cli; the terminal route of
+# the $zotero-use skill). The CLI is also the ONLY route that may perform the
+# `setup --zotero apply` guarded library write. Within that policy a session may
+# change a citation or, under `apply`, ONE field of ONE existing library item.
+# Reads are ordinary reference lookups; the library is a remote service owned by
+# the operator, so the write side is an explicit setup-time choice plus the
+# propose-then-verify protocol below. The block travels with every prompt that
+# produces or judges content, and zotero_cli_block() fills in the availability,
+# ledger and stage tokens.
 ZOT_CLI_AVAILABLE = ("available -- the `zot` command (pyzotero-cli) is on PATH; `zot --help` "
                      "lists the command surface")
-ZOT_CLI_MISSING = ("NOT available -- the `zot` command is not on PATH on this machine; do not "
-                   "invent keys or metadata, and route every Zotero item to manual verification")
-ZOT_REMOTE_HINT_READY = ("a zot-cli profile or credential looks configured (~/.config/zotcli/"
-                         "config.ini or ZOTERO_* environment variables); confirm it with "
-                         "`zot configure list-profiles` before relying on it")
-ZOT_REMOTE_HINT_UNKNOWN = ("no remote credential was detected by the orchestrator, so API-backed "
-                           "commands may fail; `zot --local ...` (GET-only) needs a running Zotero "
-                           "with its local API enabled")
+ZOT_CLI_MISSING = ("NOT available -- the `zot` command is not on PATH on this machine")
+ZOT_REMOTE_HINT_READY = ("a zot-cli profile or credential looks configured\n"
+                         "    (`~/.config/zotcli/config.ini` or ZOTERO_* environment "
+                         "variables); confirm it with\n"
+                         "    `zot configure list-profiles` before relying on it")
+ZOT_REMOTE_HINT_UNKNOWN = ("no remote credential was detected by the orchestrator, so "
+                           "API-backed\n"
+                           "    commands may fail; `zot --local ...` (GET-only) needs a "
+                           "running Zotero with its\n"
+                           "    local API enabled")
 
-ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — the `zot` CLI (pyzotero-cli; the $zotero-use skill's terminal route):
-  * Availability on this machine right now: @@ZOT_CLI@@. Remote-library access: @@ZOT_REMOTE@@.
-  * If a call fails because the session itself has no network/loopback access (a ConnectError or
+ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — MCP service first, then the Zotero skill, then the `zot` CLI fallback:
+  * ROUTE ORDER — use the first route your session has, and fall back to the next only when that
+    route is absent or fails. The order is mandatory; it is not a menu:
+      1. THE ZOTERO MCP SERVICE. If your session exposes MCP tools, look for the `zotero` server's
+         tools (`zotero_status`, `zotero_search_items`, `zotero_list_items`, `zotero_get_item`,
+         `zotero_list_libraries`, `zotero_list_collections`; in a DSH session they appear as
+         `mcp__zotero__<tool>`). Call `zotero_status` first. Use the MCP reads while they work. If
+         the tools are absent, or `zotero_status` reports the bridge or Zotero offline, Zotero not
+         running, the extension not enabled, or the session not paired, or a tool call fails, do
+         NOT retry in a loop and do not ask the user to repair it: fall back to route 2.
+      2. THE ZOTERO SKILL. The Zotero helper (`$ZOTERO_SKILL`), the `$zotero-use` skill, or
+         another installed Zotero skill, when your session has it. Use its read/search/export
+         route.
+      3. THE `zot` CLI FROM PYZOTERO-CLI — THE FALLBACK when the MCP service (route 1) and the
+         Zotero skill (route 2) are both unavailable. The read commands below are its command
+         surface.
+      4. MANUAL VERIFICATION when none of the three routes works: record the citation or live
+         field for the author; never guess and never invent metadata.
+    Library WRITES never use routes 1-2 in any mode: they follow the policy below, and only
+    `--zotero apply` reaches the one `zot` guarded update.
+  * Availability of the `zot` CLI (route 3) on this machine right now:
+    @@ZOT_CLI@@.
+    Remote-library access (route 3): @@ZOT_REMOTE@@.
+    A missing `zot` CLI does not by itself make a reference unresolvable: routes 1-2 may still
+    be available in your session. When neither route 1 nor route 2 is available either, do not
+    invent keys or metadata and route every Zotero item to manual verification.
+  * If a route fails because the session itself has no network/loopback access (a ConnectError or
     permission error, as opposed to "no such item"), do not retry in a loop: record the limitation,
-    say which items could not be verified, and continue on the corpus + manual-verification route.
-  * WHAT IT IS FOR: resolving every reference the manuscript cites. The read routes are always
-    allowed: `zot --local --library-id 0 --library-type user items list|get|children`,
-    `zot items list -q WORD` / `--filter-item-type journalArticle`, `zot items get KEY`,
-    `zot items citation|bib KEY`, `zot fulltext get ATTACHMENT_KEY`, `zot collections list|items`,
-    `zot tags list`, `zot search`, `zot util`. Cite PARENT bibliographic item keys, never
-    attachment keys, and confirm from the parent's own metadata (title, creators, year, DOI) that
-    it is the work the sentence needs.
+    say which items could not be verified, and continue with the next route or the corpus +
+    manual-verification route.
+  * WHAT IT IS FOR: resolving every reference the manuscript cites, by the first route that works.
+    On route 3, the read commands are always allowed: `zot --local --library-id 0 --library-type
+    user items list|get|children`, `zot items list -q WORD` / `--filter-item-type journalArticle`,
+    `zot items get KEY`, `zot items citation|bib KEY`, `zot fulltext get ATTACHMENT_KEY`,
+    `zot collections list|items`, `zot tags list`, `zot search`, `zot util`. On routes 1-2 use the
+    equivalent reads. Cite PARENT bibliographic item keys, never attachment keys, and confirm from
+    the parent's own metadata (title, creators, year, DOI) that it is the work the sentence needs.
   * NEVER INVENT: no key, DOI, author, year, title or quotation that no library item or full text
     backs. A citation that cannot be resolved (missing key, no matching item, library unreachable)
     is recorded as unresolved for manual verification; when a claim depends on it, the claim's fix
@@ -6021,9 +6051,9 @@ ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — the `zot` CLI (pyzotero-cli; t
 # citation receives it; guided-review/judge are read-only and rewrite edits form only,
 # so the producer instructions ("before touching a citation field", "PROVE THE
 # EDIT") must not be pasted into their prompts.
-ZOTERO_EDIT_GUIDANCE_EDIT = """  * LIVE-FIELD DOCX SEMANTICS: before touching a citation field, read the $zotero-use skill's
-    `references/word-docx-citations.md`, and validate the saved result with its bundled read-only
-    validator (`scripts/validate_zotero_docx.py`). Use the URI namespace of the item's OWN library
+ZOTERO_EDIT_GUIDANCE_EDIT = """  * LIVE-FIELD DOCX SEMANTICS: before touching a citation field, read the installed Zotero
+    skill's `references/word-docx-citations.md`, and validate the saved result with its bundled
+    read-only validator (`scripts/validate_zotero_docx.py`). Use the URI namespace of the item's OWN library
     (never copy a document-wide namespace onto a new key); give every insertion location a unique
     citationID; put several sources cited at one location into ONE field with several
     citationItems; never synthesize `formattedCitation`/`plainCitation` (the visible text you
@@ -6040,10 +6070,11 @@ ZOTERO_EDIT_GUIDANCE_EDIT = """  * LIVE-FIELD DOCX SEMANTICS: before touching a 
     fails, restore the snapshot and write a manual step instead of shipping a possibly corrupted
     field.
   * EVIDENCE CHAIN: a citation may be edited only when the cited item's own abstract/full text
-    (`zot items get`, `zot fulltext get`, or its PDF) supports the sentence it is attached to. A
-    sentence that contradicts its cited work may be reworded while the manuscript's own claim,
-    numbers, limitations and conclusions stay unchanged; a fix that would change any of those is a
-    scientific judgement call -- record it for the author, never make it."""
+    (`zot items get`, `zot fulltext get`, the MCP/skill equivalents, or its PDF) supports the
+    sentence it is attached to. A sentence that contradicts its cited work may be reworded while
+    the manuscript's own claim, numbers, limitations and conclusions stay unchanged; a fix that
+    would change any of those is a scientific judgement call -- record it for the author, never
+    make it."""
 
 ZOTERO_EDIT_GUIDANCE_REWRITE = """  * LIVE-FIELD DOCX SEMANTICS: before reading a candidate's citation field, read the
     $zotero-use skill's `references/word-docx-citations.md`; the visible citation text is
@@ -6123,9 +6154,12 @@ ZOTERO_FIELD_CONTINUITY_RULE = """  * FIELD CONTINUITY (code-enforced): your ver
     only text runs) destroys every fldChar/instrText run inside it: use a field-preserving edit, or
     re-insert the whole field afterwards.
   * PROVE IT before you finish, against the package you started from:
-      python3 <zotero-use>/scripts/validate_zotero_docx.py <your.docx> --baseline <base.docx> \\
+      python3 "$ZOTERO_USE_ROOT/scripts/validate_zotero_docx.py" <your.docx> --baseline <base.docx> \\
         --preserve-baseline-citations
-    A check that fails is an attempt that fails; restore the field, never ship the unlinked copy."""
+    If `ZOTERO_USE_ROOT` is unset or the validator is not present (the external Zotero skill is not installed), record that gap,
+    rely on the pipeline's code-side field-continuity gate, and do not treat the missing validator
+    as a failed check. A check you can run and that fails is an attempt that fails; restore the
+    field, never ship the unlinked copy."""
 # The REWRITE stage edits FORM, not content: it must preserve fields, but it may
 # not add/edit/delete a citation. Passing the producer rule there authorized an
 # edit the same prompt forbids elsewhere.
@@ -6142,9 +6176,12 @@ ZOTERO_FIELD_CONTINUITY_RULE_REWRITE = """  * FIELD CONTINUITY (code-enforced): 
     citationID, itemData and item URIs, the same visible text) and never leave the plain text in
     place of a field.
   * PROVE IT before you finish, against the package you started from:
-      python3 <zotero-use>/scripts/validate_zotero_docx.py <your.docx> --baseline <base.docx> \\
+      python3 "$ZOTERO_USE_ROOT/scripts/validate_zotero_docx.py" <your.docx> --baseline <base.docx> \\
         --preserve-baseline-citations
-    A check that fails is an attempt that fails; restore the field, never ship the unlinked copy."""
+    If `ZOTERO_USE_ROOT` is unset or the validator is not present (the external Zotero skill is not installed), record that gap,
+    rely on the pipeline's code-side field-continuity gate, and do not treat the missing validator
+    as a failed check. A check you can run and that fails is an attempt that fails; restore the
+    field, never ship the unlinked copy."""
 # Review and judge sessions are READ-ONLY: the producer rule told them to add,
 # edit or delete fields and to prove it against a `base.docx` their sandbox does
 # not carry. A missing/malformed field is a finding there, never a repair.
@@ -6156,16 +6193,22 @@ ZOTERO_FIELD_CONTINUITY_RULE_READONLY = """  * FIELD CONTINUITY (code-enforced):
     report it; you never repair it. The producer-side validation command belongs to the stages
     that write a document and does not apply here."""
 
-ZOTERO_LIBRARY_READ = """the library is READ-ONLY for this run. Every `zot` call must be a read; never
-    run create/update/delete/add-tags/add-doi or a collection-mutating subcommand. A library record
-    you believe is wrong (a field, tag, collection or duplicate) becomes a proposal row in the
-    ledger -- item key, the version you read, the field, the current value, the proposed value, the
-    evidence, and the manuscript location that depends on it -- plus a matching manual step: the
-    author applies it in Zotero."""
+ZOTERO_LIBRARY_READ = """the library is READ-ONLY for this run. Every Zotero call -- `zot` CLI, MCP
+    tool or skill -- must be a read; never run create/update/delete/add-tags/add-doi or a
+    collection-mutating subcommand, and never call a library-write MCP tool
+    (`zotero_create_item`, `zotero_update_item`, `zotero_batch_update_items`, `zotero_add_tags`,
+    `zotero_remove_tags`, `zotero_add_to_collection`, `zotero_create_collection`,
+    `zotero_add_note`, `zotero_trash_items`). A library record you believe is wrong (a field, tag,
+    collection or duplicate) becomes a proposal row in the ledger -- item key, the version you
+    read, the field, the current value, the proposed value, the evidence, and the manuscript
+    location that depends on it -- plus a matching manual step: the author applies it in Zotero."""
 ZOTERO_LIBRARY_PROPOSE = ZOTERO_LIBRARY_READ
 ZOTERO_LIBRARY_APPLY = """updates are ENABLED for this run under a two-pass protocol, and NOTHING else is
     enabled. This is the pipeline's explicit override of the skill's read-only-Zotero default, and
-    it covers exactly the single guarded update described here:
+    it covers exactly the single guarded update described here. The MCP service and the Zotero
+    skill remain READ-ONLY for the library in every mode: the one write goes through the `zot` CLI
+    only. If that CLI is unavailable, do NOT attempt the write through routes 1-2: downgrade it to
+    a proposal row plus a manual step.
       P1 PROPOSE: before any write, put the proposal row in the ledger: item key, the version you
          read, the field, the current value, the proposed value, the evidence, and the manuscript
          location that depends on it.
@@ -6175,7 +6218,8 @@ ZOTERO_LIBRARY_APPLY = """updates are ENABLED for this run under a two-pass prot
          that nothing else moves, and that no ambiguous or duplicate match exists. If anything is
          unclear, conflicting, or would touch a claim, DO NOT write: downgrade to a proposal row
          plus a manual step.
-      APPLY exactly one guarded update:
+      APPLY exactly one guarded update through the `zot` CLI -- never through an MCP tool or the
+      skill:
          `zot items update <KEY> --field <FIELD> "<VALUE>" --last-modified auto`
       (the version guard turns a concurrent edit into a clean failure instead of an overwrite).
       Then RE-READ the item, confirm the new value and the untouched neighbours, and append the
@@ -6205,12 +6249,14 @@ ZOTERO_LEDGER_RULE_JUDGE = """name the item keys you checked, and what you concl
     sheet's evidence; do not create a separate Zotero ledger."""
 
 ZOTERO_CLI_RULE_OFF = """ZOTERO TOOLING — SWITCHED OFF for this run:
-  * The pipeline was configured with `--zotero off`. Do NOT run the `zot` CLI, do not attempt a
-    library read or write, and follow the skills' manual route for every live field or citation you
-    cannot verify from the corpus itself: an unreadable or unverifiable field goes to the
-    manual-verification list / MANUAL_STEPS.md, never into a guess and never into an edit. This
-    overrides any earlier sentence in this prompt that mentions the `$zotero-use` skill or the
-    `zot` CLI as available tooling."""
+  * The pipeline was configured with `--zotero off`. Do NOT use the Zotero MCP service (do not
+    call any `zotero_*` or `mcp__zotero__*` tool), do not use the Zotero skill, do not run the
+    `zot` CLI, and do not attempt a library read or write. Follow the skills' manual route for
+    every live field or citation you cannot verify from the corpus itself: an unreadable or
+    unverifiable field goes to the manual-verification list / MANUAL_STEPS.md, never into a guess
+    and never into an edit. This overrides any earlier sentence in this prompt -- and any later
+    sentence to the same effect -- that mentions the Zotero MCP service, the `$zotero-use` skill,
+    or the `zot` CLI as available tooling."""
 ZOTERO_CLI_RULE_OFF_BASE = ZOTERO_CLI_RULE_OFF
 ZOTERO_CLI_RULE_OFF += ("\n(The field-continuity rules below stay in force with the CLI switched "
                         "off: the bundled validate_zotero_docx.py is an offline, read-only DOCX "

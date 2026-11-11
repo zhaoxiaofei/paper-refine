@@ -303,6 +303,17 @@ def _copy_session_tools(sb: Path, stamp: float = None,
                 if (driver_src.parent / DOCX_FORMAT_PARTS_DIR).is_dir():
                     copy_asset_dirs(driver_src.parent, tool_dir,
                                     names=(DOCX_FORMAT_PARTS_DIR,))
+                # The staged driver imports its companion modules and reads the
+                # model catalog/policy BESIDE ITSELF (`model_runtime` resolves
+                # both relative to `__file__`). Staging only the driver + parts
+                # made the pre-flight fail with ModuleNotFoundError; copy the
+                # whole frozen module set next to the staged driver.
+                for _name in PIPELINE_MODULE_FILES:
+                    if _name in (SELFCHECK_DRIVER, DOCX_FORMAT_MODULE):
+                        continue
+                    _companion = driver_src.parent / _name
+                    if _companion.is_file():
+                        _safe_restore_copy(_companion, tool_dir / _name, sb)
     except OSError as e:
         # A partial/refused copy used to be swallowed: the stage then called a
         # missing or incomplete formatter (or driver) and had no diagnostic

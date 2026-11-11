@@ -42,7 +42,8 @@ sys.modules["paper_contr"] = pp
 spec.loader.exec_module(pp)
 
 FAILS = []
-BASE = Path("/home/zhaoxiaofei/manuscript-postgrad-data")
+BASE = Path(os.environ.get("PAPER_REFINE_REAL_DATA",
+                       Path.home() / "manuscript-postgrad-data"))
 
 
 def check(name, cond, detail=""):

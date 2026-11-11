@@ -16,7 +16,9 @@ from pathlib import Path
 
 MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
                 "paper_redlines_adapter.py", "paper_qwen_agent.py",
-                "paper_dots_agent.py", "paper_model_agent.py")
+                "paper_dots_agent.py", "paper_model_agent.py",
+                "model_runtime.py", "llm_retry.py", "llm_policy.json",
+                "model_catalog.json", "docx2pdf.sh", "docxcompare.sh")
 ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts")
 
 

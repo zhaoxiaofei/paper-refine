@@ -77,15 +77,17 @@ USAGE_EXAMPLES = """usage:
           Legend length never makes a version ineligible, reorders a ranking or
           fails a decision.
           --zotero is the reference-tooling policy for every agent session
-          (off|read|edit|apply; default edit). off never runs the `zot` CLI
-          (pyzotero-cli); read resolves and verifies references only; edit also
-          lets the revision and integration stages add, remove or relink
+          (off|read|edit|apply; default edit). The prompts try the Zotero MCP
+          service first, then the Zotero skill, and use the `zot` CLI
+          (pyzotero-cli) only as the fallback when both are unavailable. off
+          disables all three; read resolves and verifies references only; edit
+          also lets the revision and integration stages add, remove or relink
           citations in their revised copy (the Zotero library stays read-only);
           apply additionally allows ONE field update of ONE existing library
-          item, after a written proposal and an independent re-fetch -- it
-          writes to your remote Zotero account and is never the default. No
-          mode creates or deletes library items, and the review, rewrite and
-          judge sessions can never write.
+          item through the `zot` CLI, after a written proposal and an
+          independent re-fetch -- it writes to your remote Zotero account and
+          is never the default. No mode creates or deletes library items, and
+          the review, rewrite and judge sessions can never write.
           Abstract and main-text length are NOT exempt: the VENUE PROFILE's
           own limits apply in their relaxed form (for the default
           nature-biotechnology Article: abstract <= 150 words and main text
@@ -803,11 +805,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "text identity is verified by the fixer. off keeps the copy "
                          "byte-identical to --source and reports formatting only")
     ps.add_argument("--zotero", choices=list(ZOTERO_MODES), default=DEFAULT_ZOTERO_MODE,
-                    help="Zotero reference-tooling policy for every agent session. "
-                         "off = never run the `zot` CLI (pyzotero-cli); live fields stay on the "
-                         "skills' manual route. "
-                         "read = agents may resolve/verify references with `zot` but never edit a "
-                         "citation field and never write to the library. "
+                    help="Zotero reference-tooling policy for every agent session. The stage "
+                         "prompts try the Zotero MCP service first, then the Zotero skill, and "
+                         "use the `zot` CLI (pyzotero-cli) only as the fallback when both are "
+                         "unavailable. "
+                         "off = no Zotero tooling (MCP service, skill or `zot` CLI); live "
+                         "fields stay on the skills' manual route. "
+                         "read = agents may resolve/verify references through the first "
+                         "available route but never edit a citation field and never write to "
+                         "the library. "
                          "edit (default) = also lets the revision and integration stages add, "
                          "remove or relink citations in their revised copy under the live-field "
                          "validation rules; the library itself stays read-only. "

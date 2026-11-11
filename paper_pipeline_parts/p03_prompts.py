@@ -90,12 +90,14 @@ the M18 caption suggestion governs figure legends, and the cover letter keeps it
 Never make length-driven cuts outside those M18/M19 rules.
 
 Zotero live fields: if you cannot properly read a live field, ignore the field contents and add
-it to a manual-verification list for me to verify in Word. (Zotero skill:
-/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py, cloned from
-https://github.com/openai/plugins.git. You may also use other skills under
-/mnt/d/software/plugins/ and ~/.codex/skills/ [such as $zotero-use, which internally uses the zot
-command from pyzotero-cli and was downloaded from https://github.com/drguptavivek/zotero-use] as
-needed.)
+it to a manual-verification list for me to verify in Word. Zotero tooling, when this run enables
+it, is installed by this checkout's `install_dependencies.sh`: the Zotero helper is
+`$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
+`$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
+`zot` command from pyzotero-cli -- are available as needed.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
+when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
+the FALLBACK when the MCP service and the skill are both unavailable.
 
 At the end of Phase 1, present the complete findings list and automatically begin the revision (do
 not stop for my confirmation).
@@ -152,12 +154,14 @@ step-by-step manual instructions so I can intervene personally. These unfixable 
 grouped by issue type.
 
 Zotero live fields: if you cannot properly read or handle a live field, ignore the field contents
-and add it to a manual-verification list for me to verify in Word. (Zotero skill:
-/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py, cloned from
-https://github.com/openai/plugins.git. You may also use other skills under
-/mnt/d/software/plugins/ and ~/.codex/skills/ [such as $zotero-use, which internally uses the zot
-command from pyzotero-cli and was downloaded from https://github.com/drguptavivek/zotero-use] as
-needed.)
+and add it to a manual-verification list for me to verify in Word. Zotero tooling, when this run
+enables it, is installed by this checkout's `install_dependencies.sh`: the Zotero helper is
+`$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
+`$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
+`zot` command from pyzotero-cli -- are available as needed.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
+when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
+the FALLBACK when the MCP service and the skill are both unavailable.
 
 Final deliverables of Phase 2: the revised/ package (CHANGELOG.md, MANUAL_STEPS.md,
 REVISION_REPORT.md and any other artifacts the skill specifies), the code/ directory and rerun
@@ -334,36 +338,47 @@ def selfcheck_block(kind: str, run_id: str, r: int) -> str:
     20-minute attempt. It is a pre-flight, not a second verdict: the content
     checks that need the root's state stay in the postcheck.
 
-    The absolute path is the ROOT's frozen copy (AGENTS.md rule 11: a root runs
-    its own snapshot). A harness that jails the session can mount the run root
-    read-only SOMEWHERE ELSE, so the path is not guaranteed to resolve: the
-    2026-11-01 audit ran `ls` on it, got "No such file or directory", and spent
-    its whole attempt "verified manually" because the prompt offered no second
-    way to reach the driver. Every sandbox now also carries its own copy of the
-    frozen driver and parts (`SELFCHECK_DRIVER_REL`, staged by
-    `_copy_session_tools`), which a jailed harness cannot hide; the block names
-    that copy FIRST, then the root, then the origin snapshot and the harness's
-    read-only mount of it (`HARNESS_DRIVER_REL`).
+    The ROOT's frozen copy is authoritative (AGENTS.md rule 11). A harness that
+    jails the session can mount the run root read-only SOMEWHERE ELSE, so a
+    hard-coded absolute path is not guaranteed to resolve (the 2026-11-01 audit
+    ran `ls` on it, got "No such file or directory", and spent its whole attempt
+    "verified manually"). Every sandbox also carries its own copy of the frozen
+    driver and parts (`SELFCHECK_DRIVER_REL`, staged by `_copy_session_tools`),
+    and the orchestrator exports the root/mount/snapshot locations to the
+    session (`PAPER_PIPELINE_SELF`, `PAPER_PIPELINE_MOUNT`,
+    `PAPER_PIPELINE_ORIGIN`), so the prompt names env vars instead of baking a
+    machine path into its text.
     """
-    reachable = [Path(path) for path in pipeline_fallback_paths()]
-    harness_mount = Path(HARNESS_DRIVER_REL)
-    if harness_mount not in reachable:
-        reachable.append(harness_mount)
-    alternate = "\n".join(
-        f'    python {shlex.quote(str(path))} selfcheck --sandbox . --stage {kind} '
-        f'--run-id {run_id} --round {int(r)}' for path in reachable)
+    alt_lines = [
+        f'    python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage {kind} '
+        f'--run-id {run_id} --round {int(r)}',
+        f'    python "$PAPER_PIPELINE_MOUNT/{SELFCHECK_DRIVER}" selfcheck --sandbox . '
+        f'--stage {kind} --run-id {run_id} --round {int(r)}',
+    ]
+    try:
+        if pipeline_fallback_paths():
+            alt_lines.append(
+                f'    python "$PAPER_PIPELINE_ORIGIN" selfcheck --sandbox . --stage {kind} '
+                f'--run-id {run_id} --round {int(r)}')
+    except Exception:                                           # noqa: BLE001
+        pass
+    alternate = "\n".join(alt_lines)
     alt_text = (f"IF THAT PATH DOES NOT EXIST OR CANNOT BE READ in this session (a sandboxed or\n"
                 f"jailed harness may mount the run root elsewhere), run the SAME frozen driver from\n"
-                f"the snapshot this root was set up from, or from the harness's read-only mount:\n"
+                f"the exported ROOT copy, the harness's read-only mount, or the verified snapshot:\n"
                 f"{alternate}\n"
-                f"It is the same bytes; the verdict is the same.\n")
+                f"`PAPER_PIPELINE_SELF` is the ROOT's frozen driver; `PAPER_PIPELINE_MOUNT` is the\n"
+                f"harness's mount; `PAPER_PIPELINE_ORIGIN` (when listed above) is the snapshot this\n"
+                f"root was set up from. It is the same bytes; the verdict is the same.\n")
     return (f"""
 SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
     python {SELFCHECK_DRIVER_REL} selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
 The driver is staged in THIS sandbox at `{SELFCHECK_DRIVER_REL}` (the same frozen bytes as the ROOT's
 copy), so run that first. The ROOT's frozen copy is authoritative (AGENTS.md rule 11); if the staged
 copy is missing (an older or resumed sandbox), run it instead:
-    python {shlex.quote(str(pipeline_self_path()))} selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
+    python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
+(In a manual run, set `PAPER_PIPELINE_SELF` to the ROOT's `paper_pipeline.py`; set
+`PAPER_PIPELINE_MOUNT` or `PAPER_PIPELINE_ORIGIN` only when you use those lines.)
 It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
 required deliverable, the seeded decision tables' dispositions, the audit sheet, the manual TODO
 inventory and source gates of a package-producing stage, the M30 ledger when the round carries an
@@ -394,25 +409,36 @@ def judge_selfcheck_block(run_id: str) -> str:
     The sandbox can be jailed, in which case the root's copy of the driver may
     not resolve (see `selfcheck_block`); a judge sandbox carries NO staged
     driver bundle (the evidence-pack blinding rule forbids orchestrator
-    artifacts beside the blinded packages), so the origin snapshot and the
-    harness's read-only mount are the fallbacks. Those paths identify no
+    artifacts beside the blinded packages), so the exported ROOT path and the
+    harness's read-only mount are the fallbacks. Those env vars identify no
     candidate and carry none of the forbidden vocabulary, so the blinding rule
     holds.
     """
-    reachable = [Path(path) for path in pipeline_fallback_paths()]
-    harness_mount = Path(HARNESS_DRIVER_REL)
-    if harness_mount not in reachable:
-        reachable.append(harness_mount)
+    alt_lines = [
+        '    python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage judge',
+        f'    python "$PAPER_PIPELINE_MOUNT/{SELFCHECK_DRIVER}" selfcheck --sandbox . '
+        f'--stage judge',
+    ]
+    try:
+        if pipeline_fallback_paths():
+            alt_lines.append(
+                '    python "$PAPER_PIPELINE_ORIGIN" selfcheck --sandbox . --stage judge')
+    except Exception:                                           # noqa: BLE001
+        pass
     alternate = (
         "\nIf the path above cannot be read in this session, the SAME frozen checker is "
         "reachable at:\n"
-        + "\n".join(f'    python {shlex.quote(str(path))} selfcheck --sandbox . --stage judge'
-                    for path in reachable))
+        + "\n".join(alt_lines)
+        + "\n`PAPER_PIPELINE_SELF` is the ROOT's frozen driver; `PAPER_PIPELINE_MOUNT` is the "
+          "harness's mount; `PAPER_PIPELINE_ORIGIN` (when listed above) is the verified "
+          "snapshot.\n")
     return (f"""
 === PRE-FLIGHT CHECK — RUN IT BEFORE THE MARKER ===
 
 From the sandbox root, before you write `{MARKER_FILE}`:
-    python {shlex.quote(str(pipeline_self_path()))} selfcheck --sandbox . --stage judge
+    python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage judge
+(In a manual run, set `PAPER_PIPELINE_SELF` to the ROOT's `paper_pipeline.py`; set
+`PAPER_PIPELINE_MOUNT` or `PAPER_PIPELINE_ORIGIN` only when you use those lines.)
 It applies the orchestrator's OWN detectors to this sandbox -- scores.json, its schema, the integer
 against the rows that back it, your `checks` map and your coverage of every issued opponent label --
 and prints what the post-check would reject for every family a sandbox can decide on its own (the
@@ -432,10 +458,10 @@ pipeline. Your sandbox is:
 Write ONLY inside this sandbox and never touch sibling sandboxes or parent directories. Reading is
 also confined to this sandbox, with exactly one exception: you MAY read (never write) the skill
 documents and scripts you are instructed to use ($paper-review, its SKILL.md, its references, its
-bundled scripts, the Zotero helper script, and the `$zotero-use` skill with its `zot` CLI when a
-citation or live field must be resolved). Never read the manuscript sources, review outputs,
-candidate packages, or reports of other runs. Keep your working
-directory at the sandbox root.
+bundled scripts, the Zotero helper (`$ZOTERO_SKILL`), and the `$zotero-use` skill with its
+`zot` CLI when a citation or live field must be resolved). Never read the manuscript sources,
+review outputs, candidate packages, or reports of other runs. Keep your working directory at the
+sandbox root.
 
 Layout (paths relative to the sandbox root):
   base/         — the round's base revision A1_@@ROUND@@. READ-ONLY: the orchestrator hashes it
@@ -635,12 +661,14 @@ Skill discipline that the orchestrator will check for:
 @@CAPTION_RULE@@
 
 Zotero live fields: if you cannot properly read a live field, ignore the field contents and add it
-to a manual-verification list for the user to verify in Word. (Zotero helper:
-/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py, cloned from
-https://github.com/openai/plugins.git. You may also use other skills under
-/mnt/d/software/plugins/ and ~/.codex/skills/ [such as $zotero-use, which internally uses the zot
-command from pyzotero-cli and was downloaded from https://github.com/drguptavivek/zotero-use] as
-needed -- read-only.)
+to a manual-verification list for the user to verify in Word. Zotero tooling, when this run
+enables it, is installed by this checkout's `install_dependencies.sh`: the Zotero helper is
+`$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
+`$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
+`zot` command from pyzotero-cli -- are available as needed -- read-only.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
+when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
+the FALLBACK when the MCP service and the skill are both unavailable.
 
 === COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
 
@@ -1076,9 +1104,9 @@ also confined to this sandbox, with exactly two exceptions: (1) when the failure
 ./previous_attempt/, you MAY read (never write) that directory -- the rejected package copied into
 this sandbox; (2) you MAY read (never write) the skill documents and scripts you are instructed to
 use ($paper-revise and $paper-review, their references and bundled scripts, the Zotero helper
-script, and the `$zotero-use` skill with its `zot` CLI when a citation or live field must be
-resolved or edited). Never read the manuscript sources, review outputs, or candidate packages of
-other runs. Keep your working directory at the sandbox root.
+(`$ZOTERO_SKILL`), and the `$zotero-use` skill with its `zot` CLI when a citation or live field
+must be resolved or edited). Never read the manuscript sources, review outputs, or candidate
+packages of other runs. Keep your working directory at the sandbox root.
 
 Layout (paths relative to the sandbox root):
   base/         — the round's base revision A1_@@ROUND@@. READ-ONLY (hash-verified after your run).
@@ -1219,12 +1247,15 @@ Explicit requirements that override skill defaults where they conflict:
      subjective scientific judgment) are never guessed at: report them in revised/MANUAL_STEPS.md,
      grouped by issue type, with precise step-by-step manual instructions (which file, which
      section/paragraph/field, what to check, exact tool steps) and any follow-ups.
-  6. Zotero live fields: if you cannot properly read or handle a live field, ignore its contents and
-     add it to the manual-verification list. (Zotero helper:
-     /mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py, cloned from
-     https://github.com/openai/plugins.git; other skills under /mnt/d/software/plugins/ and
-     ~/.codex/skills/ [such as $zotero-use, which internally uses the zot command from pyzotero-cli
-     and was downloaded from https://github.com/drguptavivek/zotero-use] may be read.)
+  6. Zotero live fields: if you cannot properly read or handle a live field, ignore its contents
+     and add it to the manual-verification list. Zotero tooling, when this run enables it, is
+     installed by this checkout's `install_dependencies.sh`: the Zotero helper is
+     `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
+     `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
+     `zot` command from pyzotero-cli -- may be read.
+     ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service
+     first when your session exposes it; then the Zotero skill; the `zot` command from
+     pyzotero-cli is the FALLBACK when the MCP service and the skill are both unavailable.
   7. @@M18_REVISE_RULE@@
   8. Acronym long-form repetition findings (review check M1, rule (k); evidence: the M1b instance
      table in guided_review/artifacts/M1_acronyms.md, one row per un-abbreviated long-form occurrence that
@@ -1564,9 +1595,9 @@ Your sandbox is:
 Write ONLY inside this sandbox and never touch sibling sandboxes or parent directories. Reading is
 also confined to this sandbox, with exactly one exception: you MAY read (never write) the skill
 documents and scripts you are instructed to use ($paper-review and $paper-revise, their references and
-bundled scripts, the Zotero helper script, and the `$zotero-use` skill with its `zot` CLI when a
-citation or live field must be resolved or edited). Never read the manuscript sources, review
-outputs, or packages of other runs. Keep your working directory at the sandbox root.
+bundled scripts, the Zotero helper (`$ZOTERO_SKILL`), and the `$zotero-use` skill with its `zot`
+CLI when a citation or live field must be resolved or edited). Never read the manuscript sources,
+review outputs, or packages of other runs. Keep your working directory at the sandbox root.
 
 Layout (paths relative to the sandbox root):
   self/         — YOUR BASE package (@@SELF_ID@@). READ-ONLY (hash-verified after your run). This is
@@ -1823,10 +1854,10 @@ integrated candidates of the round.
 @@CONTENT_EDIT_POLICY@@
 Write ONLY inside this sandbox and never touch sibling sandboxes or parent directories. Reading is
 also confined to this sandbox, with exactly one exception: you MAY read (never write) the skill
-documents you need for the style rules ($paper-review and $paper-revise, their SKILL.md and references,
-the Zotero helper script, and the `$zotero-use` skill with its `zot` CLI when a citation or live
-field must be resolved). Never read the manuscript sources, review outputs, or candidate packages
-of other runs. Keep your working directory at the sandbox root.
+documents you need for the style rules ($paper-review and $paper-revise, their SKILL.md and
+references, the Zotero helper (`$ZOTERO_SKILL`), and the `$zotero-use` skill with its `zot` CLI
+when a citation or live field must be resolved). Never read the manuscript sources, review
+outputs, or candidate packages of other runs. Keep your working directory at the sandbox root.
 
 Layout (paths relative to the sandbox root):
   base/         — the round's base manuscript A1_@@ROUND@@ (round 1: the pristine original;
@@ -1954,12 +1985,14 @@ the original.
 @@CAPTION_RULE@@
 
 Zotero live fields: if you cannot properly read a live field, preserve it untouched, ignore its
-contents and add it to the manual-verification list for the user to verify in Word. (Zotero helper:
-/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py, cloned from
-https://github.com/openai/plugins.git. You may also use other skills under
-/mnt/d/software/plugins/ and ~/.codex/skills/ [such as $zotero-use, which internally uses the zot
-command from pyzotero-cli and was downloaded from https://github.com/drguptavivek/zotero-use] as
-needed -- read-only.)
+contents and add it to the manual-verification list for the user to verify in Word. Zotero
+tooling, when this run enables it, is installed by this checkout's `install_dependencies.sh`:
+the Zotero helper is `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other
+installed skills under `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`,
+which provides the `zot` command from pyzotero-cli -- are available as needed -- read-only.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
+when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
+the FALLBACK when the MCP service and the skill are both unavailable.
 
 === CANONICAL OUTPUTS (these exact paths; the pipeline reads them) ===
   rewritten/REWRITE_REPORT.md — REQUIRED. Four sections:
@@ -2244,8 +2277,9 @@ available to you -- and is not needed. Your sandbox is:
 Write ONLY inside this sandbox; siblings and parent directories are off-limits. Reading is also
 confined to this sandbox, with exactly one exception: you MAY read (never write) the $paper-review
 skill documents, references and bundled scripts that you use to ground your comparisons, plus the
-`$zotero-use` skill and the READ routes of the `zot` CLI when a citation must be resolved. There is
-no other judge's sheet and no other pipeline sandbox anywhere in your reach -- do not go looking.
+Zotero helper (`$ZOTERO_SKILL`), the `$zotero-use` skill and the READ routes of the `zot` CLI
+when a citation must be resolved. There is no other judge's sheet and no other pipeline sandbox
+anywhere in your reach -- do not go looking.
 
 Layout (paths relative to the sandbox root):
   target/       — the ONE package you judge, as a complete document corpus at its top level.

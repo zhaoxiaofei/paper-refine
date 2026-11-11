@@ -41,10 +41,10 @@ _spec.loader.exec_module(fmt)
 
 CNB = Path(os.environ.get(
     "PAPER_CNB_ROUND2",
-    "/home/zhaoxiaofei/manuscript-postgrad-data/cnb-to34-1019-0025-a755adf/round2_winner"))
+    Path.home() / "manuscript-postgrad-data/cnb-to34-1019-0025-a755adf/round2_winner"))
 NEO = Path(os.environ.get(
     "PAPER_NEO_ROUND2",
-    "/home/zhaoxiaofei/manuscript-postgrad-data/neohet-to17-1029-0029-a755adf/round2_winner"))
+    Path.home() / "manuscript-postgrad-data/neohet-to17-1029-0029-a755adf/round2_winner"))
 
 FAILS = []
 

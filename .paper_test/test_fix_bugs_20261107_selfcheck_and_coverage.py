@@ -97,13 +97,13 @@ def test_review_prompt_names_the_staged_copy_first() -> None:
     text = pp.review_prompt(sb, "r1_guided_review", 1, venue=prof, scope="full",
                             execution_profile="high")
     staged = f"python {pp.SELFCHECK_DRIVER_REL} selfcheck"
-    root = f"python {pp.pipeline_self_path()} selfcheck"
+    root = 'python "$PAPER_PIPELINE_SELF" selfcheck'
     check("the staged selfcheck is a command line", staged in text)
-    check("the staged copy is named before the ROOT's absolute path",
+    check("the staged copy is named before the exported ROOT driver",
           staged in text and root in text
           and text.index(staged) < text.index(root))
     check("the harness's neutral mount is a named fallback",
-          pp.HARNESS_DRIVER_REL in text)
+          '"$PAPER_PIPELINE_MOUNT/' in text)
     check("the bridge text still explains a jailed session",
           "jailed harness may mount the run root elsewhere" in text)
 
@@ -114,11 +114,11 @@ def test_judge_prompt_uses_the_harness_mount() -> None:
     text = pp.judge_prompt(sb, "judge_x_j1", 1, "v1", 1, 2, [], venue=prof,
                            execution_profile="high")
     check("the judge pre-flight runs the ROOT's frozen copy",
-          f"python {pp.pipeline_self_path()} selfcheck --sandbox . --stage judge" in text)
+          'python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage judge' in text)
     check("the judge pre-flight does NOT stage the driver in its blinded sandbox",
           f"python {pp.SELFCHECK_DRIVER_REL} selfcheck" not in text)
     check("the judge pre-flight names the harness mount",
-          pp.HARNESS_DRIVER_REL in text)
+          '"$PAPER_PIPELINE_MOUNT/' in text)
 
 
 def test_judge_tool_staging_omits_the_driver() -> None:

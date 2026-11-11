@@ -50,3 +50,11 @@ venue_profiles/*
 ~$*.xlsx
 ~$*.docx
 ~$*.doc
+
+# Third-party dependencies installed by `./install_dependencies.sh` (the
+# Zotero MCP service, the Zotero helper plugin and the `zot` CLI source) and
+# the shell environment it generates. Both are machine-local installs, never
+# vendored; `deps.env` records checkout-relative paths only.
+external/
+deps.env
+activate-deps.sh

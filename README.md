@@ -53,9 +53,32 @@ acceptable trade-off. The two invariants most often missed — the frozen root, 
 separation of finding generation from repair — are summarized under
 *How this repository is governed* at the end.
 
+## Install dependencies
+
+The pipeline core is standard-library only, so a first run needs only Python 3.9+ and an
+agent CLI. The full toolchain — the reproducible conda environment used by the test suite,
+the Node dependencies of both MCP servers, the agent skills, and the external Zotero
+checkouts — is installed by one script:
+
+```bash
+./install_dependencies.sh          # conda env, npm ci, skills/MCP rows, external Zotero repos
+source ./activate-deps.sh          # export PAPER_REFINE_ROOT / PAPER_REFINE_DEPS / ZOTERO_SKILL
+```
+
+`install_dependencies.sh` writes only checkout-relative paths. `deps.env` records them and
+`activate-deps.sh` resolves them for the current shell; no machine path is baked into a prompt
+or into the generated dependency files. (The harness MCP registrations necessarily name an
+absolute server path, because a harness starts its servers from its own working directory.) The
+script also probes the optional system tools
+(Zotero Desktop, Word/PowerShell, LibreOffice, Poppler, Ghostscript, ImageMagick, TeX Live,
+`codex`/`dsh`) and prints the exact missing command instead of installing an OS package.
+Use `--dry-run` to see the plan, `--offline` to reuse existing checkouts, and `--help` for
+the switches that skip conda, Node, the external checkouts or the agent-tooling
+registration.
+
 ## Quick start
 
-No install step: the pipeline is standard-library only, but it needs Python 3.9+ and an
+The pipeline is standard-library only, but it needs Python 3.9+ and an
 agent CLI for its sessions — by default the DeepSeek Harness (`dsh`) running
 DeepSeek Flash, or another `--agent-harness`/`--agent-model` pair, the legacy
 `--agent` names, or `manual` for a human-driven run; see *Requirements*. The
@@ -113,13 +136,23 @@ last two cases — see *Exit codes*.
   `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
   `pdftoppm`, the `docx-compare` MCP tool / `docxcompare.sh` (Word's own
   comparison engine for tracked changes), `latexdiff` (LaTeX difference
-  tracking), and the `zot` CLI for read-only Zotero reference resolution.
-* Optional: the external `zotero-use` skill (`$ZOTERO_SKILL` / `$zotero-use`)
-  that the Zotero stage prompts name for the interactive `zot` route and for
-  their `validate_zotero_docx.py` proof step. That script is NOT bundled here;
-  when the skill is not installed, the pipeline's own code-side live-field
-  inventory and continuity gate (`paper_docx_format.py`, run by every DOCX
-  stage) is the check that actually enforces field preservation, and the
+  tracking), the `zotero` MCP service (the Zotero bridge's `zotero_status`,
+  `zotero_search_items`, `zotero_get_item` reads), and the `zot` CLI
+  (pyzotero-cli) as the LAST-RESORT route for read-only Zotero reference
+  resolution.
+* Optional: the external Zotero skill (`$ZOTERO_SKILL` / `$zotero-use`) that the
+  Zotero stage prompts name for the skill route and for their
+  `validate_zotero_docx.py` proof step. `./install_dependencies.sh` clones the
+  helper and the `$zotero-use` skill under `external/`, and `activate-deps.sh`
+  exports `$ZOTERO_SKILL` (a checkout-relative path turned absolute only for the
+  current shell). The stage prompts pin the ROUTE ORDER: the Zotero MCP service
+  first when the session exposes it, then this skill, and the `zot` CLI from
+  pyzotero-cli only as the FALLBACK when the MCP service and the skill are both
+  unavailable. When none of the three routes works, the citation or live field
+  goes to manual verification. The skill script is NOT bundled in this
+  repository; when the skill is not installed, the pipeline's own code-side
+  live-field inventory and continuity gate (`paper_docx_format.py`, run by every
+  DOCX stage) is the check that actually enforces field preservation, and the
   prompts' `PROVE IT` step degrades to that gate.
 * The two DOCX MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) read the
   optional `DOCX_MCP_ALLOWED_ROOTS` environment variable: a PATH-delimiter-
@@ -537,7 +570,7 @@ evidence pack.
 | `set-submit-code off\|on` | whether `code/` is part of the submission (`off`, the default: revision content the stages revise and the judges evaluate, but stripped from `journal_submission/` like `raw_data/`, and not citeable by the response letter; `on`: the submission carries it and the letter may cite it) |
 | `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
 | `redline --root ROOT` / `track --root ROOT` | (re)write the tracked-changes `.docx` tree / the difference-tracking copies (`*.tracking-*`) plus the persistent PDF renders |
-| `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: `off` = no Zotero tooling, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
+| `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: the stage tries the Zotero MCP service first, then the Zotero skill, and the `zot` CLI only as the fallback when both are unavailable; `off` = no Zotero tooling at all (MCP service, skill or CLI), `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write through the `zot` CLI. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
 | `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant. The pair carries `2*judges` scores, so the sign rule needs at least 3 judges: at 2 judges the smallest attainable one-sided p (4/4 losses) is 0.0625, and `setup` refuses that combination rather than shipping a gate that can never reject |
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
 | `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. The legacy `--judge-agent {codex,claude,dsh,qwen,dots,manual}` / `--judge-agent-cmd JSON` remain |
@@ -2600,13 +2633,13 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 116 KB | 48 KB | 58% |
-| cold_start_review | 59 KB | 24 KB | 59% |
-| audit | 86 KB | 43 KB | 49% |
-| revise | 114 KB | 60 KB | 47% |
-| integrate | 113 KB | 60 KB | 46% |
-| rewrite | 106 KB | 56 KB | 46% |
-| judge | 101 KB | 71 KB | 30% |
+| review | 119 KB | 49 KB | 58% |
+| cold_start_review | 60 KB | 24 KB | 59% |
+| audit | 88 KB | 46 KB | 48% |
+| revise | 117 KB | 63 KB | 46% |
+| integrate | 116 KB | 64 KB | 45% |
+| rewrite | 109 KB | 60 KB | 45% |
+| judge | 103 KB | 73 KB | 29% |
 | revision_audit | 23 KB | 13 KB | 41% |
 | revision_repair | 22 KB | 9 KB | 57% |
 
@@ -3681,6 +3714,9 @@ its four integration runs never started.
 | `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
 | `mcp-docx-compare/` | the `docx-compare` MCP tool (Word's own compare engine, first choice for tracked changes) |
 | `paper-skills/` | the bundled review (`paper-review`) and revision (`paper-revise`) skills + prompts |
+| `install_dependencies.sh` | installs the conda env, Node MCP dependencies, agent skills/MCP rows and the external Zotero checkouts; writes checkout-relative `deps.env` + `activate-deps.sh` |
+| `external/` | (gitignored) the third-party checkouts installed by that script; `INSTALLED.json` records their commits |
+| `deps.env` / `activate-deps.sh` | (generated) checkout-relative dependency paths and the shell exporter that resolves them for the current shell only |
 | `scripts/` | operator-side helpers — the Codex→DSH MCP importer (`install-codex-mcp.mjs`/`.sh`, documented in `scripts/README-codex-mcp.md`), the test-environment builder/exporter (`create-test-env.sh`, `export-test-env.sh`, `env_test_closure.py`) |
 | `env/` | the exported test environment the Test section recreates (`create-test-env.sh` reads it; refresh it with `export-test-env.sh`) — see `env/README.md` |
 | `venue_profiles/` | the venue profiles (the submission rule sets) + their schema documentation |
@@ -3692,7 +3728,8 @@ its four integration runs never started.
 The suite is offline and needs Python 3.12 plus two third-party packages:
 `python-docx` (the DOCX scanner/parity fixtures) and `openpyxl` (the pairwise
 workbook check). **Create that environment first, with the bundled script, if
-you intend to run any test:**
+you intend to run any test** (or let `./install_dependencies.sh` do it together
+with the Node and external Zotero dependencies):
 
 ```bash
 bash scripts/create-test-env.sh             # create it (or verify an existing one)

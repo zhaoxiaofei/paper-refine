@@ -20,7 +20,7 @@ target journal's own author guide and say which source you used.
 - `WORK` = `./guided_review/work` — corpus, scripts, state
 - `raw_data/` (the raw-data area) — when SUBMISSION_DIR carries it: the **evidence
   area**, not submission content (see below)
-- `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override if the user provides one; if absent → fall back to manual-verification)
+- `ZOTERO_SKILL` = the path in the `$ZOTERO_SKILL` environment variable (set by `./install_dependencies.sh`, normally `external/openai-plugins/plugins/zotero/skills/zotero/scripts/zotero.py` relative to that checkout; override if the user provides one; if absent → fall back to manual-verification)
 - `ZOT_CLI` = `zot` (pyzotero-cli) and the `$zotero-use` skill — the reference route for resolving citations read-only (`zot --local ... items list|get|citation|bib`, `zot fulltext get`). This review never edits a citation field and never writes to the Zotero library.
 
 If `SUBMISSION_DIR` does not exist or is empty: **STOP and ask the user.**

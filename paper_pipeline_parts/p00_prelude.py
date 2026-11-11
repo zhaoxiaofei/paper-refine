@@ -359,6 +359,7 @@ PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
                          "paper_redlines_adapter.py", "paper_qwen_agent.py",
                          "paper_dots_agent.py", "paper_model_agent.py",
                          "model_runtime.py", "llm_retry.py", "llm_policy.json",
+                         "model_catalog.json",
                          # The render/track shims are read beside the running
                          # driver (`visual_renderer_choices`), so a root that
                          # lacks them silently loses the highest-fidelity
@@ -395,8 +396,11 @@ SELFCHECK_DRIVER_REL = f"{SELFCHECK_TOOL_DIR}/{SELFCHECK_DRIVER}"
 HARNESS_PIPELINE_MOUNT = "/paper-pipeline"
 HARNESS_DRIVER_REL = f"{HARNESS_PIPELINE_MOUNT}/{SELFCHECK_DRIVER}"
 
-# The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
-#   off   -- never run the `zot` CLI; live fields stay on the skills' manual route
+# The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`).
+# The stage prompts try the Zotero MCP service first, then the Zotero skill, and
+# use the `zot` CLI only as the FALLBACK when both are unavailable:
+#   off   -- no Zotero tooling (MCP service, skill or CLI); live fields stay on
+#            the skills' manual route
 #   read  -- read-only reference resolution/verification, no field edits
 #   edit  -- + add/remove/relink citations in the revision/integration copies
 #   apply -- + ONE guarded field update of ONE existing library item per change

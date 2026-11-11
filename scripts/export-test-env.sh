@@ -69,9 +69,10 @@ echo "exporting ${ENV_NAME} -> ${OUT}"
 
 # `conda env export` writes a `prefix:` line naming THIS machine; re-creating
 # from a file that hard-codes someone else's home directory is a foot-gun, so
-# the PORTABLE files drop it. The full export keeps it: it is the record of the
-# machine the freeze was taken on (see env/README.md).
-for f in "${STEM}.freeze.env_export.no_builds.yml" \
+# EVERY export drops it. The files remain a record of the package set, not of
+# the checkout's location (see env/README.md).
+for f in "${STEM}.freeze.env_export.yml" \
+         "${STEM}.freeze.env_export.no_builds.yml" \
          "${STEM}.freeze.env_export.from_history.yml"; do
   grep -v '^prefix:' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 done
@@ -139,7 +140,7 @@ Re-run the export (and commit the result) whenever the test dependencies change.
 | \`${ENV_NAME}.freeze.env_export.from_history.yml\` | \`conda env export --from-history\`: only the packages explicitly asked for (here \`python=3.12\`) | **the portable, cross-machine choice** — \`create-test-env.sh\` pairs it with \`requirements.test.txt\` |
 | \`${ENV_NAME}.requirements.test.txt\` | the DECLARED test dependencies and their full transitive closure, at the exact installed versions | **what \`create-test-env.sh\` installs** — the reproducible, portable subset |
 | \`${ENV_NAME}.freeze.env_export.no_builds.yml\` | the full solve, versions pinned, build strings dropped | rebuilding on a different OS/build matrix |
-| \`${ENV_NAME}.freeze.env_export.yml\` | the exact export, builds included, plus the \`prefix:\` of the machine it was taken on | reproducing THIS machine byte-for-byte; not portable (drop or rewrite the \`prefix:\` line) |
+| \`${ENV_NAME}.freeze.env_export.yml\` | the exact export, builds included (the machine-specific \`prefix:\` line is stripped) | reproducing THIS machine's package set byte-for-byte |
 | \`${ENV_NAME}.freeze.env_export.no_channels.yml\` | the exact export with the \`channels:\` block removed | a box whose channel configuration must not be overridden |
 | \`${ENV_NAME}.requirements.list_e.txt\` | \`pip freeze --all\`: every installed wheel at its exact version | the full pip record |
 | \`${ENV_NAME}.requirements.list_e_no_pypi.txt\` | the same list with the conda-managed distributions removed | \`pip install\` into an environment whose non-Python packages came from conda |

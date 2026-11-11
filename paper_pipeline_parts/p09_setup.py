@@ -675,7 +675,8 @@ def cmd_setup(args) -> None:
     # drift.
     for _adapter_name in ("paper_qwen_agent.py", "paper_dots_agent.py",
                           "paper_model_agent.py", "model_runtime.py",
-                          "llm_retry.py", "llm_policy.json"):
+                          "llm_retry.py", "llm_policy.json",
+                          "model_catalog.json"):
         _adapter = script.with_name(_adapter_name)
         if _adapter.is_file():
             shutil.copy(_adapter, root / _adapter_name)
@@ -1064,15 +1065,17 @@ def cmd_setup(args) -> None:
     print("[setup] OOXML formatting scan:   " + format_note(ctx.state["original_format"])
           + "  (code-side proxy; the agents' category-4 formatting sweep is authoritative)")
     _zot_note = {
-        "off": "the `zot` CLI is NEVER used; live fields stay on the skills' manual route",
-        "read": "read-only reference resolution with `zot`; citation fields are not edited",
+        "off": "no Zotero tooling (MCP service, skill or `zot` CLI); live fields stay on the "
+               "skills' manual route",
+        "read": "read-only reference resolution (MCP service, then skill, then `zot`); citation "
+                "fields are not edited",
         "edit": "citation edits in the revised copy are allowed; the Zotero library stays "
                 "read-only",
         "apply": "citation edits AND single-item field updates are allowed -- this WRITES TO "
-                 "YOUR REMOTE ZOTERO ACCOUNT (propose-then-verify protocol)",
+                 "YOUR REMOTE ZOTERO ACCOUNT (propose-then-verify protocol via the `zot` CLI)",
     }[zotero]
     print(f"[setup] zotero policy:           {zotero}: {_zot_note}"
-          + (f" (`zot` {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
+          + (f" (`zot` fallback {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
              if zotero != "off" else ""))
     print(f"[setup] corpus rule:             the difference-tracking auxiliaries "
           f"(\"*.tracking-<token>.<ext>\" and their \"*.logging-<token>.<ext>\" fallbacks, "
@@ -3838,20 +3841,21 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # remote library -- says so loudly.
     _zot_mode = zotero_mode_of(ctx)
     if _zot_mode == "off":
-        _zot_note = ("off -- the `zot` CLI is never used; live fields stay on the skills' manual "
-                     "route")
+        _zot_note = ("off -- no Zotero tooling (MCP service, skill or `zot` CLI); live fields "
+                     "stay on the skills' manual route")
     else:
-        _zot_on_path = ("the `zot` CLI is on PATH" if zot_cli_available()
-                        else "the `zot` CLI is NOT on PATH")
+        _zot_on_path = ("the `zot` CLI fallback is on PATH" if zot_cli_available()
+                        else "the `zot` CLI fallback is NOT on PATH")
         if _zot_mode == "apply":
             _zot_note = ("apply -- citation edits AND single-field library updates are allowed "
-                         "(propose-then-verify, --last-modified auto); this WRITES TO YOUR REMOTE "
-                         f"ZOTERO ACCOUNT ({_zot_on_path})")
+                         "(propose-then-verify via the `zot` CLI, --last-modified auto); this "
+                         f"WRITES TO YOUR REMOTE ZOTERO ACCOUNT ({_zot_on_path})")
         elif _zot_mode == "edit":
             _zot_note = ("edit -- citation edits in the revised copy are allowed; the Zotero "
                          f"library stays read-only ({_zot_on_path})")
         else:
-            _zot_note = f"read -- read-only reference resolution; no citation edits ({_zot_on_path})"
+            _zot_note = ("read -- read-only reference resolution (MCP service, then skill, then "
+                         f"`zot`); no citation edits ({_zot_on_path})")
     print(f"[run] zotero reference tooling:  {_zot_note}")
     # The docx->pdf converter the prompts ask for FIRST (see the visual rule):
     # the docx-converter MCP tool, falling back to the other renderers.

@@ -1950,6 +1950,17 @@ def agent_session_env(sb: Path) -> dict:
     if sandbox not in roots:
         roots.append(sandbox)
     env["DOCX_MCP_ALLOWED_ROOTS"] = os.pathsep.join(roots)
+    # The prompt's self-check fallbacks name environment variables, never a
+    # machine path: the ROOT's frozen driver, the harness's read-only mount and
+    # the verified setup-time snapshot are resolved here, per session.
+    env["PAPER_PIPELINE_SELF"] = str(pipeline_self_path())
+    env["PAPER_PIPELINE_MOUNT"] = HARNESS_PIPELINE_MOUNT
+    try:
+        fallbacks = pipeline_fallback_paths()
+    except Exception:                                           # noqa: BLE001
+        fallbacks = []
+    if fallbacks:
+        env["PAPER_PIPELINE_ORIGIN"] = str(fallbacks[0])
     return env
 
 

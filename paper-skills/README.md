@@ -42,8 +42,11 @@ cp -r paper-revise  ~/.codex/skills/
 #    actually loaded (below, `<install>` is that copy — e.g. the package
 #    directory itself, since Codex discovers skills recursively):
 #    <install>/paper-review/SKILL.md and <install>/paper-revise/SKILL.md
-#    ZOTERO_SKILL = /path/to/your/zotero/scripts/zotero.py
-#    Default: /mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py
+#    ZOTERO_SKILL = <path to your Zotero helper script>
+#    Default: the `$ZOTERO_SKILL` environment variable set by the paper-refine
+#    checkout's `./install_dependencies.sh` (normally
+#    `external/openai-plugins/plugins/zotero/skills/zotero/scripts/zotero.py`
+#    relative to that checkout). No machine path is baked into the skill.
 #    If absent, both skills degrade gracefully to "manual verification required".
 #    Reference resolution is read-only by default. paper-revise may edit a
 #    citation field in its REVISED copy under the live-field rules

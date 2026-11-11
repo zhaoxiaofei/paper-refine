@@ -332,8 +332,10 @@ def test_real_packages_are_clean_now():
     failure until the fixes are applied (that is how the defects were confirmed
     in the first place), so it stays.
     """
-    pkg = Path("/home/zhaoxiaofei/manuscript-postgrad-data/cnb-30to31-1015-1812-669237d/"
-               "final_clean_version_cnb-30to31-1015-1812-669237d")
+    pkg = Path(os.environ.get("PAPER_REFINE_REAL_DATA",
+                              Path.home() / "manuscript-postgrad-data")
+               ) / "cnb-30to31-1015-1812-669237d" / \
+        "final_clean_version_cnb-30to31-1015-1812-669237d"
     if not pkg.is_dir():
         print("skip: the CNB delivered package is not readable here")
         return
@@ -366,7 +368,8 @@ def test_delivered_packages_if_present():
     Skipped (never silently passed) when the root is not readable from here --
     the suite must be runnable on any machine.
     """
-    base = Path("/home/zhaoxiaofei/manuscript-postgrad-data")
+    base = Path(os.environ.get("PAPER_REFINE_REAL_DATA",
+                               Path.home() / "manuscript-postgrad-data"))
     pkgs = {
         "cnb-30to31-1015-1812-669237d": "cnb-31-2-mainText-0a68ba8.docx",
         "neohet-13to14-1015-1812-669237d": "neohetero-15-2-mainText-FrontiersTemplate-zotero-eea7809.docx",
