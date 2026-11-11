@@ -1833,6 +1833,11 @@ def terminate_active_agents(grace: float = 0.5) -> int:
 def install_agent_interrupt_handlers() -> bool:
     """Make Ctrl-C/SIGTERM terminate in-flight agent trees before exiting.
 
+    Both signals raise KeyboardInterrupt so every existing interrupt path
+    (run_phase/drive_round, p17.main) saves state; a SIGTERM used to raise
+    SystemExit(143), which none of those handlers caught, so the in-flight
+    attempt was lost and the run record was left inconsistent.
+
     Only the main thread may install signal handlers. The previous handlers are
     restored before the exception is raised, so a second Ctrl-C keeps its normal
     meaning (the first one has already stopped the agents). Returns True when
@@ -1859,9 +1864,10 @@ def install_agent_interrupt_handlers() -> bool:
                           else signal.SIG_DFL)
         except (OSError, ValueError):
             pass
-        if signum == signal.SIGINT:
-            raise KeyboardInterrupt
-        raise SystemExit(128 + int(signum))
+        # SIGTERM deliberately raises the same exception as SIGINT: the only
+        # state-saving paths in this process catch KeyboardInterrupt. The shell
+        # still sees a non-zero status (p17 exits 130).
+        raise KeyboardInterrupt
 
     installed = False
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -1908,7 +1914,7 @@ def effective_agent_model(cmd) -> dict:
             except (TypeError, ValueError):
                 prep_keys = []
             return {"name": _arg("--model-name") or "default",
-                    "endpoint": endpoint,
+                    "endpoint": _model_runtime.redact_endpoint_url(endpoint),
                     "harness": _arg("--harness", "dsh"),
                     "api_key_env": _arg("--api-key-env", "PAPER_AGENT_MODEL_API_KEY"),
                     "prep_keys": prep_keys,
@@ -1983,7 +1989,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     # model configuration left no trace on the attempt. The digest is over the
     # bytes read here (the same bytes piped to the CLI), not over PROMPT.md as
     # it may look later -- the sandbox is agent-writable.
-    rec["agent_command"] = [redact_secrets(str(x)) for x in cmd]
+    rec["agent_command"] = redact_argv(cmd)
     rec["prompt_file"] = prompt_name
     rec["agent_model"] = effective_agent_model(cmd)
     prompt = read_text_bounded(sb / prompt_name)
@@ -2076,7 +2082,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     # an agent can print anything (including a provider key) before it is
     # stopped. Redact known secret-shaped environment values, never the prompt or
     # the package text. The state record's argv is redacted at the same time.
-    safe_cmd = redact_secrets(" ".join(cmd))
+    safe_cmd = " ".join(redact_argv(cmd))
     safe_out = redact_secrets(out)
     safe_err = redact_secrets(err)
     safe_exc = exc if exc is None else redact_secrets(exc)

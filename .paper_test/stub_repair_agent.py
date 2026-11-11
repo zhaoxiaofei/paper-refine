@@ -510,7 +510,9 @@ def main() -> int:
     # and never break the stage's bookkeeping from an auxiliary session.
     if stub.revision_aux_session(prompt):
         return stub.main(prompt)
-    if "ARTIFACT REPAIR" in prompt[:2000]:
+    # The security/contradiction blocks now precede the repair header, so the
+    # marker can sit well past character 2000. Search the whole prompt.
+    if "ARTIFACT REPAIR" in prompt:
         stage = stage_of(name)
         # The review-only structural fixtures (they prove the guard's row rules)
         # stay available for every stage that owns a decision table.

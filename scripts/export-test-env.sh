@@ -6,6 +6,7 @@
 #   bash scripts/export-test-env.sh                    # write ./env/
 #   bash scripts/export-test-env.sh --out /somewhere   # write elsewhere
 #   PAPER_REFINE_TEST_ENV=my-env bash scripts/export-test-env.sh
+#   PAPER_REFINE_TEST_PREFIX=/path bash scripts/export-test-env.sh
 #
 # What it writes into `env/` (the same shape the neoguider `env/` freeze uses):
 #
@@ -29,6 +30,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "${HERE}/.." && pwd)"
 ENV_NAME="${PAPER_REFINE_TEST_ENV:-paper-refine-test}"
+ENV_PREFIX="${PAPER_REFINE_TEST_PREFIX:-}"
 OUT="${WS}/env"
 CONDA="${CONDA_EXE:-$(command -v conda || true)}"
 
@@ -42,7 +44,7 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       OUT="$2"; shift 2 ;;
-    -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "error: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -52,19 +54,28 @@ if [[ -z "${CONDA}" || ! -x "${CONDA}" ]]; then
   exit 2
 fi
 
-if ! "${CONDA}" run -n "${ENV_NAME}" python -c 'import sys' >/dev/null 2>&1; then
-  echo "error: conda environment ${ENV_NAME} does not exist (run scripts/create-test-env.sh)." >&2
+# A prefix environment (the documented fallback when conda's envs directory is
+# read-only) is addressed with -p; a named one with -n.
+if [[ -n "${ENV_PREFIX}" ]]; then
+  ENV_SELECT=(-p "${ENV_PREFIX}")
+  ENV_LABEL="${ENV_PREFIX}"
+else
+  ENV_SELECT=(-n "${ENV_NAME}")
+  ENV_LABEL="${ENV_NAME}"
+fi
+if ! "${CONDA}" run "${ENV_SELECT[@]}" python -c 'import sys' >/dev/null 2>&1; then
+  echo "error: conda environment ${ENV_LABEL} does not exist (run scripts/create-test-env.sh)." >&2
   exit 2
 fi
 
 mkdir -p "${OUT}"
 STEM="${OUT}/${ENV_NAME}"
-echo "exporting ${ENV_NAME} -> ${OUT}"
+echo "exporting ${ENV_LABEL} -> ${OUT}"
 
 # --- conda side ------------------------------------------------------------
-"${CONDA}" env export -n "${ENV_NAME}" > "${STEM}.freeze.env_export.yml"
-"${CONDA}" env export -n "${ENV_NAME}" --no-builds > "${STEM}.freeze.env_export.no_builds.yml"
-"${CONDA}" env export -n "${ENV_NAME}" --from-history \
+"${CONDA}" env export "${ENV_SELECT[@]}" > "${STEM}.freeze.env_export.yml"
+"${CONDA}" env export "${ENV_SELECT[@]}" --no-builds > "${STEM}.freeze.env_export.no_builds.yml"
+"${CONDA}" env export "${ENV_SELECT[@]}" --from-history \
   > "${STEM}.freeze.env_export.from_history.yml"
 
 # `conda env export` writes a `prefix:` line naming THIS machine; re-creating
@@ -88,13 +99,13 @@ awk '
 
 # --- pip side --------------------------------------------------------------
 # Every wheel the environment's pip knows about (the full record).
-"${CONDA}" run -n "${ENV_NAME}" python -m pip freeze --all 2>/dev/null \
+"${CONDA}" run "${ENV_SELECT[@]}" python -m pip freeze --all 2>/dev/null \
   > "${STEM}.requirements.list_e.txt" || true
 
 # A conda-installed distribution is marked `pypi_0` in `conda list --export`;
 # everything else came from pip, so the pip-only list keeps the `pypi_0` entries
 # and drops the conda-managed lines.
-"${CONDA}" list -n "${ENV_NAME}" --export 2>/dev/null \
+"${CONDA}" list "${ENV_SELECT[@]}" --export 2>/dev/null \
   | awk -F= '$3 != "pypi_0" {print tolower($1)}' | tr '_' '-' | sort -u \
   > "${STEM}.conda.packages.txt"
 if [[ -s "${STEM}.conda.packages.txt" ]]; then
@@ -122,7 +133,7 @@ done
 # base-image wheels, which the record above keeps and this file leaves out.
 # (conda run does not forward its stdin, so the closure is a helper script and
 # not an inline heredoc.)
-"${CONDA}" run -n "${ENV_NAME}" python "${HERE}/env_test_closure.py" \
+"${CONDA}" run "${ENV_SELECT[@]}" python "${HERE}/env_test_closure.py" \
   "${STEM}.requirements.test.txt"
 
 # --- README ----------------------------------------------------------------

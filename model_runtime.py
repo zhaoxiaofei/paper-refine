@@ -240,10 +240,17 @@ def _apply_model_catalog(models: Dict[str, Dict[str, Any]]) -> None:
                 )
             entry["context_window"] = context_window
             entry["max_tokens"] = max_tokens
+    except FileNotFoundError:
+        # A checkout refreshed from upstream may not carry the catalog yet (the
+        # adapter fallbacks below already document that case). Keep the table's
+        # documented default capacities instead of failing the import, so setup
+        # can still report a genuinely missing asset rather than dying in a
+        # raw traceback before its own manifest check runs.
+        return
     except OSError as exc:
         raise ConfigError(
             "cannot read the shared model catalog %s: %s (copy it beside "
-            "agent_models.py)" % (_MODEL_CATALOG_PATH, exc)
+            "model_runtime.py)" % (_MODEL_CATALOG_PATH, exc)
         ) from exc
     except (ValueError, KeyError, TypeError) as exc:
         raise ConfigError(
@@ -415,6 +422,14 @@ def agent_model_choice(value: Any) -> str:
             endpoint_base(raw)      # validate the URL shape
         except ConfigError as exc:
             raise ValueError(str(exc)) from None
+        credential = endpoint_credentials(raw)
+        if credential:
+            raise ValueError(
+                "--agent-model endpoint %r carries a credential in its %s; "
+                "pass the key with --agent-model-api-key (or "
+                "PAPER_AGENT_MODEL_API_KEY) instead"
+                % (redact_endpoint_url(raw), credential)
+            )
         return raw
     slug = normalize_agent_model(raw)
     if slug == MODEL_DEFAULT:
@@ -660,6 +675,15 @@ def resolve_agent_selection(
                 % (resolved_harness, resolved_model)
             )
         endpoint_base(str(resolved_model))
+        credential = endpoint_credentials(str(resolved_model))
+        if credential:
+            raise ConfigError(
+                "--agent-model endpoint %r carries a credential in its %s. The "
+                "generated provider patch and the run record must stay "
+                "credential-free; pass the key with --agent-model-api-key (or "
+                "PAPER_AGENT_MODEL_API_KEY) instead."
+                % (redact_endpoint_url(str(resolved_model)), credential)
+            )
     elif not agent_pair_supported(resolved_harness, resolved_model):
         allowed = ", ".join(
             (AGENT_MODELS.get(resolved_model) or {}).get("harnesses") or ()
@@ -708,8 +732,15 @@ def endpoint_base(url: str) -> str:
     query parameter is preserved as the model name by :func:`endpoint_query_model`.
     """
     text = str(url or "").strip()
-    parsed = urllib.parse.urlsplit(text)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        host = parsed.hostname
+        parsed.port          # a non-numeric or out-of-range port is malformed too
+    except ValueError:
+        raise ConfigError(
+            "--agent-model endpoint %r is not an http(s) URL with a host" % text
+        ) from None
+    if parsed.scheme not in ("http", "https") or not host:
         raise ConfigError(
             "--agent-model endpoint %r is not an http(s) URL with a host" % text
         )
@@ -717,6 +748,52 @@ def endpoint_base(url: str) -> str:
     if path.endswith("/chat/completions"):
         path = path[: -len("/chat/completions")]
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+#: Query keys that carry a credential.  The endpoint's key belongs in
+#: ``--agent-model-api-key`` / the key environment variable, not in the URL:
+#: the URL is written to the generated patch and to the run's own records.
+_CREDENTIAL_QUERY_KEYS = {
+    "api_key",
+    "apikey",
+    "api-key",
+    "key",
+    "token",
+    "access_token",
+    "auth",
+    "authorization",
+    "password",
+    "passwd",
+    "secret",
+    "client_secret",
+}
+
+
+def endpoint_credentials(url: str) -> str:
+    """A short description of the credential a URL carries, or "".
+
+    Userinfo (``user:secret@host``) and a credential-named query parameter are
+    both rejected before a run: neither can be honoured by the generated DSH
+    patch (which carries no query string) and both would be written to the run
+    record.  A non-secret query parameter such as ``?model=`` stays allowed.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+    except ValueError:
+        return ""
+    if parsed.username is not None or parsed.password is not None:
+        return "userinfo"
+    try:
+        pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    except ValueError:
+        return ""
+    for key, _value in pairs:
+        lowered = str(key).strip().lower()
+        if lowered in _CREDENTIAL_QUERY_KEYS or lowered.endswith(
+                ("_key", "_token", "_secret", "_password")
+        ):
+            return "query parameter %r" % key
+    return ""
 
 
 def endpoint_query_model(url: str) -> str:
@@ -999,8 +1076,16 @@ def stop_prep_proxy(server: Any = None) -> None:
 #: The DSH compaction summarizer calls the LLM adapter directly, outside
 #: ``dsh-llm-retry``; the shared proxy gives that one call site the same
 #: 10s-to-3600s per-call backoff.
-def compaction_proxy_target(selection: Optional[AgentSelection]) -> str:
-    """The upstream base URL whose compaction calls need the retrying proxy."""
+def compaction_proxy_target(
+    selection: Optional[AgentSelection], *, base_url_override: Optional[str] = None
+) -> str:
+    """The upstream base URL whose compaction calls need the retrying proxy.
+
+    ``base_url_override`` is the caller's resolved provider base (an adapter's
+    ``--base-url`` override); the compaction route must share the regular
+    provider's upstream rather than fall back to the environment-derived default
+    while the regular provider uses the override.
+    """
     if selection is None or selection.model is None:
         return ""
     try:
@@ -1009,7 +1094,7 @@ def compaction_proxy_target(selection: Optional[AgentSelection]) -> str:
         return ""
     if settings.get("family") != "dots":
         return ""
-    return str(settings.get("base_url") or "")
+    return str(base_url_override or settings.get("base_url") or "")
 
 
 def start_compaction_proxy(
@@ -1234,7 +1319,9 @@ def dsh_patch_text(
             or endpoint_query_model(str(selection.model or ""))
             or "default"
         )
-        base_url = base_url_override or settings["base_url"]
+        # The patch is a credential-free artifact: userinfo and a query string
+        # belong to the live request, never to a file an agent can read.
+        base_url = redact_endpoint_url(base_url_override or settings["base_url"])
         return (
             (
                 "# Generated by generic_debug_pipeline for this stage: --agent-model.\n"
@@ -1310,10 +1397,14 @@ def dsh_patch_text(
             )
             % (
                 json.dumps("Qwen vLLM (%s)" % model),
-                json.dumps(settings["base_url"]),
+                json.dumps(base_url_override or settings["base_url"]),
                 json.dumps(model),
-                int(settings["context_window"] or QWEN_CONTEXT_WINDOW),
-                int(settings["max_tokens"] or QWEN_MAX_TOKENS),
+                int(
+                    context_window_override
+                    or settings["context_window"]
+                    or QWEN_CONTEXT_WINDOW
+                ),
+                int(max_tokens_override or settings["max_tokens"] or QWEN_MAX_TOKENS),
                 json.dumps(model),
                 json.dumps(effort_override or settings["effort"] or QWEN_DEFAULT_EFFORT),
             )
@@ -1323,11 +1414,15 @@ def dsh_patch_text(
         return dots_dsh_overlay(
             LLM_POLICY,
             model=model,
-            base_url=settings["base_url"],
+            base_url=base_url_override or settings["base_url"],
             context_window=int(
-                settings["context_window"] or DOTS_CONTEXT_WINDOW
+                context_window_override
+                or settings["context_window"]
+                or DOTS_CONTEXT_WINDOW
             ),
-            max_tokens=int(settings["max_tokens"] or DOTS_MAX_TOKENS),
+            max_tokens=int(
+                max_tokens_override or settings["max_tokens"] or DOTS_MAX_TOKENS
+            ),
             compaction_base_url=compaction_base_url,
         )
     info = selection.model_info()
@@ -1398,6 +1493,10 @@ def codex_provider_args(
             ),
             _codex_config("model_providers.qwen.env_key", "PAPER_QWEN_API_KEY"),
             _codex_config("model_providers.qwen.wire_api", "responses"),
+            _codex_config(
+                "model_context_window",
+                int(settings["context_window"] or QWEN_CONTEXT_WINDOW),
+            ),
             _codex_config(
                 "model_reasoning_effort", settings["effort"] or QWEN_DEFAULT_EFFORT
             ),
@@ -1595,7 +1694,10 @@ def redact_prep_object(value: Any) -> Any:
         for key, item in value.items():
             text = str(key).lower()
             is_secret = text in _PREP_SECRET_KEYS or text.endswith(_PREP_SECRET_SUFFIXES)
-            if is_secret and not isinstance(item, (dict, list)):
+            # A secret-named key masks its whole value, whatever its type: a
+            # list/dict under `api_key` used to lose the key context when the
+            # recursion descended into it and returned the credential unchanged.
+            if is_secret:
                 result[str(key)] = "[REDACTED]"
             else:
                 result[str(key)] = redact_prep_object(item)

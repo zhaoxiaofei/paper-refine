@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import contextlib
+import http.client
 import json
 import math
 import os
@@ -69,6 +70,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -212,7 +214,11 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
         except ValueError:
             body = raw
         return e.code, body, ""
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
+    except (urllib.error.URLError, OSError, TimeoutError,
+            http.client.HTTPException) as e:
+        # BadStatusLine/IncompleteRead are HTTPException, not OSError; left
+        # uncaught they escaped chat/probe as a traceback instead of a retryable
+        # transport error.
         return 0, None, f"{type(e).__name__}: {e}"
 
 
@@ -283,6 +289,15 @@ def _stop_tunnel() -> None:
         _TUNNEL_STDERR = None
 
 
+def _local_tunnel_url(cfg: dict) -> str:
+    """The URL the local end of the ssh forward actually listens on."""
+    parsed = urllib.parse.urlsplit(str(cfg["base_url"]))
+    path = parsed.path.rstrip("/")
+    return urllib.parse.urlunsplit(
+        (parsed.scheme or "http", "127.0.0.1:%s" % cfg["local_port"], path, "", "")
+    )
+
+
 def ensure_tunnel(cfg: dict, log=None) -> str:
     """Make the endpoint reachable; return "" or an error message.
 
@@ -325,6 +340,7 @@ def ensure_tunnel(cfg: dict, log=None) -> str:
                 f"{cfg['base_url']}/models did not answer ({err}); another "
                 f"service may own the port -- stop it or change "
                 f"PAPER_QWEN_TUNNEL_LOCAL")
+    tunnel_url = _local_tunnel_url(cfg)
     cmd = ["ssh", "-p", cfg["ssh_port"], "-N",
            "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
            "-o", "ServerAliveInterval=30",
@@ -341,8 +357,12 @@ def ensure_tunnel(cfg: dict, log=None) -> str:
     while time.time() < deadline:
         if _TUNNEL.poll() is not None:
             break
-        ok, ids, err = probe_endpoint(cfg, timeout=2.0)
+        ok, ids, err = probe_endpoint(dict(cfg, base_url=tunnel_url), timeout=2.0)
         if ok:
+            # The forward listens on local_port, which need not equal the port in
+            # the configured base_url; the harness must talk to the port that is
+            # actually forwarded, not the URL that was probed before the tunnel.
+            cfg["base_url"] = tunnel_url
             log(f"[qwen] started ssh tunnel pid {_TUNNEL.pid}: "
                 f"localhost:{cfg['local_port']} -> {cfg['ssh_host']}:"
                 f"{cfg['ssh_port']} -> {cfg['remote']}; models: {', '.join(ids)}")
@@ -399,6 +419,10 @@ def codex_argv(cfg: dict, extra: list = None) -> list:
         f'model_providers.qwen.base_url="{cfg["base_url"]}"',
         'model_providers.qwen.env_key="PAPER_QWEN_API_KEY"',
         'model_providers.qwen.wire_api="responses"',
+        # qwen3.8-27b is not in Codex's built-in catalog, so the provider must
+        # declare the deployment's window explicitly or Codex applies its own
+        # default (the dots adapter does the same for its model).
+        f'model_context_window={int(cfg.get("context_window") or DEFAULT_CONTEXT_WINDOW)}',
         f'model_reasoning_effort="{cfg["effort"]}"',
     ]
     argv = ["codex", "exec"]
@@ -527,8 +551,15 @@ def _chat_output_budget(cfg: dict, prompt: str, system: str = "") -> int:
     long prompt and lets ``prompt + max_tokens`` cross the window.
     """
     cap = int(cfg.get("chat_max_tokens") or cfg["max_tokens"])
+    context = int(cfg.get("context_window") or 0)
+    # A minimal caller may supply only model/max_tokens (the repository's own
+    # older regression fixtures do). Without a declared window the output cap
+    # is the only limit; treating "no window" as zero made every such call
+    # fail with "the prompt does not fit the None-token context window".
+    if not context:
+        return max(1, cap)
     prompt_tokens = int(math.ceil((len(prompt) + len(system)) / 3.4))
-    room = int(cfg.get("context_window") or 0) - prompt_tokens - 2048
+    room = context - prompt_tokens - 2048
     if room <= 0:
         return 0
     return max(1, min(cap, room))

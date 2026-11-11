@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import contextlib
+import http.client
 import http.server
 import json
 import os
@@ -94,6 +95,10 @@ DEFAULT_MODEL = rt.DEFAULT_AGENT_MODEL
 DEFAULT_ENDPOINT_CONTEXT = rt.DEFAULT_ENDPOINT_CONTEXT
 DEFAULT_ENDPOINT_MAX_TOKENS = rt.DEFAULT_ENDPOINT_MAX_TOKENS
 
+#: One JSON event line larger than this is discarded (matches the shared
+#: stream readers in the qwen/dots adapters; this router lacked the constant).
+MAX_DSH_LINE_BYTES = 1 << 20
+
 _DSH_HOME_TMP = None
 _PATCH_TMP = None
 _PROXY_SERVER = None
@@ -124,7 +129,14 @@ def _endpoint_base(url: str) -> str:
     parameter is preserved as the model name by `_endpoint_model`.
     """
     text = str(url).strip()
-    parsed = urllib.parse.urlsplit(text)
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        host = parsed.hostname
+        parsed.port          # a non-numeric or out-of-range port is malformed too
+    except ValueError:
+        return ""
+    if parsed.scheme not in ("http", "https") or not host:
+        return ""
     path = parsed.path.rstrip("/")
     if path.endswith("/chat/completions"):
         path = path[: -len("/chat/completions")]
@@ -181,6 +193,10 @@ def resolve_endpoint_model(cfg: dict) -> tuple:
         if (context and not os.environ.get("PAPER_AGENT_CONTEXT_WINDOW")
                 and not cfg.get("context_explicit")):
             cfg["context"] = context
+            # The discovered window is now authoritative: dsh_patch_text only
+            # forwards an explicit context, so without this marker the patch
+            # silently fell back to the 32768 default.
+            cfg["context_explicit"] = True
         return cfg["model_name"], ""
     query_model = _endpoint_query_model(cfg.get("endpoint") or "")
     if query_model:
@@ -192,6 +208,7 @@ def resolve_endpoint_model(cfg: dict) -> tuple:
         if (context and not os.environ.get("PAPER_AGENT_CONTEXT_WINDOW")
                 and not cfg.get("context_explicit")):
             cfg["context"] = context
+            cfg["context_explicit"] = True
         return models[0], ""
     if len(models) > 1:
         return "", (f"the endpoint lists {len(models)} models ({', '.join(models[:8])}"
@@ -291,7 +308,12 @@ def _pair_problem(cfg: dict) -> str:
         if not cfg.get("endpoint"):
             return "empty custom endpoint URL"
         if not cfg.get("base_url"):
-            return f"cannot parse endpoint URL {cfg.get('endpoint')!r}"
+            return (f"cannot parse endpoint URL {cfg.get('endpoint')!r}: it must be "
+                    f"an http(s) URL with a host")
+        credential = rt.endpoint_credentials(str(cfg.get("endpoint")))
+        if credential:
+            return (f"the endpoint URL carries a credential in its {credential}; "
+                    f"pass the key with --api-key-env / --agent-model-api-key instead")
         return ""
     if cfg["model"] not in MODELS:
         return f"unknown native model {cfg['model']!r}; use {', '.join(MODELS)}"
@@ -370,7 +392,11 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
             with contextlib.suppress(OSError):
                 self.wfile.write(raw)
             return
-        except (urllib.error.URLError, OSError, TimeoutError) as e:
+        except (urllib.error.URLError, OSError, TimeoutError,
+                http.client.HTTPException) as e:
+            # BadStatusLine/IncompleteRead are HTTPException, not OSError; the
+            # shared model_runtime proxy already catches them, and without this
+            # the client saw a closed connection instead of a structured 502.
             raw = json.dumps({"error": {"message":
                                        f"custom endpoint proxy failed: {e}"}}).encode()
             self.send_response(502)

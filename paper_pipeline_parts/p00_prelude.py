@@ -280,7 +280,7 @@ from pathlib import Path
 #   `-m`/DeepSeek Responses provider, and Claude Code's `--model`/DeepSeek
 #   Anthropic environment. qwen/dots keep their adapters (the dots adapter also
 #   learned Claude Code's `--harness claude`). Unsupported wire-protocol pairs
-#   (GPT through Claude Code, Claude through Codex, Qwen through Claude Code)
+#   (GPT through Claude Code, Claude through Codex)
 #   are refused before any session starts. The run record stores the effective
 #   harness/model and, for the judge, its own pair.
 # 3.10.0 -- THE DOTS BACKEND (`--agent dots`). The Dots API's OpenAI-compatible
@@ -289,7 +289,8 @@ from pathlib import Path
 #   keeps the operator's harness and points it at that route:
 #     * PAPER_DOTS_HARNESS=codex (default) uses the platform's documented Codex
 #       route (`model_provider=dots`, `wire_api=responses`, `DOTS_API_KEY`,
-#       web search disabled) with the model's 512K context window declared;
+#       web search disabled) with the enforced 393,000-token context window
+#       declared (512K is advertised, 393,000 is enforced);
 #     * PAPER_DOTS_HARNESS=dsh generates the `llm-pi-ai` route over OpenAI Chat
 #       Completions plus an `agent-default-model` override;
 #     * PAPER_DOTS_HARNESS=chat is a text-only direct call.

@@ -200,9 +200,45 @@ def redact_secrets(text: str) -> str:
     # run-log `argv:` header cannot capture it.
     text = re.sub(r"(--(?:judge-)?agent-model-api-key)([ =])(\S+)",
                   r"\1\2[REDACTED]", text)
+    # URL userinfo / credential query parameters, in case a transcript carries one.
+    text = re.sub(r"(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@", text)
+    text = re.sub(
+        r"(?i)([?&](?:api[_-]?key|apikey|key|token|access[_-]?token|auth|"
+        r"authorization|password|secret)=)[^&\s'\"]+",
+        r"\1[REDACTED]", text)
+    # A JSON object logged as text still masks its credential-looking string values.
+    text = re.sub(
+        r'(?i)("(?:api[_-]?key|apikey|key|token|access[_-]?token|auth|'
+        r'authorization|password|secret)"\s*:\s*)"[^"]*"',
+        r'\1"[REDACTED]"', text)
     for value in secret_env_values():
         text = text.replace(value, "[REDACTED]")
     return text
+
+
+def redact_argv(argv) -> list:
+    """`redact_secrets` per element; a prep-json value masks its secret fields."""
+    out = []
+    prepare = False
+    for value in argv or []:
+        text = str(value)
+        if prepare:
+            prepare = False
+            try:
+                parsed = json.loads(text)
+                redactor = getattr(globals().get("_model_runtime"), "redact_prep_object")
+                text = json.dumps(redactor(parsed))
+            except (TypeError, ValueError, AttributeError):
+                text = "[REDACTED]"
+            # Keep the shared secret-environment backstop: the structured
+            # redactor only masks secret-NAMED keys, while a known secret value
+            # may sit under an ordinary key.
+            out.append(redact_secrets(text))
+            continue
+        if text in ("--agent-model-prep-json", "--judge-agent-model-prep-json"):
+            prepare = True
+        out.append(redact_secrets(text))
+    return out
 
 
 def start_run_log(cmd: str, root, argv=None) -> Path:
@@ -243,7 +279,7 @@ def start_run_log(cmd: str, root, argv=None) -> Path:
                 n += 1
         header = (f"# paper_pipeline {cmd} -- {utcnow()}\n"
                   f"# root: {Path(root).resolve()}\n"
-                  f"# argv: {redact_secrets(' '.join(str(a) for a in (argv or [])))}\n")
+                  f"# argv: {' '.join(redact_argv(argv))}\n")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(header)
         return path
@@ -644,6 +680,7 @@ def pipeline_snapshot_note(ctx: Ctx) -> str:
                 f"{_sync_code_hint(ctx.root, st.get('maintained_path'))} (or recreate the "
                 f"root from the maintained tree) before the next stage if the new rules "
                 f"must apply.")
+    _bundle = ", ".join(f"`{name}`" for name in PIPELINE_MODULE_FILES)
     if st.get("frozen_foreign") and st.get("maintained_differs"):
         # The recorded origin is ANOTHER root's snapshot, and the tree the
         # operator maintains has moved on: this root and its origin agree with
@@ -658,10 +695,7 @@ def pipeline_snapshot_note(ctx: Ctx) -> str:
                 f"(sha256 {str(st.get('maintained_sha256'))[:16]}...). Every command here "
                 f"executes the frozen code, so fixes committed since the snapshot will NOT run "
                 f"in this root. Re-create the root from the maintained tree (same `--source`), "
-                f"or copy the current `paper_pipeline.py`, `paper_docx_format.py` and "
-                f"`paper_redlines_adapter.py` and the `paper_qwen_agent.py`/"
-                f"`paper_dots_agent.py`/`paper_model_agent.py` adapters beside this "
-                f"root's `state.json`.")
+                f"or copy the current bundle ({_bundle}) beside this root's `state.json`.")
     if st.get("frozen_differs"):
         # The record and the FILE disagree: state.json says one sha256, the
         # frozen script hashes to another. That is not "origin moved on" -- it is

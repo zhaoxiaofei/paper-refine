@@ -56,9 +56,9 @@ fi
 # package cache there too, so a read-only HOME/conda cache (common in CI or a
 # file sandbox) cannot block creation.
 if [[ -n "${ENV_PREFIX}" ]]; then
-  export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-$PWD/tmp/conda-pkgs}"
-  export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-$PWD/tmp/conda-envs}"
-  export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$PWD/tmp/pip-cache}"
+  export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-$WS/tmp/conda-pkgs}"
+  export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-$WS/tmp/conda-envs}"
+  export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$WS/tmp/pip-cache}"
   mkdir -p "${CONDA_PKGS_DIRS}" "${CONDA_ENVS_PATH}" "${PIP_CACHE_DIR}"
 fi
 
@@ -119,10 +119,13 @@ REQUIREMENTS="${EXPORT_DIR}/${ENV_NAME}.requirements.test.txt"
 # --- 0. choose a target this process can actually write --------------------
 # Deleting an environment we cannot re-create is worse than not deleting it.
 if [[ -z "${ENV_PREFIX}" ]] && [[ ! -w "$("${CONDA}" info --base)/envs" ]]; then
-  ENV_PREFIX="${PWD}/tmp/${ENV_NAME}"
-  export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-$PWD/tmp/conda-pkgs}"
-  export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-$PWD/tmp/conda-envs}"
-  export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$PWD/tmp/pip-cache}"
+  # The documented fallback is a prefix under the CHECKOUT (`../tmp/`), not the
+  # caller's cwd: install_dependencies.sh invokes this script without cd, and a
+  # read-only caller cwd must not break the self-contained environment.
+  ENV_PREFIX="${WS}/tmp/${ENV_NAME}"
+  export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-$WS/tmp/conda-pkgs}"
+  export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-$WS/tmp/conda-envs}"
+  export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$WS/tmp/pip-cache}"
   mkdir -p "${CONDA_PKGS_DIRS}" "${CONDA_ENVS_PATH}" "${PIP_CACHE_DIR}" \
            "$(dirname "${ENV_PREFIX}")"
   echo "note: $("${CONDA}" info --base)/envs is not writable here (sandboxed or" >&2

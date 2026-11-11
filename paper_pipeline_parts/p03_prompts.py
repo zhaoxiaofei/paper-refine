@@ -3306,8 +3306,10 @@ def zotero_cli_block(role: str, mode: str = DEFAULT_ZOTERO_MODE,
     library write path; the read-only roles are hard-wired to the read clause, so
     no configuration value can hand a judge, rewrite or review session the
     ability to change the library. An unknown mode falls back to the default
-    (never to a more permissive one), and `off` replaces the whole block with the
-    short "do not use zot at all" notice.
+    (never to a more permissive one). `off` returns the off notice plus the
+    role-specific FIELD CONTINUITY rule, which stays in force so an off run
+    still preserves live citation fields; the CLI/skill/library-write guidance
+    is dropped.
     """
     if mode not in ZOTERO_MODES:
         mode = DEFAULT_ZOTERO_MODE

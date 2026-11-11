@@ -64,6 +64,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import contextlib
+import http.client
 import json
 import math
 import os
@@ -115,6 +116,13 @@ DEFAULT_CHAT_MAX_TOKENS = _catalog_capacity(
 )
 DOCS_URL = "https://dots.ai/platform/docs"
 
+# Cleanup targets: the temporary DSH_HOME copy and the generated patch file.
+# They are module globals because the atexit cleanup runs outside the function
+# that created them; an uninitialised read raised NameError on every exit.
+_DSH_HOME_TMP = None
+_PATCH_TMP = None
+_COMPACTION_PROXY = None
+
 #: The per-LLM-call policy is owned by the shared ``model_runtime`` module
 #: (whose ``llm_retry`` copy reads ``llm_policy.json``).  Keeping one schedule
 #: here means the direct-chat client and the generated DSH ``retryPolicy``
@@ -144,8 +152,13 @@ def config(args=None) -> dict:
     args = args or argparse.Namespace()
     base = (getattr(args, "base_url", None)
             or _env("PAPER_DOTS_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
-    key = (getattr(args, "api_key", None)
-           or _env("PAPER_DOTS_API_KEY") or _env("DOTS_API_KEY"))
+    # ``args > env`` also for an explicitly supplied EMPTY key: a caller that
+    # passes ``api_key=""`` is asking for a keyless endpoint (the local
+    # OpenAI-compatible case), and the ambient DOTS_API_KEY must not silently
+    # turn that into an authenticated hosted request.
+    supplied_key = getattr(args, "api_key", None)
+    key = (supplied_key if supplied_key is not None
+           else (_env("PAPER_DOTS_API_KEY") or _env("DOTS_API_KEY")))
     compaction_key = (
         _env("DOTS_API_KEY_1474")
         or _env("DOTS_AI_API_KEY_1474")
@@ -217,8 +230,22 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
         except ValueError:
             body = raw
         return e.code, body, ""
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
+    except (urllib.error.URLError, OSError, TimeoutError,
+            http.client.HTTPException) as e:
+        # BadStatusLine/IncompleteRead are HTTPException, not OSError; left
+        # uncaught they escaped chat/probe as a traceback instead of a retryable
+        # transport error.
         return 0, None, f"{type(e).__name__}: {e}"
+
+
+def _announce_retry(what: str, attempt: int, delay: float, detail: str) -> None:
+    """One retry line on stderr (the shared 10s-to-3600s schedule)."""
+    print(
+        "[paper-dots] %s failed (%s); retry %d/%d in %.0fs"
+        % (what, detail, attempt, rt.RETRY_SCHEDULE.max_retries, delay),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _request_with_retry(
@@ -322,6 +349,7 @@ def dsh_patch_text(cfg: dict) -> str:
         base_url_override=cfg["base_url"],
         context_window_override=cfg["context_window"],
         max_tokens_override=cfg["max_tokens"],
+        compaction_base_url=cfg.get("compaction_base_url") or None,
     )
 
 
@@ -390,7 +418,10 @@ def ensure_dsh_home() -> tuple:
 
 
 def _cleanup() -> None:
-    global _DSH_HOME_TMP, _PATCH_TMP
+    global _DSH_HOME_TMP, _PATCH_TMP, _COMPACTION_PROXY
+    if _COMPACTION_PROXY is not None:
+        rt.stop_compaction_proxy(_COMPACTION_PROXY)
+        _COMPACTION_PROXY = None
     if _DSH_HOME_TMP is not None:
         shutil.rmtree(_DSH_HOME_TMP, ignore_errors=True)
         _DSH_HOME_TMP = None
@@ -431,8 +462,15 @@ def _chat_output_budget(cfg: dict, prompt: str, system: str = "") -> int:
     long prompt and lets ``prompt + max_tokens`` cross the window.
     """
     cap = int(cfg.get("chat_max_tokens") or cfg["max_tokens"])
+    context = int(cfg.get("context_window") or 0)
+    # A minimal caller may supply only model/max_tokens (the repository's own
+    # older regression fixtures do). Without a declared window the output cap
+    # is the only limit; treating "no window" as zero made every such call
+    # fail with "the prompt does not fit the None-token context window".
+    if not context:
+        return max(1, cap)
     prompt_tokens = int(math.ceil((len(prompt) + len(system)) / 3.4))
-    room = int(cfg.get("context_window") or 0) - prompt_tokens - 2048
+    room = context - prompt_tokens - 2048
     if room <= 0:
         return 0
     return max(1, min(cap, room))
@@ -625,6 +663,26 @@ def _api_key_problem(cfg: dict) -> str:
     return ""
 
 
+def _start_compaction_proxy(cfg: dict) -> None:
+    """Wire the dedicated Dots compaction route to the shared retrying proxy.
+
+    The DSH compaction summarizer calls the provider directly, outside DSH's own
+    retry hook; pointing that one provider at the proxy gives the dedicated
+    compaction key the same 10s-to-3600s per-call backoff.
+    """
+    global _COMPACTION_PROXY
+    # The overlay's dots provider uses cfg["base_url"] (the --base-url override
+    # when present); the compaction route must forward to that same upstream.
+    target = rt.compaction_proxy_target(
+        _selection(cfg), base_url_override=cfg.get("base_url")
+    )
+    if not target:
+        return
+    _COMPACTION_PROXY, proxy_base = rt.start_compaction_proxy(target)
+    if _COMPACTION_PROXY is not None:
+        cfg["compaction_base_url"] = proxy_base
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -722,6 +780,7 @@ def main(argv=None) -> int:
         print(f"[dots] {cfg['base_url']} model={cfg['model']} harness=codex "
               f"effort={cfg['effort']}", file=sys.stderr)
     elif cfg["harness"] == "dsh":
+        _start_compaction_proxy(cfg)
         cmd, denv, derr = dsh_argv(cfg)
         if derr:
             print(f"dots: {derr}", file=sys.stderr)

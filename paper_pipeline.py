@@ -755,7 +755,8 @@ LEGACY AGENT BACKENDS (exact old commands; kept for backward compatibility)
                      to `PAPER_DOTS_HARNESS=codex` (the platform's documented
                      OpenAI Responses route: `model_provider=dots`,
                      `wire_api="responses"`, `DOTS_API_KEY`, web search
-                     disabled, 512K context window declared); `dsh` generates
+                     disabled, 393,000-token context window declared -- 512K is advertised
+                     but the endpoint enforces 393,000); `dsh` generates
                      an `llm-pi-ai` route over the platform's OpenAI-compatible
                      Chat Completions endpoint, `claude` uses the platform's
                      Anthropic Messages endpoint, and `chat` is a text-only
@@ -891,6 +892,25 @@ def _parts_dir() -> _Path:
     return _Path(__file__).resolve().with_name(_PARTS_DIRNAME)
 
 
+def _missing_bundle_assets() -> list:
+    """Companion modules/dirs the ordered parts import before `setup` can check.
+
+    The p00 prelude carries the manifest; p01 already imports `model_runtime`,
+    so a tree missing that module (or `paper_docx_format.py`) used to die in a
+    raw ModuleNotFoundError/ConfigError before setup's own friendly missing-asset
+    diagnostic. The preflight runs after p00 and before the rest.
+    """
+    here = _Path(__file__).resolve().parent
+    missing = []
+    for dirname in globals().get("PIPELINE_ASSET_DIRS") or ():
+        if not (here / dirname).is_dir():
+            missing.append(f"{dirname}/")
+    for name in globals().get("PIPELINE_MODULE_FILES") or ():
+        if name != _Path(__file__).name and not (here / name).is_file():
+            missing.append(str(name))
+    return missing
+
+
 def _load_parts() -> None:
     """Execute every part, in order, in THIS module's globals."""
     parts = _parts_dir()
@@ -902,9 +922,20 @@ def _load_parts() -> None:
     files = sorted(parts.glob("p[0-9][0-9]_*.py"))
     if not files:
         raise SystemExit(f"{_PARTS_DIRNAME}/ carries no implementation parts")
+    preflighted = False
     for part in files:
         code = compile(part.read_text(encoding="utf-8"), str(part), "exec")
         exec(code, globals(), globals())
+        if not preflighted and part.name.startswith("p00_"):
+            missing = _missing_bundle_assets()
+            if missing:
+                raise SystemExit(
+                    "paper_pipeline.py: the running tree is missing "
+                    f"{', '.join(missing)} beside {_Path(__file__).name}; refusing "
+                    "to start a bundle whose stages cannot run. Run the command from "
+                    "the maintained checkout (the tree that carries the loaders, "
+                    "their parts and the companion modules).")
+            preflighted = True
 
 
 _load_parts()

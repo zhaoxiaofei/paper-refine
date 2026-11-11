@@ -809,7 +809,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "prompts try the Zotero MCP service first, then the Zotero skill, and "
                          "use the `zot` CLI (pyzotero-cli) only as the fallback when both are "
                          "unavailable. "
-                         "off = no Zotero tooling (MCP service, skill or `zot` CLI); live "
+                         "off = the run policy forbids all Zotero tooling (MCP service, "
+                         "skill or `zot` CLI) and every stage prompt says so; the pipeline "
+                         "does not uninstall the harness's MCP registration or skill, so "
+                         "install with --no-zotero-mcp --no-external to remove them. Live "
                          "fields stay on the skills' manual route. "
                          "read = agents may resolve/verify references through the first "
                          "available route but never edit a citation field and never write to "
@@ -1209,9 +1212,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     psync = sub.add_parser(
         "sync-code", parents=[common],
-        help="copy the maintained paper_pipeline.py/paper_docx_format.py/"
-             "paper_redlines_adapter.py/paper_qwen_agent.py/paper_dots_agent.py/"
-             "paper_model_agent.py into a root and record their digests")
+        help="copy the maintained module bundle (paper_pipeline.py, "
+             "paper_docx_format.py, paper_redlines_adapter.py, the "
+             "qwen/dots/model adapters, model_runtime.py, llm_retry.py, "
+             "llm_policy.json, model_catalog.json, and the docx shims) into a "
+             "root and record their digests")
     psync.set_defaults(func=cmd_sync_code)
 
     ptr = sub.add_parser("trend", parents=[common],

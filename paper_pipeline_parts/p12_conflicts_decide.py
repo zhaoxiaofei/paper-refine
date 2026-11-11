@@ -8573,14 +8573,12 @@ def cmd_sync_code(args) -> None:
     `setup` freezes the driver and its sibling modules for reproducibility. When
     the maintained tree gains a rule (the 2026-10-19 layout scans), an existing
     root keeps running the old bundle until the operator deliberately replaces
-    it. This command is that deliberate replacement: it copies the maintained
+    it. That replacement copies the `PIPELINE_MODULE_FILES` bundle --
     `paper_pipeline.py`, `paper_docx_format.py`, `paper_redlines_adapter.py`,
     `paper_qwen_agent.py`, `paper_dots_agent.py`, `paper_model_agent.py`,
-    `docx2pdf.sh` and `docxcompare.sh` into the root
-    (preserving each source file's mode, so the shell shims stay executable),
-    records their new digests (so `refuse_foreign_pipeline` can
-    tell a synced root from a drifted one) and prints what changed. It never
-    touches the package, the pinned bytes, the review or any manuscript file.
+    `model_runtime.py`, `llm_retry.py`, `llm_policy.json`, `model_catalog.json`,
+    `docx2pdf.sh` and `docxcompare.sh` -- into the root, preserving each mode and
+    recording the new digests; it never touches the package or pinned bytes.
     """
     root = Path(args.root).resolve()
     if not (root / "state.json").is_file():

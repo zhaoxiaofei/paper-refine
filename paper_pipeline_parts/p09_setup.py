@@ -3489,10 +3489,10 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         else agent_choice(os.environ.get("PAPER_AGENT_HARNESS", "")))
     _raw_model = (None if _legacy_agent else
                   (_cli_model or os.environ.get("PAPER_AGENT_MODEL")))
-    if agent_model_is_endpoint(_raw_model):
-        _new_model = str(_raw_model).strip()
-    else:
-        _new_model = agent_choice(_raw_model) if _raw_model else ""
+    try:
+        _new_model = agent_model_choice(_raw_model) if _raw_model else ""
+    except ValueError as _model_exc:
+        die(f"--agent-model: {_model_exc}", code=2)
     _new_model_name = (None if _legacy_agent else
                        (_cli_model_name or os.environ.get("PAPER_AGENT_MODEL_NAME")))
     _new_api_key = (None if _legacy_agent else
@@ -3751,21 +3751,27 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # which makes the panel a self-consistency instrument. The operator kept one
     # Codex backend on 2026-09-21; the least the pipeline owes the reader is to
     # record it, so the decision is never mistaken for an independent measure.
+    _record_agent_model = (_model_runtime.redact_endpoint_url(agent_model)
+                           if agent_model_is_endpoint(agent_model) else agent_model)
+    _record_judge_model = (_model_runtime.redact_endpoint_url(judge_model)
+                           if agent_model_is_endpoint(judge_model) else judge_model)
     ctx.state["judge_provider"] = {
         "same_as_producer": bool(not judge_manual and cmd and judge_cmd == list(cmd)),
         "producer": (cmd[0] if cmd else None),
         "producer_harness": agent_harness,
-        "producer_model": agent_model,
+        "producer_model": _record_agent_model,
         "producer_model_name": (None if not agent_model_is_endpoint(agent_model)
                                 else _new_model_name),
-        "producer_endpoint": (agent_model if agent_model_is_endpoint(agent_model) else None),
+        "producer_endpoint": (_record_agent_model
+                              if agent_model_is_endpoint(agent_model) else None),
         "producer_prep_keys": sorted(_new_prep) if _new_prep else [],
         "judge": (judge_cmd[0] if judge_cmd else None),
         "judge_harness": judge_harness,
-        "judge_model": judge_model,
+        "judge_model": _record_judge_model,
         "judge_model_name": (None if not agent_model_is_endpoint(judge_model)
                              else _judge_name),
-        "judge_endpoint": (judge_model if agent_model_is_endpoint(judge_model) else None),
+        "judge_endpoint": (_record_judge_model
+                           if agent_model_is_endpoint(judge_model) else None),
         "judge_prep_keys": sorted(_judge_prep) if _judge_prep else [],
         "judge_manual": bool(judge_manual),
         "note": ("producer and judge resolve to the SAME backend: the panel measures the model "
@@ -3791,9 +3797,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if args.timeout is None and manual and not judge_manual:
         judge_timeout = DEFAULTS["timeout"]
     if not manual:
-        print(f"[run] agent command: {redact_secrets(' '.join(cmd))}")
+        print(f"[run] agent command: {' '.join(redact_argv(cmd))}")
     if judge_manual or judge_cmd != cmd:
-        print("[run] judge sessions: " + ("manual" if judge_manual else redact_secrets(" ".join(judge_cmd))))
+        print("[run] judge sessions: " + ("manual" if judge_manual else " ".join(redact_argv(judge_cmd))))
     retries = max(0, int(args.retries))
     retry_backoff = max(0, int(getattr(args, "retry_backoff", DEFAULTS["retry_backoff"])))
     retry_backoff_max = max(0, int(getattr(args, "retry_backoff_max",
@@ -3801,14 +3807,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     ctx.state["run_policy"] = {
         "agent": agent_label,
         "agent_harness": agent_harness,
-        "agent_model": agent_model,
+        "agent_model": _record_agent_model,
         "agent_model_name": _new_model_name if agent_model_is_endpoint(agent_model) else None,
-        "agent_endpoint": agent_model if agent_model_is_endpoint(agent_model) else None,
+        "agent_endpoint": (_record_agent_model
+                           if agent_model_is_endpoint(agent_model) else None),
         "agent_model_prep_keys": sorted(_new_prep) if _new_prep else [],
         "agent_legacy": _legacy_agent,
         "judge_agent": judge_label,
         "judge_agent_harness": judge_harness,
-        "judge_agent_model": judge_model,
+        "judge_agent_model": _record_judge_model,
         "judge_agent_model_name": (None if not agent_model_is_endpoint(judge_model)
                                    else _judge_name),
         "judge_agent_model_prep_keys": sorted(_judge_prep) if _judge_prep else [],

@@ -5541,7 +5541,12 @@ def ensure_external_content_rule(text: str) -> str:
     never repeats it.
     """
     text = text or ""
-    if _SECURITY_RULE_MARKER in text:
+    # Detect the GENUINE block, not the short marker: the marker can be quoted
+    # by untrusted package/reviewer content, and the old substring test then
+    # suppressed the rule entirely (prompt-injection bypass). The full block is
+    # what this wrapper actually adds, so its presence means the prompt already
+    # carries the rule.
+    if EXTERNAL_CONTENT_RULE in text:
         return text
     return EXTERNAL_CONTENT_RULE + text
 
@@ -5595,7 +5600,9 @@ def with_context_budget(text: str) -> str:
     written by an operator or an external tool.
     """
     text = ensure_external_content_rule(text or "")
-    if "=== CONTEXT BUDGET" in text:
+    # Same substring-spoofing class as the security rule: a reviewer quote of
+    # the marker must not suppress the full context-budget block.
+    if CONTEXT_BUDGET_RULE in text:
         return text
     return text.rstrip() + "\n" + CONTEXT_BUDGET_RULE
 
@@ -6251,7 +6258,9 @@ ZOTERO_LEDGER_RULE_JUDGE = """name the item keys you checked, and what you concl
 ZOTERO_CLI_RULE_OFF = """ZOTERO TOOLING — SWITCHED OFF for this run:
   * The pipeline was configured with `--zotero off`. Do NOT use the Zotero MCP service (do not
     call any `zotero_*` or `mcp__zotero__*` tool), do not use the Zotero skill, do not run the
-    `zot` CLI, and do not attempt a library read or write. Follow the skills' manual route for
+    `zot` CLI, and do not attempt a library read or write. The pipeline does not uninstall the
+    harness's MCP registration or skill; they remain present but are OUT OF POLICY for this run.
+    Follow the skills' manual route for
     every live field or citation you cannot verify from the corpus itself: an unreadable or
     unverifiable field goes to the manual-verification list / MANUAL_STEPS.md, never into a guess
     and never into an edit. This overrides any earlier sentence in this prompt -- and any later
@@ -6259,13 +6268,14 @@ ZOTERO_CLI_RULE_OFF = """ZOTERO TOOLING — SWITCHED OFF for this run:
     or the `zot` CLI as available tooling."""
 ZOTERO_CLI_RULE_OFF_BASE = ZOTERO_CLI_RULE_OFF
 ZOTERO_CLI_RULE_OFF += ("\n(The field-continuity rules below stay in force with the CLI switched "
-                        "off: the bundled validate_zotero_docx.py is an offline, read-only DOCX "
-                        "checker -- it does not use the `zot` CLI or the network.)\n"
+                        "off: the externally installed validate_zotero_docx.py (when present, "
+                        "under $ZOTERO_USE_ROOT) is an offline, read-only DOCX checker -- it "
+                        "does not use the `zot` CLI or the network.)\n"
                         + ZOTERO_FIELD_CONTINUITY_RULE)
 ZOTERO_CLI_RULE_OFF_NOTE = ("\n(The field-continuity rules below stay in force with the CLI "
-                            "switched off: the bundled validate_zotero_docx.py is an offline, "
-                            "read-only DOCX checker -- it does not use the `zot` CLI or the "
-                            "network.)\n")
+                            "switched off: the externally installed validate_zotero_docx.py "
+                            "(when present, under $ZOTERO_USE_ROOT) is an offline, read-only "
+                            "DOCX checker -- it does not use the `zot` CLI or the network.)\n")
 
 
 def m18_blocks(limit: int) -> dict:

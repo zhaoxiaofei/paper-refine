@@ -78,6 +78,21 @@ relpath() {
     python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$1" "$2"
 }
 
+# `create-test-env.sh` may fall back to a prefix under the checkout when
+# conda's envs directory is read-only; `conda run -n` would then fail silently.
+# Resolve the environment the same way the create script chose it.
+test_env_run() {
+    if [ -n "${PAPER_REFINE_TEST_PREFIX:-}" ]; then
+        conda run -p "${PAPER_REFINE_TEST_PREFIX}" "$@"
+    elif conda run -n "$ENV_NAME" python -c 'import sys' >/dev/null 2>&1; then
+        conda run -n "$ENV_NAME" "$@"
+    elif [ -x "$REPO_ROOT/tmp/$ENV_NAME/bin/python" ]; then
+        conda run -p "$REPO_ROOT/tmp/$ENV_NAME" "$@"
+    else
+        return 1
+    fi
+}
+
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
@@ -113,7 +128,12 @@ case "$DEPS_DIR" in
     /*) ;;
     *) DEPS_DIR="$REPO_ROOT/$DEPS_DIR" ;;
 esac
-DEPS_DIR=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$DEPS_DIR")
+# `python3` is one of the prerequisites probed below; using it unconditionally
+# here made a machine without it die with "python3: command not found" before
+# the script could print the required-command guidance.
+if have python3; then
+    DEPS_DIR=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$DEPS_DIR")
+fi
 if [ "$DRY_RUN" = 0 ] && [ "$DO_EXTERNAL" = 1 ]; then
     mkdir -p -- "$DEPS_DIR"
 fi
@@ -171,9 +191,9 @@ if [ "$DO_CONDA" = 1 ]; then
             fail_step "scripts/create-test-env.sh failed for $ENV_NAME"
         fi
         if [ "$INSTALL_ZOT_CLI" = 1 ] && [ "$DRY_RUN" = 0 ] \
-                && conda run -n "$ENV_NAME" python -c 'import sys' >/dev/null 2>&1; then
+                && test_env_run python -c 'import sys' >/dev/null 2>&1; then
             note "installing the optional pyzotero-cli (`zot`) command"
-            if ! run conda run -n "$ENV_NAME" python -m pip install \
+            if ! run test_env_run python -m pip install \
                     --disable-pip-version-check pyzotero-cli; then
                 warn "pyzotero-cli could not be installed; the Zotero MCP/skill routes still work"
             fi
@@ -498,10 +518,18 @@ if [ "$DO_CONDA" = 1 ]; then
 else
     note "conda env: skipped (--no-conda)"
 fi
-note "shell env: source ./activate-deps.sh"
+if [ "$DRY_RUN" = 1 ]; then
+    note "shell env: would write ./deps.env and ./activate-deps.sh (dry run; do not source them yet)"
+else
+    note "shell env: source ./activate-deps.sh"
+fi
 note "data:      the shipped venue profiles are local; venue exemplars are fetched per run by"
 note "           'add-venue' and are not a global dependency"
-note "run:       python paper_pipeline.py setup --source <manuscript-dir> --root <run-root>"
+if [ "$DRY_RUN" = 1 ]; then
+    note "run:       (after a real install) python paper_pipeline.py setup --source <manuscript-dir> --root <run-root>"
+else
+    note "run:       python paper_pipeline.py setup --source <manuscript-dir> --root <run-root>"
+fi
 note "Zotero:    MCP service first, Zotero skill second, \`zot\` CLI fallback;"
 note "           if all three are unavailable, the stage records manual verification."
 if [ "${#FAILED[@]}" -gt 0 ]; then

@@ -91,9 +91,15 @@ def _merge_policy(document: Mapping[str, Any]) -> Dict[str, Any]:
     retry["max_retries"] = int(retry["max_retries"])
     retry["jitter_ratio"] = float(retry["jitter_ratio"])
     retry["retry_after_cap_seconds"] = float(retry["retry_after_cap_seconds"])
+    # A string is iterable, so the old code accepted "429" and expanded it to
+    # the character codes [2, 4, 9] instead of the one HTTP status 429.
     statuses = retry.get("retryable_http_statuses") or []
+    if not isinstance(statuses, (list, tuple)):
+        raise ValueError("retry.retryable_http_statuses must be a list of integers")
     retry["retryable_http_statuses"] = sorted({int(status) for status in statuses})
     codes = retry.get("retryable_error_codes") or []
+    if not isinstance(codes, (list, tuple)):
+        raise ValueError("retry.retryable_error_codes must be a list of strings")
     retry["retryable_error_codes"] = sorted({str(code) for code in codes if code})
     if retry["initial_delay_seconds"] <= 0:
         raise ValueError("retry.initial_delay_seconds must be positive")
@@ -103,6 +109,29 @@ def _merge_policy(document: Mapping[str, Any]) -> Dict[str, Any]:
         raise ValueError("retry.max_retries must be non-negative")
     if not 0.0 <= retry["jitter_ratio"] <= 1.0:
         raise ValueError("retry.jitter_ratio must be between 0 and 1")
+    if retry["retry_after_cap_seconds"] < 0:
+        raise ValueError("retry.retry_after_cap_seconds must be non-negative")
+    # The compaction tuning fields are consumed by int(...) in the generated
+    # DSH patch; a typo used to load "successfully" and then crash patch
+    # generation, defeating load_policy's documented fallback.
+    compaction = policy["compaction"]
+    for key in ("compaction_retries", "max_overflow_retries"):
+        compaction[key] = int(compaction.get(key) or 0)
+        if compaction[key] < 0:
+            raise ValueError("compaction.%s must be non-negative" % key)
+    if compaction.get("summarization_max_tokens") is not None:
+        compaction["summarization_max_tokens"] = int(
+            compaction["summarization_max_tokens"]
+        )
+        if compaction["summarization_max_tokens"] <= 0:
+            raise ValueError("compaction.summarization_max_tokens must be positive")
+    compaction["compaction_stream_idle_timeout_ms"] = int(
+        compaction.get("compaction_stream_idle_timeout_ms") or 0
+    )
+    if compaction["compaction_stream_idle_timeout_ms"] < 0:
+        raise ValueError(
+            "compaction.compaction_stream_idle_timeout_ms must be non-negative"
+        )
     return policy
 
 
@@ -293,7 +322,17 @@ class _RetryProxyHandler(http.server.BaseHTTPRequestHandler):
                     return
                 last_status = status
                 last_headers = headers
-                last_body = response.read()
+                try:
+                    last_body = response.read()
+                except http.client.HTTPException as exc:
+                    # A truncated 5xx error body is exactly the failure class the
+                    # proxy exists for: retry it instead of letting the exception
+                    # kill the handler thread and close the client connection.
+                    proxy.log(
+                        "%s: upstream %s body read failed after HTTP %d: %s"
+                        % (proxy.name, method, status, exc)
+                    )
+                    last_body = b""
             finally:
                 response.close()
                 connection.close()

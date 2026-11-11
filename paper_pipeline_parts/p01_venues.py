@@ -3388,18 +3388,17 @@ def agent_model_is_endpoint(value) -> bool:
 
 
 def agent_model_choice(value):
-    """`--agent-model` accepts a known model name OR an http(s) endpoint URL."""
-    raw = str(value).strip()
-    if agent_model_is_endpoint(raw):
-        if not raw.split("://", 1)[1].strip():
-            raise ValueError(f"empty endpoint URL: {raw!r}")
-        return raw
-    slug = agent_choice(raw)
-    if slug not in AGENT_MODELS:
-        raise ValueError(
-            f"unknown model {raw!r}; use one of {', '.join(AGENT_MODEL_CHOICES)}, "
-            f"or an http(s) chat-completions endpoint URL")
-    return slug
+    """`--agent-model` accepts a known model name OR an http(s) endpoint URL.
+
+    Delegate to the shared runtime so the provider ids the runtime accepts
+    (``gpt-6.1-sol``, ``qwen3.8-27b``, ``dots3-note-prev``, ...) are accepted
+    here too, and so a malformed endpoint URL is rejected before a session
+    starts instead of passing a non-empty host check and crashing later.
+    """
+    try:
+        return _model_runtime.agent_model_choice(value)
+    except _model_runtime.ConfigError as exc:
+        raise ValueError(str(exc)) from None
 
 
 def agent_model_label(model: str) -> str:
@@ -3415,7 +3414,8 @@ def agent_pair_supported(harness: str, model: str) -> bool:
         # use a Responses custom provider, and Claude Code only Anthropic
         # Messages, so neither can be guessed from a chat-completions URL.
         return harness == "dsh"
-    info = AGENT_MODELS.get(model) or {}
+    canonical = _model_runtime.normalize_agent_model(model)
+    info = AGENT_MODELS.get(canonical) or {}
     return harness in (info.get("harnesses") or ())
 
 
