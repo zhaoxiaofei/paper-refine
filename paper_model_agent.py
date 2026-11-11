@@ -61,6 +61,9 @@ except ImportError:  # a test loader may not put the submodule root on sys.path
     _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent-common"))
     from agent_common import model_runtime as rt
 
+from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
+from agent_common.dsh_events import line_turn_end_failed as _line_turn_end_failed
+
 DEFAULT_HARNESS = rt.DEFAULT_AGENT_HARNESS
 DEFAULT_MODEL = "deepseek-flash"
 
@@ -567,11 +570,7 @@ def dsh_argv(cfg: dict) -> tuple:
         env[cfg["api_key_env"]] = cfg.get("api_key") or "dummy"
     elif cfg["deepseek_key"]:
         env.setdefault("DEEPSEEK_API_KEY", cfg["deepseek_key"])
-    argv = ["dsh", "--profile", "headless"]
-    if patch:
-        argv += ["--patch", patch]
-    argv += ["--json", "-"]
-    return (argv, env, "")
+    return (_build_dsh_argv(patch_path=patch or None), env, "")
 
 
 def codex_argv(cfg: dict, extra: list = None) -> list:
@@ -619,35 +618,7 @@ def _echo_stdout(data: bytes) -> None:
 
 def _dsh_turn_failed(line: bytes):
     """True/False for a turn-end event line, None for every other line."""
-    s = line.strip()
-    if not s.startswith(b"{"):
-        return None
-    try:
-        event = json.loads(s)
-    except ValueError:
-        return None
-    if not isinstance(event, dict):
-        return None
-    phase = str(event.get("phase") or "").lower()
-    if event.get("type") != "turn_end" and not (
-            event.get("type") == "status" and phase == "turn_end"):
-        return None
-    status = str(event.get("status") or "").lower()
-    reason = event.get("reason")
-    reason_kind = ""
-    if isinstance(reason, dict):
-        reason_kind = str(reason.get("kind") or "").lower()
-    kind = str(event.get("kind") or reason_kind).lower()
-    if kind in ("error", "failed"):
-        return True
-    ok = ("ok", "success", "succeeded", "completed", "complete", "done", "finished")
-    if status:
-        return status not in ok
-    if kind:
-        return kind not in ok
-    return False
-
-
+    return _line_turn_end_failed(line)
 def run_dsh_streaming(cmd: list, env: dict) -> tuple:
     """(returncode, turn_failed) with the harness's stdout ECHOED, not buffered."""
     proc = subprocess.Popen(cmd, stdin=sys.stdin, stdout=subprocess.PIPE,

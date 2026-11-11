@@ -81,6 +81,10 @@ except ImportError:  # a test loader may not put the submodule root on sys.path
     _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent-common"))
     from agent_common import model_runtime as rt
 
+from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
+from agent_common.chat import completion_budget, finish_reason_error, message_text
+from agent_common.dsh_events import line_turn_end_failed as _line_turn_end_failed
+
 #: The shared model catalog (canonical: ``repos/agent-common/agent_common/model_catalog.json``;
 #: this checkout carries an identical copy).  The fallback keeps a checkout
 #: refreshed from upstream, which may not have the copy yet, working.
@@ -552,35 +556,16 @@ def dsh_argv(cfg: dict) -> tuple:
         f.write(dsh_patch_text(cfg))
     _PATCH_TMP = patch
     env = dict(os.environ, DSH_HOME=home, PAPER_QWEN_API_KEY=cfg["api_key"])
-    return (["dsh", "--profile", "headless", "--patch", patch, "--json", "-"],
-            env, "")
+    return (_build_dsh_argv(patch_path=patch), env, "")
 
 
 def _chat_output_budget(cfg: dict, prompt: str, system: str = "") -> int:
-    """The single-shot output cap, or 0 when the prompt cannot fit.
-
-    A direct completion has no harness to continue a truncated reply: one
-    response must hold the reasoning trace plus the answer, so it uses the
-    model's ``chat_max_tokens`` instead of the smaller harness ``max_tokens``.
-    Code and JSON run closer to 3.4 characters per token than to four, so this
-    estimate matches paper-refine-eval's; dividing by four underestimates a
-    long prompt and lets ``prompt + max_tokens`` cross the window.
-    """
-    cap = int(cfg.get("chat_max_tokens") or cfg["max_tokens"])
-    context = int(cfg.get("context_window") or 0)
-    # A minimal caller may supply only model/max_tokens (the repository's own
-    # older regression fixtures do). Without a declared window the output cap
-    # is the only limit; treating "no window" as zero made every such call
-    # fail with "the prompt does not fit the None-token context window".
-    if not context:
-        return max(1, cap)
-    prompt_tokens = int(math.ceil((len(prompt) + len(system)) / 3.4))
-    room = context - prompt_tokens - 2048
-    if room <= 0:
-        return 0
-    return max(1, min(cap, room))
-
-
+    """The single-shot output cap, or 0 when the prompt cannot fit."""
+    return completion_budget(
+        int(cfg.get("context_window") or 0),
+        int(cfg.get("chat_max_tokens") or cfg["max_tokens"]),
+        len(prompt) + len(system),
+    )
 def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
     """(text, error) from one /v1/chat/completions call."""
     messages = []
@@ -607,21 +592,11 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
         # max_tokens PREFIX; `content_filter` is a partial answer the provider
         # refused to finish. Both used to pass as success (F30/F68).
         finish_reason = choice.get("finish_reason")
-        if finish_reason == "length":
-            return "", (f"the chat completion was truncated (finish_reason='length', "
-                        f"max_tokens={budget}): the answer is incomplete")
-        if finish_reason not in (None, "stop", "end_turn", "stop_sequence",
-                                 "tool_calls", "function_call"):
-            return "", (f"the chat completion did not finish normally "
-                        f"(finish_reason={finish_reason!r}): the answer is incomplete")
+        problem = finish_reason_error(finish_reason, budget)
+        if problem:
+            return "", problem
         message = choice["message"]
-        content = message.get("content")
-        if isinstance(content, list):
-            # The chat API may return content parts; `str(list)` used to ship a
-            # Python repr as the answer.
-            content = "".join(str(part.get("text") or "")
-                              for part in content
-                              if isinstance(part, dict) and part.get("type") == "text")
+        content = message_text(message.get("content"))
         if not isinstance(content, str) or not content.strip():
             # Qwen3 reasoning responses can carry the text in `reasoning_content`
             # and leave `content` null. That is an INTERMEDIATE reasoning
@@ -670,45 +645,8 @@ def _echo_stdout(data: bytes) -> None:
 
 
 def _dsh_turn_failed(line: bytes):
-    """True/False for a turn-end event line, None for every other line.
-
-    Two shapes are accepted because the harness has emitted both: the older
-    `{"type":"turn_end","status":...}` record and the current
-    `{"type":"status","phase":"turn_end","reason":{"kind":...}}` record. A
-    completion the adapter cannot parse must not turn a provider error into a
-    successful stage, so the allowlist is explicit either way.
-    """
-    s = line.strip()
-    if not s.startswith(b"{"):
-        return None
-    try:
-        event = json.loads(s)
-    except ValueError:
-        return None
-    if not isinstance(event, dict):
-        return None
-    phase = str(event.get("phase") or "").lower()
-    if event.get("type") != "turn_end" and not (
-            event.get("type") == "status" and phase == "turn_end"):
-        return None
-    status = str(event.get("status") or "").lower()
-    reason = event.get("reason")
-    reason_kind = ""
-    if isinstance(reason, dict):
-        reason_kind = str(reason.get("kind") or "").lower()
-    kind = str(event.get("kind") or reason_kind).lower()
-    if kind in ("error", "failed"):
-        return True
-    # An explicit allowlist, not a denylist: `cancelled`, `interrupted`,
-    # `aborted`, `timeout` and any future non-success status are incomplete.
-    ok = ("ok", "success", "succeeded", "completed", "complete", "done", "finished")
-    if status:
-        return status not in ok
-    if kind:
-        return kind not in ok
-    return False
-
-
+    """True/False for a turn-end event line, None for every other line."""
+    return _line_turn_end_failed(line)
 def run_dsh_streaming(cmd: list, env: dict) -> tuple:
     """(returncode, turn_failed) with the harness's stdout ECHOED, not buffered.
 
