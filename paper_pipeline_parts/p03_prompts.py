@@ -288,17 +288,29 @@ def pipeline_fallback_paths() -> list:
 
 
 def marker_root_rule(out_dir: str = "") -> str:
-    """WHERE the completion marker goes, stated the same way in every prompt.
+    """WHERE and HOW the completion marker is written, stated in every prompt.
 
     The location is part of the contract (the postcheck reads the sandbox root),
     and a real audit session wrote the marker one directory down because its own
     directives said "write everything inside `audit/`" one sentence before the
     marker instruction -- see SIGNAL_ALT_DIRS.
+
+    HOW is the other half.  On 2026-11-12 three revise attempts left a complete
+    package (revision_report.json, work/R6_language.md, a fully disposed M30)
+    and failed on the missing marker alone: the model ended its last turn with a
+    prose summary instead of a file write, and a turn cap or a stalled session
+    then lost a 2.5-hour stage over one line of JSON.  The stage blocks still
+    say WHEN (after the self-check); this rule adds that the marker is a tool
+    call before any closing message, which is a mechanism, not a reordering.
     """
     inside = f" (not inside `{out_dir}/`, and not anywhere else)" if out_dir else ""
     return (f"LOCATION, and it is part of the contract: `{MARKER_FILE}` goes in the SANDBOX ROOT "
             f"-- the directory that holds `PROMPT.md` (and `base/` for the stages that have "
-            f"one){inside}.")
+            f"one){inside}. "
+            f"HOW: it is written with your file-write tool, as the last ACTION of the session -- "
+            f"never as prose. A closing summary is not a step of the work: if you are about to "
+            f"send one and the marker is not on disk, write the marker first. A stage whose "
+            f"deliverables are complete but whose marker is missing is unfinished.")
 
 
 # The contradiction rule EVERY agent prompt carries. Prompts restate rules (the

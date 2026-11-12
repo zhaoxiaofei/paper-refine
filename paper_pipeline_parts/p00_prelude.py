@@ -260,6 +260,17 @@ from pathlib import Path
 #     order that a Word/Zotero refresh rewrites -- FMT-Z1..Z5 -- with the
 #     `zotero-check` CLI and a version-to-version parity gate), each with its own
 #     coverage row and artifact; the judge's frozen map is unchanged.
+# 3.11.1 -- THE COMPLETION MARKER IS A TOOL CALL, NOT A CLOSING MESSAGE. Every
+#   stage prompt already stated WHERE the marker goes; on 2026-11-12 the last of
+#   six revise attempts (three archived sandboxes) left a complete package
+#   (revision_report.json, R6_language.md, a fully disposed M30) and failed on
+#   the missing marker alone, because the session ended its last turn with
+#   prose instead of the marker write. `marker_root_rule()` now states HOW:
+#   the marker is written with the file-write tool, before any closing message,
+#   and a final answer without it is an unfinished stage. The stage blocks keep
+#   WHEN (after the self-check), so the change reorders nothing and relaxes no
+#   gate; it is shared text, so `--execution-profile high` and `medium` stay
+#   normatively identical (rule 12).
 # 3.11.0 -- MODEL / HARNESS SPLIT (`--agent-model` + `--agent-harness`, and the
 #   same pair for judges). The old `--agent` / `--judge-agent` names remain as
 #   legacy shortcuts with their exact old commands. The new axes are:
@@ -349,7 +360,7 @@ from pathlib import Path
 #   sidecar string and degenerate intervals in a shipped source table all
 #   survived every layer in real runs -- and the discovery round's own probes
 #   had read the very table and reported "no anomalies".
-VERSION = "3.11.0"
+VERSION = "3.11.1"
 STATE_VERSION = 3
 # The driver executes these siblings; a root freezes all of them. Recording only
 # the driver let a root run new code with an old formatter (the round-2 case).
