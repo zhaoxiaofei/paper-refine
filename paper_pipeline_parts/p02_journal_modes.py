@@ -6261,8 +6261,8 @@ ZOTERO_CLI_RULE_OFF = """ZOTERO TOOLING — SWITCHED OFF for this run:
   * The pipeline was configured with `--zotero off`. Do NOT run the `zot` CLI.
     Do NOT use the Zotero MCP service (do not call any `zotero_*` or `mcp__zotero__*` tool),
     and do not use the Zotero skill. Do not attempt a library read or write. The pipeline does
-    not uninstall the harness's MCP registration or skill; they remain present but are OUT OF
-    POLICY for this run.
+    not uninstall the harness's MCP registration or skill; they remain present but are
+    OUT OF POLICY for this run.
     Follow the skills' manual route for
     every live field or citation you cannot verify from the corpus itself: an unreadable or
     unverifiable field goes to the manual-verification list / MANUAL_STEPS.md, never into a guess

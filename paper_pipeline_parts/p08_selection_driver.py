@@ -1618,7 +1618,7 @@ def _probe_dsh_headless(exe: str) -> str:
                 "import uses `node:util` parseEnv).\n"
                 "       Install AND run it under the same newer node (`nvm use 22` && "
                 "`npm i -g @deepseek-ai/dsh@alpha`, then run the pipeline with node 22 first "
-                "on PATH), or run the stages on another backend (--agent codex|claude|manual, "
+                "on PATH), or run the stages on another backend (--manual, "
                 "or --agent-cmd)")
     # The other half of the same mistake: the harness IS started by a newer node
     # than the one it was installed for, so its native binding does not match
@@ -1630,7 +1630,7 @@ def _probe_dsh_headless(exe: str) -> str:
                 "binding found ...`), so it cannot boot.\n"
                 "       Reinstall it under the node the pipeline will use (`nvm use 22` && "
                 "`npm i -g @deepseek-ai/dsh@alpha`), or run the stages on another backend "
-                "(--agent codex|claude|manual, or --agent-cmd)")
+                "(--manual, or --agent-cmd)")
     if "headless" not in text.lower():
         return ""                        # not the app this preset speaks to: say nothing
     if "--json" in text and "stdin" in text:
@@ -1649,7 +1649,7 @@ def _probe_dsh_headless(exe: str) -> str:
             "session of this backend would fail with a usage error.\n"
             "       Upgrade it (`npm i -g @deepseek-ai/dsh@alpha`; the contract is "
             "verified against dsh 0.2.1-alpha.4 and 0.2.0-rc.2), run the stages on another "
-            "backend (--agent codex|claude|manual), or point --agent-cmd at your own CLI")
+            "backend (--manual), or point --agent-cmd at your own CLI")
 
 
 _HARNESS_PROBE_CACHE = {}
@@ -2321,7 +2321,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
             time.sleep(max(2, poll))
     except KeyboardInterrupt:
         ctx.save_state()
-        print("\n[manual] interrupted; state saved. Re-run `run --agent manual` to continue "
+        print("\n[manual] interrupted; state saved. Re-run `run --manual` to continue "
               "(staging is respected: prompts are only printed once their dependencies exist).")
         sys.exit(130)
     bump_attempt(rec)
@@ -2482,7 +2482,7 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     rec = ctx.run(rid)
                     sb = ctx.sandbox_of(rec)
                     print(f"[manual] {rid}: paste {sb / 'PROMPT.md'} (cwd = {sb.resolve()}); "
-                          f"then re-run `run --agent manual`")
+                          f"then re-run `run --manual`")
                 return False, True
             for rid in to_execute:
                 manual_run_one(ctx, ctx.run(rid), poll, timeout)
@@ -4049,7 +4049,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             if nowait:
                 print(f"[manual] {e['id']} (round {r}, {e['stage']}): paste "
                       f"{sb / 'PROMPT.md'} (cwd = {sb.resolve()}); then re-run "
-                      f"`run --agent manual`")
+                      f"`run --manual`")
                 continue
             print(f"[manual] {e['id']} (round {r}, {e['stage']}): waiting for the completion "
                   f"signal; paste {sb / 'PROMPT.md'} with cwd = {sb.resolve()}")

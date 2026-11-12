@@ -80,9 +80,9 @@ def test_f01_f36_f43() -> None:
           bool(m) and int(m.group(1)) == suites, f"README={m and m.group(1)} tree={suites}")
 
     helped = run_py(WS / "paper_pipeline.py", "--help").stdout
-    check("F36 --help accepts the qwen and dots agents the parser accepts",
-          "[--agent codex|claude|dsh|qwen|dots|manual]" in helped
-          and "[--judge-agent codex|claude|dsh|qwen|dots|manual]" in helped)
+    check("F36 --help advertises the run/judge pair and manual mode",
+          "[--agent-harness dsh|gpt-codex|claude-code]" in helped
+          and "[--manual]" in helped and "[--judge-manual]" in helped)
     check("F36 AGENT_CHOICES still carries qwen and dots",
           "qwen" in pp.AGENT_CHOICES and "dots" in pp.AGENT_CHOICES)
 

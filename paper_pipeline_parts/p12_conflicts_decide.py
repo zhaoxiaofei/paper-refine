@@ -48,7 +48,6 @@ _JUDGE_CONFLICT_TOKEN_RE = re.compile(r"[a-z][a-z0-9_.\-/]{2,}")
 _JUDGE_CONFLICT_NUMBER_RE = re.compile(
     r"(?<![\w.])([-\u2212]?(?:\d[\d,]*(?:\.\d+)?|\.\d+))")
 
-
 def _conflict_numbers(text, floor: float = 10.0) -> set:
     """Quantitative numbers in a claim/message; ids and panel letters are skipped.
 
@@ -77,7 +76,6 @@ def _conflict_numbers(text, floor: float = 10.0) -> set:
         if abs(v) >= float(floor) or is_decimal or is_percent:
             out.add(v if v != int(v) else int(v))
     return out
-
 
 def _conflict_tokens(text) -> set:
     toks = {t for t in _JUDGE_CONFLICT_TOKEN_RE.findall(str(text or "").lower())
@@ -9465,6 +9463,22 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         print("No completed rounds yet; nothing to decide.")
         for p in problems:
             print(f"  - {p}")
+        # reports/decision.json's `readiness` block is what the status readme
+        # points at; this branch used to exit before the decision.json write
+        # below, leaving that pointer dangling.
+        _no_round = {"submission_ready": False, "blocking_findings": 1,
+                     "advisory_findings": 0,
+                     "findings": [{"detail": "no round has completed, so there is no "
+                                              "published package to assess"}]}
+        try:
+            write_json_atomic(ctx.reports_dir / "decision.json", {
+                "generated": utcnow(), "pipeline_root": str(ctx.root),
+                "version": VERSION, "problems": list(problems), "rounds": [],
+                "certification": {"certified": False, "submission_ready": False,
+                                  "exit_code": 2},
+                "readiness": _no_round, "exit_code": 2})
+        except OSError as e:
+            print(f"[decide] WARNING: could not write reports/decision.json: {e}")
         # The sibling status readme is documented in README.md as the record
         # of the skip when no winner/pin exists, and write_final_clean_readme()
         # says decide always writes it. This branch used to exit before the
@@ -9981,22 +9995,3 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         print("[decide] --require-clean-captions: caption length is advisory in this pipeline "
               "and can no longer fail a decision (see the NOTE above for the suggested-length "
               "report).")
-
-
-def cmd_run_decide(args) -> None:
-    """`run`, then `decide`, in series, honouring decide's flags.
-
-    `run` holds the root lock for its whole phase and releases it when it
-    returns; `decide` then takes the lock for its own writes (reports,
-    decision.json, final_clean_version/). The digest cache stays OFF for that
-    phase: it rewrites files it hashed, and a same-size rewrite inside one
-    timestamp tick would otherwise reuse the stale digest (main() left the cache
-    off because `run-decide` is not a read-only command). A hard error inside
-    `run` (a `die()`) propagates and the decide phase is skipped -- deciding a
-    root that could not even be started would only repeat the same error.
-    """
-    cmd_run(args)
-    note = configure_hash_cache_for_command("decide", getattr(args, "root", None))
-    if note:
-        print(f"[run-decide] note: {note}")
-    cmd_decide(args)

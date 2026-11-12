@@ -198,6 +198,46 @@ if [ "${#MISSING_TOOLS[@]}" -gt 0 ]; then
     fi
 fi
 
+# ---- required agent-common submodule --------------------------------------
+# `agent-common/` is a git submodule the pipeline imports before any stage can
+# start, and a plain `git clone` leaves it empty. Initialize it here so the
+# documented quick start works; when this checkout is not a git clone, name the
+# command instead of failing later with the loader's missing-bundle diagnostic.
+step "agent-common runtime submodule"
+_agent_common_files=(
+    agent-common/agent_common/model_runtime.py
+    agent-common/agent_common/llm_retry.py
+    agent-common/agent_common/llm_policy.json
+    agent-common/agent_common/model_catalog.json
+)
+_agent_common_missing=0
+for _f in "${_agent_common_files[@]}"; do
+    [ -f "$REPO_ROOT/$_f" ] || _agent_common_missing=1
+done
+if [ "$_agent_common_missing" = 1 ]; then
+    if [ -e "$REPO_ROOT/.git" ] && have git; then
+        run git -C "$REPO_ROOT" submodule update --init --recursive || \
+            fail_step "git submodule update --init --recursive failed; agent-common/ is required"
+        if [ "$DRY_RUN" = 1 ]; then
+            note "agent-common/ is empty; would be initialized by the submodule update"
+        else
+            for _f in "${_agent_common_files[@]}"; do
+                [ -f "$REPO_ROOT/$_f" ] || _agent_common_missing=2
+            done
+            if [ "$_agent_common_missing" = 2 ]; then
+                fail_step "agent-common/ is still empty after the submodule update"
+            fi
+        fi
+    elif [ "$DRY_RUN" = 1 ]; then
+        note "agent-common/ is empty and this checkout is not a git clone;"
+        note "  would need: git submodule update --init --recursive"
+    else
+        fail_step "agent-common/ is missing and this checkout has no .git; run \`git submodule update --init --recursive\`"
+    fi
+else
+    note "agent-common/ is present"
+fi
+
 # The optional tools are reported, never installed: some need administrator
 # rights and all are probed at run time by the pipeline.
 OPTIONAL_TOOLS=(

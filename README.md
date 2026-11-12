@@ -80,11 +80,14 @@ registration.
 
 The pipeline is standard-library only, but it needs Python 3.9+ and an
 agent CLI for its sessions — by default the DeepSeek Harness (`dsh`) running
-DeepSeek Flash, or another `--agent-harness`/`--agent-model` pair, the legacy
-`--agent` names, or `manual` for a human-driven run; see *Requirements*. The
+DeepSeek Flash, or another `--agent-harness`/`--agent-model` pair, or
+`--manual` for a human-driven run; see *Requirements*. The
 shortest path:
 
 ```bash
+# 0. a fresh clone must initialize the required agent-common submodule first
+git submodule update --init --recursive
+
 # 1. create a pipeline root from the pristine submission directory
 python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds
 #    another venue/journal:
@@ -128,9 +131,13 @@ last two cases — see *Exit codes*.
 * An agent CLI for the stage sessions. The new pair selects the two axes
   independently: `--agent-harness dsh|gpt-codex|claude-code` (default `dsh`)
   and `--agent-model deepseek-flash|gpt-sol|gpt-terra|claude-opus|claude-sonnet|
-  qwen38-27b|dots3-note-preview` (default `deepseek-flash`). The legacy
-  `--agent codex|claude|dsh|qwen|dots` and `--agent manual` remain available,
-  as does a custom command via `--agent-cmd`.
+  qwen38-27b|dots3-note-preview` (default `deepseek-flash`). `--manual` stages
+  every session prompt for a human-driven run, and a custom command can be
+  supplied via `--agent-cmd`.
+* The `agent-common/` submodule. A normal `git clone` does NOT populate it, and
+  the pipeline refuses to start without it: run
+  `git submodule update --init --recursive` (the dependency installer also
+  initializes it). A source archive must carry the populated directory.
 * Optional, probed at runtime and never required: the `docx` CLI (read/render/
   diff/validate), a .docx→PDF converter (`docx2pdf.sh` + Word, the
   `docx-converter` MCP tool, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
@@ -163,7 +170,7 @@ last two cases — see *Exit codes*.
   agent-driven path is contained even when the operator sets nothing; set it
   explicitly when you drive the servers outside the pipeline.
 
-### `--agent dsh`: the DeepSeek Harness (`dsh`) as the session backend
+### `--agent-harness dsh`: the DeepSeek Harness (`dsh`) as the session backend
 
 `dsh` is a separate install (node >= 22, `npm i -g @deepseek-ai/dsh@alpha`), and
 the pipeline drives it the way it drives the other two CLIs: one non-interactive
@@ -179,7 +186,7 @@ continued, not restarted*). The harness's own home (`$DSH_HOME`, default
 this preset carries no overrides, and a prompt that wants an MCP tool the
 harness does not have falls back to the next converter in its own list. Since
 that one-shot contract belongs to the installed BUILD rather than to a flag,
-`--agent dsh` reads the harness's own `dsh --profile headless --help` once
+`--agent-harness dsh` reads the harness's own `dsh --profile headless --help` once
 per invocation and names the gap (with the upgrade) up front instead of letting
 every session of a wave fail one by one -- including the conditions that would
 otherwise only appear as a stack trace per session: a build without the one-shot
@@ -192,9 +199,9 @@ custom `--agent-cmd` instead (e.g. the npx form, for a machine with no global
 install), the sessions run exactly the same way but keep the custom-command
 rule: no continuation form, so a stopped session gets a fresh attempt.
 
-### `--agent qwen`: Qwen3.8-27B through an OpenAI-compatible vLLM endpoint (and Claude Code's Anthropic route)
+### `--agent-model qwen38-27b`: Qwen3.8-27B through an OpenAI-compatible vLLM endpoint (and Claude Code's Anthropic route)
 
-`--agent qwen` points an existing harness at a vLLM server instead of
+`--agent-model qwen38-27b` points an existing harness at a vLLM server instead of
 reimplementing the agent loop. The adapter, `paper_qwen_agent.py`, is copied
 beside the root's driver at `setup` and travels through `sync-code`. It chooses
 the harness with `PAPER_QWEN_HARNESS`:
@@ -241,9 +248,9 @@ make the tool probe a hard preflight for a production run (the default is
 warn-and-run so the adapter can still be exercised against a text-only
 endpoint).
 
-### `--agent dots`: dots3-note-prev through the Dots API
+### `--agent-model dots3-note-preview`: dots3-note-prev through the Dots API
 
-`--agent dots` keeps the harness and points it at the Dots API instead of
+`--agent-model dots3-note-preview` keeps the harness and points it at the Dots API instead of
 reimplementing the agent loop; the platform's documentation is
 <https://dots.ai/platform/docs>. The adapter, `paper_dots_agent.py`, is copied
 beside the root's driver at `setup` and travels through `sync-code`. Create a
@@ -326,7 +333,7 @@ given, its default harness is used. An unsupported pair (GPT through Claude
 Code, Claude through Codex) is refused before any session starts, never once
 per stage. `--judge-agent-harness` and
 `--judge-agent-model` select the same pair for the judge panel and default to
-the producer's pair; `--judge-agent` remains the legacy shortcut.
+the producer's pair; `--judge-manual` stages its prompts for a human.
 `PAPER_AGENT_HARNESS` / `PAPER_AGENT_MODEL` (and the `PAPER_JUDGE_AGENT_*`
 equivalents) supply defaults when the flags are absent.
 
@@ -420,21 +427,12 @@ python paper_pipeline.py run --root ./paper_rounds \
     --judge-agent-harness gpt-codex --judge-agent-model gpt-terra
 ```
 
-**Legacy `--agent` / `--judge-agent`.** The old names keep their exact old
-commands and cannot be combined with the new pair. They map to:
-
-| legacy name | effective pair | note |
-| --- | --- | --- |
-| `codex` | `gpt-codex` + the CLI's own model | exact old `codex exec` command |
-| `claude` | `claude-code` + the CLI's own model | exact old `claude` command |
-| `dsh` | `dsh` + `deepseek-flash` | exact old `dsh` command |
-| `qwen` | `gpt-codex` + `qwen38-27b` | still honours `PAPER_QWEN_HARNESS` |
-| `dots` | `gpt-codex` + `dots3-note-preview` | still honours `PAPER_DOTS_HARNESS` |
-| `manual` | manual | stages every prompt for a human |
-
-The `--agent qwen` and `--agent dots` sections above remain the detailed
-reference for their adapters; the new pair is the preferred route because it
-selects the harness explicitly.
+The legacy `--agent` / `--judge-agent` shortcuts are gone: they were replaced
+by `--manual` / `--judge-manual` and the `--agent-harness`/`--agent-model`
+pair. `conform` and `add-venue` still take their own `--agent` option, which is
+unrelated to the run/judge pair. The Qwen and Dots adapters are selected through
+`--agent-model qwen38-27b` / `--agent-model dots3-note-preview`, and their
+sections above remain the detailed reference for those adapters.
 
 ## What you get
 
@@ -574,7 +572,7 @@ evidence pack.
 | `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: the stage tries the `zot` CLI first, then the Zotero MCP service, and the Zotero skill only as the fallback when both are unavailable; `off` = the run policy forbids all Zotero tooling and every stage prompt says so; the pipeline does NOT uninstall the operator's MCP registration or skill, so a machine that must be incapable of Zotero access should install with `install_dependencies.sh --no-zotero-mcp --no-external`, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write through the `zot` CLI. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
 | `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant. The pair carries `2*judges` scores, so the sign rule needs at least 3 judges: at 2 judges the smallest attainable one-sided p (4/4 losses) is 0.0625, and `setup` refuses that combination rather than shipping a gate that can never reject |
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
-| `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. The legacy `--judge-agent {codex,claude,dsh,qwen,dots,manual}` / `--judge-agent-cmd JSON` remain |
+| `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. `--judge-manual` stages the judge prompts for a human, and `--judge-agent-cmd JSON` overrides the judge command |
 | `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
 | `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
@@ -942,7 +940,7 @@ python paper_pipeline.py conform --root ./paper_rounds --agent --agent-cmd '["my
 
 **`transfer` and `init` run that stage FIRST.** A root configured with `--revision-mode transfer`
 or `--revision-mode init` conforms the submission before the feedback/round stages: the sandbox is
-staged and (unless `--agent manual`, which stops with the instruction to fill it) the agent
+staged and (unless `--manual`, which stops with the instruction to fill it) the agent
 session runs, and the code-side postcheck gates the whole run. With an official Word template the
 session copies it and replaces its placeholders; with no `.official` directory, `init` still runs
 the session, falling back to the journal's own author guidelines and then to academic convention
@@ -1160,7 +1158,7 @@ schedule: `2 3` = two rounds following the schedule's rounds 2 and 3, `3`/`-1`
 `--caption-limit N` (default: the venue profile's own),
 `--jobs N`, `--agent-harness NAME`, `--agent-model NAME_OR_URL`,
 `--agent-model-api-key KEY`, `--agent-model-name MODEL`,
-`--agent {codex,claude,dsh,qwen,dots,manual}` (legacy), `--agent-cmd JSON`, `--retries N`,
+`--manual`, `--agent-cmd JSON`, `--judge-manual`, `--retries N`,
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
 2; see *Running only some of the steps*). Opt-in audits:
 `--defect-audit {codex-lite,codex,claude,dsh,qwen,dots,manual}`, `--defect-audit-cmd JSON`,
@@ -1334,7 +1332,7 @@ partial selection leaves the chain incomplete, and the response letter +
 the chain is done.
 
 `transfer` and `init` additionally expose the conform stage: `--only conform`
-drives (or checks, with `--agent manual`) that stage alone and reports it
+drives (or checks, with `--manual`) that stage alone and reports it
 pending/done; the rounds stay pending until a later `run`.
 
 The selection items are comma-separated and combine as a **union**:
@@ -2636,11 +2634,11 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 |---|---|---|---|
 | review | 119 KB | 49 KB | 58% |
 | cold_start_review | 60 KB | 24 KB | 59% |
-| audit | 88 KB | 46 KB | 48% |
-| revise | 117 KB | 63 KB | 46% |
-| integrate | 116 KB | 64 KB | 45% |
-| rewrite | 109 KB | 60 KB | 45% |
-| judge | 103 KB | 73 KB | 29% |
+| audit | 89 KB | 46 KB | 48% |
+| revise | 118 KB | 64 KB | 46% |
+| integrate | 117 KB | 64 KB | 45% |
+| rewrite | 110 KB | 60 KB | 45% |
+| judge | 103 KB | 74 KB | 29% |
 | revision_audit | 23 KB | 13 KB | 41% |
 | revision_repair | 22 KB | 9 KB | 57% |
 
@@ -3715,11 +3713,12 @@ its four integration runs never started.
 |---|---|
 | `paper_pipeline.py` | thin loader for the orchestrator; it executes the ordered `paper_pipeline_parts/` in its own globals (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline / track) |
 | `paper_pipeline_parts/` | the orchestrator's implementation, split by domain (prelude, venues, journal modes, prompts, utilities, state/corpus, postchecks, stage quality, selection/driver, setup, reports, audits, conflicts/decide, redlines, tracking, PDF, retry, CLI) — every file is under 10,000 lines |
+| `agent-common/` | the required runtime submodule (`agent_common/model_runtime.py`, `llm_retry.py`, `llm_policy.json`, `model_catalog.json`); initialize it with `git submodule update --init --recursive` — the loader refuses to start without it |
 | `pairwise_scores.py` | builds a per-round directed score workbook from `reports/round*_raw_scores.csv`; uses each judge's `own` frame and never invents the opposite direction from the derived `received` row |
 | `paper_docx_format.py` | thin loader for the OOXML style/formatting scanner, fixer and blank-page checker |
 | `paper_docx_format_parts/` | the formatter's implementation (core XML/field primitives, text rules, layout/edit rules, report + CLI) — every file is under 10,000 lines |
 | `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
-| `paper_qwen_agent.py` / `paper_dots_agent.py` / `paper_model_agent.py` | provider adapters behind `--agent-model` and the legacy `--agent qwen`/`--agent dots`; all are frozen into a root by `setup` and carried by `sync-code` |
+| `paper_qwen_agent.py` / `paper_dots_agent.py` / `paper_model_agent.py` | provider adapters behind `--agent-model` (`qwen38-27b` / `dots3-note-preview`); all are frozen into a root by `setup` and carried by `sync-code` |
 | `AGENTS.md` | the agent-facing contract (rules the sessions and reviewers are held to) |
 | `revision_history/` | the dated working records — audit findings, revision plans, validation ledgers and the history log; repository bookkeeping, never submitted |
 | `revision_history/REMAINING_ISSUES_TRIAGE_2026-1009.md` | the 2026-10-09 human triage of the two audited final packages |
@@ -3793,7 +3792,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 197 suites (a few
+any failure. They are independent, so run them in parallel — 198 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

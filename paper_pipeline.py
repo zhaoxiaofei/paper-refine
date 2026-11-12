@@ -575,9 +575,10 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           the author's/agent's own metadata survives the
                           pipeline. Only judge views are anonymized and
                           normalized (build_judge_view).
-    * judge backend       --judge-agent / --judge-agent-cmd let the judge panel
-                          run on a different (e.g. cheaper) CLI than the
-                          production stages.
+    * judge backend       --judge-agent-harness / --judge-agent-model (or
+                          --judge-agent-cmd) let the judge panel run on a
+                          different (e.g. cheaper) backend than the production
+                          stages; --judge-manual stages its prompts for a human.
 
 CONTENTS OF THIS FILE
 ---------------------
@@ -698,85 +699,20 @@ MODEL / HARNESS SELECTION
                      their adapters.
     --agent-cmd      a custom JSON argv still overrides either form, and
                      PAPER_AGENT_CMD remains its environment equivalent.
-                     `--agent` and `--judge-agent` are the legacy shortcuts and
-                     cannot be combined with the new pair. EVERY --agent-* flag
-                     has a --judge-agent-* equivalent: --judge-agent-harness,
-                     --judge-agent-model, --judge-agent-model-api-key,
-                     --judge-agent-model-name, --judge-agent-model-prep-json and
-                     --judge-agent-cmd.
+                     --manual stages every producer prompt for a human and
+                     --judge-manual does the same for the judge panel. EVERY
+                     --agent-* flag has a --judge-agent-* equivalent:
+                     --judge-agent-harness, --judge-agent-model,
+                     --judge-agent-model-api-key, --judge-agent-model-name,
+                     --judge-agent-model-prep-json and --judge-agent-cmd.
 
-LEGACY AGENT BACKENDS (exact old commands; kept for backward compatibility)
-----------------------------------------------------------------------------
-    --agent codex    `codex exec -` (prompt piped via stdin, cwd =
-                     the sandbox), plus one `-c` override per MCP server the
-                     prompts drive, so that server's tools are callable without
-                     an operator: `codex exec` runs with approval policy
-                     `never`, and an MCP tool call that wants approval is
-                     DENIED there, not queued for a human. The overrides name
-                     only servers that are actually installed, and they change
-                     nothing about how the CLI sandboxes shell commands.
-    --agent claude   `claude --permission-mode bypassPermissions --print`
-    --agent dsh      the DeepSeek Harness CLI (`dsh`): `dsh --profile headless
-                     --json -` (the stage's PROMPT.md piped via stdin, cwd = the
-                     sandbox, one fresh persisted session per attempt, `--json`
-                     so the opening `session` line carries the id a
-                     continuation adopts). The harness is a separate install
-                     (node >= 22, `npm i -g @deepseek-ai/dsh@alpha`; verified
-                     against dsh 0.2.1-alpha.4 and 0.2.0-rc.2) and its own home
-                     ($DSH_HOME, default ~/.dsh) owns the model, the
-                     DEEPSEEK_API_KEY credential and its MCP servers -- unlike
-                     the codex preset this argv carries no overrides for them.
-                     Prompts that tell an agent to reach an MCP tool (the
-                     docx-converter renderer, the docx-compare redline engine)
-                     fall back to the next converter in their list when the
-                     harness has no such server configured.
-    --agent qwen     Qwen3.8-27B through an OpenAI-compatible vLLM endpoint,
-                     wrapped around the harness the operator already uses. The
-                     adapter (`paper_qwen_agent.py`, copied beside the driver)
-                     defaults to `PAPER_QWEN_HARNESS=codex`; `dsh` generates an
-                     `llm-pi-ai` provider patch for its headless profile,
-                     `claude` uses vLLM's Anthropic Messages endpoint when the
-                     server serves it, and `chat` is a text-only completion mode. The endpoint is
-                     `PAPER_QWEN_BASE_URL` (default
-                     http://127.0.0.1:8000/v1), model
-                     `PAPER_QWEN_MODEL` (default qwen3.8-27b), key
-                     `PAPER_QWEN_API_KEY` (default `dummy`). When the endpoint
-                     is not already reachable the adapter starts the SSH tunnel
-                     `ssh -p 52080 -N -L 8000:127.0.0.1:8000
-                     zxf@101.6.31.113` (configurable with PAPER_QWEN_SSH_HOST/
-                     PORT/TUNNEL_LOCAL/TUNNEL_REMOTE; PAPER_QWEN_TUNNEL=off
-                     forbids starting it). `python3 paper_qwen_agent.py
-                     --probe` reports endpoint/model/tool-call support, and
-                     `--check-tools` exits 0/1 on whether the server accepts
-                     `tool_choice=auto`: the agentic harness needs that; a
-                     server started without `--enable-auto-tool-choice
-                     --tool-call-parser` fails a tool-using turn.
-    --agent dots     dots3-note-prev through the Dots API
-                     (https://dots.ai/platform/docs), wrapped around the
-                     harness the operator already uses. The adapter
-                     (`paper_dots_agent.py`, copied beside the driver) defaults
-                     to `PAPER_DOTS_HARNESS=codex` (the platform's documented
-                     OpenAI Responses route: `model_provider=dots`,
-                     `wire_api="responses"`, `DOTS_API_KEY`, web search
-                     disabled, 393,000-token context window declared -- 512K is advertised
-                     but the endpoint enforces 393,000); `dsh` generates
-                     an `llm-pi-ai` route over the platform's OpenAI-compatible
-                     Chat Completions endpoint, `claude` uses the platform's
-                     Anthropic Messages endpoint, and `chat` is a text-only
-                     completion mode. The endpoint is `PAPER_DOTS_BASE_URL`
-                     (default https://note3-prev-api.askdiandian.com/v1), the
-                     model `PAPER_DOTS_MODEL` (default dots3-note-prev), and the
-                     key `DOTS_API_KEY` (exported to the harness by the
-                     adapter). `python3 paper_dots_agent.py --probe` reports
-                     endpoint/model/key/tool-call support, and `--check-tools`
-                     exits 0/1 on whether the endpoint accepts
-                     `tool_choice=auto`. There is no tunnel: the platform is a
-                     remote service.
-    --agent manual   the orchestrator builds every sandbox + PROMPT.md, prints
-                     each prompt's path, and polls for the completion signal;
-                     you paste each prompt into your agent yourself. Staging is
-                     respected: a revise prompt is never printed before its
-                     review marker exists.
+MANUAL AND CUSTOM BACKENDS
+--------------------------
+    --manual         the orchestrator builds every sandbox + PROMPT.md and
+                     polls for each completion signal; you paste each prompt
+                     into your agent yourself. Staging is respected: a revise
+                     prompt is never printed before its review marker exists.
+                     --judge-manual stages the judge prompts the same way.
     any other CLI:   --agent-cmd '["your","cli","--flag"]' or the environment
                      variable PAPER_AGENT_CMD with the same JSON argv list.
 

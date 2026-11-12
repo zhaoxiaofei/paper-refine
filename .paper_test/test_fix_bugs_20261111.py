@@ -466,6 +466,66 @@ def test_shell_scripts():
               proc.stderr[-200:])
 
 
+def test_wave_20261113_followup():
+    """Regression checks for the 2026-11-13 verified findings (F01-F11)."""
+    print("\n== 2026-11-13 follow-up: template stage, secrets, submodule, decide ==")
+    import re as _re
+    setup_src = (WS / "paper_pipeline_parts/p09_setup.py").read_text(encoding="utf-8")
+    check("F01 the template-first stage calls the defined pair helper",
+          hasattr(pipe, "_agent_pair_from_options")
+          and _re.search(r"(?<!_)pair_from_options\(", setup_src) is None,
+          "pair_from_options is not defined in the bundle")
+    split = pipe.redact_argv(["--agent-model-api-key", "SUPER_SECRET_VALUE_1234"])
+    check("F03 the split --agent-model-api-key form is redacted",
+          "SUPER_SECRET_VALUE_1234" not in " ".join(split), str(split))
+    cmd = pipe.redact_argv(["--agent-cmd",
+                            '["cli","--api-key","CMD_SECRET_VALUE_9876"]'])
+    check("F03 a credential inside --agent-cmd JSON is redacted",
+          "CMD_SECRET_VALUE_9876" not in " ".join(cmd), str(cmd))
+    readme = (WS / "README.md").read_text(encoding="utf-8")
+    install = (WS / "install_dependencies.sh").read_text(encoding="utf-8")
+    check("F04 the README documents the required submodule init",
+          "git submodule update --init --recursive" in readme
+          and "agent-common/" in readme)
+    check("F04 the installer initializes the required submodule",
+          "submodule update --init --recursive" in install)
+    check("F02 run/setup no longer advertise --agent manual",
+          "add --agent manual" not in setup_src
+          and "run --agent manual" not in setup_src)
+    help_proc = subprocess.run(["bash", str(WS / "scripts/create-test-env.sh"), "--help"],
+                               capture_output=True, text=True, timeout=30)
+    check("F11 the test-environment help stops before its shell preamble",
+          help_proc.returncode == 0
+          and help_proc.stdout.rstrip().splitlines()[-1] != "set -euo pipefail",
+          help_proc.stdout.rstrip().splitlines()[-1] if help_proc.stdout else "")
+
+    tmp = Path(tempfile.mkdtemp(prefix="wave1113_decide_"))
+    try:
+        src = tmp / "src"
+        src.mkdir()
+        (src / "manuscript.md").write_text("# m\n\ntext.\n", encoding="utf-8")
+        root = tmp / "root"
+        subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "setup",
+                        "--source", str(src), "--root", str(root),
+                        "--venue", "generic", "--journal", "Test Journal"],
+                       capture_output=True, text=True, timeout=300)
+        proc = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "decide",
+                               "--root", str(root)], capture_output=True, text=True,
+                              timeout=300)
+        decision = root / "reports" / "decision.json"
+        check("F06 a no-round decide exits 2", proc.returncode == 2, str(proc.returncode))
+        check("F06 the no-round decide writes the decision.json its readme points at",
+              decision.is_file()
+              and json.loads(decision.read_text(encoding="utf-8")).get(
+                  "readiness", {}).get("submission_ready") is False)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    changelog = (WS / "paper-skills/CHANGELOG.md").read_text(encoding="utf-8")
+    check("F09 the changelog no longer offers decide --unlink-zotero-fields",
+          "and — for the published\n  copy — `decide --unlink-zotero-fields`" not in changelog
+          and "`decide --unlink-zotero-fields` is REFUSED" in changelog)
+
+
 def main() -> int:
     test_dots_exit_and_retry()
     test_stream_and_endpoint()
@@ -480,6 +540,7 @@ def main() -> int:
     test_sigterm()
     test_docs()
     test_shell_scripts()
+    test_wave_20261113_followup()
     print()
     if FAILS:
         print(f"FAILED: {len(FAILS)} check(s): {', '.join(FAILS)}")

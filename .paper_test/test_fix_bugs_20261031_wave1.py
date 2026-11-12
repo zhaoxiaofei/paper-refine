@@ -482,8 +482,9 @@ def test_f60() -> None:
 def test_docs() -> None:
     print("\n== F61/F63/F65/F66/F70/F73: docs match the CLI ==")
     readme = (WS / "README.md").read_text("utf-8")
-    check("F61 the flag summary lists qwen and dots",
-          "--agent {codex,claude,dsh,qwen,dots,manual}" in readme)
+    check("F61 the flag summary lists manual mode and the qwen/dots models",
+          "`--manual`, `--agent-cmd JSON`" in readme
+          and "qwen38-27b" in readme and "dots3-note-preview" in readme)
     block = readme[readme.index("`--strict-venue` (accepted by every subcommand"):
                    readme.index("makes a missing", readme.index("`--strict-venue` (accepted"))]
     check("F66 set-dedup-mode appears exactly once", block.count("`set-dedup-mode`") == 1,

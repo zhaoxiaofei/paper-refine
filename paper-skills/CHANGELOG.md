@@ -34,13 +34,16 @@
   refreshes the fields everywhere, but it does not unlink them (the author
   normally unlinks manually when preparing the final submission file). The
   explicit triggers are `zotero-refresh FILE.docx --unlink`,
-  `fix FILE.docx --out OUT --unlink-zotero-fields`, and — for the published
-  copy — `decide --unlink-zotero-fields` (or
-  `format_policy.unlink_zotero_fields_at_publish: true`). When requested, the
-  order is refresh → verify → unlink, so only the verified numbering is
-  frozen; a refusal leaves the fields live and becomes readiness finding
-  `FMT-Z7` ("live fields remain in the published copy") — never a silent
-  freeze. The readme states which of the three outcomes happened.
+  `fix FILE.docx --out OUT --unlink-zotero-fields`, and — before the round is
+  pinned and judged — `format_policy.unlink_zotero_fields: true` (or
+  `format_policy.unlink_zotero_fields_at_publish: true`) in
+  `pipeline_config.json`. `decide --unlink-zotero-fields` is REFUSED: a
+  post-pin flatten would make the published package differ from the scored
+  digest. When requested, the order is refresh → verify → unlink, so only the
+  verified numbering is frozen; a refusal leaves the fields live and becomes
+  readiness finding `FMT-Z7` ("live fields remain in the published copy") —
+  never a silent freeze. The readme states which of the three outcomes
+  happened.
 - **Skill/prompt sync.** `paper-revise/SKILL.md`, `references/edit_rules.md`
   (rule E2) and the standalone `adress_issues.prompt.md` now say the refresh is
   automatic, so a stale citation is a hand-off only when the offline refresh

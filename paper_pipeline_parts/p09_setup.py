@@ -1133,7 +1133,7 @@ def cmd_setup(args) -> None:
                   f"forbid the disabled change and the postcheck rejects a package that "
                   f"inserts/deletes a content unit")
     print(f"[setup] next: python {root / script.name} run --root {root}")
-    print(f"[setup] manual mode: add --agent manual (staging is respected; each round's revise "
+    print(f"[setup] manual mode: add --manual (staging is respected; each round's revise "
           f"prompt appears only after its review marker)")
 
 
@@ -2145,7 +2145,7 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
         _t_h = agent_choice(getattr(args, "agent_harness", None)
                             or os.environ.get("PAPER_AGENT_HARNESS", ""))
         _t_m = getattr(args, "agent_model", None) or os.environ.get("PAPER_AGENT_MODEL") or ""
-        _t_h, _t_m = pair_from_options(_t_h or None, _t_m or None)
+        _t_h, _t_m = _agent_pair_from_options(_t_h or None, _t_m or None)
         agent = agent_selection_label(_t_h, _t_m)
         cmd = resolve_agent_model_cmd(
             _t_h, _t_m, getattr(args, "agent_cmd", None),
@@ -3898,7 +3898,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 summarize(ctx)
                 if paused:
                     print("[run] manual mode: prompts printed above; nothing was executed by the "
-                          "orchestrator. Re-run `run --agent manual` after your agents finish.")
+                          "orchestrator. Re-run `run --manual` after your agents finish.")
                     return
                 ctx.round_rec(1)["status"] = "pending"
                 ctx.save_state()
@@ -3961,7 +3961,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             summarize(ctx)
             if paused:
                 print("[run] manual mode: prompts printed above; nothing was executed by the "
-                      "orchestrator. Re-run `run --agent manual` after your agents finish.")
+                      "orchestrator. Re-run `run --manual` after your agents finish.")
                 return
             # Honest state: the round is waiting again, not "active".
             ctx.round_rec(r)["status"] = "pending"
@@ -4094,3 +4094,22 @@ def summarize(ctx: Ctx) -> None:
               for r in range(1, ctx.rounds_count() + 1)]
     if rlines:
         print("[summary] " + " | ".join(rlines))
+
+
+def cmd_run_decide(args) -> None:
+    """`run`, then `decide`, in series, honouring decide's flags.
+
+    `run` holds the root lock for its whole phase and releases it when it
+    returns; `decide` then takes the lock for its own writes (reports,
+    decision.json, final_clean_version/). The digest cache stays OFF for that
+    phase: it rewrites files it hashed, and a same-size rewrite inside one
+    timestamp tick would otherwise reuse the stale digest (main() left the cache
+    off because `run-decide` is not a read-only command). A hard error inside
+    `run` (a `die()`) propagates and the decide phase is skipped -- deciding a
+    root that could not even be started would only repeat the same error.
+    """
+    cmd_run(args)
+    note = configure_hash_cache_for_command("decide", getattr(args, "root", None))
+    if note:
+        print(f"[run-decide] note: {note}")
+    cmd_decide(args)

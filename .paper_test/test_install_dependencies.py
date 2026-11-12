@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
@@ -73,6 +75,26 @@ def main() -> int:
           (dry.stdout + dry.stderr)[-300:])
     after = deps_env.read_bytes() if deps_env.is_file() else None
     check("the dry-run does not create or modify deps.env", after == before)
+
+    # A fresh clone has .git but an empty agent-common/ (the submodule is not
+    # initialized). The documented --dry-run contract is "print the plan,
+    # change nothing", so it must name the planned update and exit 0 without
+    # treating the still-missing files as a failed install.
+    with tempfile.TemporaryDirectory(prefix="installer-fresh-clone-") as scratch:
+        clone = Path(scratch)
+        shutil.copy2(script, clone / "install_dependencies.sh")
+        (clone / ".git").mkdir()
+        (clone / "agent-common").mkdir()
+        fresh = subprocess.run(
+            [str(clone / "install_dependencies.sh"), "--dry-run", "--no-conda",
+             "--no-node", "--no-external", "--no-agent-tooling"],
+            capture_output=True, text=True, timeout=60)
+        fresh_out = fresh.stdout + fresh.stderr
+        check("a fresh-clone --dry-run plans the submodule update and succeeds",
+              fresh.returncode == 0
+              and "submodule update --init --recursive" in fresh_out
+              and "install complete" in fresh_out,
+              fresh_out[-300:])
 
     prompt_sources = [WS / "paper_pipeline_parts" / "p02_journal_modes.py",
                       WS / "paper_pipeline_parts" / "p03_prompts.py"]

@@ -119,8 +119,8 @@ USAGE_EXAMPLES = """usage:
           [--judge-agent-harness dsh|gpt-codex|claude-code] [--judge-agent-model NAME_OR_URL]
           [--judge-agent-model-api-key KEY] [--judge-agent-model-name MODEL]
           [--judge-agent-model-prep-json JSON]
-          [--agent codex|claude|dsh|qwen|dots|manual] [--agent-cmd '<json argv>']
-          [--judge-agent codex|claude|dsh|qwen|dots|manual] [--judge-agent-cmd '<json argv>']
+          [--manual] [--agent-cmd '<json argv>'] [--judge-manual]
+          [--judge-agent-cmd '<json argv>']
           [--poll S] [--skip-hash]
           drive rounds 1..R as a DEPENDENCY GRAPH: every session starts as soon
           as its inputs exist (the M rewrites and the round's review start
@@ -137,9 +137,9 @@ USAGE_EXAMPLES = """usage:
           judge panel is still incomplete after the retries, the round is left
           pending (reports/round<r>_panel_gaps.json) instead of being decided on
           the reduced panel.
-          --judge-agent/--judge-agent-cmd override the backend for the judge
-          panel only (it is the largest wave), e.g. to run judges on a cheaper
-          CLI than the production stages.
+          --judge-manual/--judge-agent-cmd select the judge backend without
+          changing the production pair (it is the largest wave), e.g. to run
+          judges on a cheaper CLI than the production stages.
           --only SELECTION runs a subset in this invocation; items are a UNION:
           a round ordinal or range (--only 1,2 = only rounds 1 and 2, every
           stage; --only 1-3), a stage name (--only audit = that stage in every
@@ -328,7 +328,7 @@ review-audit-revise-and-judge round 3 (full review, no rewrite, no integration)
   #    round<R>_winner/.
   python paper_pipeline.py run --root ./paper_rounds --jobs 255
   #    Useful variants of that one command:
-  #      --agent manual                  paste each PROMPT.md yourself (staged;
+  #      --manual                        paste each PROMPT.md yourself (staged;
   #                                      --no-wait prints every ready prompt)
   #      --judge-agent-cmd '<json argv>' run the panel on a cheaper CLI
   #      --retries 2 --retry-backoff 30  two retries per failure, exponential
@@ -415,35 +415,16 @@ model/harness selection:
   --judge-agent-model-prep-json and --judge-agent-cmd; the judge-side key uses
   the matching PAPER_JUDGE_AGENT_MODEL_* variables.
 
-legacy agent backends (kept exactly as before; do not combine with the new
---agent-harness/--agent-model pair):
-  --agent codex `codex exec -`, plus a `-c` override per MCP server
-  the prompts drive (an MCP call that wants approval is DENIED, not queued, in
-  a non-interactive session: approval policy is `never`)   |   --agent claude
-  `claude --permission-mode bypassPermissions --print`   |   --agent dsh
-  the DeepSeek Harness CLI: `dsh --profile headless --json -` (prompt on
-  stdin, one fresh persisted session per attempt; the harness's own home
-  $DSH_HOME owns the model, the DEEPSEEK_API_KEY credential and its MCP
-  servers, and a continuation adopts the session its `--json` stream named with
-  `--session-id`). A gap that would fail every session -- the binary not
-  installed, a build whose headless app declares neither `--json` nor the stdin
-  task form, a `node` the harness cannot run under (older than 22, or one it
-  was not installed for) -- is named with its fix before the wave starts
-  instead of once per session.
-  --agent manual: the orchestrator builds every sandbox + PROMPT.md and polls
-  for each completion signal; you paste each prompt into your agent yourself,
-  with cwd = that sandbox. Manual mode respects the same dependencies, and
-  --no-wait prints EVERY prompt whose dependencies are already satisfied (a
-  revise prompt is never printed before the round's review marker exists, and
-  an integration prompt never before the whole pool is done).
-  --agent dots: dots3-note-prev through the Dots API (default endpoint
-  https://note3-prev-api.askdiandian.com/v1, key DOTS_API_KEY). The adapter
-  PAPER_DOTS_HARNESS=codex (default; the platform's documented Responses
-  route), dsh (a generated llm-pi-ai route), or claude (the platform's
-  Anthropic Messages endpoint); `chat` is text-only.
-  See paper_dots_agent.py --probe and PAPER_DOTS_* in its docstring.
+manual and custom backends:
+  --manual: the orchestrator builds every sandbox + PROMPT.md and polls for
+  each completion signal; you paste each prompt into your agent yourself, with
+  cwd = that sandbox. --judge-manual stages the judge prompts the same way.
+  Manual mode respects the same dependencies, and --no-wait prints EVERY prompt
+  whose dependencies are already satisfied (a revise prompt is never printed
+  before the round's review marker exists, and an integration prompt never
+  before the whole pool is done).
   any other CLI: --agent-cmd '["your","cli","--flag"]' or PAPER_AGENT_CMD (JSON
-  argv list in the environment).
+  argv list in the environment); --judge-agent-cmd overrides the judge command.
 
 completion signals (never a bare non-empty output directory):
   rewrite / review / revise / integrate -> _pipeline_done.json, matching stage
