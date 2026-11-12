@@ -585,6 +585,74 @@ def _with_table_gaps(rows: list, gaps: list, rule: str, limit: int) -> list:
 # `ONLY_STAGE_GROUPS` (p02) are read at CALL time, so the split is invisible.
 # =====================================================================
 
+ONLY_ROUND_RANGE_CAP = 64
+
+
+def parse_only_rounds(text: str, item: str, flag: str = "--only") -> set:
+    """Parse the round side of an `--only` item: "2", "1-3" or "1,2,4" -> set.
+
+    `text` is the raw (un-normalized) round side, `item` the whole item for the
+    error message. Round ordinals are 1-based and are range-checked against the
+    pipeline's `--rounds` later, when the config is known.
+    """
+    rounds = set()
+    for chunk in re.split(r"[,\s]+", text.strip()):
+        if not chunk:
+            continue
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", chunk)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo < 1 or hi < 1:
+                die(f"{flag}: round ordinals are 1-based, got {item!r}", code=2)
+            if hi < lo:
+                die(f"{flag}: empty round range {chunk!r} in {item!r}", code=2)
+            # Refuse an implausible span HERE: `1-999999999` used to expand
+            # into a billion-element set -- the process died (MemoryError, no
+            # message) long before `validate` could range-check it against the
+            # configured round count.
+            if hi - lo + 1 > ONLY_ROUND_RANGE_CAP:
+                die(f"{flag}: round range {chunk!r} in {item!r} names "
+                    f"{hi - lo + 1} rounds; the pipeline's round count is a handful "
+                    f"(rounds are 1-based)", code=2)
+            rounds.update(range(lo, hi + 1))
+            continue
+        if not chunk.isdigit():
+            die(f"{flag}: {chunk!r} in {item!r} is not a round ordinal (1, 2, ... "
+                f"or a range like 1-3)", code=2)
+        if int(chunk) < 1:
+            die(f"{flag}: round ordinals are 1-based, got {item!r}", code=2)
+        rounds.add(int(chunk))
+    if not rounds:
+        die(f"{flag}: {item!r} names no round", code=2)
+    return rounds
+
+
+def parse_only_stages_for(token: str, item: str, flag: str = "--only") -> tuple:
+    """Resolve one stage name/alias to the stages it names, or die.
+
+    The result is a TUPLE because one token can name a STEP: `review` selects the
+    guided review and the cold-start review together (see ONLY_STAGE_GROUPS),
+    while each stage's own name selects only that stage.
+    """
+    name = ONLY_ALIASES.get(token, token)
+    if name in ONLY_STAGE_GROUPS:
+        return ONLY_STAGE_GROUPS[name]
+    if name not in ONLY_STAGES:
+        die(f"{flag}: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
+            f"(aliases: review=guided_review+cold_start_review, merge=integrate, "
+            f"w=rewrite, a/a2=revise, j=judge, fb=feedback, resp=response)", code=2)
+    return (name,)
+
+
+def plan_stage_of(entry: dict) -> str:
+    """The bare stage name of a round-plan entry.
+
+    `round_run_plan` labels entries with their plan position ("revise 1/1",
+    "integrate 2/2", "rewrite 1/2", "guided_review"); `--only` filters on the bare
+    name, so map the label back to it.
+    """
+    return str((entry or {}).get("stage") or "").strip().lower().split(" ")[0]
+
 
 class OnlySpec:
     """The parsed `run --only` selection: which ROUNDS and which STAGES run.
