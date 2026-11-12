@@ -7988,9 +7988,11 @@ def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
     """Write the repair prompt, pin the scope, record the attempt. None if impossible.
 
     The session runs in the FAILED ATTEMPT'S OWN sandbox (nothing is rebuilt, so
-    it sees exactly what the postcheck judged) and counts as an attempt of the
-    same run: `runs/<run>_try<N>_failed/`, and its outcome in `attempts_log`
-    (source `artifact-repair`).
+    it sees exactly what the postcheck judged) and carries an attempt number of
+    the same run: `runs/<run>_try<N>_failed/`, and its outcome in `attempts_log`
+    (source `artifact-repair`). It is a SCOPED REPAIR, not an extra retry: its
+    own count (`scoped_repairs`) is reported separately, and a repair that does
+    not clear the problem spends the retry slot of the attempt it serves.
     """
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir():
@@ -8006,16 +8008,19 @@ def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
     write_text_atomic(sb / REPAIR_PROMPT_FILE, repair_prompt(ctx, rec, problems))
     guard = snapshot_repair_guard(sb, rec)
     rec["repair_attempts"] = list(rec.get("repair_attempts") or []) + [n]
+    repair_no = bump_scoped_repair(rec)
     rec["artifact_repair"] = {"attempt": n, "problems": list(problems), "status": "running",
                               "started": utcnow(), "prompt": REPAIR_PROMPT_FILE}
     # The repair appends to the same transcript file as the stage session it
     # repairs (each session writes its own header naming the attempt), so the
     # archive keeps one timeline for that sandbox.
-    flight = {"rid": rec["id"], "attempt": n, "problems": list(problems), "guard": guard,
+    flight = {"rid": rec["id"], "attempt": n, "repair": repair_no,
+              "problems": list(problems), "guard": guard,
               "log": str(sb.relative_to(ctx.root) / "_agent.log")}
     scope = str((repair_profile(rec) or {}).get("scope") or "").split(" plus ")[0]
     print(f"  [repair] {rec['id']}: {len(problems)} repairable bookkeeping problem(s) -> one "
-          f"scoped repair session (attempt {n}; it may write {scope} and nothing else)")
+          f"scoped repair session (scoped repair {repair_no}; record attempt {n}; it may "
+          f"write {scope} and nothing else)")
     return flight
 
 
@@ -8057,8 +8062,10 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
 
     A continuation runs in the SAME sandbox as the attempt it continues (the CLI
     resumes the recorded working directory, so the sandbox must not have been
-    archived yet) and is a normal attempt afterwards: the identical postcheck
-    decides. Returns the flight dict, or None when it cannot run.
+    archived yet) and is judged like a normal attempt afterwards: the identical
+    postcheck decides. It continues an attempt instead of retrying the stage, so
+    it is counted as a CONTINUATION (`continuation_sessions`) and is never
+    charged as an extra retry. Returns the flight dict, or None when it cannot run.
     """
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir():
@@ -8077,6 +8084,7 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
     # Charge the budget NOW: a continuation that dies half-way must not be
     # restarted forever by a later invocation.
     rec["resume_attempts"] = dict(rec.get("resume_attempts") or {}, **{key: used + 1})
+    bump_continuation(rec)
     rec["last_resume"] = {"session": key, "attempt": used + 1, "reason": reason,
                           "started": utcnow(), "prompt": RESUME_PROMPT_FILE,
                           # The marker belongs to the TRUNCATED case only: the
@@ -8167,7 +8175,8 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     """
     sb = ctx.sandbox_of(rec)
     bump_attempt(rec)
-    record = {"attempt": attempt_number(rec), "problems": list(flight["problems"]),
+    record = {"attempt": attempt_number(rec), "repair": flight.get("repair"),
+              "problems": list(flight["problems"]),
               "started": rec.get("last_attempt_started"), "finished": utcnow(),
               "duration": round(res.get("dur") or 0.0, 1), "prompt": REPAIR_PROMPT_FILE,
               "transcript": flight["log"]}
@@ -8198,7 +8207,8 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
                               "changed": record["changed"], "transcript": record["transcript"],
                               "prompt": REPAIR_PROMPT_FILE}
     ctx.log("artifact-repair", rec["id"],
-            f"attempt {record['attempt']}: {'ok' if record['ok'] else 'failed'}"
+            f"scoped repair {flight.get('repair')} (record attempt {record['attempt']}): "
+            f"{'ok' if record['ok'] else 'failed'}"
             + (f" ({len(problems)} out-of-scope change(s))" if problems else ""))
     ctx.save_state()
     if record["ok"]:
@@ -8208,7 +8218,7 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     else:
         print_failure(rec["id"], [record["error"]] if record.get("error")
                       else record["postcheck_errors"],
-                      note=f"after the scoped repair (attempt {record['attempt']})")
+                      note=f"after scoped repair {flight.get('repair')}")
     return record
 
 

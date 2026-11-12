@@ -1311,6 +1311,7 @@ def sweep_artifacts(ctx: Ctx, cmd: list = None, timeout: int = 0) -> list:
         if not completion_signal_exists(ctx, rec):
             continue
         bump_attempt(rec)
+        bump_stage_attempt(rec)
         postcheck(ctx, rec, source="adopted (completion signal already on disk)")
         if rec["status"] != "done" and cmd:
             problems = repairable_artifact_failure(ctx, rec)
@@ -2143,6 +2144,7 @@ def apply_results(ctx: Ctx, results: dict) -> None:
         res = results[rid]
         rec = ctx.run(rid)
         bump_attempt(rec)
+        bump_stage_attempt(rec)
         rec["started"] = rec["started"] or utcnow()
         rec["last_duration"] = round(res.get("dur") or 0.0, 1)
         if res.get("error") or res.get("rc") not in (0,):
@@ -2169,6 +2171,50 @@ def apply_results(ctx: Ctx, results: dict) -> None:
             else:
                 print_failure(rid, rec["postcheck"]["errors"])
         ctx.save_state()
+
+
+def attempt_start_suffix(rec: dict, budget: int, used: int) -> str:
+    """The launch line's ` [attempt 2/3; 1 re-verification]` tag (empty for the first).
+
+    `used` is how many retry attempts THIS INVOCATION has already spent on the
+    run -- the caller reads it from the live budget (`budget - attempts_left`);
+    the ordinal is `used + 1`. The budget is granted per invocation (a fresh
+    `run` re-grants it), so the tag must not use the run's cumulative counters:
+    a resumed run with four lifetime sessions is still on attempt 1 of its new
+    budget. A scoped repair, a CONTINUATION or a re-verify is part of the
+    attempt it serves, so it is named after the semicolon instead of adding a
+    number (before the split, 2026-11-12 r1_a2_revise printed "[attempt 5/3]"
+    for its third launch).
+    """
+    full_no = int(used) + 1
+    if full_no <= 1:
+        return ""
+    aux = auxiliary_session_summary(rec)
+    return f" [attempt {full_no}/{budget}" + (f"; {aux}" if aux else "") + "]"
+
+
+def failed_run_cell(rid: str, rec: dict, budget: int, spent: int) -> str:
+    """One run's entry in the end-of-invocation FAILED summary.
+
+    `spent` is the retry budget this invocation has actually consumed
+    (`budget - attempts_left`), never the run's cumulative session count: the
+    budget is granted per invocation, so a resumed run starts again at 0. A
+    failed scoped repair/continuation spends the slot of the attempt it serves
+    (it does not add one), and every auxiliary session is named beside it
+    instead of being counted as a retry (which used to print "attempt 5/3").
+    """
+    rec = rec or {}
+    bits = [f"{int(spent)} of {budget} attempt(s) spent"]
+    # The run's lifetime full launches are the same number in the ordinary case;
+    # name them only when a resumed invocation or an out-of-budget stop makes
+    # them differ, so the line never hides an attempt that actually ran.
+    full = stage_attempt_count(rec)
+    if full and full != int(spent):
+        bits.append(f"{full} full launch(es)")
+    aux = auxiliary_session_summary(rec)
+    if aux:
+        bits.append(aux)
+    return f"{rid} (" + "; ".join(bits) + ")"
 
 
 def print_failure(rid: str, errors, note: str = "") -> None:
@@ -2233,6 +2279,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
         while not completion_signal_exists(ctx, rec):
             if timeout and (time.time() - t0) > timeout:
                 bump_attempt(rec)
+                bump_stage_attempt(rec)
                 rec["status"] = "failed"
                 rec["last_error"] = f"manual wait exceeded {timeout}s"
                 record_attempt(ctx, rec, False, [rec["last_error"]], [], source="manual-timeout")
@@ -2259,6 +2306,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
                     # unchanged, so the old order overwrote the previous
                     # attempt's history and left the retry budget unmoved.
                     bump_attempt(rec)
+                    bump_stage_attempt(rec)
                     record_attempt(ctx, rec, False, bad, [], source="malformed-output")
                     ctx.log("malformed-output", rec["id"], "; ".join(bad)[:300])
                     ctx.save_state()
@@ -2277,6 +2325,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
               "(staging is respected: prompts are only printed once their dependencies exist).")
         sys.exit(130)
     bump_attempt(rec)
+    bump_stage_attempt(rec)
     postcheck(ctx, rec, source="manual (operator-supplied completion signal)")
     ctx.save_state()
     print(f"  [{'ok' if rec['status'] == 'done' else 'FAIL'}] {rec['id']}: "
@@ -2297,19 +2346,22 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
     an incomplete panel must never decide a round.
 
     The retry budget is PER INVOCATION: a fresh `run` grants every failed run
-    another retries+1 attempts (the loop bound below enforces it), while the
-    persistent rec["attempts"] counter keeps recording the lifetime total for
-    the audit. Rationale: an operator who re-runs `run` after inspecting a
-    failure is explicitly asking to try again; using the lifetime counter as the
-    gate made the second `run` a no-op that exited immediately with the old
-    error, which reads like a hang. `retry --run <ID>` remains the explicit
-    single-run reset.
+    another retries+1 attempts (the loop bound below enforces it), while
+    rec["stage_attempts"] keeps the cumulative full-launch history the status
+    table shows and rec["attempts"] the lifetime total of every recorded
+    session for the audit (scoped repairs, CONTINUATIONS and re-verifies
+    included; they are reported beside the budget, never as extra retries).
+    Rationale:
+    an operator who re-runs `run` after inspecting a failure is explicitly
+    asking to try again; using the lifetime counter as the gate made the second
+    `run` a no-op that exited immediately with the old error, which reads like a
+    hang. `retry --run <ID>` remains the explicit single-run reset.
     """
     ids = [i for i in ids if ctx.run(i) is not None]
     if not ids:
         return True, False
     max_rounds = max(1, int(retries) + 1)
-    # Failures observed in THIS invocation, per run. The persistent
+    # Failures observed in THIS invocation, per run. The lifetime
     # rec["attempts"] counter also covers earlier invocations (and a freshly
     # rebuilt sandbox inherits it), so using it for the backoff would make a
     # rebuilt run wait before its FIRST attempt.
@@ -2341,6 +2393,7 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     print(f"  [info] {rid}: process-level failure but artifacts exist -> "
                           f"re-verifying")
                     bump_attempt(rec)
+                    bump_reverification(rec)
                     postcheck(ctx, rec, source="re-verify (process failed, artifacts complete)")
                     ctx.save_state()
                 elif manual:
@@ -2392,8 +2445,11 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                                         "checked_at": utcnow()}
                     if failures_in_phase.get(rid, 0) > retries:
                         rec["status"] = "failed"
+                        aux = auxiliary_session_summary(rec)
                         print(f"        no attempts left in this invocation "
-                              f"({rec.get('attempts')} lifetime); leaving it failed")
+                              f"({failures_in_phase.get(rid, 0)} attempt(s) spent, "
+                              f"budget {max_rounds}"
+                              + (f"; {aux}" if aux else "") + "); leaving it failed")
                         ctx.save_state()
                         continue
                     print("        treating it as a failed attempt: rebuilding the sandbox and "
@@ -2476,11 +2532,14 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
             print(f"  [{label}] PAUSED (not failed): {paused} already contain agent output but "
                   f"no completion marker.")
         if hard:
-            # Same rule as the round scheduler: name each run's OWN attempt
-            # count, because a run can stop for a reason outside its budget.
+            # Same rule as the round scheduler: name the budget THIS invocation
+            # actually spent, because a run can stop for a reason outside its
+            # retry budget. A failed repair/continuation spends the slot of the
+            # attempt it serves (never an extra one) and its count is named
+            # beside the budget, not folded into it.
             print(f"  [{label}] FAILED: " + ", ".join(
-                f"{rid} ({int(ctx.run(rid).get('attempts') or 0)} attempt(s), "
-                f"budget {max_rounds})" for rid in hard))
+                failed_run_cell(rid, ctx.run(rid), max_rounds,
+                                failures_in_phase.get(rid, 0)) for rid in hard))
             for rid in hard[:6]:
                 err = clip_error_line(ctx.run(rid).get("last_error") or "")
                 if err:
@@ -3972,6 +4031,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             if state == "signal":
                 signal_rec = ctx.run(e["id"])
                 bump_attempt(signal_rec)
+                bump_stage_attempt(signal_rec)
                 postcheck(ctx, signal_rec, source="recheck (marker already on disk)")
                 ctx.save_state()
                 if signal_rec.get("status") == "done" \
@@ -4030,6 +4090,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
         """
         failures[rid] += 1
         attempts_left[rid] -= 1
+        spent = max_attempts - attempts_left[rid]
         if attempts_left[rid] <= 0:
             failed_hard.append(rid)
             return
@@ -4040,12 +4101,18 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
         if delay:
             not_before[rid] = time.time() + delay
         kept = failed_sandbox_dir(ctx, rec)
+        # Read the sandbox's attempt(s) BEFORE the rebuild renames it away, and
+        # name the RETRY ordinal from THIS invocation's budget (not the run's
+        # lifetime sessions): the kept sandbox may hold a full attempt plus the
+        # continuation/re-verify that ran in it, and none of those is a retry.
+        inside = sandbox_attempts(rec) or [attempt_number(rec)]
         try:
             rebuild_sandbox(ctx, rec)
             rec["status"] = "pending"
             if kept.is_dir():
-                print(f"  [retry] {rid}: attempt {attempt_number(rec)} kept in "
-                      f"{kept.relative_to(ctx.root)} (its transcript is under "
+                print(f"  [retry] {rid}: attempt {spent}/{max_attempts} kept in "
+                      f"{kept.relative_to(ctx.root)} (record session(s) "
+                      f"{', '.join(str(a) for a in inside)}; its transcript is under "
                       f"{Path(LOGS_DIRNAME)}/)")
         except DepsNotMet as exc:
             print(f"  [info] {rid}: {exc}")
@@ -4099,6 +4166,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 if state == "signal":
                     rec = ctx.run(rid)
                     bump_attempt(rec)
+                    bump_stage_attempt(rec)
                     postcheck(ctx, rec, source="recheck (marker already on disk)")
                     ctx.save_state()
                     if rec["status"] == "done" and revision_chain_pending(rec):
@@ -4129,8 +4197,8 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     continue
                 rec = ctx.run(rid)
                 print(f"  [{label}] starting {rid} ({e['stage']})"
-                      + (f" [attempt {rec['attempts'] + 1}/{max_attempts}]"
-                         if rec["attempts"] else ""))
+                      + attempt_start_suffix(rec, max_attempts,
+                                             max_attempts - attempts_left[rid]))
                 fut = ex.submit(_execute_attempt_in, ctx.sandbox_of(rec), rec, cmd, timeout)
                 running[fut] = rid
             # 2. wait for a completion (or a short tick to re-check backoff timers)
@@ -4196,6 +4264,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 if rec["status"] == "failed" and not (rec.get("postcheck") or {}).get("errors") \
                         and likely_complete_artifacts(ctx, rec):
                     bump_attempt(rec)
+                    bump_reverification(rec)
                     postcheck(ctx, rec, source="re-verify (process failed, artifacts complete)")
                     ctx.save_state()
                     if rec["status"] == "done":
@@ -4229,15 +4298,19 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             never_started = [rid for rid in hard if not (ctx.run(rid) or {}).get("attempts")]
             tried = [rid for rid in hard if rid not in never_started]
             if tried:
-                # Each run's OWN attempt count, never the invocation's budget: a
-                # run that failed for a reason OUTSIDE its retry budget (a
-                # sandbox that could not be rebuilt, an internal error) never
-                # spent it, and reporting "FAILED after 3 attempt(s)" for a run
-                # with one attempt sends the operator hunting for two attempts
-                # that never happened (2026-09-23: r1_audit).
+                # The budget THIS invocation spent, never the run's lifetime
+                # count and never the whole budget: a run that failed for a
+                # reason OUTSIDE its retry budget (a sandbox that could not be
+                # rebuilt, an internal error) may have spent only one slot, and
+                # reporting "FAILED after 3 attempt(s)" for a run with one sends
+                # the operator hunting for attempts that never happened
+                # (2026-09-23: r1_audit). The budget is per invocation, so a
+                # resumed run starts again at 0; scoped repairs, CONTINUATIONS
+                # and re-verifies are named beside it, not added to it.
                 print(f"  [{label}] FAILED: " + ", ".join(
-                    f"{rid} ({int((ctx.run(rid) or {}).get('attempts') or 0)} attempt(s), "
-                    f"budget {max_attempts})" for rid in tried))
+                    failed_run_cell(rid, ctx.run(rid), max_attempts,
+                                    max_attempts - attempts_left[rid])
+                    for rid in tried))
             if never_started:
                 print(f"  [{label}] never started (an upstream run is not done): "
                       + ", ".join(never_started))

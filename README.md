@@ -3439,7 +3439,7 @@ Now every attempt is recorded and its evidence is preserved:
 
 | where | what it holds |
 |---|---|
-| `state.json` → `runs.<id>.attempts_log` | one entry per attempt: number, source (`postcheck` / `process` / `adopted` / `recheck` / `re-verify` / `manual`), timestamps, duration, status, the postcheck's errors and warnings, the decision-artifact quality report, the marker's own summary, and the paths of the attempt's archive and transcript (one entry per attempt, bounded by the run's `--retries` budget; the error/warning lists are **complete** — no message-count cap, 4000 characters per message plus a 512 KiB total guard per list, see below) |
+| `state.json` → `runs.<id>.attempts_log` | one entry per attempt of the run — a full stage attempt, a scoped repair, a continuation, or a re-verify (which runs no agent) — with number, source (`postcheck` / `process` / `adopted` / `recheck` / `re-verify` / `artifact-repair` / `continuation` / `manual`), timestamps, duration, status, the postcheck's errors and warnings, the decision-artifact quality report, the marker's own summary, and the paths of the attempt's archive and transcript. The retry budget is charged once per failed attempt and reported per invocation (`[attempt N/M; …]` on the console, `N of M attempt(s) spent` in the FAILED line); auxiliary sessions are reported beside it, and `status` shows the lifetime split as `FULL+AUX`. The error/warning lists are **complete** — no message-count cap, 4000 characters per message plus a 512 KiB total guard per list, see below |
 | `runs/<run>_try<N>_failed/` | the FAILED TRY's whole sandbox, renamed there before the retry builds a fresh `runs/<run>/`: the deliverables exactly as the postcheck judged them, the corpus copies, the agent transcript and a self-describing `record.json` (which names the attempts whose work it holds — a stage attempt and, when the scoped repair ran in it, the repair session too). `prune` reclaims these with the round they belong to |
 | `runs/_logs/<run>.<attempt…>.log` | transcripts of attempts whose sandbox was reset by a `retry` or a revalidation (a sandbox kept as `_try<N>_failed` keeps its own `_agent.log` inside) |
 
@@ -3452,6 +3452,20 @@ per session. `status` and `DECISION_REPORT.md` list every failed attempt with it
 first problem and the paths above, and `prune` reclaims the kept sandboxes of the
 rounds it prunes — the attempt RECORDS stay in `state.json`, so the history
 remains readable and says that the kept sandbox is gone.
+
+**Retries and auxiliary sessions are counted separately.** `[attempt N/M]` on the
+console is the retry-budget ordinal of the CURRENT invocation (a fresh `run`
+re-grants the budget, so a resumed run starts at attempt 1 again), so it can
+never exceed `--retries`+1; a scoped repair, a continuation or a re-verify that
+ran in the same sandbox is named after the semicolon (`[attempt 3/3; 2
+re-verifications]`), and the end-of-invocation FAILED line reads
+`2 of 3 attempt(s) spent; …`. A failed scoped repair or continuation spends the
+slot of the attempt it serves, never an extra one — the repair policy treats it
+as that attempt's failure. `status` shows the lifetime split as `FULL+AUX`
+(`2+1` = two full launches and one auxiliary session). The 2026-11-12 root
+printed `[attempt 5/3]` for its third launch because the display counted the two
+re-verifies of a process that died after writing complete artifacts as retries;
+the budget itself had not been overrun.
 
 A defect message is part of this record: a repeated disposition is now quoted in
 full and names the rows it is about (`-- rows: <document> / <heading> / para n`),

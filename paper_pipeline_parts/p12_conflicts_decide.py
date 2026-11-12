@@ -8514,12 +8514,13 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     L.append("")
     L.append("## 4. Run audit")
     L.append("")
-    rows = [[r["id"], r["kind"], r["round"], r["status"], r.get("attempts", 0),
+    rows = [[r["id"], r["kind"], r["round"], r["status"], attempt_split_cell(r),
              fmt_dur(r.get("last_duration")),
              "ok" if (r.get("postcheck") or {}).get("ok") else "ERR",
              (r.get("last_error") or "; ".join((r.get("postcheck") or {}).get("warnings", [])))[:60]]
             for r in ctx.runs()]
-    L.append(_tbl(rows, ["run", "kind", "round", "status", "att", "dur", "post", "note"]))
+    L.append(_tbl(rows, ["run", "kind", "round", "status", "att (full+aux)", "dur", "post",
+                         "note"]))
     L.append("")
     history = attempt_history_lines(ctx, indent="", limit=10)
     if history:
@@ -8811,8 +8812,8 @@ def cmd_status(args) -> None:
         print(_tbl(rows, ["ROUND", "STATUS", "FIELD", "SCORES/VER", "CHAMPION", "MEDIAN",
                           "MEAN", "PIN", "WINNER DIR", "HAND-OFF"]))
         print()
-    hdr = (f"{'RUN ID':<24}{'KIND':<10}{'RND':<5}{'STATUS':<9}{'ATT':<4}{'DUR':<9}{'POST':<7}"
-           f"NOTE")
+    hdr = (f"{'RUN ID':<24}{'KIND':<10}{'RND':<5}{'STATUS':<9}{'FULL+AUX':<9}{'DUR':<9}"
+           f"{'POST':<7}NOTE")
     print(hdr)
     print("-" * len(hdr))
     for rec in ctx.runs():
@@ -8824,8 +8825,10 @@ def cmd_status(args) -> None:
         if rec["kind"] == "judge" and rec.get("target_id"):
             note = f"target={rec['target_id']} " + note
         print(f"{rec['id']:<24}{rec['kind']:<10}{rec.get('round', '-'):<5}"
-              f"{rec['status']:<9}{rec.get('attempts', 0):<4}"
+              f"{rec['status']:<9}{attempt_split_cell(rec):<9}"
               f"{fmt_dur(rec.get('last_duration')):<9}{post:<7}{note[:60]}")
+    print("  FULL+AUX = full stage launches + scoped-repair/continuation/re-verify sessions "
+          "(lifetime; the retry budget is reported per invocation on the console).")
     print()
     history = attempt_history_lines(ctx)
     if history:

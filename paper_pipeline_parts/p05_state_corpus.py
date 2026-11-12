@@ -1090,7 +1090,8 @@ class Ctx:
         rec = self.state["runs"].get(rid)
         if rec is None:
             rec = {"id": rid, "kind": kind, "round": int(round_no), "sandbox": sandbox_rel,
-                   "status": "pending", "attempts": 0, "created": utcnow(), "started": None,
+                   "status": "pending", "attempts": 0, "stage_attempts": 0,
+                   "created": utcnow(), "started": None,
                    "finished": None, "last_error": None, "last_duration": None,
                    "postcheck": None, "inputs_manifest": None, "upstream_run_id": None,
                    "source_id": None, "self_id": None, "other_id": None, "target_id": None,
@@ -3079,16 +3080,127 @@ def stash_logs(sb: Path, logs_dir: Path, rid: str, attempt: int = None) -> list:
 
 
 def bump_attempt(rec: dict) -> int:
-    """Count one attempt: the per-invocation counter AND the monotone total.
+    """Number one session that wrote into the run: since-reset count + total.
 
-    `attempts` is what the retry policy and the status table's ATT column use,
-    and `retry` resets it to 0; `attempts_done` never goes back, so the attempt
-    that wrote a sandbox keeps its number (and therefore its archive directory
-    and its log name) across a reset.
+    `attempts` numbers the RECORDED sessions since the last reset (`retry
+    --run`, a revalidation reset); `attempts_done` never goes back, so the
+    attempt that wrote a sandbox keeps its number (and therefore its archive
+    directory and its log name) across a reset.
+
+    This is an IDENTITY counter, not the retry budget: a CONTINUATION, a scoped
+    ARTIFACT-REPAIR session and a re-verify all need a number (two records must
+    never share one), but none of them is a retry of the stage. The driver's
+    retry budget is a separate, per-invocation counter (and `stage_attempts`
+    is the cumulative full-launch history); mixing the record count with the
+    budget made a run report "[attempt 5/3]" (2026-11-12, r1_a2_revise: two
+    re-verifies between three launches), which reads as if the retry policy had
+    overrun.
     """
     rec["attempts"] = int(rec.get("attempts") or 0) + 1
     rec["attempts_done"] = int(rec.get("attempts_done") or 0) + 1
     return rec["attempts_done"]
+
+
+def bump_stage_attempt(rec: dict) -> int:
+    """Count one FULL stage attempt -- a fresh agent session for the stage.
+
+    This is the run's cumulative full-launch count (the `full` half of the status
+    table's `FULL+AUX` cell and the history). The retry budget itself is tracked
+    per invocation by the driver (`attempts/run`, a live `attempts_left`
+    counter): one FAILED attempt cycle spends one slot, and a scoped repair or a
+    CONTINUATION that fails spends the slot of the attempt it serves, not an
+    extra one. Auxiliary sessions are counted separately (`bump_scoped_repair`,
+    `bump_continuation`, `bump_reverification`) so that neither the console nor
+    the status table can present them as retries of the stage.
+    """
+    rec["stage_attempts"] = int(rec.get("stage_attempts") or 0) + 1
+    return rec["stage_attempts"]
+
+
+def _bump_aux(rec: dict, key: str) -> int:
+    rec[key] = int(rec.get(key) or 0) + 1
+    return rec[key]
+
+
+def bump_scoped_repair(rec: dict) -> int:
+    """Count one scoped artifact-repair session (its own count, never a retry)."""
+    return _bump_aux(rec, "scoped_repairs")
+
+
+def bump_continuation(rec: dict) -> int:
+    """Count one CONTINUATION session (its own count, never a retry)."""
+    return _bump_aux(rec, "continuation_sessions")
+
+
+def bump_reverification(rec: dict) -> int:
+    """Count one re-postcheck of a failed process's complete artifacts.
+
+    A re-verify runs no agent at all; it only gives the same attempt a second
+    look, so it is recorded here instead of being charged to the retry budget.
+    """
+    return _bump_aux(rec, "reverifications")
+
+
+def stage_attempts(rec: dict) -> int:
+    """The number of FULL stage attempts recorded for the run (cumulative)."""
+    try:
+        return int(rec.get("stage_attempts") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def stage_attempt_count(rec: dict) -> int:
+    """The full-attempt count for a report, with a pre-split record's fallback.
+
+    A record written before the split (or built by hand in a test) counted every
+    session as an attempt; it must never be reported as "0 attempt(s)".
+    """
+    n = stage_attempts(rec)
+    if n:
+        return n
+    try:
+        return int(rec.get("attempts") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def auxiliary_sessions(rec: dict) -> int:
+    """How many sessions ran for this run WITHOUT being a full stage retry."""
+    total = 0
+    for key in ("scoped_repairs", "continuation_sessions", "reverifications"):
+        try:
+            total += int(rec.get(key) or 0)
+        except (TypeError, ValueError):
+            pass
+    return total
+
+
+def auxiliary_session_summary(rec: dict) -> str:
+    """`N scoped repair(s), M continuation(s), K re-verification(s)` (empty if none)."""
+    parts = []
+    for key, noun in (("scoped_repairs", "scoped repair"),
+                      ("continuation_sessions", "continuation"),
+                      ("reverifications", "re-verification")):
+        try:
+            n = int(rec.get(key) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n:
+            parts.append(f"{n} {noun}{'' if n == 1 else 's'}")
+    return ", ".join(parts)
+
+
+def attempt_split_cell(rec: dict) -> str:
+    """`2+1` -- full stage attempts plus the auxiliary sessions, for the run table.
+
+    The `+` part is shown only when an auxiliary session ran, so an ordinary
+    run's cell stays a plain number. The two numbers are the run's LIFETIME
+    history (the retry budget itself is per invocation and is reported on the
+    console); keeping them apart is what stops the table from reading a scoped
+    repair or a re-verify as a retry.
+    """
+    full, aux = stage_attempt_count(rec), auxiliary_sessions(rec)
+    return f"{full}+{aux}" if aux else str(full)
 
 
 def attempt_number(rec: dict) -> int:
@@ -5139,7 +5251,9 @@ def _vid_index(rec: dict) -> int:
 
 def reset_run_record(rec: dict) -> None:
     """Clear a run's bookkeeping so the next attempt cannot inherit an old result."""
-    rec.update({"status": "pending", "attempts": 0, "last_error": None, "postcheck": None,
+    rec.update({"status": "pending", "attempts": 0, "stage_attempts": 0,
+                "scoped_repairs": 0, "continuation_sessions": 0, "reverifications": 0,
+                "last_error": None, "postcheck": None,
                 "scores": None, "summary": None})
     for k in ("stale_reason", "corpus_digest", "content_fingerprint", "captions",
               "document_set", "placeholders", "critical_findings_input",
