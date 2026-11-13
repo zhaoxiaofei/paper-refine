@@ -181,7 +181,13 @@ def likely_complete_artifacts(ctx: Ctx, rec: dict) -> bool:
         return (sb / FINDINGS_REL).is_file()
     if rec["kind"] in ("rewrite", "revise", "integrate"):
         out = sb / output_dir_of(rec)
-        return out.is_dir() and any(out.iterdir())
+        # A revise sandbox is materialized WITH the seeded ledger/language
+        # skeleton. Those are inputs, not evidence that the agent produced a
+        # package: a process that died before writing anything is a fresh
+        # attempt, not a "finished artifacts, re-verify" case.
+        seeded = untouched_revise_seed_paths(sb) if rec["kind"] == "revise" else set()
+        return out.is_dir() and any(p.is_file() and p not in seeded
+                                    for p in out.rglob("*"))
     if rec["kind"] == "judge":
         # A partial sheet from a crashed attempt must not be adopted silently:
         # require the full comparison set for this session's labels.
@@ -419,9 +425,13 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
         d = sb / "response"
         return d.is_dir() and any(d.iterdir())
     # rewrite / revise / integrate: the output package and code/ are the agent's.
+    # A revise sandbox is materialized WITH the seeded ledger and language-pass
+    # skeleton; those are inputs, not partial work (a fresh sandbox must still be
+    # launchable). Every other file under the package is the agent's.
+    seeded = untouched_revise_seed_paths(sb) if rec.get("kind") == "revise" else set()
     for rel in (output_dir_of(rec), CODE_DIR):
         d = sb / rel
-        if d.is_dir() and any(d.iterdir()):
+        if d.is_dir() and any(p.is_file() and p not in seeded for p in d.rglob("*")):
             return True
     return False
 
@@ -7043,7 +7053,12 @@ REPAIR_PROFILES = {
                    + (r"^revised/revision_report\.json is missing: ",
                       r"^revised/revision_report\.json does not carry the revision ledger ",
                       r"^revised/revision_report\.json is EMPTY/unfinished \(structured output\): ",
-                      r"^revised/revision_report\.json does not name ")),
+                      r"^revised/revision_report\.json does not name ",
+                      # The ledger is seeded with one empty row per frozen id: the
+                      # rows are identity and must stay, the VERDICT is the cell
+                      # the scoped repair may complete from the package's evidence.
+                      r"^revised/revision_report\.json names \d+ finding id\(s\) without a "
+                      r"VERDICT: ")),
         "scope": "the bookkeeping files inside revised/ (revision_report.json, "
                  "REVISION_REPORT.md, CHANGELOG.md, MANUAL_STEPS.md, VISUAL_CHECK.md, "
                  "DIFF_LEDGER.md) plus revised/work/ scratch",

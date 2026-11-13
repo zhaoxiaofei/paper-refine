@@ -223,6 +223,15 @@ if not resumed:
     if MODE == "overflow":
         sys.stderr.write("ERROR: unexpected status 413 Payload Too Large: length limit exceeded\\n")
         sys.exit(1)
+    if MODE == "partial":
+        # Do the stage's work, then stop before the completion marker: the
+        # 2026-11-13 case (a two-hour revise that ended one line short).
+        sys.stdin = io.StringIO(prompt)
+        rc = stub_agent.main()
+        marker = Path.cwd() / "_pipeline_done.json"
+        if marker.is_file():
+            marker.unlink()
+        sys.exit(rc)
     sys.exit(0)                      # the stall: nothing written, rc=0
 sandbox = Path.cwd()
 (sandbox / "_fake_resume_count").write_text(
@@ -303,6 +312,34 @@ def test_end_to_end_continuation():
           and not (root / "runs" / "r1_w1" / nb.RESUME_PROMPT_FILE).exists())
 
 
+def test_end_to_end_partial_continuation():
+    print()
+    print("== a package that stopped BEFORE THE MARKER is continued ==")
+    tmp = scratch("paper_resume_partial_")
+    root = make_root(tmp)
+    proc = run_with_fake_codex(root, make_fake_codex(tmp / "bin"), "--retries", "0",
+                               mode="partial")
+    out = proc.stdout + proc.stderr
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    rec = state["runs"]["r1_w1"]
+    sources = [(e.get("attempt"), e.get("source"), e.get("ok"))
+               for e in rec.get("attempts_log") or []]
+    check("a stage that did its work but stopped before the marker is continued",
+          rec["status"] == "done" and sources == [(1, "postcheck", False),
+                                                  (2, "continuation", True)],
+          f"{sources} {str((rec.get('postcheck') or {}).get('errors'))[:200]}")
+    check("the continuation wrote the missing marker (the only thing that was missing)",
+          (root / "runs" / "r1_w1" / "_pipeline_done.json").is_file())
+    check("the stopped attempt spent NO fresh-attempt budget (only the continuation)",
+          sum(1 for e in rec.get("attempts_log") or []
+              if e.get("source") in ("postcheck", "process")) == 1
+          and rec.get("resume_attempts") == {SID: 1},
+          f"sources={sources} resume={rec.get('resume_attempts')}")
+    check("the console names it as a continuation, not a retry",
+          "[resume] r1_w1: continuing session" in out and "continuation 1/2" in out,
+          out[-400:])
+
+
 def test_end_to_end_limit():
     print()
     print("== a session that keeps stalling is continued at most twice ==")
@@ -357,6 +394,7 @@ def main() -> int:
         test_gate()
         test_context_overflow_gate()
         test_end_to_end_continuation()
+        test_end_to_end_partial_continuation()
         test_end_to_end_limit()
         test_end_to_end_context_overflow()
     finally:

@@ -2612,6 +2612,16 @@ postcheck.
   file, package or donor set, or the re-validation read that re-opens a cited location before an
   edit, and write-economy guidance never demands a format-invalid partial deliverable.
 
+**To choose between them for a weak or small model, measure — do not assume.**
+`medium` shrinks the per-call payload but ADDS read turns (the session slices
+`INSTRUCTIONS/PROFILE_RULES.md`) and, on a long stage, more compaction and more
+chances to lose the thread; `high` inlines the same rules once and removes the
+slicing. A 2026-11-13 27B arm under `medium` compacted seven times before it
+reached its bookkeeping. The first experiment for such a model is therefore to
+re-run the same root with `--execution-profile high`: the rules, the postchecks
+and the staged sessions are identical (that is what rule 12 means), so the
+comparison is about payload shape, not about a weaker contract.
+
 **`medium` is normatively equivalent to `high`** (AGENTS.md rule 12), and the equivalence is tested,
 not assumed. The paged file carries the blocks byte-for-byte (only a level-2 heading may be demoted
 one level so it cannot end a section), in the order their pointers occur in the prompt, so a session that
@@ -3554,8 +3564,19 @@ which files may change, and which evidence is pinned:
 |---|---|---|---|
 | `review` | the decision-artifact quality problems (empty cells, boilerplate closures, echoed OUTLINE summaries), the M1b long-form gate (undisposed residue rows — the class that failed the 2026-09-22 roots), a missing visual record | `guided_review/artifacts/` (the seeded tables **including `M1_acronyms.md`**), `guided_review/work/` | every table's row identity, all headers and column orders; `findings.json`/`md`, `round2/`, the other artifact files |
 | `audit` | `audit.json` missing/unparseable/duplicated/missing dispositions | `audit/` | every existing disposition and every `adds` row; **new dispositions must be `confirm`** (a drop hides a finding from the revisers and needs the auditor's own evidence) |
-| `rewrite` / `revise` / `integrate` | an EMPTY/thin report or ledger the stage wrote (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`: blank cells, wrong level, missing `artifact` rows), the language-pass coverage rows, the visual record, the marker | the package's bookkeeping files the stage wrote (by name) and its existing `work/` files | every manuscript file of the package; the frozen review; the corpus inputs |
+| `rewrite` / `revise` / `integrate` | an EMPTY/thin report or ledger the stage wrote (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`: blank cells, wrong level, missing `artifact` rows), the seeded revise ledger's empty verdict cells and the language-pass coverage cells, the visual record, the marker | the package's bookkeeping files the stage wrote (by name) and its existing `work/` files | every manuscript file of the package; the frozen review; the corpus inputs; every seeded row's identity |
 | `judge` | a missing `checks` coverage map, `score`/`basis` that contradict the sheet's own ledger, bookkeeping ids, a missing grounding record | `scores.json`, `judge_review/` | `resolved`/`introduced` (the ledger IS the judgement), the comparison set, existing coverage entries; new coverage entries must be `unable` |
+
+**The revise arm starts with the two late deliverables EMPTY-BUT-SHAPED.** At
+materialization the pipeline seeds `revised/revision_report.json` with one row per
+frozen finding id (empty verdict/rationale/evidence) and
+`revised/work/R6_language.md` with the L1-L11 coverage rows (empty counts). The
+seed is a head start, never a pass: an empty verdict or an empty coverage cell is
+still a postcheck ERROR (and the scoped repair may complete the cells from the
+package's own evidence), while the completion marker is deliberately NOT seeded —
+a stage that stopped before it is UNFINISHED and is continued, not repaired. The
+reason is the 2026-11-13 arm that wrote the revised brief and stopped three
+bookkeeping files short: the failure was a one-line omission, not a missing review.
 
 **Variant B — a repair finishes the paperwork of work that happened, it never
 substitutes for the work.** A repair may only CHANGE files the stage itself

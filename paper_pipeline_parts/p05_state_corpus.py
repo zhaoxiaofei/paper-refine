@@ -4669,6 +4669,121 @@ def merge_cold_start_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
     return {"rows": len(merged_rows), "remap": remap}
 
 
+# =====================================================================
+# THE TWO LATE DELIVERABLES ARE SEEDED EMPTY-BUT-SHAPED
+# =====================================================================
+# A weak model tends to spend its whole session on the manuscript and stop
+# before the two files that carry the EVIDENCE of the revision: the per-finding
+# ledger and the L1-L11 language-pass coverage table. A stage that stops before
+# writing a file loses a two-hour attempt to a "missing deliverable" error that
+# is really a one-line omission (the 2026-11-13 qwen arm wrote the revised
+# brief and stopped three bookkeeping files short).
+#
+# Seeding is a HEAD START, never a pass: the rows exist, the judgement does not.
+# An empty verdict / an empty coverage cell is still a postcheck ERROR, and the
+# scoped repair (`--strict-artifacts fix`) may complete the cells from the
+# package's own evidence. The completion marker is deliberately NOT seeded: it
+# is the signal that the stage finished, so a stage that never wrote it is
+# UNFINISHED and is continued (RESUME_PROMPT.md), not completed by paperwork.
+def _revise_frozen_finding_ids(sb: Path) -> list:
+    """The ids this revise session must resolve (frozen review + audit, X-* included)."""
+    ids = []
+    for row in findings_from_sandbox(sb, sandbox_audit_record(sb)):
+        fid = str((row or {}).get("id") or "").strip()
+        if fid and fid not in ids:
+            ids.append(fid)
+    return ids
+
+
+def _revise_frozen_review_readable(sb: Path) -> bool:
+    """True when the frozen review file exists and parses as a findings object.
+
+    A zero-finding review is a legitimately CLEAN review, not an unreadable one:
+    the ledger is seeded `[]` for it (the postcheck accepts an empty ledger only
+    when the frozen total is zero), while a missing/unreadable file gets no seed.
+    """
+    data = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
+    return isinstance(data, dict) and isinstance(data.get("findings"), list)
+
+
+def revise_ledger_skeleton(ids: list) -> str:
+    """The machine-readable ledger with one EMPTY row per frozen finding id."""
+    return json.dumps(
+        [{"id": fid, "verdict": "", "rationale": "", "evidence": "",
+          "final_status": ""} for fid in ids],
+        indent=2, ensure_ascii=False) + "\n"
+
+
+def revise_language_skeleton() -> str:
+    """The L1-L11 coverage table with one EMPTY row per step."""
+    lines = [
+        "# Language pass — L1–L11 (seeded empty by the pipeline)",
+        "",
+        "The pipeline seeded this coverage table with one row per step so the pass",
+        "cannot be silently skipped. Fill `rows changed` with an integer and `note`",
+        "for EVERY row, including the steps that changed nothing",
+        "(`L3 | 0 | no logic jumps found`). Record each edit above the table as",
+        "`step | location | before | after | reason`.",
+        "",
+        "| step | rows changed | note |",
+        "|---|---|---|",
+    ]
+    lines += [f"| L{i} |  |  |" for i in range(1, 12)]
+    return "\n".join(lines) + "\n"
+
+
+def seed_revise_deliverable_skeletons(sb: Path) -> dict:
+    """Write the ledger and language-pass skeletons when absent (never overwrite).
+
+    Returns ``{"ledger": bool, "language": bool}`` naming what this call created.
+    The ledger is seeded when the frozen review is READABLE: a zero-finding
+    review is legitimately clean and gets ``[]``, while a missing/unreadable
+    list gets NO seed -- an empty skeleton must not satisfy the all-clean branch
+    of a review whose findings could not be read.
+    """
+    rev = sb / REVISED_DIR
+    rev.mkdir(parents=True, exist_ok=True)
+    seeded = {"ledger": False, "language": False}
+    ids = _revise_frozen_finding_ids(sb)
+    if ids or _revise_frozen_review_readable(sb):
+        ledger = rev / "revision_report.json"
+        if not ledger.is_file():
+            write_text_atomic(ledger, revise_ledger_skeleton(ids))
+            seeded["ledger"] = True
+    lang = rev / "work" / "R6_language.md"
+    if not lang.is_file():
+        lang.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(lang, revise_language_skeleton())
+        seeded["language"] = True
+    return seeded
+
+
+def untouched_revise_seed_paths(sb: Path) -> set:
+    """The seeded files that are STILL byte-identical to the seed (inputs).
+
+    `leftovers_present` must not mistake a fresh sandbox for a partial package:
+    a materialized revise sandbox already carries the ledger and language-pass
+    seeds, so a plain "any file?" probe would never launch its first agent.
+    Comparing CONTENT is what keeps the guard honest the other way too: a seed
+    the agent has edited is the agent's own work, and a crashed session is then
+    "dirty" rather than silently re-entered.
+    """
+    rev = sb / REVISED_DIR
+    expected = {}
+    ids = _revise_frozen_finding_ids(sb)
+    if ids or _revise_frozen_review_readable(sb):
+        expected[rev / "revision_report.json"] = revise_ledger_skeleton(ids)
+    expected[rev / "work" / "R6_language.md"] = revise_language_skeleton()
+    untouched = set()
+    for path, text in expected.items():
+        try:
+            if path.is_file() and path.read_text(encoding="utf-8") == text:
+                untouched.add(path)
+        except (OSError, UnicodeError):
+            continue
+    return untouched
+
+
 def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     """Phase-2 sandbox for ONE reviewed-and-then-revised candidate.
 
@@ -4739,6 +4854,10 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
         ensure_copy(ctx.sandbox_of(aud_rec) / "audit", sb / "audit")
         aud_manifest = hash_manifest(sb / "audit")
     (sb / REVISED_DIR).mkdir(exist_ok=True)
+    # Seed the ledger and the language-pass coverage table EMPTY-BUT-SHAPED (a
+    # head start, not a pass: the empty cells are still postcheck errors; the
+    # completion marker is not seeded, so a stopped stage stays unfinished).
+    skeleton_seed = seed_revise_deliverable_skeletons(sb)
     # A retry used to start from base/ with only the failure TEXT, while the
     # prompt told the agent to read a sibling sandbox it was forbidden to open.
     # Copy the rejected package INTO this sandbox so the retry can inspect (and
@@ -4787,6 +4906,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                prefer_rewrite=_prefer_ok))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
+    rec["seeded_skeletons"] = skeleton_seed
     _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok)
     if _policy_rec is None:
         rec.pop("content_edit_policy", None)

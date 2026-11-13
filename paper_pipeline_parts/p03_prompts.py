@@ -1136,8 +1136,12 @@ Layout (paths relative to the sandbox root):
                   DO NOT MODIFY ANYTHING UNDER guided_review/ — not one byte. The orchestrator verifies
                   guided_review/ is byte-identical after your run and a single changed byte FAILS this run.
 @@AUDIT_BLOCK@@
-  revised/      — YOU create this; your revision package goes here (revised documents, CHANGELOG.md,
-                  MANUAL_STEPS.md, REVISION_REPORT.md, revision_report.json, work/).
+  revised/      — the revision package: revised documents, CHANGELOG.md,
+                  MANUAL_STEPS.md, REVISION_REPORT.md, work/. The pipeline has
+                  ALREADY seeded `revised/revision_report.json` (one empty row
+                  per frozen finding id) and `revised/work/R6_language.md` (the
+                  L1-L11 coverage rows); fill them in place and never remove or
+                  recreate `revised/` wholesale.
                   Your OWN report files are pipeline bookkeeping, not submission content: writing
                   them is required, but never edit manuscript text to make a report look better,
                   and never let them change a scientific claim. (The next round, the judges and
@@ -1170,17 +1174,20 @@ Run the complete $paper-revise workflow -- R0 through V5 -- as specified by the 
 the artifacts landing in ./revised. Read the skill's SKILL.md and its references first
 (references/ledger.md, references/edit_rules.md). Required procedure, in order:
   R0  setup/safety: inventory + sha256 of every original; load guided_review/findings.json and, when
-      present, guided_review/round2/findings_extra.json; build the A1 revision-ledger skeleton
-      PROGRAMMATICALLY so that no finding id can be silently dropped (F-* and X-* are separate
-      namespaces; every id appears exactly once, "not addressed" is not a status). The
-      machine-readable ledger (revised/revision_report.json) must NAME every one of those ids as
-      structured data -- a row's id field, a mapping key, or an id list -- because the orchestrator
-      reads the ids from that file and re-runs this stage when an id is missing. Any container name
-      is accepted (the skill's coverage table, `findings`, `ledger`, `rows`, ...); an id that only
-      appears inside a prose sentence is NOT accepted as naming it. An X-* discovery finding is
-      treated exactly like an F-* one -- same ledger row, same evidence bar -- and the V3 rescan
-      re-locates its quoted defect in revised/: a resolution whose evidence is still present after
-      your edits is not resolved, and every X id is reported the same way the F-* list is.
+      present, guided_review/round2/findings_extra.json. The pipeline has ALREADY seeded the A1
+      revision-ledger skeleton at revised/revision_report.json -- one row per frozen finding id,
+      every verdict/rationale/evidence cell EMPTY. Fill those rows IN PLACE (F-* and X-* are
+      separate namespaces; every id appears exactly once, "not addressed" is not a status); never
+      delete, reorder, rename or replace the seeded rows, and never recreate revised/ wholesale
+      (it also carries the seeded language-pass skeleton). The machine-readable ledger must NAME
+      every one of those ids as structured data -- a row's id field, a mapping key, or an id list
+      -- because the orchestrator reads the ids from that file and re-runs this stage when an id
+      is missing. Any container name is accepted (the skill's coverage table, `findings`,
+      `ledger`, `rows`, ...); an id that only appears inside a prose sentence is NOT accepted as
+      naming it. An X-* discovery finding is treated exactly like an F-* one -- same ledger row,
+      same evidence bar -- and the V3 rescan re-locates its quoted defect in revised/: a
+      resolution whose evidence is still present after your edits is not resolved, and every X id
+      is reported the same way the F-* list is.
   R1  re-verify every finding against the sources; record a verdict with a location-checked
       rationale (empty rationale = invalid). False positives are discarded only with a concrete
       recorded rationale; ambiguous wording becomes "clarification"; unverifiable becomes
@@ -1189,6 +1196,8 @@ the artifacts landing in ./revised. Read the skill's SKILL.md and its references
       (the audit block above is authoritative); the ledger still NAMES its id so nothing is
       silently dropped.
   R2  copy the editable documents into revised/ (doc/docx/tex/bib/md/txt/xlsx; never pdf/png).
+      revised/ already exists with the seeded ledger and language-pass files: copy INTO it,
+      never delete or recreate it first.
   R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E12; P propagation A6
       (supplementary tables > supplementary figures/notes > main figures & legends > Methods >
       main text > abstract > cover letter) for every corrected number/label/term/claim; C code
