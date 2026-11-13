@@ -1532,7 +1532,7 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
     b_kept = []
     for f in b_items:
         key = _dedup_key(f)
-        if key != ("", "") and key in a_keys:
+        if key != ("", "", "") and key in a_keys:
             # Both sessions found the same defect at the same place with the same
             # evidence: keep A's row (ids and coverage ride with it) instead of
             # handing the reviser two rows for one thing.
@@ -3787,7 +3787,12 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
             # let an invented `50 mM -> 25 mM` pair pass (F-032). Presence is
             # required wherever the corresponding package is available.
             if before and prev_available:
-                if ptext is not None and before not in norm(ptext):
+                if ptext is None and not (prev / f).is_file():
+                    problems.append(
+                        f"response row {cid!r}: previous_package/{f} is missing, so the "
+                        f"claimed `before` pre-image cannot be verified; quote a file the "
+                        f"pre-revision package actually carries")
+                elif ptext is not None and before not in norm(ptext):
                     problems.append(
                         f"response row {cid!r}: the change's `before` span is not present in "
                         f"previous_package/{f}; quote the pre-revision text verbatim (no "
@@ -4797,7 +4802,13 @@ def journal_seed_coverage_problems(sb: Path, seed: dict, rows: list) -> list:
             disposition = str(row.get("disposition") or "").strip()
             low = disposition.lower()
             if low.startswith(("no concern", "skipped", "not-a-concern", "no demand")):
-                reason = re.split(r"[—–:\-]", disposition, maxsplit=1)
+                # Strip the skip PREFIX before splitting: splitting the raw
+                # `not-a-concern` on its hyphens left `a-concern` as the start
+                # of the "reason", so the three-word bar was never enforced.
+                _pref = re.match(
+                    r"(?i)^(?:no concern|skipped|not-a-concern|no demand)\b", disposition)
+                rest = disposition[_pref.end():] if _pref else disposition
+                reason = re.split(r"[—–:\-]", rest, maxsplit=1)
                 words = re.findall(r"\S+", reason[1] if len(reason) > 1 else "")
                 if len(words) < 3:
                     problems.append(f"{SEED_COVERAGE_REL}: {sid} is skipped without a real "
@@ -5896,7 +5907,7 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
         if check_plan:
             for row in block["rows"]:
                 disposition = str(row.get("disposition") or "")
-                for match in re.finditer(r"(?i)fact\s+removed\s*[—:-]\s*(RP-\d+)",
+                for match in re.finditer(r"(?i)fact\s+removed\s*[—–:-]\s*(RP-\d+)",
                                          disposition):
                     if match.group(1).upper() not in plan_ids:
                         problems.append(
@@ -6585,6 +6596,12 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     if response_dir is not None:
         for rel in (JOURNAL_RESPONSE_MD_REL, JOURNAL_RESPONSE_MAP_REL):
             src = response_dir / rel
+            if src.is_symlink():
+                # `is_file()`/copy2 follow the link: a response stage could
+                # plant `RESPONSE_TO_REVIEWERS.md -> /etc/passwd` and have it
+                # delivered in journal_submission/.
+                die(f"refusing to publish {src}: it is a symlink, not a response "
+                    f"document (a symlinked output is never package content)")
             if src.is_file():
                 out = stage / Path(rel).name
                 shutil.copy2(src, out)
@@ -6603,6 +6620,9 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
         if rd.is_dir():
             out_dir = stage / "tracked_changes"
             for p in sorted(rd.iterdir()):
+                if p.is_symlink():
+                    die(f"refusing to publish tracked-changes entry {p}: it is a "
+                        f"symlink (a link is never package content)")
                 if p.is_file():
                     # NEVER overwrite the clean document: the marked-up copies
                     # go in their own folder beside it.

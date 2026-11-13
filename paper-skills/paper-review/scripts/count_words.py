@@ -25,10 +25,8 @@ sources are read as LaTeX: the abstract environment's own `\end{abstract}` ends
 the abstract (paragraph breaks inside it do not), and `\caption`/`\captionof`
 text is a legend even though its "Figure N" label is added at typesetting time.
 
-The cover letter is counted twice: its PERSUADING part against the venue
-profile's own `cover_letter` bound (a range, or a one-sided `at most N` /
-`at least N`; the built-in 300-500-word preference applies only when the
-profile configures no cover-letter block), and its TOTAL content (salutation, body, disclosures
+The cover letter is counted twice: its PERSUADING part against the user's
+300-500-word preference, and its TOTAL content (salutation, body, disclosures
 and signature) against the profile's `cover_letter.total_max` when one is set;
 the shipped profiles record no total cap.
 
@@ -46,31 +44,33 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# Support direct execution and loading the script by filename.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    import manuscript_words
-    from evidence_names import (EVIDENCE_DIRNAMES,
-                                is_evidence as _is_evidence,
-                                _COVER_WORD_RE)
-finally:
-    sys.path.pop(0)
-
-count_words = manuscript_words.count_words
-lenient_cap = manuscript_words.lenient_cap
-_strip_latex = manuscript_words.strip_latex
-
-_heading_text = manuscript_words.heading_text
-section_kind = manuscript_words.section_kind
-keyword_continuation = manuscript_words.keyword_continuation
-SECTION_BOUND = manuscript_words.SECTION_BOUND
-
+ABSTRACT_HEAD = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary)\s*[:.\u2014\u2013-]?\s*$", re.I)
+# The common inline layout: "Abstract: We studied ..." on one line. The heading
+# itself must be recognised so the abstract is not left inside the main text;
+# the remainder is its first paragraph.
+INLINE_ABSTRACT_HEAD = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary)\s*[:.\u2014\u2013-]\s*(\S.*)$",
+    re.I)
+MAIN_START = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:introduction|main text|background)\s*[:.\u2014\u2013-]?\s*$",
+    re.I)
+SECTION_BOUND = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary|keywords?|introduction|background|"
+    r"results?|discussion|conclusions?|materials (?:and|&) methods|online methods?|methods?|"
+    r"star methods|experimental procedures|"
+    r"references?|bibliography|(?:literature|works) cited|figure legends?|acknowledg\w*|"
+    r"author contributions?|"
+    r"(?:data|code) availability|competing interests?|conflicts? of interest|funding|"
+    r"supplementary (?:information|materials?|methods|figures|tables|notes?))"
+    r"\s*[:.\u2014\u2013-]?\s*$", re.I)
 # The venue's main-text counting convention (check id M19): the section kinds a
 # word limit may leave OUT of its count. A profile states them in
 # `counting.main_text.excludes` (per venue, or per article type where the types
@@ -88,6 +88,98 @@ MAIN_TEXT_SECTION_KINDS = ("abstract", "methods", "references", "figure-legends"
 DEFAULT_MAIN_TEXT_EXCLUDES = tuple(
     kind for kind in MAIN_TEXT_SECTION_KINDS
     if kind not in ("table-captions", "table-contents"))
+SECTION_KIND_RES = (
+    ("methods", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials (?:and|&) methods|online methods?|methods?|"
+        r"star methods|experimental procedures)\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("references", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography|"
+        r"(?:literature|works) cited)\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("figure-legends", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?figure legends?\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("acknowledgements", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?acknowledg\w*\s*(?:[:.\u2014\u2013-]\s*|\s*$)",
+        re.I)),
+    ("author-contributions", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?author contributions?\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("data-availability", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:data|code) availability\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("competing-interests", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:competing interests?|conflicts? of interest)\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("funding", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?funding\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("supplementary", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?supplementary "
+        r"(?:information|materials?|methods|figures|tables|notes?)\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+)
+
+
+def _heading_text(line: str) -> str:
+    """A heading line with a Markdown ATX prefix or emphasis removed.
+
+    The pipeline's own length scan strips `#{1,6}` (`_length_heading_text`);
+    without the same step here `## Methods` was body text to this counter and
+    a heading to the gate, so a .md manuscript got one `whole file` row and
+    skipped the M19 cap check. The same holds for `**Abstract**`-style
+    emphasis headings, which the pipeline scanner now recognises too.
+    """
+    text = re.sub(r"^\s*#{1,6}\s+", "", (line or "").strip())
+    m = re.match(r"^(\*\*|__|\*|_)(\S.*?)\1(.*)$", text)
+    if m and m.group(2).strip():
+        text = (m.group(2) + m.group(3)).strip()
+    return text
+
+
+def section_kind(line: str) -> str:
+    """The M19 counting-convention kind of a boundary heading ("" when not one)."""
+    text = _heading_text(line)
+    if not text:
+        return ""
+    for kind, pattern in SECTION_KIND_RES:
+        if pattern.match(text):
+            return kind
+    return ""
+KEYWORDS = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:key\s?words?)\s*"
+    r"(?:[:.\u2014\u2013-]|$)", re.I)
+
+
+def keyword_continuation(line: str) -> bool:
+    """Does this line continue the keyword LIST, or start the body?
+
+    The pipeline's twin `_length_keyword_continuation` must return the same
+    answer on the same line, or the two M19 counters disagree. A comma/semicolon
+    list of short items is a continuation; a sentence with a terminator is body;
+    a short lowercase unpunctuated line is a list; anything longer is body.
+    """
+    text = (line or "").strip()
+    if not text:
+        return False
+    words = text.split()
+    terminated = bool(re.search(r"[.!?]\s*$", text))
+    if "," in text or ";" in text:
+        # Keep the pipeline twin's rule: a comma-bearing sentence is body, but a
+        # capitalized one-word item ("COVID-19, SARS-CoV-2") can still be a list.
+        if terminated:
+            return False
+        parts = [p.strip() for p in re.split(r"[,;]", text) if p.strip()]
+        if not parts:
+            return False
+        if not text[:1].islower() and len(parts[0].split()) > 1:
+            return False
+        return (2 <= len(parts) <= 20 and len(words) <= 24
+                and all(len(p.split()) <= 4 for p in parts))
+    if terminated:
+        return False
+    return len(words) <= 4 and text[:1].islower()
+
+
 # A caption line starts with the label, the number AND its separator ("Figure 2
 # | ...", "Fig. 1: ...", "Figure 3. ..."). Without the separator guard a BODY
 # sentence that merely opens with a figure reference ("Figure 2A shows that p53
@@ -141,38 +233,6 @@ COVER_DISCLOSURE = re.compile(
 # a `.tex` manuscript is counted with the same rule as a .md/.docx one instead
 # of being answered with a markup-inclusive "whole file" row.
 TEX_EXTS = (".tex", ".ltx")
-# convert_corpus.py keeps the original basename and appends `.txt`, so the
-# uniform corpus carries LaTeX as `<name>.tex.txt` (and Word as
-# `<name>.docx.txt`).  Reading that file as plain text produced a cap-null
-# "whole file" M19 row (F277); recognise the converted suffixes instead.
-CONVERTED_TEX_SUFFIXES = (".tex.txt", ".ltx.txt")
-CONVERTED_DOC_SUFFIXES = (".docx.txt", ".xlsx.txt")
-# A synthetic part marker written by convert_corpus.py ("### corpus-marker:
-# header (word/header1.xml)").  Page furniture (running heads/footers) is not
-# the authors' prose, and a marker line is never a word.
-CORPUS_MARKER = re.compile(
-    r"^\s*###\s*corpus-marker:\s*([A-Za-z][A-Za-z -]*?)(?=\s*[(:]|\s*$)", re.I)
-
-
-def strip_converted_page_furniture(text: str) -> str:
-    """Drop converter part markers and the header/footer text they introduce.
-
-    The `.docx.txt` representation appends Word's header/footer parts; counting
-    them inflated a 3-word main text to 20 in the F277 fixture.  Footnote and
-    endnote bodies are document text and stay (only their marker is dropped).
-    """
-    out, skip = [], False
-    for line in (text or "").splitlines():
-        m = CORPUS_MARKER.match(line)
-        if m:
-            skip = m.group(1).strip().lower() in ("header", "footer")
-            continue
-        if skip:
-            continue
-        out.append(line)
-    return "\n".join(out)
-
-
 TEX_SECTION = re.compile(r"^\\(?:sub)*section\*?(?:\[[^\]]*\])?\{([^{}]*)\}")
 TEX_CAPTION = re.compile(r"\\caption(?:of)?\*?\s*(?:\{[^{}]*\}\s*)?(?:\[[^\]]*\]\s*)?\{")
 TEX_ENV_TOKEN = re.compile(r"\\(?:begin|end)\s*\{[^{}]*\}(?:\s*\[[^\]]*\])?")
@@ -205,28 +265,13 @@ def _tex_include_path(base: Path, arg: str):
     cand = Path(arg)
     if cand.suffix.lower() not in TEX_EXTS:
         cand = Path(str(cand) + ".tex")
-    # A converted corpus names a LaTeX child `<name>.tex.txt`; without the
-    # `.txt` fallback an included chapter is never found in the corpus and the
-    # root alone is counted.
-    candidates = [cand] + [Path(str(cand) + ".txt")]
-    # A CONVERTED corpus flattens a subdirectory child into
-    # `sub__chapter.tex.txt`; the written `\input{sub/chapter}` has to resolve
-    # to that flattened name too (F019).
-    flat = arg.replace("/", "__").replace("\\", "__")
-    stem = flat[:-4] if flat.lower().endswith(TEX_EXTS) else flat
-    candidates += [Path(stem + ".tex.txt"), Path(stem + ".ltx.txt"),
-                   Path(stem + ".tex"), Path(stem + ".ltx"),
-                   Path(stem + ".txt")]
-    for candidate in candidates:
-        path = candidate if candidate.is_absolute() else (base / candidate)
-        try:
-            resolved = path.resolve()
-            resolved.relative_to(base.resolve())
-        except (OSError, ValueError):
-            continue                # a path outside the manuscript directory
-        if resolved.is_file():
-            return resolved
-    return None
+    path = cand if cand.is_absolute() else (base / cand)
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(base.resolve())
+    except (OSError, ValueError):
+        return None                     # a path outside the manuscript directory
+    return resolved if resolved.is_file() else None
 
 
 _DOCX_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -387,13 +432,86 @@ COVER_LETTER_TOTAL_MAX = None
 COVER_LETTER_MAX = 500
 
 
+def count_words(text: str) -> int:
+    """Maximal runs of non-space characters; a newline is a space."""
+    return len(re.findall(r"\S+", text or ""))
+
+
+def lenient_cap(base: int, factor: float) -> int:
+    """Largest integer word count within `base` relaxed by `factor`."""
+    # floor(base*factor), tolerant of the float representation error that made
+    # "100 words +15%" 114.99999999999999 -> 114 instead of 115. This must stay
+    # identical to paper_pipeline.lenient_word_limit(): an agent trimming to a
+    # cap one word stricter than the orchestrator's turns a boundary document
+    # into a spurious M19 finding.
+    return math.floor(float(base) * float(factor) + 1e-9)
+
+
+# Inline verbatim is CODE, not prose (`\verb|x y|`, `\lstinline[opts]{x y}`):
+# the command-name stripper removed only the command, so the delimiters and the
+# code tokens stayed in the M19 count. Keep these two patterns, and the whole
+# `_strip_latex` order, IDENTICAL to paper_pipeline._strip_latex.
+TEX_INLINE_VERBATIM = re.compile(
+    r"\\mintinline\*?(?:\[[^\[\]]*\]\s*)?\{[^{}]*\}\s*"
+    r"(?:\{[^{}]*\}|(?P<md>[^\sA-Za-z0-9])(?:\\.|(?!(?P=md))[\s\S])*?(?P=md))")
+TEX_INLINE_VERB = re.compile(
+    r"\\(?:verb|lstinline)\*?(?:\[[^\[\]]*\]\s*)?"
+    r"(?:\{[^{}]*\}|(?P<vd>[^\sA-Za-z0-9])"
+    r"(?:\\.|(?!(?P=vd))[\s\S])*?(?P=vd))")
+
+
+def _strip_latex(text: str) -> str:
+    """Prose of a LaTeX line: commands removed, math blanked, braces as spaces."""
+    # The OPTIONAL arguments come first: the brace-only pattern left `[p.5]` and
+    # `x` behind as prose for `\cite[p.5]{x}` (and for the `\citep[see][p.5]{x}`
+    # form), so M19 counted phantom words on exactly the manuscripts whose
+    # counting must be trusted.
+    # `[a-zA-Z]*ref` covers the whole reference family (`\pageref{p12}`,
+    # `\eqref{}`, `\autoref{}`, `\cref{}`): the bare `ref` alternative missed
+    # every prefixed form, so `\pageref{p12}` left the phantom word `p12` in the
+    # M19 count. An ESCAPED dollar (`\$5`) is a literal, not math: the math
+    # pattern is lookbehind-guarded (keep this in step with
+    # paper_pipeline._strip_latex).
+    # The CITATION family is matched case-insensitively and on BOTH sides of
+    # `cite`: the biblatex-prefixed commands (`\nocite`, `\autocite`,
+    # `\parencite`, `\textcite`, `\footcite`) and the capitalized natbib forms
+    # (`\Cite`, `\Citet`, `\Citep`) used to leave their keys as prose.
+    text = re.sub(r"\\(?:[a-zA-Z]*cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
+                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text, flags=re.I)
+    text = TEX_INLINE_VERBATIM.sub(" ", text)
+    text = TEX_INLINE_VERB.sub(" ", text)
+    # A colour, font or graphics-file argument is an identifier, not prose (keep
+    # in step with paper_pipeline._strip_latex).
+    text = re.sub(r"\\(?:includegraphics|includesvg|includepdf)\*?\s*"
+                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text, flags=re.I)
+    text = re.sub(r"\\textcolor\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text,
+                  flags=re.I)
+    text = re.sub(r"\\colorbox\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text,
+                  flags=re.I)
+    text = re.sub(r"\\fcolorbox\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}\s*\{[^{}]*\}",
+                  " ", text, flags=re.I)
+    text = re.sub(r"\\(?:color|pagecolor|definecolor)\s*(?:\[[^\[\]]*\]\s*)*"
+                  r"(?:\{[^{}]*\}\s*){1,3}", " ", text, flags=re.I)
+    # Inline and single-line display math (`$p<0.05$`, `\(x\)`, `\[x\]`) is not
+    # prose; only the command names used to be stripped, so the body's tokens
+    # were counted.
+    # An even run of backslashes before the math is a line break, not an
+    # escape: `\\$x$` is still math, `\$5` is a literal dollar.
+    text = re.sub(r"(?<!\\)(?:\\\\)*\$\$[\s\S]*?\$\$"
+                  r"|(?<!\\)(?:\\\\)*\$[^$]*\$|\\\[[\s\S]*?\\\]|"
+                  r"\\\([\s\S]*?\\\)", " ",
+                  text)
+    text = re.sub(r"\\[a-zA-Z@]+\*?", " ", text)
+    return re.sub(r"\s+", " ", text.replace("{", " ").replace("}", " ")).strip()
+
+
 # Display-math environments whose BODY is not prose. Their `\begin`/`\end`
 # tokens were already stripped, so the equation's own tokens were counted as the
 # authors' words -- an upward drift on an equation-heavy .tex, the dangerous
 # direction against a venue cap.
 TEX_MATH_ENV = re.compile(
-    r"\\begin\s*\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
-    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\s*\{\1\}", re.M)
+    r"\\begin\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
+    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\{\1\}", re.M)
 
 
 def blank_math_environments(text: str) -> str:
@@ -490,11 +608,11 @@ def tex_lines(text: str):
         # environment, or the rest of the document is blanked as code.
         _line = strip_tex_comment(_line)
         while True:
-            _b = re.search(r"\\begin\s*\{(verbatim|lstlisting|minted|Verbatim)\}",
+            _b = re.search(r"\\begin\{(verbatim|lstlisting|minted|Verbatim)\}",
                            _line)
             if not _b:
                 break
-            _e = re.search(r"\\end\s*\{" + re.escape(_b.group(1)) + r"\}",
+            _e = re.search(r"\\end\{" + re.escape(_b.group(1)) + r"\}",
                            _line[_b.end():])
             if _e:
                 _line = _line[:_b.start()] + _line[_b.end() + _e.end():]
@@ -514,8 +632,8 @@ def tex_lines(text: str):
         # `re.search`, not `re.match`: a legal one-line abstract preceded by
         # title text on the same source line is still an abstract environment,
         # exactly as the pipeline's scan treats it (F05).
-        begins = re.search(r"\\begin\s*\{abstract\}", line)
-        ends = re.search(r"\\end\s*\{abstract\}", line)
+        begins = re.search(r"\\begin\{abstract\}", line)
+        ends = re.search(r"\\end\{abstract\}", line)
         if begins or ends:
             # Both tokens may sit ANYWHERE on the line (`\begin{abstract} ...
             # \end{abstract}`, or the usual `Last sentence.\end{abstract}`):
@@ -551,48 +669,61 @@ def tex_lines(text: str):
         if m:
             lines.append(m.group(1).strip())
             continue
-        # A legal line may carry SEVERAL caption groups
-        # (`\\caption{A.}\\caption{B.}`): the single `search` handled only the
-        # first, leaving the second legend's words in the main-text count while
-        # paper_pipeline's M19 scan subtracted both (F109).
-        if TEX_CAPTION.search(line):
-            rest = line
-            while True:
-                cap = TEX_CAPTION.search(rest)
-                if not cap:
-                    tail = _line_text(rest)
-                    if tail:
-                        lines.append(tail)
-                    break
-                before = _line_text(rest[:cap.start()])
-                if before:
-                    lines.append(before)
-                cap_start = cap.start()
-                cap_prefix = rest[:cap_start]
-                cap_token = rest[cap_start:]
-                group = rest[cap.end():]
-                depth = 1 + _brace_delta(group)
-                while depth > 0 and i < n:
-                    nxt = strip_tex_comment(raw_lines[i]).strip()
-                    i += 1
-                    group = f"{group}\n{nxt}"
-                    depth += _brace_delta(nxt)
-                cap_text, rest = _split_group(group)
-                cap_kind = _tex_float_env_after(cap_prefix, env_at_start)
-                # Read the kind from the MATCHED caption text, not from the
-                # prefix that ends before it: `\captionof{table}{...}` outside
-                # a table float used to keep a None kind and be subtracted as a
-                # figure legend (R01/F109).
-                of = re.match(r"\\captionof\*?\s*\{([^{}]*)\}", cap_token)
-                if of:
-                    cap_kind = of.group(1).strip().lower()
-                captions.append((len(lines), cap_kind))
-                lines.append(_strip_latex(cap_text))
+        cap = TEX_CAPTION.search(line)
+        if cap:
+            before = _line_text(line[:cap.start()])
+            if before:
+                lines.append(before)
+            group = line[cap.end():]
+            depth = 1 + _brace_delta(group)
+            while depth > 0 and i < n:
+                nxt = strip_tex_comment(raw_lines[i]).strip()
+                i += 1
+                group = f"{group}\n{nxt}"
+                depth += _brace_delta(nxt)
+            cap_text, after = _split_group(group)
+            cap_kind = _tex_float_env_after(line[:cap.start()], env_at_start)
+            of = re.match(r"\\captionof\*?\s*\{([^{}]*)\}", line[cap.start():])
+            if of:
+                cap_kind = of.group(1).strip().lower()
+            captions.append((len(lines), cap_kind))
+            lines.append(_strip_latex(cap_text))
+            after = _line_text(after)
+            if after:
+                lines.append(after)
             continue
         stripped = _line_text(line)
         if stripped:
             lines.append(stripped)
     return lines, abstract_end, captions
+
+
+def _abstract_end(lines, start):
+    """Index where the abstract's text ends.
+
+    A section heading (or the Keywords line) is the boundary the manuscript
+    itself states. A blank line is only a fallback for a document that has no
+    such boundary at all: a multi-paragraph abstract is legitimate, and
+    stopping at its first blank line undercounted the abstract while charging
+    the later paragraphs to the main text.
+    """
+    j = start
+    seen_text = False
+    first_blank = None
+    while j < len(lines):
+        line = lines[j].strip()
+        heading = _heading_text(line)
+        if SECTION_BOUND.match(heading) or MAIN_START.match(heading) \
+                or KEYWORDS.match(heading):
+            return j
+        if not line:
+            if seen_text and first_blank is None:
+                first_blank = j
+            j += 1
+            continue
+        seen_text = True
+        j += 1
+    return first_blank if first_blank is not None else j
 
 
 def _caption_match(line: str, kinds=("figure",)):
@@ -641,70 +772,6 @@ def caption_ranges(lines: list, kinds=("figure",)) -> list:
     return ranges
 
 
-def _blank_indented_code(text: str) -> str:
-    """Blank CommonMark indented (4-space/tab) code blocks; keep line breaks.
-
-    A code block starts only at top level after a blank line (or at the start
-    of the document). Inside a list item the same indent is continuation prose,
-    and a hanging reference entry is prose, so the blanket `^(?: {4}|\\t)` pass
-    blanked prose the reader counts (R02, 2026-11-23).
-    """
-    lines = str(text or "").split("\n")
-    out, in_list, prev_blank = [], False, True
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        indented = bool(re.match(r"^(?: {4}|\t)", line))
-        if indented and prev_blank and not in_list:
-            # Blank the block, its internal blank lines included, preserving
-            # the line count so section detection sees the same structure.
-            while i < len(lines) and (not lines[i].strip()
-                                      or re.match(r"^(?: {4}|\t)", lines[i])):
-                out.append("")
-                i += 1
-            prev_blank = True
-            continue
-        out.append(line)
-        if line.strip():
-            if re.match(r"^ {0,3}(?:[-*+]|\d{1,3}[.)])\s+\S", line):
-                in_list = True
-            elif not indented:
-                in_list = False
-            prev_blank = False
-        else:
-            prev_blank = True
-        i += 1
-    return "\n".join(out)
-
-
-def strip_markdown_nonprose(text: str) -> str:
-    """Blank fenced code, HTML comments and YAML front matter in Markdown.
-
-    A reader does not count a code listing, a hidden comment or front-matter
-    metadata as manuscript words; the LaTeX path already strips its own
-    non-prose constructs (F155). Line breaks are preserved so section
-    detection still sees the same structure.
-    """
-    src = str(text or "")
-
-    def _blank(m):
-        return "\n" * m.group(0).count("\n")
-
-    # YAML front matter only at the very start.
-    src = re.sub(r"\A---[ \t]*\n.*?\n---[ \t]*(?:\n|\Z)", _blank, src,
-                 count=1, flags=re.S)
-    src = re.sub(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$", _blank, src)
-    # CommonMark allows an UNCLOSED fence through EOF; the closed-fence pass
-    # above left it (and its code) in the count (F10, 2026-11-23).
-    src = re.sub(r"(?ms)^[ \t]*(?:```|~~~)[^\n]*\n.*\Z", _blank, src)
-    # An indented (4-space/tab) code block is code even without a fence, but
-    # only at top level after a blank line; list continuations and hanging
-    # reference entries are prose (R02).
-    src = _blank_indented_code(src)
-    src = re.sub(r"(?s)<!--.*?-->", _blank, src)
-    return src
-
-
 def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) -> list:
     """[(section, words, note)] for a document's text lines.
 
@@ -726,20 +793,100 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
         if section in excludes)
     subtract_captions = bool(caption_kinds)
     lines = (text or "").splitlines()
-    bounds = manuscript_words.section_bounds(lines, abstract_end)
-    abs_start, abs_end, main_start = bounds
+    n = len(lines)
+    abs_start = abs_end = None
+    for i, raw in enumerate(lines):
+        heading = _heading_text(raw)
+        inline = INLINE_ABSTRACT_HEAD.match(heading)
+        if inline:
+            # Keep the remainder as the abstract's first paragraph; the heading
+            # itself is not counted.
+            lines[i] = inline.group(1)
+            abs_start = i
+            abs_end = (max(abs_start, min(int(abstract_end), n)) if abstract_end is not None
+                       else _abstract_end(lines, abs_start))
+            break
+        if ABSTRACT_HEAD.match(heading):
+            abs_start = i + 1
+            abs_end = (max(abs_start, min(int(abstract_end), n)) if abstract_end is not None
+                       else _abstract_end(lines, abs_start))
+            break
+        # "Summary" is also a common CLOSING heading. The pipeline scan stops
+        # at a body heading before accepting a later Summary; this loop did not,
+        # so a paper that starts with Introduction and ends with Summary was
+        # treated as abstract-only and its main text reported as 0 (F05).
+        if MAIN_START.match(heading) or section_kind(heading):
+            break
+    main_start = None
+    for i, raw in enumerate(lines):
+        if MAIN_START.match(_heading_text(raw)):
+            main_start = i + 1
+            break
     if abs_start is None and main_start is None and not include_abstract:
         return [("whole file", count_words(text), "no abstract/main-text shape detected")]
     rows = []
     if abs_start is not None:
         rows.append(("abstract", count_words(" ".join(lines[abs_start:abs_end])), ""))
-    start, included, end_found = manuscript_words.main_text_lines(
-        lines, bounds, excludes, normalize_keywords=True)
+    # The main-text span starts after an excluded abstract; when the venue
+    # counts the abstract inside the main text, it starts at the abstract's own
+    # text (title/author block stays out), or at the beginning of a document
+    # with no headings at all (NBT's Brief Communication).
+    if abs_start is not None:
+        start = abs_start if include_abstract else abs_end
+    elif main_start is not None:
+        start = main_start
+    else:
+        start = 0
+    offset = start
+    # Build the counted set line by line. An excluded section heading starts a
+    # skip; a later heading whose kind the venue does NOT exclude resumes the
+    # count. Stopping at the first excluded heading silently dropped a Results
+    # or Discussion section that follows a mid-paper Methods block, although
+    # the profile says that kind is inside the count.
+    included = [False] * n
+    excluded_now = False
+    end_found = False
+    in_keyword_block = False
+    for i in range(start, n):
+        stripped = _heading_text(lines[i])
+        if KEYWORDS.match(stripped):
+            # A Keywords line is not a section kind: the old generic branch
+            # resumed the count after it, putting the keyword list and any
+            # Methods prose after it back into the main text. The following
+            # continuation lines of the keyword block are not prose either.
+            in_keyword_block = True
+            excluded_now = True
+            continue
+        if in_keyword_block:
+            if not stripped:
+                in_keyword_block = False
+                excluded_now = False
+                continue
+            if keyword_continuation(stripped):
+                continue                # a wrapped keyword list is not prose
+            # A non-empty line that is not a keyword continuation ends the
+            # block AND is body text: a Brief Communication written as
+            # "Keywords: ..." directly followed by its body (no blank line, no
+            # headings) used to lose the whole body and report 0 main-text words.
+            in_keyword_block = False
+            excluded_now = False
+        if SECTION_BOUND.match(stripped) or MAIN_START.match(stripped):
+            in_keyword_block = False
+        if SECTION_BOUND.match(stripped) or MAIN_START.match(stripped):
+            kind = section_kind(stripped)
+            if kind and kind in excludes:
+                excluded_now = True
+                end_found = True
+            else:
+                excluded_now = False
+            continue
+        included[i] = not excluded_now
+    body = [lines[i] for i in range(start, n) if included[i]]
     cap_ranges = []
     if subtract_captions:
         if caption_lines is None:
-            cap_ranges = [(start + a, start + b)
-                          for a, b in caption_ranges(lines[start:], kinds=caption_kinds)]
+            cap_ranges = [(offset + a, offset + b)
+                          for a, b in caption_ranges(lines[offset:], kinds=caption_kinds)]
         else:
             # `caption_lines` from tex_lines() carries (index, kind): subtract
             # only the caption kinds the venue excludes. A flat integer list is
@@ -755,7 +902,13 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
                     idx = entry
                 keep.append(int(idx))
             cap_ranges = [(i, i + 1) for i in sorted(set(keep))]
-    words, captions = manuscript_words.count_main_text(lines, start, included, cap_ranges)
+    captions = sum(
+        count_words(" ".join(lines[j] for j in range(max(a, start), min(b, n))
+                            if included[j]))
+        for a, b in cap_ranges
+        if any(included[i] for i in range(max(a, start), min(b, n)))
+    )
+    words = max(0, count_words(" ".join(body)) - captions)
     notes = []
     if abs_start is None:
         # The count does not always start at line 0: with a main-text heading
@@ -795,20 +948,8 @@ def _name_is_type_manuscript(name: str, type_names=()) -> bool:
             continue
         if norm == t:
             return True
-        if not norm.startswith(t + " "):
-            continue
-        rest = norm[len(t) + 1:]
-        if re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}", rest):
-            return True
-        # Mirror the pipeline's `_name_is_article_type_manuscript()` suffixes
-        # (F64 added final/draft/revised and the 7-hex content token there).
-        # The standalone M19 counter did not, so a renamed article-type
-        # manuscript fell through to the cover-letter bound (F31).
-        if re.fullmatch(r"(?:final|draft|revised|revision)", rest):
-            return True
-        if re.fullmatch(r"[0-9a-f]{7}", rest.replace(" ", "")):
-            return True
-        if re.fullmatch(r"(?:final|draft|revised) ?[0-9a-f]{7}", rest):
+        if norm.startswith(t + " ") and re.fullmatch(
+                r"(?:v|rev|version|revision|draft)? ?\d{1,3}", norm[len(t) + 1:]):
             return True
     return False
 
@@ -827,20 +968,37 @@ def is_cover_letter(text: str, name: str = "", type_names=()) -> bool:
         return False
     if _COVER_WORD_RE.search(name or ""):
         return True
-    # The pipeline's `_is_cover_letter_lines()` accepts the role TOKEN "letter"
-    # as well (`letter_to_editor.md`): without it the script counted the whole
-    # file as main text while the pipeline measured the persuading part. The
-    # tokenizer matches the pipeline's `_document_role_tokens` (camelCase split
-    # + non-alphanumeric separator).
-    stem = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", Path(base).stem).lower()
-    if "letter" in set(re.findall(r"[a-z0-9]+", stem)):
-        return True
     for line in (text or "").splitlines()[:12]:
         if COVER_SALUTATION.match(line.strip()):
             return True
     return False
 
 
+RAW_DATA_DIRNAMES = ("raw_data",)
+HUMAN_FEEDBACK_DIR = "human_review_feedback"
+LLM_FEEDBACK_DIR = "llm_review_feedback"
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
+# `<evidence area>.disabled` / `.off` is inert evidence (the pipeline's
+# `is_disabled_evidence_rel`); exact-name membership swept it as manuscript.
+DISABLED_EVIDENCE_SUFFIXES = ("disabled", "off")
+
+
+def _is_evidence_part(part: str) -> bool:
+    low = str(part or "").strip().lower()
+    if low in EVIDENCE_DIRNAMES:
+        return True
+    return any(low.startswith(area + ".")
+               and low[len(area) + 1:] in DISABLED_EVIDENCE_SUFFIXES
+               for area in EVIDENCE_DIRNAMES)
+# A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
+# `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
+_ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
+    r"^(?:(?:the[.\s_-]+)?editorial(?:[.\s_-]+board)?|"
+    r"letters?[.\s_-]+(?:to|for)[.\s_-]+(?:the[.\s_-]+)?editor)"
+    r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
+# `.reply`/`.review`/`.notes` name the DOCUMENT kind, not another extension.
+_SEMANTIC_SUFFIX_RE = re.compile(
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
 EXTERNAL_FEEDBACK_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
     r"to[-_ ]?authors))*|"
@@ -858,12 +1016,21 @@ AUTHORED_REPLY_RE = re.compile(
 # A scientific compound that merely ENDS in a role word is not a reply or a
 # feedback file: `dose_response.txt` / `immune_response.md` / `biofeedback_results.txt`
 # are real manuscripts and must reach the M19 count.
+_SCIENCE_ROLE_COMPOUND_RE = re.compile(
+    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
+    r"pharmacodynamic)[-_ ]?response"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
+    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
 # The WORD "cover" (and the camelCase "coverLetter"/"plainLetter"), not the
 # substring: a bare `"cover" in name` also named `discovery.md`,
 # `coverage_table.txt` and `recovered_samples.md` the cover letter (forcing them
 # into the submission runs) and masked a reply file whose name merely contains the
 # substring. A word starts at the start, after a non-letter, or at a lower->UPPER
 # camelCase boundary; it ends at a non-lowercase character.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 # An authored REPLY is not a cover letter, whatever else its name contains.
 # The pipeline's `_is_cover_letter_lines` has excluded these all along; this
 # predicate did not, so a response-to-reviewers package was measured against
@@ -874,7 +1041,44 @@ _COVER_REPLY_RE = re.compile(
 
 
 def is_evidence_path(path: str) -> bool:
-    return _is_evidence(path, EXTERNAL_FEEDBACK_RE, AUTHORED_REPLY_RE)
+    """True when the given file is raw-data EVIDENCE, not a submission document.
+
+    A file under `raw_data/`, or an editors'/reviewers'
+    feedback file, is never counted against a submission's abstract/main-text/
+    cover-letter limits, whatever its name suggests.
+    """
+    parts = str(path).replace("\\", "/").split("/")
+    if any(_is_evidence_part(part) for part in parts[:-1]):
+        return True
+    # The converter FLATTENS an evidence file's directory into its name
+    # ("raw_data/table1.txt" -> "raw_data__table1.txt"); the two sibling
+    # extractors (extract_citations.py, extract_acronyms.py) already gate on
+    # that spelling, and without it raw-data text was counted against the
+    # submission's abstract/main-text limits.
+    if any(parts[-1].startswith(d + "__") for d in EVIDENCE_DIRNAMES):
+        return True
+    # A cover letter IS a submission document -- and this test must come FIRST,
+    # exactly as in extract_citations.py: with the reply/feedback test below it,
+    # `cover_letter_response.md` was dropped as reviewers' feedback and the
+    # letter never reached the M19 length sweep.
+    if _COVER_WORD_RE.search(parts[-1]):
+        return False
+    base = parts[-1]
+    if _SEMANTIC_SUFFIX_RE.search(base):
+        return True             # a reply/review/notes DOCUMENT, never author prose
+    stem = base
+    while True:
+        _stripped = re.sub(
+            r"\.(?:txt|docx?|md|tex|pdf|rtf|bib|csv|tsv|bak|final|tar|gz|zip)$",
+            "", stem, flags=re.I)
+        if _stripped == stem:
+            break
+        stem = _stripped
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(stem):
+        return False            # the authors' article-type manuscript, not a letter
+    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
+    return bool(EXTERNAL_FEEDBACK_RE.search(cleaned)
+                or AUTHORED_REPLY_RE.search(cleaned))
 
 
 def cover_letter_words(text: str) -> int:
@@ -1052,11 +1256,6 @@ def main(argv=None) -> int:
         else:
             base_abstract = base_main = rel_abstract = rel_main = None
         cover_stated = isinstance(limits.get("cover_letter"), dict)
-        # A stated cover_letter block is authoritative even when it carries only
-        # ONE side: `{"max": 200}` means "at most 200 words" (README), so the
-        # missing side must stay None rather than inherit the built-in 300/500
-        # range (which produced "300-200 words" and a false OUTSIDE-PREFERENCE).
-        cover_configured = cover_stated
         cover = limits.get("cover_letter") or {}
         if not cover_stated and types:
             # The cover-letter preference is venue-wide: a type that states NO
@@ -1075,24 +1274,9 @@ def main(argv=None) -> int:
             for candidate in types:
                 if isinstance(candidate, dict) and \
                         _article_type_id(candidate) == default_id:
-                    block = (candidate.get("length_limits") or {}).get("cover_letter")
-                    cover = block or cover
-                    if isinstance(block, dict):
-                        cover_configured = True
+                    cover = ((candidate.get("length_limits") or {}).get("cover_letter")
+                             or cover)
                     break
-            if not cover_configured:
-                # The venue-level block is the LAST fallback in the pipeline's
-                # VenueProfile.length_limits (type -> default type -> venue), so
-                # a profile that carries an article_types table AND a venue-wide
-                # cover_letter preference is bounded by that block, never by the
-                # built-in 300-500 preference. Without this fallback the two M19
-                # readers disagreed about the same profile.
-                venue_block = (profile or {}).get("length_limits") or {}
-                block = (venue_block.get("cover_letter")
-                         if isinstance(venue_block, dict) else None)
-                if isinstance(block, dict):
-                    cover = block
-                    cover_configured = True
         def _profile_number(value, key):
             """A profile's numeric limit, or None (with a warning) when malformed."""
             if value is None:
@@ -1106,14 +1290,8 @@ def main(argv=None) -> int:
                 return None
             return int(number) if number.is_integer() else number
 
-        if cover_configured:
-            # The block is authoritative: an absent (or null) side means "no
-            # bound on this side", not the built-in 300/500 default.
-            cover_min = _profile_number(cover.get("min"), "cover_letter.min")
-            cover_max = _profile_number(cover.get("max"), "cover_letter.max")
-        else:
-            cover_min = _profile_number(cover.get("min", cover_min), "cover_letter.min")
-            cover_max = _profile_number(cover.get("max", cover_max), "cover_letter.max")
+        cover_min = _profile_number(cover.get("min", cover_min), "cover_letter.min")
+        cover_max = _profile_number(cover.get("max", cover_max), "cover_letter.max")
         # A profile is authoritative: an absent total_max MEANS "no TOTAL cap"
         # (the pipeline's rule). The no-profile path has no built-in cap either,
         # so the total count is reported without one.
@@ -1165,8 +1343,6 @@ def main(argv=None) -> int:
             failed = True
             continue
         ext = p.suffix.lower()
-        _lname = p.name.lower()
-        is_tex = ext in TEX_EXTS or _lname.endswith(CONVERTED_TEX_SUFFIXES)
         if ext == ".docx":
             # A DOCX is a ZIP: reading it as UTF-8 text counted replacement
             # characters as words (F06). Extract the visible paragraphs, and
@@ -1194,13 +1370,7 @@ def main(argv=None) -> int:
                 print(f"error: cannot read {name}: {e}", file=sys.stderr)
                 failed = True
                 continue
-            if _lname.endswith(CONVERTED_DOC_SUFFIXES):
-                # A converted Word corpus file carries the converter's part
-                # markers and the header/footer text; neither is counted prose.
-                text = strip_converted_page_furniture(text)
-            if ext in (".md", ".markdown"):
-                text = strip_markdown_nonprose(text)
-        if is_tex:
+        if ext in TEX_EXTS:
             # A multi-file manuscript's body lives in the children; counting
             # the master alone reported 1-2 words (F06).
             text = _tex_expand_includes(text, p.parent, source=p)

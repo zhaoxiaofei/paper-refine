@@ -603,10 +603,17 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
         cid = str(row.get("id") or f"C{i}")
         md += [f"## {cid}", f"**Comment:** \"{str(row.get('quote') or '')[:120]}\"",
                "**Response:** stub", ""]
-        planned = bool(os.environ.get("PAPER_STUB_RESPONSE_PLANNED"))
-        mapped.append({"id": cid, "status": "planned" if planned else "addressed", "response": "stub",
+        # The response map's `before` span is a real claim: the generic stub has
+        # no verified preimage to quote, so it honestly reports a planned change
+        # rather than inventing one (F083's gate refuses a fabricated preimage).
+        # PAPER_STUB_RESPONSE_ADDRESSED=1 asks for the old addressed-with-change
+        # map, for the tests that exercise that path.
+        addressed = bool(os.environ.get("PAPER_STUB_RESPONSE_ADDRESSED"))
+        mapped.append({"id": cid, "status": "addressed" if addressed else "planned",
+                       "response": "stub",
                        "changes": ([{"file": files[0], "location": "whole file",
-                                     "before": "a", "after": "b"}] if files and not planned else []),
+                                     "before": "a", "after": "b"}]
+                                   if files and addressed else []),
                        "new_data": []})
     (out / "RESPONSE_TO_REVIEWERS.md").write_text("\n".join(md), encoding="utf-8")
     write_json(out / "response_map.json",

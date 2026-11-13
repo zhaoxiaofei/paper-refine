@@ -355,7 +355,7 @@ class ScopedWorkflowTests(unittest.TestCase):
                     "--judge-agent-cmd", json.dumps([sys.executable,
                         str(WS / ".paper_test" / "test_redesign_v3.py"), "--as-zero-judge"]),
                     "--retries", "0", "--no-track"], capture_output=True, text=True, timeout=120,
-                    env=dict(os.environ, PAPER_STUB_RESPONSE_PLANNED="1"))
+                    env=dict(os.environ, PAPER_STUB_RESPONSE_ADDRESSED="1"))
                 self.assertEqual(result.returncode, 0, result.stdout[-6000:] + result.stderr[-2000:])
                 state = json.loads((ctx.root / "state.json").read_text())
                 self.assertEqual(state["stopped_early"]["after_round"], 1)

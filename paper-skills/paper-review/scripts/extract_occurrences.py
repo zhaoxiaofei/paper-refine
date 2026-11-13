@@ -35,15 +35,7 @@ import re
 import sys
 import unicodedata
 
-from pathlib import Path
-
-# Allow direct execution and import by filename.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    from evidence_names import EVIDENCE_DIRNAMES, is_evidence as _is_evidence
-finally:
-    sys.path.pop(0)
-
+EVIDENCE_DIRNAMES = ("raw_data", "human_review_feedback", "llm_review_feedback")
 # Role words are NAME TOKENS, not substrings: a manuscript named
 # `immune_response.md` or `biofeedback_results.txt` is real prose, while a role
 # word preceded by a role qualifier (`reviewer_response`, `author_feedback`)
@@ -62,112 +54,77 @@ _NON_MANUSCRIPT_RE = re.compile(
 _REPLY_RE = re.compile(
     r"(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)",
     re.I)
+# A scientific compound that merely ENDS in a role word is not a reply: these
+# were silently dropped from every manuscript sweep (M1/M2/M4/M19).
+_SCIENCE_ROLE_COMPOUND_RE = re.compile(
+    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
+    r"pharmacodynamic)[-_ ]?response"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
+    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
+# A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
+# `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
+_ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
+    r"^(?:(?:the[.\s_-]+)?editorial(?:[.\s_-]+board)?|"
+    r"letters?[.\s_-]+(?:to|for)[.\s_-]+(?:the[.\s_-]+)?editor)"
+    r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
+# A semantic suffix (`paper.reply.txt`, `editorial.review.txt`) names the
+# DOCUMENT KIND, not an arbitrary extension: test it before stripping
+# extensions, or `.reply`/`.review`/`.notes` disappear into the base name.
+_SEMANTIC_SUFFIX_RE = re.compile(
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
+# The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
+# `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
+# `recovered_samples.md` a cover letter (forcing them into the submission runs)
+# and masked a reply file whose name merely contains the substring.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
+
+
+def _is_evidence_part(part: str) -> bool:
+    """True for an evidence area, including its inert `<area>.disabled` form.
+
+    The pipeline's `is_disabled_evidence_rel` treats `llm_review_feedback.disabled/`
+    and `.off/` as inert evidence: not submission content, not readable evidence.
+    Testing exact membership here swept that area as the authors' manuscript.
+    """
+    low = str(part or "").strip().lower()
+    if low in EVIDENCE_DIRNAMES:
+        return True
+    return any(low.startswith(area + ".")
+               and low[len(area) + 1:] in ("disabled", "off")
+               for area in EVIDENCE_DIRNAMES)
 
 
 def is_non_manuscript(name: str) -> bool:
-    return _is_evidence(name, _NON_MANUSCRIPT_RE, _REPLY_RE)
-
-
-# A reference list is quoted bibliography, not the authors' prose: an
-# occurrence inside a cited title must never be enumerated as a propagation
-# target (F275).  The sibling extractors already skip the region and a
-# reference-role file; this enumerator did neither.
-REF_HEAD_RE = re.compile(
-    r"^\s*(?:"
-    r"\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}\s*(?:\\label\{[^{}]*\})?"
-    r"|\\begin\{thebibliography\}"
-    r"|\\(?:bibliography|printbibliography)\b.*"
-    r"|(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
-    r"(?:references?|bibliography|reference\s+list|literature\s+cited)"
-    r"\s*(?:\*{1,2}|_{1,2})?\s*[:.\u2014\u2013-]?\s*"
-    r")\s*(?:%.*)?$", re.I)
-REF_END_RE = re.compile(
-    r"^\s*(?:\\end\{thebibliography\}|\\(?:section|subsection|chapter)\*?\s*\{|"
-    r"#{1,6}\s+\S|"
-    r"(?:abstract|introduction|background|methods?|materials and methods|"
-    r"results?|discussion|conclusions?|acknowledg\w*|author contributions?|"
-    r"data availability|code availability|competing interests?|"
-    r"conflicts? of interest|funding|supplementary(?:\s+\w+)?|"
-    r"figure legends?|tables?)\s*(?::|\s*$))", re.I)
-NUM_ENTRY_RE = re.compile(r"^\s*(?:\[?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
-REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
-
-
-def is_reference_file(name: str) -> bool:
-    """A bibliography file by name, with the siblings' role-word rule."""
-    raw = os.path.basename(name or "").lower()
-    base = re.sub(r"\.(?:txt|md)$", "", raw)
-    base = re.sub(r"\.[a-z0-9]{1,5}$", "", base)
-    return bool(REF_ROLE_RE.search(base) or "bibliograph" in base
-                or re.search(r"\.bib(\.|$)", raw))
-
-
-BULLET_ENTRY_RE = re.compile(r"^\s*[-*\u2022]\s+\S")
-_YEAR_RE = re.compile(r"\b(?:1[5-9]|20)\d{2}[a-z]?\b")
-_ENTRY_AUTHOR_RE = re.compile(
-    r"^\s*[A-Z][A-Za-z'\-]+(?:\s+[A-Z]{1,3}[,.]|\s+[A-Z]\.|\s*,\s*(?:[A-Z]\.|[A-Z][a-z]+))")
-_AUTHOR_START_RE = re.compile(r"^\s*[A-Z][A-Za-z'\-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)")
-
-
-def looks_like_reference_entry(s):
-    """The siblings' reference-entry test (ported for the F092 region end)."""
-    if NUM_ENTRY_RE.match(s) or BULLET_ENTRY_RE.match(s):
+    """True for an evidence-area / feedback / response file (never author prose)."""
+    parts = str(name).replace("\\", "/").split("/")
+    if any(_is_evidence_part(part) for part in parts[:-1]):
         return True
-    if _ENTRY_AUTHOR_RE.match(s) or _AUTHOR_START_RE.match(s):
+    base = parts[-1]
+    if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
-    if re.search(r"\bdoi\b|https?://", s, re.I):
-        return True
-    if _YEAR_RE.search(s) and re.search(r"\b\d+\s*[:(]\s*\d+", s):
-        return True
-    if re.match(r"^\s*(?:[A-Z][\w'\u2019\-&.]+\s+){2,}\(?(?:19|20)\d{2}\)?\s*[.;:,)]", s):
-        return True
-    return False
-
-
-_TEX_VERBATIM_RE = re.compile(
-    r"\\begin\{(verbatim\*?|lstlisting|minted|Verbatim\*?)\}"
-    r".*?\\end\{\1\}", re.S)
-_TEX_COMMENT_RE = re.compile(r"(?<!\\)%.*$", re.M)
-
-
-def latex_source_text(text):
-    """LaTeX text with comments and verbatim/listing bodies blanked in place."""
-    def blank(m):
-        return re.sub(r"[^\n]", " ", m.group(0))
-    return _TEX_COMMENT_RE.sub(blank, _TEX_VERBATIM_RE.sub(blank, text or ""))
-
-
-def find_reference_region(lines):
-    """(start, end) line indices of a reference list, or None."""
-    start = None
-    for i, ln in enumerate(lines):
-        if REF_HEAD_RE.match(ln.strip()):
-            # The LAST heading is the real list (a table-of-contents line or a
-            # superseded list must not latch the sweep onto the wrong region).
-            start = i + 1
-    if start is None:
-        return None
-    end = len(lines)
-    prev_blank = False
-    for j in range(start, len(lines)):
-        s = lines[j].strip()
-        if not s:
-            prev_blank = True
-            continue  # blank lines and numbered entries are inside the list
-        if NUM_ENTRY_RE.match(s):
-            prev_blank = False
-            continue
-        if REF_END_RE.match(s):
-            end = j
+    if _COVER_WORD_RE.search(base):
+        return False            # a cover letter IS a submission document
+    if _SEMANTIC_SUFFIX_RE.search(base):
+        return True             # a reply/review/notes DOCUMENT, never author prose
+    # Strip ALL extension layers: `letter_to_the_editor.final.docx.txt` and
+    # `letter_to_the_editor.tar.gz.txt` are still the article-type manuscript.
+    stem = base
+    while True:
+        _stripped = re.sub(
+            r"\.(?:txt|docx?|md|tex|pdf|rtf|bib|csv|tsv|bak|final|tar|gz|zip)$",
+            "", stem, flags=re.I)
+        if _stripped == stem:
             break
-        # F092: a plain paragraph of 5+ words after a blank line that does not
-        # look like a reference entry ends the list; otherwise prose after the
-        # bibliography was skipped by the propagation pass.
-        if prev_blank and len(s.split()) >= 5 and not looks_like_reference_entry(s):
-            end = j
-            break
-        prev_blank = False
-    return start, end
+        stem = _stripped
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(stem):
+        return False            # the authors' article-type manuscript, not a letter
+    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
+    if _REPLY_RE.search(cleaned):
+        return True
+    return bool(_NON_MANUSCRIPT_RE.search(cleaned))
 
 
 def slugify(s):
@@ -183,20 +140,11 @@ def variant_pattern(term, mode):
         # never a decimal point: reading "1,234" as 1.234 generated an
         # alternative spelling for a different magnitude.
         num = term
-        # U+2212 MINUS SIGN and ASCII '-' are the same sign in typeset text, so
-        # a target written in one spelling must enumerate the other (F278).
-        sign_forms = []
-        if num.startswith("\u2212"):
-            sign_forms.append("-" + num[1:])
-            num = sign_forms[0]
-        elif num.startswith("-"):
-            sign_forms.append("\u2212" + num[1:])
         # The LITERAL spelling is always one of the forms: with a thousands
         # separator (`1,234`) the decimal-normalised `num` is "1.234", which
         # never matches the text that carries the number, so the sweep reported
         # an occurrence the manuscript still carries as missing.
         pats = [re.escape(num), esc]
-        pats.extend(re.escape(form) for form in sign_forms if form != num)
         if num.startswith("0."):
             pats.append(re.escape(num[1:]))           # .031
         if num.startswith("."):
@@ -221,21 +169,6 @@ def variant_pattern(term, mode):
         norm = num.replace(",", "") if grouped else num
         if norm != num:
             pats.append(re.escape(norm))
-        # The other direction: a plain integer target must also enumerate its
-        # comma-grouped spelling ("1234" ~ "1,234").  The leading guard keeps
-        # the plain digits from matching inside the grouped form, so without
-        # this pattern the other spelling was invisible (F278).
-        if not grouped and re.fullmatch(r"[+\-]?\d{4,}", num):
-            _sign = num[0] if num[0] in "+-" else ""
-            _digits = num[len(_sign):]
-            if not _digits.startswith("0"):
-                _grouped = _sign + format(int(_digits), ",")
-                pats.append(re.escape(_grouped))
-                if _sign == "-":
-                    pats.append(re.escape("\u2212" + format(int(_digits), ",")))
-                elif not _sign:
-                    # The explicit plus sign is the same value as the plain one.
-                    pats.append(r"\+" + re.escape(_grouped))
         try:
             # Decimal, not float: `float("9007199254740993")` is
             # 9007199254740992, so the generated scientific spelling named a
@@ -287,11 +220,8 @@ def variant_pattern(term, mode):
             pats.append(re.escape(mant) + mant_pad + re.escape(" × 10^" + str(exp_i)))
             # The multiplication sign is also written without the caret and
             # with a U+2212 minus ("3.1 × 10−2"); those occurrences were
-            # invisible to the M4 sweep. Exponent 0 is the exception: "3 × 100"
-            # is three hundred, not 3, so only the caret/superscript forms
-            # ("3 × 10^0"/"3 × 10⁰") name that value.
-            if exp_i != 0:
-                pats.append(re.escape(mant) + mant_pad + " × 10" + re.escape(str(exp_i)))
+            # invisible to the M4 sweep.
+            pats.append(re.escape(mant) + mant_pad + " × 10" + re.escape(str(exp_i)))
             # The U+2212 spelling is the SAME value only when the exponent is
             # negative. Emitting it for a positive exponent also matched the
             # different value ("1.5 × 10^−3" for a target of 1500).
@@ -439,21 +369,13 @@ def main():
                     continue
                 if is_non_manuscript(fname):
                     continue  # occurrences are counted in the manuscript only
-                if is_reference_file(fname):
-                    continue  # a bibliography file is quoted text, not prose
                 try:
-                    _text = open(os.path.join(corpus, fname), encoding="utf-8",
-                                 errors="replace").read()
-                    if fname.lower().endswith((".tex", ".tex.txt", ".ltx", ".ltx.txt")):
-                        _text = latex_source_text(_text)
-                    lines = _text.split("\n")
+                    lines = open(os.path.join(corpus, fname), encoding="utf-8",
+                                 errors="replace").read().split("\n")
                 except OSError as e:
                     print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
                     continue
-                region = find_reference_region(lines)
                 for li, raw in enumerate(lines, 1):
-                    if region and region[0] <= li - 1 < region[1]:
-                        continue  # a cited title is never a propagation target
                     for m in pat.finditer(raw):
                         results.append({"file": fname, "line": li,
                                         "match": m.group(0),

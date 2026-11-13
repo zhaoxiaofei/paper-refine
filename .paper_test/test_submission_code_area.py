@@ -142,11 +142,8 @@ def test_submit_code_switch():
     rec = ctx.run("r1_response")
     map_path = ctx.sandbox_of(rec) / nb.JOURNAL_RESPONSE_MAP_REL
     data = json.loads(map_path.read_text(encoding="utf-8"))
-    # A code citation is citeable like any other package file, so its quoted
-    # spans are verified too (F100): quote the file's real text. The analysis
-    # stub is `print('analysis')\\n`.
-    data["rows"][0]["changes"] = [{"file": "code/analysis.py", "location": "line 1",
-                                   "before": "print('analysis')", "after": "print"}]
+    data["rows"][0]["changes"] = [{"file": "code/analysis.py", "location": "stub",
+                                   "before": "a", "after": "b"}]
     # A change citation belongs to an 'addressed' row; the stub now reports
     # 'planned' with no changes because it has no verified preimage (F083).
     data["rows"][0]["status"] = "addressed"
@@ -200,11 +197,6 @@ def test_dangling_reference_report():
     lib.check("SC4 the scan ignores a code/ tail inside a URL",
               not any(r["file"] == "url.md" for r in rows), str(rows)[:300])
     (pkg / "data.md").write_text("The tables are in raw_data/tables.tsv.\n", encoding="utf-8")
-    # The "every area is carried" check below must actually carry the file the
-    # pointer names: a raw_data/ pointer is a PKG-3 name otherwise, and F231
-    # (wave 2) correctly reports it from a Markdown main text.
-    (pkg / "raw_data").mkdir()
-    (pkg / "raw_data" / "tables.tsv").write_text("a\tb\n1\t2\n", encoding="utf-8")
     input_rows = nb.non_submitted_reference_rows(pkg, ("raw_data",))
     lib.check("SC4 a read-only input's row says it never ships (no `set-submit-code` hint)",
               input_rows and "never ships" in input_rows[0]["detail"]

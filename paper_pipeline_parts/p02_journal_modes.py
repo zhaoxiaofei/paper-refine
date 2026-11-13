@@ -124,7 +124,7 @@ JOURNAL_FEEDBACK_NAME_RE = re.compile(
 # it sits -- the same reason a "cover"-spelled letter is carved out below.
 ARTICLE_TYPE_MANUSCRIPT_NAME_RE = re.compile(
     r"^(?:letter[\s_-]+(?:to|for)[\s_-]+the[\s_-]+editor|editorial)"
-    r"(?:[\s_-]+(?:v|rev|version|revision|draft)?[\s_-]*\d{1,3})?$", re.I)
+    r"(?:[\s_.-]+(?:v|rev|version|revision|draft)?[\s_.-]*\d{1,3})?$", re.I)
 
 
 def is_journal_feedback_name(name) -> bool:
@@ -146,7 +146,11 @@ def is_journal_feedback_name(name) -> bool:
         stem = _stripped
     if ARTICLE_TYPE_MANUSCRIPT_NAME_RE.match(stem):
         return False
-    return bool(JOURNAL_FEEDBACK_NAME_RE.search(base))
+    # A scientific compound that merely ENDS in a role word (`feedback_loop`,
+    # `dose_response`) is a manuscript, not the editors' letter -- the same
+    # carve-out `authored_reply_name` already applies.
+    cleaned = SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
+    return bool(JOURNAL_FEEDBACK_NAME_RE.search(cleaned))
 
 
 # A file the AUTHORS wrote ("response_to_reviewers.docx", "rebuttal.md",

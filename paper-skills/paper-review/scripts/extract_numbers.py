@@ -29,17 +29,6 @@ import re
 import sys
 from collections import defaultdict
 
-from pathlib import Path
-
-# Allow direct execution and import by filename.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    from evidence_names import (EVIDENCE_DIRNAMES,
-                                is_evidence as _is_evidence,
-                                _COVER_WORD_RE)
-finally:
-    sys.path.pop(0)
-
 
 def strip_tex_comment(line: str) -> str:
     """`line` up to its first unescaped `%` (the LaTeX comment marker)."""
@@ -56,6 +45,7 @@ def strip_tex_comment(line: str) -> str:
     return "".join(out)
 
 
+EVIDENCE_DIRNAMES = ("raw_data", "human_review_feedback", "llm_review_feedback")
 # Role words are NAME TOKENS, not substrings: a manuscript named
 # `immune_response.md` or `biofeedback_results.txt` is real prose, while a role
 # word preceded by a role qualifier (`reviewer_response`, `author_feedback`)
@@ -74,6 +64,32 @@ _NON_MANUSCRIPT_RE = re.compile(
 _REPLY_RE = re.compile(
     r"(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)",
     re.I)
+# A scientific compound that merely ENDS in a role word is not a reply: these
+# were silently dropped from every manuscript sweep (M1/M2/M4/M19).
+_SCIENCE_ROLE_COMPOUND_RE = re.compile(
+    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
+    r"pharmacodynamic)[-_ ]?response"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
+    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
+# A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
+# `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
+_ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
+    r"^(?:(?:the[.\s_-]+)?editorial(?:[.\s_-]+board)?|"
+    r"letters?[.\s_-]+(?:to|for)[.\s_-]+(?:the[.\s_-]+)?editor)"
+    r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
+# A semantic suffix (`paper.reply.txt`, `editorial.review.txt`) names the
+# DOCUMENT KIND, not an arbitrary extension: test it before stripping
+# extensions, or `.reply`/`.review`/`.notes` disappear into the base name.
+_SEMANTIC_SUFFIX_RE = re.compile(
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
+# The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
+# `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
+# `recovered_samples.md` a cover letter (forcing them into the submission runs)
+# and masked a reply file whose name merely contains the substring.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 # The supplement role is a WORD too: the old `"supp" in f` swept `support.docx`
 # and `suppress.md` as supplementary text, exactly the files the pipeline keeps
 # as main text. `supp`, `suppl`, `supplement*` and `supplementary` still match.
@@ -82,8 +98,49 @@ SUPP_ROLE_RE = re.compile(
     r"|extended_?data|appendix", re.I)
 
 
+def _is_evidence_part(part: str) -> bool:
+    """True for an evidence area, including its inert `<area>.disabled` form.
+
+    The pipeline's `is_disabled_evidence_rel` treats `llm_review_feedback.disabled/`
+    and `.off/` as inert evidence: not submission content, not readable evidence.
+    Testing exact membership here swept that area as the authors' manuscript.
+    """
+    low = str(part or "").strip().lower()
+    if low in EVIDENCE_DIRNAMES:
+        return True
+    return any(low.startswith(area + ".")
+               and low[len(area) + 1:] in ("disabled", "off")
+               for area in EVIDENCE_DIRNAMES)
+
+
 def is_non_manuscript(name: str) -> bool:
-    return _is_evidence(name, _NON_MANUSCRIPT_RE, _REPLY_RE)
+    """True for an evidence-area / feedback / response file (never author prose)."""
+    parts = str(name).replace("\\", "/").split("/")
+    if any(_is_evidence_part(part) for part in parts[:-1]):
+        return True
+    base = parts[-1]
+    if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
+        return True
+    if _COVER_WORD_RE.search(base):
+        return False            # a cover letter IS a submission document
+    if _SEMANTIC_SUFFIX_RE.search(base):
+        return True             # a reply/review/notes DOCUMENT, never author prose
+    # Strip ALL extension layers: `letter_to_the_editor.final.docx.txt` and
+    # `letter_to_the_editor.tar.gz.txt` are still the article-type manuscript.
+    stem = base
+    while True:
+        _stripped = re.sub(
+            r"\.(?:txt|docx?|md|tex|pdf|rtf|bib|csv|tsv|bak|final|tar|gz|zip)$",
+            "", stem, flags=re.I)
+        if _stripped == stem:
+            break
+        stem = _stripped
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(stem):
+        return False            # the authors' article-type manuscript, not a letter
+    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
+    if _REPLY_RE.search(cleaned):
+        return True
+    return bool(_NON_MANUSCRIPT_RE.search(cleaned))
 
 
 LABEL_PATTERNS = [
@@ -99,11 +156,7 @@ LABEL_PATTERNS = [
         r"((?:\d+\.?\d*|\.\d+)(?:[eE][+\-\u2212]?\d+)?"
         r"(?:\s*(?:[×x]|\\times)\s*10\s*"
         r"(?:\^\s*\{?\s*[+\-\u2212]?\d+\s*\}?"
-        r"|[\u2070\u00b9\u00b2\u00b3\u2074-\u2079\u207b]+"
-        # The ordinary "10−8" spelling (U+2212, no caret/superscript) is the
-        # most common journal rendering; without this branch only "5" was
-        # captured, so a p = 5 × 10−8 was inventoried as p = 5.
-        r"|\s*[+\-\u2212]\s*\d+))?)")),
+        r"|[\u2070\u00b9\u00b2\u00b3\u2074-\u2079\u207b]+))?)")),
     # `n = 1,234` is one count and `n = 12.5` is not a count at all; the old
     # `(\d+)\b` read them as 1 and 12, inventing a conflict with `n = 1234`.
     ("n", re.compile(
@@ -174,8 +227,7 @@ def _metric_key(label: str, val) -> str:
         # capturing only the coefficient made it look like p = 5.
         _sup = str.maketrans("\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076"
                              "\u2077\u2078\u2079\u207b", "0123456789-")
-        _raw = (text.replace("\\times", "×").replace("{", "").replace("}", "")
-                .replace("\u2212", "-"))
+        _raw = text.replace("\\times", "×").replace("{", "").replace("}", "")
         _raw = _raw.translate(_sup)
         m = re.fullmatch(r"\s*([+\-]?\d+(?:\.\d+)?)\s*[×x]\s*10\s*\^?\s*"
                          r"([+\-]?\d+)\s*", _raw)
@@ -225,13 +277,11 @@ RANGE_RE = re.compile(
     # No leading `\b`: a word boundary cannot sit between the space and the
     # minus of "-80 C", so the old pattern started at the digit and dropped the
     # sign, turning an ascending -80..-60 range into a false descending one.
-    r"(?<![A-Za-z0-9])(?:from\s+)?(?P<low>[+\-\u2212]?\d+(?:\.\d+)?)\s*"
-    r"(?P<u1>" + _RANGE_UNIT + r")"
+    r"(?<![A-Za-z0-9])(?:from\s+)?(?P<low>-?\d+(?:\.\d+)?)\s*(?P<u1>" + _RANGE_UNIT + r")"
     r"\s+(?:to|through)\s+"
     # `%` is a non-word character, so a trailing `\b` can never match after it;
     # reject a word character instead, which allows "90% to 10%".
-    r"(?P<high>[+\-\u2212]?\d+(?:\.\d+)?)\s*(?P<u2>" + _RANGE_UNIT + r")"
-    r"(?![A-Za-z0-9])"
+    r"(?P<high>-?\d+(?:\.\d+)?)\s*(?P<u2>" + _RANGE_UNIT + r")(?![A-Za-z0-9])"
 )
 ACCESSION_RE = re.compile(r"\b(GSE\d+|PRJNA\d+|SR[APRX]\d+|E-MTAB-\d+|zenodo\.\d+)\b", re.I)
 VERSION_RE = re.compile(r"\b(?:v(?:er(?:sion)?)?\.?\s?)(\d+(?:\.\d+)+)\b", re.I)
@@ -242,24 +292,8 @@ VERSION_RE = re.compile(r"\b(?:v(?:er(?:sion)?)?\.?\s?)(\d+(?:\.\d+)+)\b", re.I)
 REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 
 REF_HEAD_RE = re.compile(
-    r"^\s*(?:"
-    # LaTeX head forms: a sectioning command, the bibliography environment, or
-    # a reference-list command.  Without these the list was swept as prose and
-    # a cited title's p-value entered M4 (F269).
-    r"\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}\s*(?:\\label\{[^{}]*\})?"
-    r"|\\begin\{thebibliography\}"
-    r"|\\(?:bibliography|printbibliography)\b.*"
-    # Plain/Markdown heading, optionally ATX and optionally emphasised:
-    # "**References**" was not a boundary.
-    r"|(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
-    r"(?:references?|bibliography|reference\s+list|literature\s+cited)"
-    r"\s*(?:\*{1,2}|_{1,2})?\s*[:.\u2014\u2013-]?\s*"
-    r")\s*(?:%.*)?$", re.I)
-# A LaTeX reference region also ends at the closing environment or the next
-# sectioning command (the plain STOP_SECTION_RE cannot see either).
-REF_TEX_END_RE = re.compile(
-    r"^\s*(?:\\end\{thebibliography\}|\\(?:section|subsection|chapter)\*?\s*\{)",
-    re.I)
+    r"^\s*(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
 STOP_SECTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
     r"(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
@@ -277,29 +311,6 @@ FIG_CAPTION_RE = re.compile(
 TABLE_CAPTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:extended\s+data|supplementary\s+)?tables?\.?\s*"
     r"(?:s\d+|\d+[a-z]?)\s*" + CAP_SEP, re.I)
-
-_CAPTION_BODY_PRONOUN_RE = re.compile(r"^(?:we|i|our|here)\b", re.I)
-
-
-def _caption_line(raw, pattern):
-    """True for a display-item caption, not a body sentence that opens like one.
-
-    `section_label` used to apply its 60-character HEADING cap to captions as
-    well, so a real legend longer than 60 characters was never its own context
-    (and a body sentence "Figure 1. We next tested..." was). The caption's own
-    label/separator decides; only a following FIRST-PERSON continuation marks
-    the body sentence whose "Figure 1." is a citation, not a caption ("This
-    figure shows..." stays a legitimate caption opening).
-    """
-    m = pattern.match(raw)
-    if not m:
-        return False
-    head = raw[:m.end()]
-    cut = max(head.rfind(ch) for ch in ".:|\u2014\u2013,")
-    rest = raw[cut + 1:].strip()
-    return not _CAPTION_BODY_PRONOUN_RE.match(rest)
-
-
 NUM_ENTRY_RE = re.compile(r"^\s*(?:\[?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
 BULLET_ENTRY_RE = re.compile(r"^\s*[-*•]\s+\S")
 YEAR_RE = re.compile(r"\b(?:19|20)\d{2}[a-z]?\b")
@@ -343,10 +354,7 @@ SECTION_PATTERNS = [
     ("references", re.compile(r"^(?:references?|bibliography|reference list|literature cited)\s*$", re.I)),
     ("supplementary", re.compile(r"^(?:supplementary|extended data|appendix)\b", re.I)),
     ("figure legend", re.compile(r"^(?:figure legends?|legends?)\b", re.I)),
-    # A heading or the bare word only: "Table 1 shows ..." is a body sentence,
-    # not a context switch (F191). Real captions are matched earlier by
-    # TABLE_CAPTION_RE, which requires the separator after the number.
-    ("table", re.compile(r"^(?:tables?|table legends?)\s*$", re.I)),
+    ("table", re.compile(r"^(?:tables?|table legends?)\b", re.I)),
     # synthetic corpus markers written by convert_corpus.py
     ("table", re.compile(r"^sheet\b", re.I)),
     ("header", re.compile(r"^header\b", re.I)),
@@ -387,7 +395,6 @@ def find_reference_region(lines):
             prev_blank = False
             continue  # a numbered reference entry is never a section heading
         if STOP_SECTION_RE.match(s) or MD_HEADING_RE.match(s) or \
-                REF_TEX_END_RE.match(s) or \
                 FIG_CAPTION_RE.match(s) or TABLE_CAPTION_RE.match(s):
             end = j
             note = "ends at the next heading/caption (line %d)" % (j + 1)
@@ -432,42 +439,16 @@ def classify_context(fname):
     return "main text"
 
 
-_TEX_VERBATIM_RE = re.compile(
-    r"\\begin\{(verbatim\*?|lstlisting|minted|Verbatim\*?)\}"
-    r".*?\\end\{\1\}", re.S)
-
-
-def blank_tex_verbatim(text):
-    """Blank verbatim/listing/minted bodies in place (line count preserved)."""
-    def blank(m):
-        return re.sub(r"[^\n]", " ", m.group(0))
-    return _TEX_VERBATIM_RE.sub(blank, text or "")
-
-
 def section_label(raw):
     """In-file section heading or display-item caption, else None."""
     s = raw.strip()
-    if not s:
+    if not s or len(s) > 60:
         return None
-    # The caption tests come BEFORE the 60-character HEADING cap: a real legend
-    # is often longer, and capping first attributed its metrics to the previous
-    # section (the bug extract_acronyms.section_label already fixed).
-    if _caption_line(raw, FIG_CAPTION_RE):
+    if FIG_CAPTION_RE.match(raw):
         return "figure legend"
-    if _caption_line(raw, TABLE_CAPTION_RE):
+    if TABLE_CAPTION_RE.match(raw):
         return "table"
-    if len(s) > 60:
-        return None
-    # F101: LaTeX sectioning and emphasized Markdown headings are contexts too.
-    _tex = re.match(r"^\\(?:section|subsection|subsubsection|chapter)\*?\s*\{([^{}]*)\}", s)
-    if _tex:
-        s = _tex.group(1)
-    elif re.match(r"^\\begin\{abstract\}", s):
-        return "abstract"
-    s = re.sub(r"^#{1,6}\s*", "", s)
-    s = re.sub(r"^(?:\*{1,2}|_{1,2})\s*", "", s)
-    s = re.sub(r"\s*(?:\*{1,2}|_{1,2})$", "", s)
-    s = s.rstrip(":.").strip()
+    s = re.sub(r"^#{1,6}\s*", "", s).rstrip(":.").strip()
     for label, pat in SECTION_PATTERNS:
         if pat.match(s):
             return label
@@ -502,17 +483,10 @@ def main():
     out = os.path.abspath(args.out) if args.out else os.path.dirname(work.rstrip("/"))
     corpus = os.path.join(work, "corpus")
     art_dir = os.path.join(out, "artifacts")
-    # Validate --work BEFORE creating anything: an invalid WORK used to leave a
-    # fresh artifact tree behind (F84). A symlinked artifacts directory is a
-    # write outside the work tree; refuse it rather than follow it (F77).
+    os.makedirs(art_dir, exist_ok=True)
     if not os.path.isdir(corpus):
         print("ERROR: corpus dir not found: %s" % corpus)
         sys.exit(2)
-
-    if os.path.islink(art_dir) or (os.path.exists(art_dir) and not os.path.isdir(art_dir)):
-        print("ERROR: artifacts path is a symlink or not a directory: %s" % art_dir)
-        sys.exit(2)
-    os.makedirs(art_dir, exist_ok=True)
 
     metrics = defaultdict(list)     # (label, value) -> occurrences
     accessions = defaultdict(list)
@@ -529,13 +503,12 @@ def main():
         if role == "references":
             continue  # a reference list is not the authors' own metric source
         try:
-            _text = open(os.path.join(corpus, fname), encoding="utf-8",
-                         errors="replace").read()
-            lines = blank_tex_verbatim(_text).split("\n")
+            lines = open(os.path.join(corpus, fname), encoding="utf-8",
+                         errors="replace").read().split("\n")
         except OSError as e:
             print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
             continue
-        if fname.lower().endswith((".tex.txt", ".ltx.txt")):
+        if fname.endswith((".tex.txt", ".ltx.txt")):
             # A LaTeX comment is not manuscript prose: a commented-out
             # `% p = 0.001` must not become an M4 divergence candidate.
             lines = [strip_tex_comment(ln) for ln in lines]
@@ -610,8 +583,7 @@ def main():
                 if u1 != u2:
                     continue
                 try:
-                    low = float(m.group("low").replace("\u2212", "-"))
-                    high = float(m.group("high").replace("\u2212", "-"))
+                    low, high = float(m.group("low")), float(m.group("high"))
                 except ValueError:
                     continue
                 if low > high:

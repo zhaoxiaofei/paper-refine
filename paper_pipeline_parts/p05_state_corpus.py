@@ -264,8 +264,11 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         # corpus input. Omitting it let `retry` reach that RuntimeError as an
         # unhandled traceback instead of deferring the run as stale.
         deps = [rid_a1(r)]
-        if ctx is not None and journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER,
-                                                        JOURNAL_MODE_RESUBMIT):
+        if ctx is not None and journal_has_feedback(ctx) and not journal_is_scoped(ctx):
+            # The materializer stages `concerns/` from the feedback run for ANY
+            # unscoped journal mode (`llm` included), so the dependency must
+            # follow the same predicate: a retry used to bypass unmet_deps and
+            # raise inside materialize_rewrite instead of deferring.
             deps.append(rid_feedback(r))
         return deps
     if kind == "guided_review":
@@ -432,9 +435,10 @@ def load_state_file(path: Path) -> tuple:
         st = path.lstat()
     except OSError as e:                                          # noqa: BLE001
         return None, f"could not be read ({type(e).__name__}: {e})"
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-        return None, ("is not a regular file (a symlink, FIFO or device at the registry "
-                      "path is refused; state.json must be written by this pipeline)")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        return None, ("is not a regular file (a symlink, FIFO, device or hard-linked "
+                      "registry path is refused; state.json must be single-linked and "
+                      "written by this pipeline)")
     size = st.st_size
     if size > MAX_STATE_BYTES:
         def _mib(n):
@@ -1090,7 +1094,8 @@ class Ctx:
         rec = self.state["runs"].get(rid)
         if rec is None:
             rec = {"id": rid, "kind": kind, "round": int(round_no), "sandbox": sandbox_rel,
-                   "status": "pending", "attempts": 0, "created": utcnow(), "started": None,
+                   "status": "pending", "attempts": 0, "stage_attempts": 0,
+                   "created": utcnow(), "started": None,
                    "finished": None, "last_error": None, "last_duration": None,
                    "postcheck": None, "inputs_manifest": None, "upstream_run_id": None,
                    "source_id": None, "self_id": None, "other_id": None, "target_id": None,
@@ -1484,7 +1489,7 @@ def _normalize_version_refs(data: bytes, tokens) -> bytes:
         _urls.append(m.group(0))
         return b"\x00VIEWURL%d\x00" % (len(_urls) - 1)
 
-    data = re.sub(rb"https?://[^\s\"'<>)]+", _stash_url, data)
+    data = re.sub(rb"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>)]+", _stash_url, data)
     data = re.sub(rb"([-_])" + tok + rb"(?=\.[A-Za-z][A-Za-z0-9]{0,9}\b)",
                   rb"", data)
     cmd = re.compile(
@@ -1941,7 +1946,9 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
         _urls.append(m.group(0))
         return "\ue000%d\ue001" % (len(_urls) - 1)
 
-    text = re.sub(r"https?://[^\s\"'<>]+", _stash_url, text)
+    # Any URI scheme, not only http(s): an ftp/file URL's filename was rewritten
+    # to an anonymous placeholder in the judge view.
+    text = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+", _stash_url, text)
 
     def add(mapping, old, new):
         amb = ambiguous.setdefault(id(mapping), set())
@@ -2420,10 +2427,10 @@ def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> 
 
     def _rel(m):
         el = m.group(0)
-        tm = re.search(rb'Target="([^"]*)"', el)
-        if not tm:
+        t = re.search(rb'Target=(["\'])([^"\']*)\1', el)
+        if not t:
             return el
-        target = tm.group(1).decode("utf-8", "replace")
+        target = url_unquote(t.group(2).decode("utf-8", "replace"))
         if re.match(r"(?i)^(?:[a-z][a-z0-9+.-]*:|#|\\\\|/)", target):
             return el
         new = file_map.get(target)
@@ -2433,7 +2440,8 @@ def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> 
                 new = posixpath.relpath(file_map[resolved], base_dir or ".")
         if new is None:
             return el
-        return re.sub(rb'Target="[^"]*"', b'Target="' + new.encode("utf-8") + b'"', el)
+        encoded = url_quote(new, safe="/._-~")
+        return el[:t.start(2)] + encoded.encode("utf-8") + el[t.end(2):]
 
     return _RELS_ENTRY_RE.sub(_rel, payload)
 
@@ -2467,13 +2475,13 @@ def _prune_dropped_part_references(payload: bytes, name: str, dropped: set,
 
     def _rel(m):
         el = m.group(0)
-        tm = re.search(rb'TargetMode="([^"]*)"', el)
-        if tm and tm.group(1).lower() == b"external":
+        tm = re.search(rb'TargetMode=(["\'])([^"\']*)\1', el)
+        if tm and tm.group(2).lower() == b"external":
             return el
-        t = re.search(rb'Target="([^"]*)"', el)
+        t = re.search(rb'Target=(["\'])([^"\']*)\1', el)
         if not t:
             return el
-        target = t.group(1).decode("utf-8", "replace")
+        target = url_unquote(t.group(2).decode("utf-8", "replace"))
         resolved = posixpath.normpath(posixpath.join(base_dir, target)).lstrip("/")
         if resolved.lower() in dropped:
             notes.append(f"dropped the {name} relationship to the removed part {resolved}")
@@ -2539,7 +2547,8 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         nonlocal accepted
         new = re.sub(rb"<w:rsids\b[^>]*>.*?</w:rsids>", b"", payload, flags=re.S)
         new = re.sub(rb"<w:rsids\b[^>]*/>", b"", new)
-        new = re.sub(rb"\s(?:[\w]+:)?(?:rsid\w*|paraId|textId|durableId)=\"[^\"]*\"", b"", new)
+        new = re.sub(rb"\s(?:[\w]+:)?(?:rsid\w*|paraId|textId|durableId)=([\"'])[^\"']*\1",
+                     b"", new)
         new = re.sub(rb"<w:proofErr\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:lastRenderedPageBreak\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:proofState\b[^>]*/>", b"", new)
@@ -2656,10 +2665,10 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 payload = _ooxml_xml_utf8(payload)
                 payload = _normalize_word_prefix(payload)
                 payload = _accept_changes(payload)
-                new = re.sub(rb'((?:w|w15|w16):(?:author|initials))="[^"]*"', rb'\1="author"',
-                             payload)
-                new = re.sub(rb"((?:w|w15|w16):date)=\"[^\"]*\"",
-                             rb"\1=" + b'"' + fixed_date + b'"', new)
+                new = re.sub(rb'((?:w|w15|w16):(?:author|initials))=([\"\'])[^\"\']*\2',
+                             rb'\1=\2author\2', payload)
+                new = re.sub(rb"((?:w|w15|w16):date)=([\"\'])[^\"\']*\2",
+                             rb"\1=\2" + fixed_date + rb"\2", new)
                 if new != payload:
                     stripped += 1
                 payload = new
@@ -2800,8 +2809,19 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
 def _transform_view_file(old_rel: str, src: Path, file_map: dict):
     """(transformed bytes | None, notes) for one view file (None = copy as is)."""
     ext = src.suffix.lower()
+
+    def _read() -> tuple:
+        try:
+            return src.read_bytes(), []
+        except OSError as e:
+            # One unreadable payload must not abort judge materialization
+            # (F105): the caller omits it and records a named gap.
+            return None, [f"unreadable source ({e}); the file is omitted from the view"]
+
     if _view_is_text(old_rel):
-        raw = src.read_bytes()
+        raw, _bad = _read()
+        if raw is None:
+            return None, _bad
         text = raw.decode("utf-8", "surrogateescape")
         text = _rewrite_view_references(text, old_rel, file_map[old_rel], file_map)
         # The pipeline's hand-off marker prefix must not identify a package as
@@ -2809,7 +2829,9 @@ def _transform_view_file(old_rel: str, src: Path, file_map: dict):
         text = text.replace(PLACEHOLDER_TOKEN, "[TO BE COMPLETED")
         return text.encode("utf-8", "surrogateescape"), []
     if ext in VIEW_OOXML_EXTS or ext in VIEW_PDF_EXTS:
-        raw = src.read_bytes()
+        raw, _bad = _read()
+        if raw is None:
+            return None, _bad
         # The sanitized bytes do not depend on the view seed: the same figure or
         # document appears in many views, so cache by content (bounded).
         kind = "ooxml" if ext in VIEW_OOXML_EXTS else "pdf"
@@ -2847,7 +2869,11 @@ def expected_view_digest(ctx: Ctx, r: int, vid: str, view_seed: str) -> list:
     # The transform depends on each file's RELATIVE PATH (reference rewriting
     # resolves against it), not only on its bytes: a rename with identical
     # content must not reuse the old expected view (F10).
-    src_key = tuple(sorted((rel, sha256_file(p)) for rel, p in files))
+    # A chmod-000 payload must not abort judge materialization: the sentinel
+    # makes the view compare as stale (and the build records the gap) instead
+    # of raising PermissionError out of this function.
+    src_key = tuple(sorted((rel, sha256_files([p], on_error="<unreadable>")[0])
+                           for rel, p in files))
     key = (int(r), str(vid), str(view_seed), src_key)
     with _VIEW_EXPECT_LOCK:
         hit = _VIEW_EXPECT_CACHE.get(key)
@@ -2857,8 +2883,13 @@ def expected_view_digest(ctx: Ctx, r: int, vid: str, view_seed: str) -> list:
     digs = []
     for old_rel, src in files:
         data, _notes = _transform_view_file(old_rel, src, file_map)
+        if data is None and any("unreadable source" in str(n).lower()
+                                for n in (_notes or [])):
+            # build_judge_view omits the same file and records the gap, so it
+            # must not be part of the expected identity either.
+            continue
         digest = (hashlib.sha256(data).hexdigest() if data is not None
-                  else sha256_file(src))
+                  else sha256_files([src], on_error="<unreadable>")[0])
         # The anonymous NAME is part of the expected identity (F-015): a view
         # whose files carry the right bytes under the wrong names is not the
         # view this corpus materializes.
@@ -2934,6 +2965,11 @@ def build_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
                                          "compressed/unparsable", "not stripped",
                                          "could not be blanked", "budget")):
                 _transform_warnings.append(f"{file_map[rel]}: {_note}"[:400])
+        if data is None and any("unreadable source" in str(n).lower()
+                                for n in (_notes or [])):
+            _transform_warnings.append(
+                f"{file_map[rel]}: unreadable source; omitted from the judge view"[:400])
+            continue
         if data is None:
             shutil.copyfile(src, out)                 # content only: no metadata
             if Path(rel).suffix.lower() in VIEW_IMAGE_EXTS:
@@ -3079,16 +3115,127 @@ def stash_logs(sb: Path, logs_dir: Path, rid: str, attempt: int = None) -> list:
 
 
 def bump_attempt(rec: dict) -> int:
-    """Count one attempt: the per-invocation counter AND the monotone total.
+    """Number one session that wrote into the run: since-reset count + total.
 
-    `attempts` is what the retry policy and the status table's ATT column use,
-    and `retry` resets it to 0; `attempts_done` never goes back, so the attempt
-    that wrote a sandbox keeps its number (and therefore its archive directory
-    and its log name) across a reset.
+    `attempts` numbers the RECORDED sessions since the last reset (`retry
+    --run`, a revalidation reset); `attempts_done` never goes back, so the
+    attempt that wrote a sandbox keeps its number (and therefore its archive
+    directory and its log name) across a reset.
+
+    This is an IDENTITY counter, not the retry budget: a CONTINUATION, a scoped
+    ARTIFACT-REPAIR session and a re-verify all need a number (two records must
+    never share one), but none of them is a retry of the stage. The driver's
+    retry budget is a separate, per-invocation counter (and `stage_attempts`
+    is the cumulative full-launch history); mixing the record count with the
+    budget made a run report "[attempt 5/3]" (2026-11-12, r1_a2_revise: two
+    re-verifies between three launches), which reads as if the retry policy had
+    overrun.
     """
     rec["attempts"] = int(rec.get("attempts") or 0) + 1
     rec["attempts_done"] = int(rec.get("attempts_done") or 0) + 1
     return rec["attempts_done"]
+
+
+def bump_stage_attempt(rec: dict) -> int:
+    """Count one FULL stage attempt -- a fresh agent session for the stage.
+
+    This is the run's cumulative full-launch count (the `full` half of the status
+    table's `FULL+AUX` cell and the history). The retry budget itself is tracked
+    per invocation by the driver (`attempts/run`, a live `attempts_left`
+    counter): one FAILED attempt cycle spends one slot, and a scoped repair or a
+    CONTINUATION that fails spends the slot of the attempt it serves, not an
+    extra one. Auxiliary sessions are counted separately (`bump_scoped_repair`,
+    `bump_continuation`, `bump_reverification`) so that neither the console nor
+    the status table can present them as retries of the stage.
+    """
+    rec["stage_attempts"] = int(rec.get("stage_attempts") or 0) + 1
+    return rec["stage_attempts"]
+
+
+def _bump_aux(rec: dict, key: str) -> int:
+    rec[key] = int(rec.get(key) or 0) + 1
+    return rec[key]
+
+
+def bump_scoped_repair(rec: dict) -> int:
+    """Count one scoped artifact-repair session (its own count, never a retry)."""
+    return _bump_aux(rec, "scoped_repairs")
+
+
+def bump_continuation(rec: dict) -> int:
+    """Count one CONTINUATION session (its own count, never a retry)."""
+    return _bump_aux(rec, "continuation_sessions")
+
+
+def bump_reverification(rec: dict) -> int:
+    """Count one re-postcheck of a failed process's complete artifacts.
+
+    A re-verify runs no agent at all; it only gives the same attempt a second
+    look, so it is recorded here instead of being charged to the retry budget.
+    """
+    return _bump_aux(rec, "reverifications")
+
+
+def stage_attempts(rec: dict) -> int:
+    """The number of FULL stage attempts recorded for the run (cumulative)."""
+    try:
+        return int(rec.get("stage_attempts") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def stage_attempt_count(rec: dict) -> int:
+    """The full-attempt count for a report, with a pre-split record's fallback.
+
+    A record written before the split (or built by hand in a test) counted every
+    session as an attempt; it must never be reported as "0 attempt(s)".
+    """
+    n = stage_attempts(rec)
+    if n:
+        return n
+    try:
+        return int(rec.get("attempts") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def auxiliary_sessions(rec: dict) -> int:
+    """How many sessions ran for this run WITHOUT being a full stage retry."""
+    total = 0
+    for key in ("scoped_repairs", "continuation_sessions", "reverifications"):
+        try:
+            total += int(rec.get(key) or 0)
+        except (TypeError, ValueError):
+            pass
+    return total
+
+
+def auxiliary_session_summary(rec: dict) -> str:
+    """`N scoped repair(s), M continuation(s), K re-verification(s)` (empty if none)."""
+    parts = []
+    for key, noun in (("scoped_repairs", "scoped repair"),
+                      ("continuation_sessions", "continuation"),
+                      ("reverifications", "re-verification")):
+        try:
+            n = int(rec.get(key) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n:
+            parts.append(f"{n} {noun}{'' if n == 1 else 's'}")
+    return ", ".join(parts)
+
+
+def attempt_split_cell(rec: dict) -> str:
+    """`2+1` -- full stage attempts plus the auxiliary sessions, for the run table.
+
+    The `+` part is shown only when an auxiliary session ran, so an ordinary
+    run's cell stays a plain number. The two numbers are the run's LIFETIME
+    history (the retry budget itself is per invocation and is reported on the
+    console); keeping them apart is what stops the table from reading a scoped
+    repair or a re-verify as a retry.
+    """
+    full, aux = stage_attempt_count(rec), auxiliary_sessions(rec)
+    return f"{full}+{aux}" if aux else str(full)
 
 
 def attempt_number(rec: dict) -> int:
@@ -3803,7 +3950,7 @@ def seeded_cold_start_paths(sb: Path) -> set:
             sb / COLD_START_OBLIGATIONS_REL}
 
 
-def cold_start_obligation_rows(root: Path, limit: int = 200) -> list:
+def cold_start_obligation_rows(root: Path, limit: int = 200, area_names=None) -> list:
     """Rows for `COLD_START_OBLIGATIONS_REL`: what the submission promises, resolved.
 
     Three families, each derived from the corpus's own declarations -- nothing
@@ -3846,7 +3993,9 @@ def cold_start_obligation_rows(root: Path, limit: int = 200) -> list:
     # Written pointers and cited display items: the two shapes the submission
     # itself creates, resolved against what the package actually carries.
     try:
-        for r in non_submitted_reference_rows(root, submission_not_carried_areas_plain()):
+        for r in non_submitted_reference_rows(
+                root, area_names if area_names is not None
+                else submission_not_carried_areas_plain()):
             rows.append({"family": "written pointer",
                          "obligation": f"{r.get('reference')} (in {r.get('file')}:{r.get('line')})",
                          "resolves": "no (the submission does not carry it)",
@@ -3970,7 +4119,8 @@ def seed_cold_start_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
         "appears in the text)? A missing section or a cited-but-absent item belongs to this "
         "family even though nothing on the page is wrong.\n\n"
         + _evidence_artifact_table(
-            cold_start_obligation_rows(corpus),
+            cold_start_obligation_rows(
+                corpus, area_names=submission_not_carried_areas(ctx)),
             ["family", "obligation", "resolves", "where"],
             "no obligation could be derived (no README declaration, no pointer, no display item)")
         + "\n"))
@@ -4561,6 +4711,123 @@ def merge_cold_start_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
     return {"rows": len(merged_rows), "remap": remap}
 
 
+# =====================================================================
+# THE TWO LATE DELIVERABLES ARE SEEDED EMPTY-BUT-SHAPED
+# =====================================================================
+# A weak model tends to spend its whole session on the manuscript and stop
+# before the two files that carry the EVIDENCE of the revision: the per-finding
+# ledger and the L1-L11 language-pass coverage table. A stage that stops before
+# writing a file loses a two-hour attempt to a "missing deliverable" error that
+# is really a one-line omission (the 2026-11-13 qwen arm wrote the revised
+# brief and stopped three bookkeeping files short).
+#
+# Seeding is a HEAD START, never a pass: the rows exist, the judgement does not.
+# An empty verdict / an empty coverage cell is still a postcheck ERROR, and the
+# scoped repair (`--strict-artifacts fix`) may complete the cells from the
+# package's own evidence. The completion marker is deliberately NOT seeded: it
+# is the signal that the stage finished, so a stage that never wrote it is
+# UNFINISHED and is continued (RESUME_PROMPT.md), not completed by paperwork.
+def _revise_frozen_finding_ids(sb: Path) -> list:
+    """The ids this revise session must resolve (frozen review + audit, X-* included)."""
+    ids = []
+    for row in findings_from_sandbox(sb, sandbox_audit_record(sb)):
+        fid = str((row or {}).get("id") or "").strip()
+        if fid and fid not in ids:
+            ids.append(fid)
+    return ids
+
+
+def _revise_frozen_review_readable(sb: Path) -> bool:
+    """True when the frozen review file exists and parses as a findings object.
+
+    A zero-finding review is a legitimately CLEAN review, not an unreadable one:
+    the ledger is seeded `[]` for it (the postcheck accepts an empty ledger only
+    when the frozen total is zero), while a missing/unreadable file gets no seed.
+    """
+    data = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
+    return isinstance(data, dict) and isinstance(data.get("findings"), list)
+
+
+def revise_ledger_skeleton(ids: list) -> str:
+    """The machine-readable ledger with one EMPTY row per frozen finding id."""
+    return json.dumps(
+        [{"id": fid, "verdict": "", "rationale": "", "evidence": "",
+          "final_status": ""} for fid in ids],
+        indent=2, ensure_ascii=False) + "\n"
+
+
+def revise_language_skeleton() -> str:
+    """The L1-L11 coverage table with one EMPTY row per step."""
+    lines = [
+        "# Language pass — L1–L11 (seeded empty by the pipeline)",
+        "",
+        "The pipeline seeded this coverage table with one row per step so the pass",
+        "cannot be silently skipped. Fill `rows changed` with an integer and `note`",
+        "for EVERY row, including the steps that changed nothing",
+        "(`L3 | 0 | no logic jumps found`). Record each edit above the table as",
+        "`step | location | before | after | reason`.",
+        "",
+        "| step | rows changed | note |",
+        "|---|---|---|",
+    ]
+    lines += [f"| L{i} |  |  |" for i in range(1, 12)]
+    return "\n".join(lines) + "\n"
+
+
+def seed_revise_deliverable_skeletons(sb: Path) -> dict:
+    """Write the ledger and language-pass skeletons when absent (never overwrite).
+
+    Returns ``{"ledger": bool, "language": bool}`` naming what this call created.
+    The ledger is seeded when the frozen review is READABLE: a zero-finding
+    review is legitimately clean and gets ``[]``, while a missing/unreadable
+    list gets NO seed -- an empty skeleton must not satisfy the all-clean branch
+    of a review whose findings could not be read.
+    """
+    rev = sb / REVISED_DIR
+    rev.mkdir(parents=True, exist_ok=True)
+    seeded = {"ledger": False, "language": False}
+    ids = _revise_frozen_finding_ids(sb)
+    if ids or _revise_frozen_review_readable(sb):
+        ledger = rev / "revision_report.json"
+        if not ledger.is_file():
+            write_text_atomic(ledger, revise_ledger_skeleton(ids))
+            seeded["ledger"] = True
+    lang = rev / "work" / "R6_language.md"
+    if not lang.is_file():
+        lang.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(lang, revise_language_skeleton())
+        seeded["language"] = True
+    return seeded
+
+
+def untouched_revise_seed_paths(sb: Path) -> set:
+    """The seeded files that are STILL byte-identical to the seed (inputs).
+
+    `leftovers_present` must not mistake a fresh sandbox for a partial package:
+    a materialized revise sandbox already carries the ledger and language-pass
+    seeds, so a plain "any file?" probe would never launch its first agent.
+    Comparing CONTENT is what keeps the guard honest the other way too: a seed
+    the agent has edited is the agent's own work, and a crashed session is then
+    "dirty" rather than silently re-entered.
+    """
+    rev = sb / REVISED_DIR
+    expected = {}
+    ids = _revise_frozen_finding_ids(sb)
+    if ids or _revise_frozen_review_readable(sb):
+        expected[rev / "revision_report.json"] = revise_ledger_skeleton(ids)
+    expected[rev / "work" / "R6_language.md"] = revise_language_skeleton()
+    untouched = set()
+    for path, text in expected.items():
+        try:
+            # The seeded files live in the agent-writable sandbox: never read a
+            # multi-GB file (or a planted symlink) whole just to compare it.
+            if read_text_bounded(path) == text:
+                untouched.add(path)
+        except (OSError, UnicodeError):
+            continue
+    return untouched
+
+
 def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     """Phase-2 sandbox for ONE reviewed-and-then-revised candidate.
 
@@ -4631,6 +4898,10 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
         ensure_copy(ctx.sandbox_of(aud_rec) / "audit", sb / "audit")
         aud_manifest = hash_manifest(sb / "audit")
     (sb / REVISED_DIR).mkdir(exist_ok=True)
+    # Seed the ledger and the language-pass coverage table EMPTY-BUT-SHAPED (a
+    # head start, not a pass: the empty cells are still postcheck errors; the
+    # completion marker is not seeded, so a stopped stage stays unfinished).
+    skeleton_seed = seed_revise_deliverable_skeletons(sb)
     # A retry used to start from base/ with only the failure TEXT, while the
     # prompt told the agent to read a sibling sandbox it was forbidden to open.
     # Copy the rejected package INTO this sandbox so the retry can inspect (and
@@ -4679,6 +4950,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                prefer_rewrite=_prefer_ok))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
+    rec["seeded_skeletons"] = skeleton_seed
     _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok)
     if _policy_rec is None:
         rec.pop("content_edit_policy", None)
@@ -5144,7 +5416,9 @@ def _vid_index(rec: dict) -> int:
 
 def reset_run_record(rec: dict) -> None:
     """Clear a run's bookkeeping so the next attempt cannot inherit an old result."""
-    rec.update({"status": "pending", "attempts": 0, "last_error": None, "postcheck": None,
+    rec.update({"status": "pending", "attempts": 0, "stage_attempts": 0,
+                "scoped_repairs": 0, "continuation_sessions": 0, "reverifications": 0,
+                "last_error": None, "postcheck": None,
                 "scores": None, "summary": None})
     for k in ("stale_reason", "corpus_digest", "content_fingerprint", "captions",
               "document_set", "placeholders", "critical_findings_input",

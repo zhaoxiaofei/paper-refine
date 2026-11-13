@@ -69,17 +69,6 @@ import re
 import sys
 from collections import defaultdict
 
-from pathlib import Path
-
-# Allow direct execution and import by filename.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    from evidence_names import (EVIDENCE_DIRNAMES,
-                                is_evidence as _is_evidence,
-                                _COVER_WORD_RE)
-finally:
-    sys.path.pop(0)
-
 
 def strip_tex_comment(line: str) -> str:
     """`line` up to its first unescaped `%` (the LaTeX comment marker)."""
@@ -96,6 +85,31 @@ def strip_tex_comment(line: str) -> str:
     return "".join(out)
 
 
+RAW_DATA_DIRNAMES = ("raw_data",)
+HUMAN_FEEDBACK_DIR = "human_review_feedback"
+LLM_FEEDBACK_DIR = "llm_review_feedback"
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
+# `<evidence area>.disabled` / `.off` is inert evidence (the pipeline's
+# `is_disabled_evidence_rel`); exact-name membership swept it as manuscript.
+DISABLED_EVIDENCE_SUFFIXES = ("disabled", "off")
+
+
+def _is_evidence_part(part: str) -> bool:
+    low = str(part or "").strip().lower()
+    if low in EVIDENCE_DIRNAMES:
+        return True
+    return any(low.startswith(area + ".")
+               and low[len(area) + 1:] in DISABLED_EVIDENCE_SUFFIXES
+               for area in EVIDENCE_DIRNAMES)
+# A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
+# `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
+_ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
+    r"^(?:(?:the[.\s_-]+)?editorial(?:[.\s_-]+board)?|"
+    r"letters?[.\s_-]+(?:to|for)[.\s_-]+(?:the[.\s_-]+)?editor)"
+    r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
+# `.reply`/`.review`/`.notes` name the DOCUMENT kind, not another extension.
+_SEMANTIC_SUFFIX_RE = re.compile(
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
 EXTERNAL_FEEDBACK_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
     r"to[-_ ]?authors))*|"
@@ -110,6 +124,22 @@ EXTERNAL_FEEDBACK_RE = re.compile(
 AUTHORED_REPLY_RE = re.compile(
     r"(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)",
     re.I)
+# A scientific compound that merely ENDS in a role word is not a reply or a
+# feedback file: `dose_response.txt` / `immune_response.md` / `biofeedback_results.txt`
+# are real manuscripts and must reach M1/M1b.
+_SCIENCE_ROLE_COMPOUND_RE = re.compile(
+    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
+    r"pharmacodynamic)[-_ ]?response"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
+    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
+# The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
+# `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
+# `recovered_samples.md` a cover letter (forcing them into the submission runs)
+# and masked a reply file whose name merely contains the substring.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 # The supplement role is a WORD too: the old `"supp" in f` swept `support.docx`
 # and `suppress.md` as supplementary text, exactly the files the pipeline keeps
 # as main text. `supp`, `suppl`, `supplement*` and `supplementary` still match.
@@ -119,7 +149,40 @@ SUPP_ROLE_RE = re.compile(
 
 
 def is_evidence_name(fname: str) -> bool:
-    return _is_evidence(fname, EXTERNAL_FEEDBACK_RE, AUTHORED_REPLY_RE)
+    """True when a corpus file name belongs to the evidence area / external prose.
+
+    convert_corpus.py keeps raw-data text out of WORK/corpus/ (it goes to
+    WORK/evidence/); this is the defense-in-depth gate for a WORK/corpus/
+    produced by an older converter or an adapted workflow.
+    """
+    parts = fname.replace("\\", "/").split("/")
+    if any(_is_evidence_part(part) for part in parts[:-1]):
+        return True
+    base = parts[-1]
+    if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
+        return True
+    # A cover letter IS a submission document -- and this test must come FIRST,
+    # exactly as in extract_citations.py: with the reply/feedback test below it,
+    # `cover_letter_response.md` was dropped as reviewers' feedback and the
+    # letter's own text never reached M1/M1b.
+    if _COVER_WORD_RE.search(base):
+        return False
+    if _SEMANTIC_SUFFIX_RE.search(base):
+        return True             # a reply/review/notes DOCUMENT, never author prose
+    stem = base
+    while True:
+        _stripped = re.sub(
+            r"\.(?:txt|docx?|md|tex|pdf|rtf|bib|csv|tsv|bak|final|tar|gz|zip)$",
+            "", stem, flags=re.I)
+        if _stripped == stem:
+            break
+        stem = _stripped
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(stem):
+        return False            # the authors' article-type manuscript, not a letter
+    # A previous response-to-reviewers (the authors' own document) is not
+    # manuscript prose either: it never produces an M1/M1b row.
+    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
+    return bool(EXTERNAL_FEEDBACK_RE.search(cleaned) or AUTHORED_REPLY_RE.search(cleaned))
 
 
 # Universal abbreviations exempt from redefinition anywhere
@@ -192,22 +255,8 @@ FILE_RE = re.compile(
     r"bib|tex|zip|gz|json|ya?ml|sh|xls|pptx|xml|rels|fa|fq|fastq|bam|h5ad|rds|loom)\b", re.I)
 
 REF_HEADING_RE = re.compile(
-    r"^\s*(?:"
-    # LaTeX head forms (F269): a \section{References} list was swept for
-    # acronyms, so a cited title's token entered M1.
-    r"\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}\s*(?:\\label\{[^{}]*\})?"
-    r"|\\begin\{thebibliography\}"
-    r"|\\(?:bibliography|printbibliography)\b.*"
-    # Plain/Markdown heading, optionally ATX and optionally emphasised.
-    r"|(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
-    r"(?:references?|bibliography|reference\s+list|literature\s+cited)"
-    r"\s*(?:\*{1,2}|_{1,2})?\s*[:.\u2014\u2013-]?\s*"
-    r")\s*(?:%.*)?$", re.I)
-# A LaTeX reference region also ends at the closing environment or the next
-# sectioning command.
-REF_TEX_END_RE = re.compile(
-    r"^\s*(?:\\end\{thebibliography\}|\\(?:section|subsection|chapter)\*?\s*\{)",
-    re.I)
+    r"^\s*(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
 # The reference-role file names: "ref", "refs", "references", "ref-list" --
 # the SAME word-boundary rule convert_corpus.py's role guesser uses.
 # Deliberately not a bare "ref" PREFIX: "refined_draft.txt" is not a
@@ -334,7 +383,6 @@ def find_reference_region(lines):
             prev_blank = False
             continue  # a numbered reference entry is never a section heading
         if STOP_SECTION_RE.match(s) or MD_HEADING_RE.match(s) or \
-                REF_TEX_END_RE.match(s) or \
                 FIG_CAPTION_RE.match(s) or TABLE_CAPTION_RE.match(s):
             end = j
             note = "ends at the next heading/caption (line %d)" % (j + 1)
@@ -399,18 +447,6 @@ def _caption_line(raw, pattern):
     return not _CAPTION_BODY_PRONOUN_RE.match(rest)
 
 
-_TEX_VERBATIM_RE = re.compile(
-    r"\\begin\{(verbatim\*?|lstlisting|minted|Verbatim\*?)\}"
-    r".*?\\end\{\1\}", re.S)
-
-
-def blank_tex_verbatim(text):
-    """Blank verbatim/listing/minted bodies in place (line count preserved)."""
-    def blank(m):
-        return re.sub(r"[^\n]", " ", m.group(0))
-    return _TEX_VERBATIM_RE.sub(blank, text or "")
-
-
 def section_label(raw):
     """In-file section heading or display-item caption, else None."""
     s = raw.strip()
@@ -422,16 +458,7 @@ def section_label(raw):
         return "table"
     if len(s) > 60:
         return None
-    # F101: LaTeX sectioning and emphasized Markdown headings are contexts too.
-    _tex = re.match(r"^\\(?:section|subsection|subsubsection|chapter)\*?\s*\{([^{}]*)\}", s)
-    if _tex:
-        s = _tex.group(1)
-    elif re.match(r"^\\begin\{abstract\}", s):
-        return "abstract"
-    s = re.sub(r"^#{1,6}\s*", "", s)
-    s = re.sub(r"^(?:\*{1,2}|_{1,2})\s*", "", s)
-    s = re.sub(r"\s*(?:\*{1,2}|_{1,2})$", "", s)
-    s = s.rstrip(":.").strip()
+    s = re.sub(r"^#{1,6}\s*", "", s).rstrip(":.").strip()
     for label, pat in SECTION_PATTERNS:
         if pat.match(s):
             return label
@@ -562,7 +589,7 @@ SKIP_IN_INITIALS = {"and", "or", "of", "the", "for", "in", "to", "with", "using"
                     "based", "from", "on", "a", "an", "at", "by", "as", "that"}
 
 
-def _initials_ok(tok, words, min_ratio=0.70):
+def _initials_ok(tok, words):
     """Do the candidate's word initials spell out the acronym (in order)?
 
     The classical test for "is this phrase really the acronym's expansion":
@@ -617,7 +644,7 @@ def _initials_ok(tok, words, min_ratio=0.70):
     # and the loose-clause ceiling keep the "can never be" junk out (scWGS:
     # first letter differs; hg19: 1/4; CN from a 7-word clause: first letter
     # differs).
-    return prev[len(want)] >= max(1, int(min_ratio * len(want) + 0.999))
+    return prev[len(want)] >= max(1, int(0.70 * len(want) + 0.999))
 
 
 def _term_window_before(raw, pos, limit=5):
@@ -672,11 +699,7 @@ def _comma_definitions(raw):
                             r"(?:\s+[A-Za-z][A-Za-z0-9\-\u2010\u2011\u2012\u2013\u2014]*)*",
                             body):
             continue
-        # The parenthetical path already accepts a RECORDED definition at 60%
-        # (the "IQR (interquartile range)" form); a comma key is the same
-        # recorded definition, so the stricter 70% default silently dropped a
-        # legal key entry (F27, 2026-11-23).
-        if not _initials_ok(tok, words, min_ratio=0.60):
+        if not _initials_ok(tok, words):
             continue
         out[tok] = (body, m.start(1), m.start(2) + len(body))
     return out
@@ -809,11 +832,7 @@ def audit_long_forms(acro, swept):
             if " " not in cand and "-" not in cand and "–" not in cand \
                     and "—" not in cand and cand.lower() in known_tokens:
                 continue
-            # The candidate comes from a RECORDED definition (def_phrases or
-            # expansions), so the explicit "IQR (interquartile range)" form is
-            # already accepted at the 60% bar above; keep the same bar here or
-            # the definition is recorded but M1b never sees the long form (F190).
-            if not _initials_ok(tok, words, min_ratio=0.60):
+            if not _initials_ok(tok, words):
                 continue                      # not this acronym's expansion
             try:
                 patterns.append((cand, _phrase_pattern(words)))
@@ -911,17 +930,10 @@ def main():
     out = os.path.abspath(args.out) if args.out else os.path.dirname(work.rstrip("/"))
     corpus = os.path.join(work, "corpus")
     art_dir = os.path.join(out, "artifacts")
-    # Validate --work BEFORE creating anything: an invalid WORK used to leave a
-    # fresh artifact tree behind (F84). A symlinked artifacts directory is a
-    # write outside the work tree; refuse it rather than follow it (F77).
+    os.makedirs(art_dir, exist_ok=True)
     if not os.path.isdir(corpus):
         print("ERROR: corpus dir not found: %s. Run convert_corpus.py first." % corpus)
         sys.exit(2)
-
-    if os.path.islink(art_dir) or (os.path.exists(art_dir) and not os.path.isdir(art_dir)):
-        print("ERROR: artifacts path is a symlink or not a directory: %s" % art_dir)
-        sys.exit(2)
-    os.makedirs(art_dir, exist_ok=True)
 
     extras = load_extra_tokens(work)
     patterns = [("strict", TOKEN_RE), ("gene-symbol", GENE_SYMBOL_RE), ("cell-type", CELL_TYPE_RE)]
@@ -953,9 +965,8 @@ def main():
         except OSError as e:
             print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
             continue
-        text = blank_tex_verbatim(text)
         lines = text.split("\n")
-        if fname.lower().endswith((".tex.txt", ".ltx.txt")):
+        if fname.endswith((".tex.txt", ".ltx.txt")):
             # A commented-out sentence is not the authors' prose and must not
             # produce an M1 token (`% Old text mentioned FACS`).
             lines = [strip_tex_comment(ln) for ln in lines]
@@ -965,7 +976,6 @@ def main():
                 fname, region[0] + 1, region[1], region[2]))
         current_section = role
         legend_no = 0
-        table_no = 0
         seen_here = set()
         for li, raw in enumerate(lines, 1):
             if region and region[0] <= li - 1 < region[1]:
@@ -980,12 +990,6 @@ def main():
                 # second legend's legitimate first use became a residue row.
                 legend_no += 1
                 current_section = "figure legend %d" % legend_no
-            elif label == "table" and _caption_line(raw, TABLE_CAPTION_RE):
-                # Each table footnote is its own first-use context too.  The
-                # shared "table" bucket made the first long-form use in every
-                # later table a false M1(k) residue row (F272).
-                table_no += 1
-                current_section = "table %d" % table_no
             elif label:
                 current_section = label
             elif current_section == "references":
@@ -1056,19 +1060,7 @@ def main():
                         # definition: the parenthetical's words do not spell the
                         # token. Recording it as an expansion fabricated both an
                         # expansion and a "defined at first use: Y".
-                        # BUT the documented acronym-first compound form is
-                        # "IQR (interquartile range)": IQR covers only 2/3 of its
-                        # initials, so the 70% bar rejected a real definition and
-                        # the token read "never defined" (F190). Accept that
-                        # explicit sentence-initial "TOKEN (two-or-more-word
-                        # expansion)" shape at a 60% coverage bar; the
-                        # first-letter gate still rejects references.
-                        words = dm.group(1).split()
-                        explicit_expansion = (
-                            len(words) >= 2
-                            and _initials_ok(tok, words, min_ratio=0.60))
-                        if not explicit_expansion:
-                            dm = None
+                        dm = None
                     defines = bool(dm)
                     if dm:
                         rec["expansions"].add(dm.group(1).strip())

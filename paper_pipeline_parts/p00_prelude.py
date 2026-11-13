@@ -31,6 +31,7 @@ import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
+from urllib.parse import quote as url_quote, unquote as url_unquote
 import zipfile
 from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait

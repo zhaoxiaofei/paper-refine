@@ -315,7 +315,7 @@ review-audit-revise-and-judge round 3 (full review, no rewrite, no integration)
   python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \\
       --rounds 3 --judges 2
 
-  # 1. run BOTH rounds end to end. Each round is the same dependency graph; the
+  # 1. run ALL THREE rounds end to end. Each round is the same dependency graph; the
   #    arrows below are DEPENDENCIES, not a schedule, so independent runs
   #    overlap (up to --jobs sessions at once):
   #    M rewrites (round 1: w1, w2) and ONE review start TOGETHER ->

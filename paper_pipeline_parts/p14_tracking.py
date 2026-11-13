@@ -617,7 +617,10 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
         # previous round's winner (the `winner<r-1>` token).
         wrec = ctx.round_get(r) or {}
         wname = str(wrec.get("winner_dir") or "")
-        wdir = (ctx.root / wname) if wname else None
+        # `winner_dir` is a state record, not a trusted path: an absolute or
+        # `../` value must not make tracking read (and docx-parse) outside the
+        # root. `contained_under` is the same guard `decide` applies.
+        wdir = contained_under(ctx.root, wname) if wname else None
         if wdir is None or not wdir.is_dir():
             continue
         winner_srcs = [(wdir, "", ())]

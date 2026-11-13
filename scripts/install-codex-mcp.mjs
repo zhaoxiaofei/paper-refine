@@ -473,17 +473,10 @@ function transformServer(server, opts, usedNames, usedIds, pluginName) {
     // generated YAML then carried as a literal. Only a finite positive number
     // is a timeout; record the bad input instead of writing it.
     const seconds = Number(server.tool_timeout_sec);
-    // Check the value that is actually written: `Number.isFinite(seconds)`
-    // passed for 1e308, and `Math.round(seconds * 1000)` then overflowed to
-    // Infinity, which emitConfig wrote as the literal `toolCallTimeoutMs:
-    // Infinity` (F051). A safe positive integer of milliseconds is a timeout.
-    const millis = Number.isFinite(seconds) && seconds > 0
-      ? Math.round(seconds * 1000)
-      : NaN;
-    if (Number.isSafeInteger(millis) && millis > 0) {
-      config.toolCallTimeoutMs = millis;
+    if (Number.isFinite(seconds) && seconds > 0) {
+      config.toolCallTimeoutMs = Math.round(seconds * 1000);
     } else {
-      warnings.push(`tool_timeout_sec=${JSON.stringify(server.tool_timeout_sec)} is not a positive number of milliseconds; no per-server timeout was written`);
+      warnings.push(`tool_timeout_sec=${JSON.stringify(server.tool_timeout_sec)} is not a positive number; no per-server timeout was written`);
     }
   }
   if (server.startup_timeout_sec != null) {
@@ -697,12 +690,6 @@ function stripManagedBlock(text) {
   return text.replace(re, '\n');
 }
 
-/** Drop a lone `[]` flow sequence from an effectively-empty YAML document,
- * keeping every comment on it. `[]  # note` is empty YAML with a comment. */
-function withoutEmptyFlowSequence(text) {
-  return text.replace(/(^|\n)[ \t]*\[[ \t]*\][ \t]*/g, '$1');
-}
-
 function isEffectivelyEmpty(text) {
   const stripped = text
     .replace(/#[^\n]*/g, '')
@@ -716,11 +703,12 @@ function mergePatch(existing, block) {
   const remainder = stripManagedBlock(existing);
   if (!block) {
     if (isEffectivelyEmpty(remainder)) {
-      // Preserve the remainder verbatim (comments included) and replace only
-      // the empty flow sequence. Keeping just the lines that START with `#`
-      // dropped a comment that sat on the `[]` line itself (F049).
-      const body = withoutEmptyFlowSequence(remainder).replace(/\s+$/, '');
-      return `${body ? `${body}\n` : ''}[]\n`;
+      // Preserve leading comment headers, drop the empty flow sequence.
+      const comments = remainder
+        .split('\n')
+        .filter((line) => line.trim().startsWith('#'))
+        .join('\n');
+      return `${comments ? `${comments}\n` : ''}[]\n`;
     }
     const trimmed = remainder.replace(/\s+$/, '');
     return `${trimmed}\n`;
@@ -735,8 +723,11 @@ function mergePatch(existing, block) {
     return prefix + block + suffix;
   }
   if (isEffectivelyEmpty(remainder)) {
-    const body = withoutEmptyFlowSequence(remainder).replace(/\s+$/, '');
-    return `${body ? `${body}\n` : ''}${block}`;
+    const comments = remainder
+      .split('\n')
+      .filter((line) => line.trim().startsWith('#'))
+      .join('\n');
+    return `${comments ? `${comments}\n` : ''}${block}`;
   }
   const trimmed = remainder.replace(/\s+$/, '');
   return `${trimmed}\n\n${block}`;
@@ -745,30 +736,13 @@ function mergePatch(existing, block) {
 function backup(file) {
   const stamp = new Date().toISOString()
     .replace(/[-:]/g, '').replace('T', '-').replace('Z', '');
-  const source = fs.readFileSync(file);
-  // `wx` is O_CREAT|O_EXCL: it never follows a symlink planted at the
-  // predictable backup name. The old existsSync loop was false for a DANGLING
-  // symlink, and writeFileSync then created the link target with the backup
-  // bytes (the generated patch can carry API keys).
-  for (let suffix = 1; suffix <= 100; suffix += 1) {
-    const target = suffix === 1
-      ? `${file}.bak-codex-mcp-${stamp}`
-      : `${file}.bak-codex-mcp-${stamp}-${suffix}`;
-    let fd;
-    try {
-      fd = fs.openSync(target, 'wx', 0o600);
-    } catch (error) {
-      if (error.code === 'EEXIST') continue;
-      throw new Error(`could not create the backup ${target} (${error.code || error.message})`);
-    }
-    try {
-      fs.writeFileSync(fd, source);
-    } finally {
-      fs.closeSync(fd);
-    }
-    return target;
+  let target = `${file}.bak-codex-mcp-${stamp}`;
+  let suffix = 2;
+  while (fs.existsSync(target)) {
+    target = `${file}.bak-codex-mcp-${stamp}-${suffix++}`;
   }
-  throw new Error(`could not find a free backup name beside ${file}`);
+  fs.writeFileSync(target, fs.readFileSync(file), { mode: 0o600 });
+  return target;
 }
 
 function atomicWrite(file, text) {
@@ -874,17 +848,6 @@ function main() {
   if (!fs.existsSync(profileDir)) {
     die(`DSH profile "${opts.profile}" does not exist at ${profileDir}`);
   }
-  // The lexical prefix check above does not contain a SYMLINKED profile
-  // directory: `profiles/<name> -> /outside` passes it, and the write below
-  // would land outside `<dsh-home>/profiles`. Compare the real paths too.
-  const realProfilesRoot = realpathOrNull(profilesRoot);
-  const realProfileDir = realpathOrNull(profileDir);
-  if (realProfilesRoot === null || realProfileDir === null
-      || (realProfileDir !== realProfilesRoot
-          && !realProfileDir.startsWith(realProfilesRoot + path.sep))) {
-    die(`invalid --profile ${JSON.stringify(opts.profile)}: its directory resolves ` +
-        `outside ${profilesRoot}`);
-  }
   if (!fs.existsSync(patchFile)) {
     die(`${patchFile} does not exist; initialize the profile with "dsh ${opts.profile} --from-default-profile headless" first`);
   }
@@ -961,17 +924,6 @@ function main() {
     for (const name of collectExistingServerNames(homeText)) usedNames.add(name);
     for (const id of collectExistingIds(homeText)) usedIds.add(id);
   }
-  // A --merge keeps the rows this run does not mention, but those rows were
-  // parsed out of the block that `cleaned` had ALREADY stripped. Seeding the
-  // collision sets with the kept serverNames/ids is what keeps a new row from
-  // reusing one: emitBlock silently dropped a kept row whose serverName the new
-  // row took, and a reused id produced two `- id:` rows with one id (F048).
-  const keep = opts.merge ? parseExistingEntries(original) : [];
-  if (opts.merge) assertMergeable(patchFile, original, keep);
-  for (const item of keep) {
-    if (item.serverName) usedNames.add(item.serverName);
-    for (const id of collectExistingIds(item.lines.join('\n'))) usedIds.add(id);
-  }
   const entries = [];
   const skipped = [];
 
@@ -987,23 +939,8 @@ function main() {
     for (const warning of result.warnings) warn(`${server.name}: ${warning}`);
   }
 
-  // A selection that transforms to zero entries used to emit an empty block:
-  // mergePatch then spliced that emptiness into the existing block's span,
-  // deleting every managed row, and the run still printed "imported 0
-  // server(s)" and exited 0. Only --remove may delete the block on purpose.
-  const blockBegin = original.indexOf(BEGIN);
-  const blockEnd = blockBegin >= 0 ? original.indexOf(END, blockBegin) : -1;
-  const existingRows = blockBegin >= 0 && blockEnd > blockBegin
-    ? (original.slice(blockBegin + BEGIN.length, blockEnd).match(/^\s*-\s+id:/gm) || []).length
-    : 0;
-  if (entries.length === 0 && keep.length === 0 && existingRows > 0) {
-    const skippedText = skipped.length > 0
-      ? `; skipped: ${skipped.map((item) => `${item.name} (${item.reason})`).join(', ')}`
-      : '';
-    die(`the selection imports 0 server(s), which would delete the ${existingRows} managed `
-        + `row(s) in ${patchFile}; refusing to rewrite it (use --remove to delete the block `
-        + `deliberately)${skippedText}`);
-  }
+  const keep = opts.merge ? parseExistingEntries(original) : [];
+  if (opts.merge) assertMergeable(patchFile, original, keep);
   const block = emitBlock(entries, keep);
   const next = mergePatch(original, block);
 
@@ -1017,18 +954,6 @@ function main() {
   }
 
   if (next === original) {
-    // The README promises the patch (and its backups) are 0600 because the
-    // generated file can carry API keys. The no-op branch never reached
-    // atomicWrite's 0600 temp, so a world-readable patch stayed that way
-    // (F050).
-    try {
-      const st = fs.lstatSync(patchFile);
-      if (st.isFile() && (st.mode & 0o777) !== 0o600) {
-        fs.chmodSync(patchFile, 0o600);
-      }
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
     note('patch is already up to date');
   } else {
     const saved = backup(patchFile);

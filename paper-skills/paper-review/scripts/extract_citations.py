@@ -39,17 +39,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-from pathlib import Path
-
-# Allow direct execution and import by filename.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    from evidence_names import (EVIDENCE_DIRNAMES,
-                                is_evidence as _is_evidence,
-                                _COVER_WORD_RE)
-finally:
-    sys.path.pop(0)
-
+EVIDENCE_DIRNAMES = ("raw_data", "human_review_feedback", "llm_review_feedback")
 # Role words are NAME TOKENS, not substrings: a manuscript named
 # `immune_response.md` or `biofeedback_results.txt` is real prose, while a role
 # word preceded by a role qualifier (`reviewer_response`, `author_feedback`)
@@ -68,9 +58,34 @@ _NON_MANUSCRIPT_RE = re.compile(
 _REPLY_RE = re.compile(
     r"(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)",
     re.I)
-# The science-compound carve-out is the SHARED default in evidence_names.py:
-# a local copy here made treatment_response.md prose for M2/M8 but evidence for
-# M1/M4/M26 on the same corpus.
+# A scientific compound that merely ENDS in a role word is not a reply: these
+# were silently dropped from every manuscript sweep (M1/M2/M4/M19).
+_SCIENCE_ROLE_COMPOUND_RE = re.compile(
+    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
+    r"pharmacodynamic|treatment|clinical|therapeutic|behaviou?ral|survey)"
+    r"[-_ ]?responses?"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable|"
+    r"inhibition|amplitude|strength|bias)"
+    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
+    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
+# A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
+# `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
+_ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
+    r"^(?:(?:the[.\s_-]+)?editorial(?:[.\s_-]+board)?|"
+    r"letters?[.\s_-]+(?:to|for)[.\s_-]+(?:the[.\s_-]+)?editor)"
+    r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
+# A semantic suffix (`paper.reply.txt`, `editorial.review.txt`) names the
+# DOCUMENT KIND, not an arbitrary extension: test it before stripping
+# extensions, or `.reply`/`.review`/`.notes` disappear into the base name.
+_SEMANTIC_SUFFIX_RE = re.compile(
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
+# The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
+# `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
+# `recovered_samples.md` a cover letter (forcing them into the submission runs)
+# and masked a reply file whose name merely contains the substring.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 # The supplement role is a WORD too: the old `"supp" in f` swept `support.docx`
 # and `suppress.md` as supplementary text, exactly the files the pipeline keeps
 # as main text. `supp`, `suppl`, `supplement*` and `supplementary` still match.
@@ -84,8 +99,54 @@ SUPP_ROLE_RE = re.compile(
 REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 
 
+def _is_evidence_part(part: str) -> bool:
+    """True for an evidence area, including its inert `<area>.disabled` form.
+
+    The pipeline's `is_disabled_evidence_rel` treats `llm_review_feedback.disabled/`
+    and `.off/` as inert evidence: not submission content, not readable evidence.
+    Testing exact membership here swept that area as the authors' manuscript.
+    """
+    low = str(part or "").strip().lower()
+    if low in EVIDENCE_DIRNAMES:
+        return True
+    return any(low.startswith(area + ".")
+               and low[len(area) + 1:] in ("disabled", "off")
+               for area in EVIDENCE_DIRNAMES)
+
+
 def is_non_manuscript(name: str) -> bool:
-    return _is_evidence(name, _NON_MANUSCRIPT_RE, _REPLY_RE)
+    """True for an evidence-area / feedback / response file (never author prose)."""
+    parts = str(name).replace("\\", "/").split("/")
+    if any(_is_evidence_part(part) for part in parts[:-1]):
+        return True
+    base = parts[-1]
+    if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
+        return True
+    if _COVER_WORD_RE.search(base):
+        # A cover letter IS a submission document -- and this test must come
+        # FIRST: with the reply test above it, `cover_letter_response.docx.txt`
+        # was dropped as non-manuscript even though the cover-letter rule (and
+        # the M19 length sweep) treats a letter as the authors' own submission
+        # text.
+        return False
+    if _SEMANTIC_SUFFIX_RE.search(base):
+        return True             # a reply/review/notes DOCUMENT, never author prose
+    # Strip ALL extension layers: `letter_to_the_editor.final.docx.txt` and
+    # `letter_to_the_editor.tar.gz.txt` are still the article-type manuscript.
+    stem = base
+    while True:
+        _stripped = re.sub(
+            r"\.(?:txt|docx?|md|tex|pdf|rtf|bib|csv|tsv|bak|final|tar|gz|zip)$",
+            "", stem, flags=re.I)
+        if _stripped == stem:
+            break
+        stem = _stripped
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(stem):
+        return False            # the authors' article-type manuscript, not a letter
+    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
+    if _REPLY_RE.search(cleaned):
+        return True
+    return bool(_NON_MANUSCRIPT_RE.search(cleaned))
 
 
 # The OOXML marker parser accepts an en/em dash as a range separator; an em
@@ -141,7 +202,7 @@ SUSPECT_PRECEDERS = re.compile(
 # A bracket may be omitted, and a following non-digit may be glued to the
 # number ("[1]Smith"); a DIGIT after the separator is a decimal, not a new
 # entry ("12.5 mg was given" is not reference 12).
-REF_ENTRY_RE = re.compile(r"^\s*[\[(]?(\d{1,4})[\].)](?!\d)\s*(.*)$")
+REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,4})[\].)](?!\d)\s*(.*)$")
 BIB_ENTRY_RE = re.compile(
     r"@(?!(?:comment|string|preamble)\b)\w+\s*[{(]\s*([^,]+),", re.I)
 # LaTeX: the call-out is a KEY inside a \cite-family macro (`\cite`, `\citep`,
@@ -238,22 +299,8 @@ def latex_source_text(text: str) -> str:
     return "\n".join(kept)
 
 REF_HEAD_RE = re.compile(
-    r"^\s*(?:"
-    # LaTeX head forms (F269): without these a \bibitem's "Smith et al. 2019"
-    # became a phantom M2 author-year call-out.
-    r"\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}\s*(?:\\label\{[^{}]*\})?"
-    r"|\\begin\{thebibliography\}"
-    r"|\\(?:bibliography|printbibliography)\b.*"
-    # Plain/Markdown heading, optionally ATX and optionally emphasised.
-    r"|(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
-    r"(?:references?|bibliography|reference\s+list|literature\s+cited)"
-    r"\s*(?:\*{1,2}|_{1,2})?\s*[:.\u2014\u2013-]?\s*"
-    r")\s*(?:%.*)?$", re.I)
-# A LaTeX reference region also ends at the closing environment or the next
-# sectioning command.
-REF_TEX_END_RE = re.compile(
-    r"^\s*(?:\\end\{thebibliography\}|\\(?:section|subsection|chapter)\*?\s*\{)",
-    re.I)
+    r"^\s*(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
 STOP_SECTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
     r"(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
@@ -271,10 +318,7 @@ FIG_CAPTION_RE = re.compile(
 TABLE_CAPTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:extended\s+data|supplementary\s+)?tables?\.?\s*"
     r"(?:s\d+|\d+[a-z]?)\s*" + CAP_SEP, re.I)
-# A bracketed label may be glued to its entry (`[1]Smith`); a bare ordinal
-# still needs whitespace, or a decimal-leading prose sentence (`3.5-fold ...`)
-# reads as a numbered entry and extends the reference region (R01).
-NUM_ENTRY_RE = re.compile(r"^\s*(?:[\[(]\d{1,3}[\].)]\s*|\d{1,3}[.)\]]\s+)")
+NUM_ENTRY_RE = re.compile(r"^\s*(?:\[?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
 BULLET_ENTRY_RE = re.compile(r"^\s*[-*•]\s+\S")
 YEAR_RE = re.compile(r"\b(?:1[5-9]|20)\d{2}[a-z]?\b")
 ENTRY_HINT_RE = re.compile(
@@ -282,12 +326,6 @@ ENTRY_HINT_RE = re.compile(
 AUTHOR_START_RE = re.compile(r"^\s*[A-Z][A-Za-z'\-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)")
 # tail of a wrapped entry: "Nature. 2019;570:1-9." / "Science 2020;11:20-30."
 JOURNAL_TAIL_RE = re.compile(r"^[A-Z][A-Za-z&.\s]{2,40}[.,;:]?\s*\(?(?:19|20)\d{2}\b")
-# A new entry can start with a lowercase nobiliary particle ("van der Waals,
-# J. (2020). ..."), which the wrapped-entry rule below used to read as a
-# continuation of the previous entry and silently dropped (F114).
-NOBILIARY_ENTRY_RE = re.compile(
-    r"^(?:van|von|de|del|della|der|den|da|di|du|le|la|dos|das)\b"
-    r"[^()]{0,80}\((?:19|20)\d{2}\)")
 
 
 # A reference entry's author block: "Smith J.", "Smith JA,", "Smith, J.".
@@ -372,7 +410,6 @@ def find_reference_region(lines):
             prev_blank = False
             continue  # a numbered reference entry is never a section heading
         if STOP_SECTION_RE.match(s) or MD_HEADING_RE.match(s) or \
-                REF_TEX_END_RE.match(s) or \
                 FIG_CAPTION_RE.match(s) or TABLE_CAPTION_RE.match(s):
             end = j
             note = "ends at the next heading/caption (line %d)" % (j + 1)
@@ -405,10 +442,8 @@ def is_date_prose(m) -> bool:
     """True when an author-year match is prose, not a real call-out."""
     if m.group("a1") or m.group("a3") or m.group("a4"):
         # The "X et al., YYYY" and "(X, YYYY)" branches carry their own anchors; a
-        # month CAN be a surname there ("(May, 2019)"). A capitalized SECTION
-        # word before the year is prose, not an author call-out.
-        name = m.group("a1") or m.group("a3") or m.group("a4")
-        return str(name or "").lower() in _NON_AUTHOR_WORDS
+        # month CAN be a surname there ("(May, 2019)").
+        return False
     names = [m.group("a2"), m.group("a2b")]
     if not (names[0] and names[1]):
         return True
@@ -500,17 +535,10 @@ def main():
     out = os.path.abspath(args.out) if args.out else os.path.dirname(work.rstrip("/"))
     corpus = os.path.join(work, "corpus")
     art_dir = os.path.join(out, "artifacts")
-    # Validate --work BEFORE creating anything: an invalid WORK used to leave a
-    # fresh artifact tree behind (F84). A symlinked artifacts directory is a
-    # write outside the work tree; refuse it rather than follow it (F77).
+    os.makedirs(art_dir, exist_ok=True)
     if not os.path.isdir(corpus):
         print("ERROR: corpus dir not found: %s. Run convert_corpus.py first." % corpus)
         sys.exit(2)
-
-    if os.path.islink(art_dir) or (os.path.exists(art_dir) and not os.path.isdir(art_dir)):
-        print("ERROR: artifacts path is a symlink or not a directory: %s" % art_dir)
-        sys.exit(2)
-    os.makedirs(art_dir, exist_ok=True)
 
     callouts = []       # every in-text citation instance
     ref_entries = []    # every reference-list entry
@@ -538,14 +566,13 @@ def main():
         # verbatim bodies removed) while reference-list entries keep the
         # source lines. Without this a commented-out `% see [7]` became a
         # numeric call-out and an orphan.
-        _lname = fname.lower()
         callout_lines = (latex_source_text(text).split("\n")
-                         if _lname.endswith((".tex.txt", ".ltx.txt")) else lines)
-        if _lname.endswith(".bib.txt"):
+                         if fname.endswith((".tex.txt", ".ltx.txt")) else lines)
+        if fname.endswith(".bib.txt"):
             for m in BIB_ENTRY_RE.finditer(text):
                 bib_entries.append({"file": fname, "key": m.group(1).strip()})
             continue
-        is_latex = _lname.endswith((".tex.txt", ".ltx.txt"))
+        is_latex = fname.endswith((".tex.txt", ".ltx.txt"))
         if is_latex:
             # Scan the WHOLE source, not one line at a time: whitespace
             # (including a newline) is legal inside a cite argument, and the
@@ -614,11 +641,8 @@ def main():
                 elif raw.strip():
                     s = raw.strip()
                     prev = ref_entries[-1] if ref_entries else None
-                    is_wrapped = ((s[:1].islower()
-                                   and not NOBILIARY_ENTRY_RE.match(s))
-                                  or bool(JOURNAL_TAIL_RE.match(s)))
-                    if prev and prev["file"] == fname and prev_line.strip() \
-                            and is_wrapped:
+                    if prev and prev["file"] == fname and prev_line.strip() and \
+                            (s[:1].islower() or JOURNAL_TAIL_RE.match(s)):
                         prev["text"] = (prev["text"] + " " + s)[:300]  # wrapped entry
                     else:
                         ref_entries.append({"file": fname, "line": li, "num": None,
@@ -627,17 +651,7 @@ def main():
                 continue
             prev_line = raw
             scan_raw = callout_lines[li - 1] if li - 1 < len(callout_lines) else raw
-            # F194: a bracketed option/page number inside \cite[...]{key} is part
-            # of the citation command, not a numeric call-out. Blank the command
-            # span (length-preserving) before the numeric scan.
-            scan_nums = scan_raw
-            # Corpus converter output is named `*.tex.txt`: strip the
-            # transport suffix before the extension test, or the
-            # `\cite[...]` blanking never runs (F015).
-            if re.sub(r"\.txt$", "", str(fname).lower()).endswith((".tex", ".ltx")):
-                scan_nums = TEX_CITE_RE.sub(
-                    lambda mm: " " * len(mm.group(0)), scan_raw)
-            for m in NUM_CIT_RE.finditer(scan_nums):
+            for m in NUM_CIT_RE.finditer(scan_raw):
                 before = scan_raw[:m.start()].rstrip()
                 suspect = bool(SUSPECT_PRECEDERS.search(before))
                 inner = m.group(1)
@@ -676,11 +690,6 @@ def main():
                     if im.group("a2"):
                         author = "%s and %s" % (author, im.group("a2"))
                     if author.lower() in MONTH_NAMES:
-                        continue
-                    # "(Results, 2019; Discussion, 2020)" is a table of contents,
-                    # not two call-outs: reject every section word in the cluster.
-                    _parts = re.split(r"\s+(?:and|&)\s+", author)
-                    if any(p.strip().lower() in _NON_AUTHOR_WORDS for p in _parts):
                         continue
                     if not ay_name_case_ok(author):
                         continue
@@ -761,38 +770,8 @@ def main():
         """Corpus name without the suffix `convert_corpus` appended."""
         return re.sub(r"\.(?:tex|ltx|bib)\.txt$", "", str(name or ""))
 
-    # A flattened corpus name cannot be split on "__" to recover its directory:
-    # convert_corpus.py joins path components with "__" but keeps an original
-    # basename unchanged, so `supp__main.tex` (ONE file whose name contains
-    # "__") and `supp/main.tex` (a file in a directory) both become
-    # `supp__main.tex.txt`.  The inventory records the original relative path;
-    # resolve the directory from it instead of splitting blindly (F268).
-    _flat_dir_by_name, _flat_dirs_known = {}, set()
-    try:
-        with open(os.path.join(work, "inventory.json"), encoding="utf-8") as _inv:
-            for _entry in json.load(_inv):
-                _rel = str(_entry.get("path") or "")
-                if not _rel:
-                    continue
-                _flat_dir_by_name[_rel.replace(os.sep, "__") + ".txt"] = \
-                    os.path.dirname(_rel).replace(os.sep, "__")
-                _flat_dirs_known.add(os.path.dirname(_rel).replace(os.sep, "__"))
-    except (OSError, ValueError, TypeError):
-        _flat_dir_by_name, _flat_dirs_known = {}, set()
-
     def _flat_dir(name: str) -> str:
-        exact = _flat_dir_by_name.get(str(name or ""))
-        if exact is not None:
-            return exact
-        parts = _flat_stem(name).split("__")
-        # A truncated/collision-renamed corpus file misses the exact map; the
-        # longest `__`-joined prefix that the inventory records as a real
-        # directory is still the right one.
-        for k in range(len(parts) - 1, 0, -1):
-            prefix = "__".join(parts[:k])
-            if prefix in _flat_dirs_known:
-                return prefix
-        return "__".join(parts[:-1])
+        return "__".join(_flat_stem(name).split("__")[:-1])
 
     files_by_flat = {_flat_stem(f): f for f in tex_sources}
 
@@ -965,22 +944,6 @@ def main():
         dupes = {n: c for n, c in Counter(nums).items() if c > 1}
         if dupes:
             duplicate_entries[f] = dupes
-    # A real duplicate can carry TWO DIFFERENT numbers ("[1] Smith ..." and
-    # "[2] Smith ..."): counting duplicate NUMBERS never sees it (F018).
-    duplicate_entry_text = {}
-    _by_text = {}
-    for e in ref_entries:
-        if e.get("num") is None:
-            continue
-        key = re.sub(r"\W+", " ", (e.get("text") or "")).strip().lower()
-        if len(key) < 20:
-            continue
-        _by_text.setdefault(e["file"], {}).setdefault(key, []).append(e["num"])
-    for f, groups in _by_text.items():
-        rows = [{"numbers": sorted(set(nums)), "text": text}
-                for text, nums in groups.items() if len(set(nums)) > 1]
-        if rows:
-            duplicate_entry_text[f] = rows
     # Duplicate LaTeX KEYS were never checked: key lookup collapsed them into a
     # set and the duplicate test above reads numbered lists only (F-029). A key
     # defined twice inside one compile root is a conflict; the same key in two
@@ -1067,8 +1030,6 @@ def main():
            "  - per document: %s" % (tex_orphans_by_file or "none"),
            "- LaTeX \\bibitem entries never cited by any \\cite: %s" % (tex_uncited or "none"),
            "- Duplicate entry numbers within one list: %s" % (duplicate_entries or "none"),
-           "- Duplicate entry TEXT under different numbers: %s" % (
-               duplicate_entry_text or "none"),
            "- Duplicate LaTeX keys within one compile root: %s" % (
                duplicate_tex_keys or "none"),
            "- Order violations (numeric style, within one document): %d" % len(order_violations),
@@ -1104,7 +1065,6 @@ def main():
                                               tex_uncited_by_context.items()},
                    "tex_unresolved": tex_unresolved,
                    "duplicate_entries": duplicate_entries,
-                   "duplicate_entry_text": duplicate_entry_text,
                    "duplicate_tex_keys": duplicate_tex_keys,
                    "order_violations": order_violations,
                    "suspect_brackets": suspect_brackets}, f, indent=2)
