@@ -221,8 +221,99 @@ def judge_sheet_complete(sj, rec: dict) -> bool:
     return labels <= seen
 
 
+SELFCHECK_CLIENT_REL = f"{SELFCHECK_TOOL_DIR}/client.py"
+SELFCHECK_MAILBOX_REL = f"{SELFCHECK_TOOL_DIR}/.mailbox"
+
+# The client carries NO pipeline code. It drops a request in the sandbox's
+# mailbox and prints the verdict the ORCHESTRATOR computes from its own frozen
+# copy (`_serve_selfcheck`). That is what lets a sandbox run the pre-flight
+# without the implementation being readable inside it: the 2026-11-13 review
+# never ran the pre-flight and read `p06_postchecks.py` in 207 tool calls
+# (~1 MB of context) instead, then compacted 27 times and died at the turn cap.
+SELFCHECK_CLIENT_SOURCE = '''#!/usr/bin/env python3
+"""Ask the orchestrator to run the stage pre-flight on this sandbox.
+
+No pipeline code is readable here: the request goes to the orchestrator's
+mailbox and the verdict comes back as text.
+"""
+import argparse
+import json
+import os
+import sys
+import time
+import uuid
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--sandbox", default=".")
+    ap.add_argument("--stage", required=True)
+    ap.add_argument("--run-id", default="")
+    ap.add_argument("--round", type=int, default=0)
+    # The orchestrator's own detectors can legitimately run for minutes (the
+    # package validation alone is allowed 600s), so a shorter wait would report
+    # a false "unavailable" while the verdict was still being computed.
+    ap.add_argument("--timeout", type=float, default=900.0)
+    args = ap.parse_args()
+    sandbox = os.path.abspath(args.sandbox)
+    box = os.path.join(sandbox, "selfcheck", ".mailbox")
+    os.makedirs(box, exist_ok=True)
+    request_id = uuid.uuid4().hex
+    request = os.path.join(box, "request.json")
+    tmp = request + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump({"id": request_id, "stage": args.stage}, handle)
+    os.replace(tmp, request)
+    result = os.path.join(box, "result.json")
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        try:
+            with open(result, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict) and data.get("id") == request_id:
+            print("SELF-CHECK  stage=%s  sandbox=%s" % (args.stage, sandbox))
+            for warning in data.get("warnings") or []:
+                print("  [warn] %s" % warning)
+            for error in data.get("errors") or []:
+                print("  [FAIL] %s" % error)
+            if data.get("ok"):
+                print("  [ok]   the paperwork checks passed: the postcheck's own "
+                      "detectors found nothing to reject")
+                return 0
+            print("  %d problem(s): fix them, re-run this check, and write the "
+                  "completion marker LAST (the postcheck reads the same files)"
+                  % len(data.get("errors") or []))
+            return 1
+        time.sleep(0.5)
+    print("SELF-CHECK unavailable: the orchestrator did not answer within %.0f "
+          "seconds. Run the ROOT's frozen driver instead (see PROMPT.md): "
+          'python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage %s '
+          "--run-id %s --round %d"
+          % (args.timeout, args.stage, args.run_id, args.round))
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+def _stage_driver_bundle() -> bool:
+    """Whether to freeze a READABLE driver bundle into the sandbox.
+
+    Default OFF: the pre-flight is served out of process (see
+    `_serve_selfcheck`), so the sandbox needs the client only. An operator who
+    runs the agent by hand -- no orchestrator waiting -- sets
+    `PAPER_PIPELINE_SELFCHECK_COPY=1` to get the self-contained bundle back.
+    """
+    raw = (os.environ.get("PAPER_PIPELINE_SELFCHECK_COPY") or "").strip().lower()
+    return raw not in {"", "0", "false", "no", "off"}
+
+
 def _copy_session_tools(sb: Path, stamp: float = None,
-                        include_driver: bool = True) -> None:
+                        include_driver: bool | None = None) -> None:
     """Put the code-side scanner/validator next to PROMPT.md.
 
     The stage prompts call `python paper_docx_format.py scan|validate <dir>` by
@@ -236,9 +327,13 @@ def _copy_session_tools(sb: Path, stamp: float = None,
     The SELF-CHECK block names the pipeline DRIVER, not the formatter: in a
     jailed harness both the run root and the origin snapshot can be hidden (the
     eval harness masks its results tree), which made the pre-flight a dead path.
-    The frozen driver and its ordered parts are therefore staged under
-    `selfcheck/` in the sandbox too, and the prompt's first command runs that
-    copy. The staged driver loads its companion FORMATTER from beside itself
+    A readable copy of the driver and its ordered parts used to be staged under
+    `selfcheck/` for that reason. It is now OFF by default: the sandbox carries
+    the CLIENT only (`selfcheck/client.py`) and the orchestrator answers it from
+    its own frozen copy (`_serve_selfcheck`), so no implementation has to be
+    readable inside the sandbox. `PAPER_PIPELINE_SELFCHECK_COPY=1` restores the
+    self-contained bundle for an operator who runs the agent by hand. The
+    staged driver loads its companion FORMATTER from beside itself
     (`_format_module()`), so the formatter and its ordered parts are staged
     there as well: without them the package-stage pre-flight reports the OOXML
     scanner as unavailable, a failure the session cannot repair because the
@@ -251,6 +346,12 @@ def _copy_session_tools(sb: Path, stamp: float = None,
     pre-flight uses the ROOT's frozen copy or the harness's read-only
     `/paper-pipeline` mount instead.
     """
+    # `False` = a BLINDED sandbox (judge): neither the client nor the bundle.
+    # `None` = the normal stage: the client always, the readable bundle only on
+    # request (see `_stage_driver_bundle`).
+    serve = include_driver is not False
+    bundle = include_driver is True or (
+        include_driver is None and _stage_driver_bundle())
     src = Path(__file__).resolve().with_name(DOCX_FORMAT_MODULE)
     dst = sb / DOCX_FORMAT_MODULE
 
@@ -283,7 +384,7 @@ def _copy_session_tools(sb: Path, stamp: float = None,
         # masked. The tool dir is orchestrator-owned: a planted symlink there
         # is removed rather than written through. A judge sandbox is blinded
         # and gets no driver bundle (see the docstring).
-        if include_driver:
+        if bundle:
             driver_src = Path(__file__).resolve()
             if driver_src.is_file():
                 tool_dir = sb / SELFCHECK_TOOL_DIR
@@ -334,6 +435,26 @@ def _copy_session_tools(sb: Path, stamp: float = None,
             f"could not stage {DOCX_FORMAT_MODULE}, {DOCX_FORMAT_PARTS_DIR}, "
             f"{SELFCHECK_DRIVER_REL} or paper_pipeline_parts into {sb}: "
             f"{type(e).__name__}: {e}") from e
+    # The pre-flight CLIENT. It carries no pipeline code: it drops a request in
+    # the sandbox mailbox and prints the verdict the orchestrator computes from
+    # its own frozen copy. Staged for every non-blinded stage, so the sandbox
+    # never has to hold the implementation to run the pre-flight.
+    if serve:
+        try:
+            tool_dir = sb / SELFCHECK_TOOL_DIR
+            if tool_dir.is_symlink() or (tool_dir.exists() and not tool_dir.is_dir()):
+                tool_dir.unlink()
+            tool_dir.mkdir(parents=True, exist_ok=True)
+            client = tool_dir / "client.py"
+            current = ""
+            if client.is_file() and not client.is_symlink():
+                current = client.read_text(encoding="utf-8", errors="replace")
+            if current != SELFCHECK_CLIENT_SOURCE:
+                write_text_atomic(client, SELFCHECK_CLIENT_SOURCE)
+        except OSError as e:
+            raise RuntimeError(
+                f"could not stage the pre-flight client {SELFCHECK_CLIENT_REL} "
+                f"into {sb}: {type(e).__name__}: {e}") from e
     # Stamping is cosmetic (it keeps the copy from dating the sandbox): a
     # timestamp failure must not turn into a staging failure.
     if stamp is not None:
@@ -1491,6 +1612,22 @@ SWEEP_ARTIFACTS = {
     "M22": "M22_availability.md",
     "M23": "M23_supp_parity.md",
 }
+def required_review_check_ids() -> list:
+    """Every check id the guided review's coverage table must dispose.
+
+    ONE source of truth for the postcheck, the pre-flight and the contract the
+    prompt prints: a session that is given the list does not have to read the
+    implementation to discover it (the 2026-11-13 review did exactly that).
+    """
+    wanted = list(REQUIRED_REVIEW_CHECKS)
+    wanted += ["M18", "M19", "M20"]                 # always active
+    wanted += ["M21", "M22", "M23", "M24"]          # adopted discovery sweeps
+    wanted += ["M25", "M26", "M27", "M28", "M29", "J5"]   # rewrite parity
+    wanted += ["M30"]                                # source hierarchy
+    wanted += ["M31", "M32", "M33", "M34", "M35", "M36"]  # evidence integrity
+    return wanted
+
+
 _CHECK_ID_RE = re.compile(r"([MJ])0*(\d+)", re.I)
 
 
@@ -3704,26 +3841,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         errs.append(f"{FINDINGS_REL} has no coverage table; every check ID M1-M17, M18-M36 and "
                     f"J1-J5 must carry a real disposition (the skill's acceptance gate)")
     else:
-        wanted = list(REQUIRED_REVIEW_CHECKS)
-        wanted.append("M19")            # always active: the length rule is not opt-in
-        wanted.append("M18")            # always active: legends are always enumerated
-        wanted.append("M20")            # always active: the OOXML formatting sweep
-        # Adopted from the discovery rounds (sweeps.md M21-M24): the review runs
-        # them, so their coverage rows are required exactly like the older ones.
-        wanted += ["M21", "M22", "M23", "M24"]
-        # The rewrite-parity checks (sweeps.md M25-M29) and the architecture
-        # pass J5: the classes a from-scratch rewrite fixes as a side-effect.
-        # The panel's frozen set is unchanged, so J5 is review-side only.
-        wanted += ["M25", "M26", "M27", "M28", "M29", "J5"]
-        # The source-hierarchy reconciliation (sweeps.md M30): the detection side
-        # of the hierarchy the prompts already use to RESOLVE a conflict.
-        wanted += ["M30"]
-        # The EVIDENCE-INTEGRITY sweeps (sweeps.md M31-M35): artwork-versus-legend
-        # consistency, a headline statistic against the correction the paper
-        # states, availability-locator finality, figure-source-data coverage and
-        # disclosure/provenance completeness, plus M36's Zotero live-field
-    # refresh parity. Review-side like M25-M30.
-        wanted += ["M31", "M32", "M33", "M34", "M35", "M36"]
+        wanted = required_review_check_ids()
         # The split mode is needed BEFORE the coverage loop: a split session
         # legitimately writes the other half's checks as "out of scope --
         # session X" (the prompt says exactly that), so the in-scope guard must
@@ -6934,12 +7052,65 @@ _ERROR_SHAPED_STDOUT_RE = re.compile(
     r"|<\s*(?:!doctype|html|head|title)\b)")
 
 
+# The pipeline's own implementation is not provider evidence.  A review session
+# reads `paper_pipeline_parts/*` to find out what the postcheck wants (the
+# brief-communication run did it in 90 slices), and its transcript then carries
+# THIS file -- including the comments below, which quote every overflow
+# spelling the pattern above matches.  On that run the scan reported an HTTP
+# 413 that never happened, and the `resume` policy refused a continuation for
+# the wrong reason.  A provider error never begins with '#' or a raw-string
+# prefix, so those lines are dropped before the scan.
+_STDERR_SOURCE_LINE_RE = re.compile(r"\s*(?:#|r[\"'])")
+
+
+def _stderr_evidence(stderr: str) -> str:
+    return "\n".join(
+        line for line in (stderr or "").splitlines()
+        if not _STDERR_SOURCE_LINE_RE.match(line))
+
+
+# The agent proxy stops a session that is looping (model-turn cap, compaction
+# cap, a repeated tool call) and prints its reason on stderr.  That reason is
+# the real failure: classify it BEFORE the overflow scan, which can otherwise
+# match an unrelated line the session printed (see `_stderr_evidence`).
+AGENT_RUNAWAY_RE = re.compile(r"(?im)\brunaway (?:agent )?guard\b")
+
+
+def agent_runaway_reason(stderr: str) -> str:
+    """The proxy's own sentence for a stopped loop, or "" when it is absent."""
+    # Source lines are not evidence here either: this module's own comments
+    # quote the `runaway guard` spelling, so a session that reads the
+    # implementation would otherwise have a comment line reported as the
+    # proxy's sentence instead of the guard line that actually stopped it.
+    for line in _stderr_evidence(stderr).splitlines():
+        if not AGENT_RUNAWAY_RE.search(line):
+            continue
+        # The proxy prints a human line and an `ERROR: {"error": {...}}`
+        # envelope; unwrap the envelope so the operator gets one sentence.
+        match = re.search(r'"message"\s*:\s*"(.*)"\s*\}\s*\}\s*$', line)
+        if match:
+            reason = match.group(1)
+        else:
+            # Only the proxy's own `runaway guard: <sentence>` form is a
+            # sentence; a prose line that merely mentions the phrase (a source
+            # comment, a report) is not.
+            match = re.search(r"(?i)\brunaway (?:agent )?guard:\s*(.+)$", line)
+            if not match:
+                continue
+            reason = match.group(1)
+        reason = reason.replace('\\"', '"').strip().strip('"}').strip()
+        if reason:
+            return reason[:400]
+    return ""
+
+
 def agent_failure_kind(stdout: str = "", stderr: str = "") -> str:
     """A stable failure class read from the CLI's own transport errors.
 
     Only error-shaped stdout lines are considered (the process already failed,
     but its normal output can quote a manuscript); stderr is the error channel
-    and is read whole.
+    and is read whole, except the source lines a session may have printed into
+    it (see `_stderr_evidence`).
     """
     stdout_errors = "\n".join(
         line for line in (stdout or "").splitlines()
@@ -6959,7 +7130,11 @@ def agent_failure_kind(stdout: str = "", stderr: str = "") -> str:
                 or str(_structured.get("type") or "").lower().endswith(
                     ("error", "exceeded"))):
             stdout_errors = f"{stdout_errors}\n{_stdout_text}"
-    text = f"{stdout_errors}\n{stderr or ''}"
+    text = f"{stdout_errors}\n{_stderr_evidence(stderr)}"
+    # The proxy's own stop reason outranks the overflow scan: a session that
+    # read this file prints the overflow spellings into the same stderr.
+    if AGENT_RUNAWAY_RE.search(text):
+        return "runaway"
     if AGENT_CONTEXT_OVERFLOW_RE.search(text):
         return "context_overflow"
     return ""
@@ -7230,9 +7405,15 @@ def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
     reason = resume_unfinished_reason(ctx, rec)
     if not reason:
         return [], key, ""
-    if rec.get("last_failure_kind") == "context_overflow":
-        why = ("the provider already rejected this session's request as too large; "
-               "resuming resends the same context, so a FRESH attempt follows")
+    kind = str(rec.get("last_failure_kind") or "")
+    if kind in {"context_overflow", "runaway"}:
+        if kind == "runaway":
+            why = ("the session was stopped for looping instead of finishing the "
+                   "stage; a continuation resumes the same loop, so a FRESH "
+                   "attempt follows")
+        else:
+            why = ("the provider already rejected this session's request as too large; "
+                   "resuming resends the same context, so a FRESH attempt follows")
         print(f"  [resume] {rec['id']}: no continuation -- {why}")
         return [], key, ""
     argv = resume_argv_for(cmd, sid)

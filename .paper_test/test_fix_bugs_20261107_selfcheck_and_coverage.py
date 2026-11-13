@@ -71,41 +71,106 @@ def prompt_sandbox() -> Path:
     return sb
 
 
-def test_staged_driver_runs_in_the_sandbox() -> None:
-    sb = scratch("pr-selfcheck-stage-")
+def test_preflight_client_and_service() -> None:
+    """The sandbox carries the CLIENT; the orchestrator computes the verdict.
+
+    2026-11-13: the review never ran the pre-flight and read the implementation
+    in 207 tool calls instead. The client removes the readable copy and keeps
+    the pre-flight working (the orchestrator answers from its frozen copy).
+    """
+    sb = scratch("pr-selfcheck-client-")
+    (sb / "guided_review").mkdir()
     pp._copy_session_tools(sb)
-    check("the driver is staged under selfcheck/",
-          (sb / pp.SELFCHECK_TOOL_DIR / pp.SELFCHECK_DRIVER).is_file())
-    check("the driver's ordered parts are staged beside it",
-          (sb / pp.SELFCHECK_TOOL_DIR / "paper_pipeline_parts").is_dir())
-    proc = subprocess.run(
-        [sys.executable, pp.SELFCHECK_DRIVER_REL, "selfcheck", "--sandbox", ".",
-         "--stage", "guided_review", "--run-id", "r1_guided_review", "--round", "1"],
-        cwd=sb, capture_output=True, text=True, timeout=180,
-    )
-    check("the staged driver's selfcheck actually runs",
-          "SELF-CHECK" in proc.stdout,
-          (proc.stderr or proc.stdout)[-300:])
-    check("the staged driver is not a missing-parts stub",
-          "missing paper_pipeline_parts" not in (proc.stdout + proc.stderr),
-          (proc.stdout + proc.stderr)[-300:])
+    check("the pre-flight client is staged", (sb / pp.SELFCHECK_CLIENT_REL).is_file())
+    check("the driver bundle is NOT staged by default",
+          not (sb / pp.SELFCHECK_TOOL_DIR / pp.SELFCHECK_DRIVER).exists())
+    client = (sb / pp.SELFCHECK_CLIENT_REL).read_text(encoding="utf-8")
+    check("the client carries no pipeline code",
+          "sandbox_selfcheck" not in client
+          and "check_review_contract" not in client
+          and "paper_pipeline_parts" not in client)
+    (sb / "PROMPT.md").write_text("noop", encoding="utf-8")
+    rec = {"id": "r1_guided_review", "kind": "guided_review", "round": 1,
+           "sandbox": str(sb)}
+    cmd = [sys.executable, pp.SELFCHECK_CLIENT_REL, "--sandbox", ".", "--stage",
+           "guided_review", "--run-id", "r1_guided_review", "--round", "1",
+           "--timeout", "60"]
+    pp._execute_attempt_in(sb, rec, cmd, 90)
+    log = (sb / "_agent.log").read_text(encoding="utf-8", errors="replace")
+    check("the orchestrator answered the client",
+          "SELF-CHECK  stage=guided_review" in log and "[FAIL]" in log, log[-200:])
+    check("the verdict names the missing deliverable",
+          "guided_review/findings.json is missing" in log)
 
 
-def test_review_prompt_names_the_staged_copy_first() -> None:
+def test_staged_driver_bundle_is_opt_in() -> None:
+    """`PAPER_PIPELINE_SELFCHECK_COPY=1` restores the self-contained bundle."""
+    import os
+    old = os.environ.get("PAPER_PIPELINE_SELFCHECK_COPY")
+    os.environ["PAPER_PIPELINE_SELFCHECK_COPY"] = "1"
+    try:
+        sb = scratch("pr-selfcheck-bundle-")
+        pp._copy_session_tools(sb)
+        check("the driver bundle is staged on request",
+              (sb / pp.SELFCHECK_TOOL_DIR / pp.SELFCHECK_DRIVER).is_file()
+              and (sb / pp.SELFCHECK_TOOL_DIR / "paper_pipeline_parts").is_dir())
+        check("the formatter is staged beside the driver on request",
+              (sb / pp.SELFCHECK_TOOL_DIR / pp.DOCX_FORMAT_MODULE).is_file())
+        sb2 = scratch("pr-selfcheck-bundle-run-")
+        os.environ["PAPER_PIPELINE_SELFCHECK_COPY"] = "1"
+        pp._copy_session_tools(sb2)
+        proc = subprocess.run(
+            [sys.executable, pp.SELFCHECK_DRIVER_REL, "selfcheck", "--sandbox", ".",
+             "--stage", "guided_review", "--run-id", "r1_guided_review", "--round", "1"],
+            cwd=sb2, capture_output=True, text=True, timeout=180,
+        )
+        check("the opt-in bundle's pre-flight runs",
+              "SELF-CHECK" in proc.stdout, (proc.stdout + proc.stderr)[-200:])
+    finally:
+        if old is None:
+            os.environ.pop("PAPER_PIPELINE_SELFCHECK_COPY", None)
+        else:
+            os.environ["PAPER_PIPELINE_SELFCHECK_COPY"] = old
+
+
+def test_review_prompt_names_the_client_first() -> None:
     sb = prompt_sandbox()
+    pp._copy_session_tools(sb)
     prof = pp.load_venue_profile("generic")
     text = pp.review_prompt(sb, "r1_guided_review", 1, venue=prof, scope="full",
                             execution_profile="high")
-    staged = f"python {pp.SELFCHECK_DRIVER_REL} selfcheck"
+    client = f"python {pp.SELFCHECK_CLIENT_REL} --sandbox ."
     root = 'python "$PAPER_PIPELINE_SELF" selfcheck'
-    check("the staged selfcheck is a command line", staged in text)
-    check("the staged copy is named before the exported ROOT driver",
-          staged in text and root in text
-          and text.index(staged) < text.index(root))
+    check("the prompt runs the pre-flight client", client in text)
+    check("the client is named before the exported ROOT driver",
+          client in text and root in text and text.index(client) < text.index(root))
     check("the harness's neutral mount is a named fallback",
           '"$PAPER_PIPELINE_MOUNT/' in text)
-    check("the bridge text still explains a jailed session",
-          "jailed harness may mount the run root elsewhere" in text)
+    check("the prompt publishes the required deliverables",
+          "WHAT THE POSTCHECK REQUIRES" in text
+          and "guided_review/findings.json" in text)
+    check("the prompt publishes every check id and sweep artifact",
+          "M36" in text and "J5" in text and "guided_review/artifacts/M1_acronyms.md" in text)
+    check("the prompt prints the pre-flight's current verdict",
+          "THE PRE-FLIGHT'S CURRENT VERDICT FOR THIS SANDBOX" in text)
+    check("the prompt states the implementation is not an input",
+          "THE POSTCHECK'S ERROR LIST IS YOUR INPUT" in text)
+
+    def _verdict(prompt: str) -> str:
+        start = prompt.index("THE PRE-FLIGHT'S CURRENT VERDICT FOR THIS SANDBOX")
+        end = prompt.index("A finished attempt must leave none", start)
+        return prompt[start:end]
+
+    scoped = pp.review_prompt(sb, "r1_guided_review", 1, venue=prof,
+                              scope="formatting-writing", execution_profile="high")
+    check("a formatting-writing pre-flight does not demand the discovery round",
+          "discovery round" not in _verdict(scoped), _verdict(scoped)[-300:])
+    split_a = pp.review_prompt(sb, "r1_guided_review", 1, venue=prof, split="a",
+                               execution_profile="high")
+    check("a split-A pre-flight does not demand the discovery round",
+          "discovery round" not in _verdict(split_a), _verdict(split_a)[-300:])
+    check("a full pre-flight still names the discovery round",
+          "discovery round" in _verdict(text))
 
 
 def test_judge_prompt_uses_the_harness_mount() -> None:
@@ -130,35 +195,8 @@ def test_judge_tool_staging_omits_the_driver() -> None:
           (sb / pp.DOCX_FORMAT_MODULE).is_file())
 
 
-def test_staged_driver_carries_the_formatter() -> None:
-    """The staged driver loads `paper_docx_format.py` from beside ITSELF.
-
-    Staging only the driver + parts made `python selfcheck/paper_pipeline.py
-    selfcheck --stage revise` report "the OOXML formatting scanner is
-    UNAVAILABLE next to the driver": the sandbox-root copy is not where
-    `__file__` points, so the session could never clear the false failure.
-    """
-    sb = scratch("pr-selfcheck-fmt-")
-    pp._copy_session_tools(sb)
-    tool = sb / pp.SELFCHECK_TOOL_DIR
-    check("the formatter is staged beside the driver",
-          (tool / pp.DOCX_FORMAT_MODULE).is_file())
-    check("the formatter's ordered parts are staged beside it",
-          (tool / pp.DOCX_FORMAT_PARTS_DIR).is_dir())
-    (sb / "base").mkdir()
-    (sb / "base" / "manuscript.md").write_text("# m\n\ntext.\n", encoding="utf-8")
-    proc = subprocess.run(
-        [sys.executable, pp.SELFCHECK_DRIVER_REL, "selfcheck", "--sandbox", ".",
-         "--stage", "revise", "--run-id", "r1_a2_revise", "--round", "1"],
-        cwd=sb, capture_output=True, text=True, timeout=300,
-    )
-    out = proc.stdout + proc.stderr
-    check("the package-stage pre-flight does not report the scanner unavailable",
-          "UNAVAILABLE next to the driver" not in out, out[-400:])
-
-
-def test_cold_start_sandbox_stages_the_driver() -> None:
-    """The cold-start review prompt names the staged copy; its sandbox must hold it."""
+def test_cold_start_sandbox_carries_the_client() -> None:
+    """The cold-start review prompt names the client; its sandbox must hold it."""
     root = scratch("pr-coldstart-root-")
     (root / "runs").mkdir()
     (root / "reports").mkdir()
@@ -182,12 +220,12 @@ def test_cold_start_sandbox_stages_the_driver() -> None:
         pp.seed_cold_start_surfaces = real_seed
     sb = ctx.sandbox_of(rec)
     prompt = (sb / "PROMPT.md").read_text(encoding="utf-8")
-    check("the cold-start prompt names the staged driver",
-          pp.SELFCHECK_DRIVER_REL in prompt)
-    check("the cold-start sandbox actually carries the staged driver",
-          (sb / pp.SELFCHECK_TOOL_DIR / pp.SELFCHECK_DRIVER).is_file())
-    check("the cold-start sandbox carries the staged formatter for its pre-flight",
-          (sb / pp.SELFCHECK_TOOL_DIR / pp.DOCX_FORMAT_MODULE).is_file())
+    check("the cold-start prompt names the pre-flight client",
+          pp.SELFCHECK_CLIENT_REL in prompt)
+    check("the cold-start sandbox carries the client",
+          (sb / pp.SELFCHECK_CLIENT_REL).is_file())
+    check("the cold-start sandbox carries no readable driver bundle",
+          not (sb / pp.SELFCHECK_TOOL_DIR / pp.SELFCHECK_DRIVER).exists())
 
 
 def test_review_prompt_shows_a_clean_disposition_verdict() -> None:
@@ -346,12 +384,12 @@ def test_split_review_merge_replaces_a_hyphenated_placeholder() -> None:
 
 
 def main() -> int:
-    test_staged_driver_runs_in_the_sandbox()
-    test_review_prompt_names_the_staged_copy_first()
+    test_preflight_client_and_service()
+    test_staged_driver_bundle_is_opt_in()
+    test_review_prompt_names_the_client_first()
     test_judge_prompt_uses_the_harness_mount()
     test_judge_tool_staging_omits_the_driver()
-    test_staged_driver_carries_the_formatter()
-    test_cold_start_sandbox_stages_the_driver()
+    test_cold_start_sandbox_carries_the_client()
     test_review_prompt_shows_a_clean_disposition_verdict()
     test_coverage_row_accepts_only_a_named_detail_basis()
     test_out_of_scope_spellings_are_one_disposition()

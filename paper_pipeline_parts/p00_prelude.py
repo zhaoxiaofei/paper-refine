@@ -261,6 +261,52 @@ from pathlib import Path
 #     order that a Word/Zotero refresh rewrites -- FMT-Z1..Z5 -- with the
 #     `zotero-check` CLI and a version-to-version parity gate), each with its own
 #     coverage row and artifact; the judge's frozen map is unchanged.
+# 3.11.4 -- THE SESSION TURN CAP IS 3000 BY DEFAULT, AND THE ORCHESTRATOR
+#   ENFORCES IT. A long-horizon stage (a thesis revision) legitimately runs
+#   thousands of model turns, but the pipeline itself had NO turn bound: the
+#   only cap was the eval harness's proxy (1000 turns), so a standalone or
+#   hand-run pipeline was bounded only by the stage timeout. `run --max-turns`
+#   (default 3000, 0 = unlimited) is now the one source of truth; the value is
+#   written to PAPER_PIPELINE_MAX_TURNS before any session starts, recorded on
+#   every attempt (`max_turns`, `turn_cap_hit`, `turn_cap_enforced`) and in the
+#   attempt header. The counter reads the harness's own `turn_end` events (the
+#   default dsh agent streams NDJSON), so a varied loop stops at the cap instead
+#   of running to the timeout; a harness with no per-turn signal records
+#   `turn_cap_enforced=false` rather than claiming a bound it cannot count. The
+#   1000-turn eval default is unchanged and still fires first when the harness
+#   supplies it.
+# 3.11.3 -- THE PRE-FLIGHT IS SERVED OUT OF PROCESS, AND THE CONTRACT IS
+#   PRINTED. The 2026-11-13 brief-communication review never ran the pre-flight:
+#   it read `paper_pipeline_parts/*` in 207 tool calls (~1 MB of context) to
+#   predict what the postcheck would demand, compacted 27 times and died at the
+#   1000-turn guard. Four changes remove the reason and the means:
+#     * the sandbox carries ONLY `selfcheck/client.py`; it drops a request in the
+#       sandbox mailbox and the orchestrator (`_serve_selfcheck`) answers it from
+#       the frozen copy, so the implementation need not be readable in the
+#       sandbox at all. A blinded judge sandbox still gets neither;
+#       `PAPER_PIPELINE_SELFCHECK_COPY=1` restores the self-contained bundle for
+#       a hand-run agent (no orchestrator waiting);
+#     * every stage prompt prints the postcheck's own contract -- required and
+#       expected deliverables, and for the review every check id and sweep
+#       artifact -- generated from STAGE_DELIVERABLES/SWEEP_ARTIFACTS, so the
+#       session does not have to discover it;
+#     * the same block starts with the pre-flight's CURRENT verdict for the
+#       sandbox, so a session begins knowing what it must not leave behind;
+#     * the prompt states that the error list is the input and the implementation
+#       is not. The text is identical in `high` and `medium` (rule 12); the
+#       `high` shell golden is regenerated in the same commit.
+# 3.11.2 -- A LOOPING SESSION IS NOT A PROVIDER 413. `agent_failure_kind` reads
+#   stderr whole, and a review session that reads `paper_pipeline_parts/*` to
+#   find out what the postcheck wants prints THIS file into its transcript. The
+#   comments above `AGENT_CONTEXT_OVERFLOW_RE` quote every overflow spelling the
+#   pattern matches, so the 2026-11-13 brief-communication guided review was
+#   reported as "HTTP 413 / request too large" (and its continuation refused for
+#   that reason) when the agent proxy had stopped it at the 1000-turn guard. The
+#   scan now drops source lines (a leading `#` or a raw-string prefix) from
+#   stderr and classifies the proxy's own `runaway guard` sentence first, as
+#   `runaway`; `resume_gate` refuses that class and the attempt keeps the
+#   guard's own sentence as its error.
+#   A real 413 still classifies: a provider error is never a source comment.
 # 3.11.1 -- THE COMPLETION MARKER IS A TOOL CALL, NOT A CLOSING MESSAGE. Every
 #   stage prompt already stated WHERE the marker goes; on 2026-11-12 the last of
 #   six revise attempts (three archived sandboxes) left a complete package
@@ -361,7 +407,7 @@ from pathlib import Path
 #   sidecar string and degenerate intervals in a shipped source table all
 #   survived every layer in real runs -- and the discovery round's own probes
 #   had read the very table and reported "no anomalies".
-VERSION = "3.11.1"
+VERSION = "3.11.4"
 STATE_VERSION = 3
 # The driver executes these siblings; a root freezes all of them. Recording only
 # the driver let a root run new code with an old formatter (the round-2 case).
@@ -450,6 +496,11 @@ DEFAULTS = {
     "rounds": 3,            # fixed-length pipeline; the round-R champion wins
     "judges": [2],          # independent judge sessions per version, per round list
     "jobs": 255,            # concurrent agent sessions
+    # The per-session model-turn cap. A long-horizon stage legitimately runs
+    # hundreds of turns (a thesis revision can need thousands), but an
+    # unbounded loop must still stop; the eval harness used 1000, which is too
+    # tight for the long-document stages. 0 disables the cap.
+    "max_turns": 3000,
     "venue": DEFAULT_VENUE, # the submission-requirement set the stages enforce
     "journal": "",          # the target journal (free text; "" = profile default)
     "zotero": DEFAULT_ZOTERO_MODE,   # Zotero tooling policy: off|read|edit|apply

@@ -342,27 +342,90 @@ conflict belongs.
 """
 
 
-def selfcheck_block(kind: str, run_id: str, r: int) -> str:
+def _contract_deliverable(rel: str, author_to_complete: str = None) -> str:
+    """The postcheck's own path for one table entry.
+
+    `MANUAL_STEPS.md` is the table's placeholder for the hand-off list, whose
+    real name depends on the run's author-to-complete policy (the default
+    `readme` policy writes `README-AUTHOR-TO-COMPLETE.md`). The postcheck and
+    the pre-flight map it through `handoff_target`; the printed contract must
+    print the same name or it would ask for a file the policy does not produce.
+    """
+    path = Path(str(rel))
+    if path.name != "MANUAL_STEPS.md":
+        return str(rel)
+    target = handoff_target(author_to_complete or DEFAULT_AUTHOR_TO_COMPLETE)
+    return (path.parent / target).as_posix()
+
+
+def _postcheck_contract(kind: str, author_to_complete: str = None) -> str:
+    """The stage's acceptance contract, generated from the postcheck's tables.
+
+    Printed in the prompt so a session never has to infer -- or read the
+    implementation to discover -- what the postcheck will require. The text is
+    stage contract, not profile guidance, so it is byte-identical in `high` and
+    `medium` (rule 12).
+    """
+    table = STAGE_DELIVERABLES.get(kind) or {}
+    required = tuple(table.get("required") or ())
+    expected = tuple(table.get("expected") or ())
+    lines = ["", "=== WHAT THE POSTCHECK REQUIRES OF THIS STAGE "
+                 "(generated from its own tables -- do not infer it) ==="]
+    if required:
+        lines.append("REQUIRED files: an attempt that lacks any one of them FAILS.")
+        lines += [f"  * {_contract_deliverable(rel, author_to_complete)}"
+                  for rel in required]
+    if expected:
+        lines.append("EXPECTED files: reported as a warning when absent.")
+        lines += [f"  * {_contract_deliverable(rel, author_to_complete)}"
+                  for rel in expected]
+    if kind == "guided_review":
+        lines.append(f"EVERY check id below must carry exactly ONE coverage row in "
+                     f"{FINDINGS_REL} (a real disposition and its basis); a missing "
+                     f"row fails the attempt:")
+        lines.append("  " + ", ".join(required_review_check_ids()))
+        if SWEEP_ARTIFACTS:
+            lines.append("Each mechanical check below must also leave its enumeration table:")
+            lines += [f"  * {cid} -> {ARTIFACTS_REL}/{name}"
+                      for cid, name in SWEEP_ARTIFACTS.items()]
+    return "\n".join(lines) + "\n"
+
+
+def selfcheck_block(kind: str, run_id: str, r: int, sb: Path | None = None,
+                    prompt_text: str | None = None,
+                    author_to_complete: str = None) -> str:
     """The pre-marker pre-flight command for one stage's prompt.
 
     The session can run the orchestrator's OWN paperwork detectors inside the
-    sandbox before it declares completion (`cmd_selfcheck`), so a table row, an
-    audit sheet or a misplaced marker that the postcheck would reject is fixed
-    while the session's context is still live, instead of costing a rebuilt
-    20-minute attempt. It is a pre-flight, not a second verdict: the content
-    checks that need the root's state stay in the postcheck.
+    sandbox before it declares completion, so a table row, an audit sheet or a
+    misplaced marker the postcheck would reject is fixed while the context is
+    still live, instead of costing a rebuilt attempt. It is a pre-flight, not a
+    second verdict: the content checks that need the root's state stay in the
+    postcheck.
 
-    The ROOT's frozen copy is authoritative (AGENTS.md rule 11). A harness that
-    jails the session can mount the run root read-only SOMEWHERE ELSE, so a
-    hard-coded absolute path is not guaranteed to resolve (the 2026-11-01 audit
-    ran `ls` on it, got "No such file or directory", and spent its whole attempt
-    "verified manually"). Every sandbox also carries its own copy of the frozen
-    driver and parts (`SELFCHECK_DRIVER_REL`, staged by `_copy_session_tools`),
-    and the orchestrator exports the root/mount/snapshot locations to the
-    session (`PAPER_PIPELINE_SELF`, `PAPER_PIPELINE_MOUNT`,
-    `PAPER_PIPELINE_ORIGIN`), so the prompt names env vars instead of baking a
-    machine path into its text.
+    The pre-flight is normally answered OUT OF PROCESS: the sandbox carries a
+    small client (`SELFCHECK_CLIENT_REL`) that drops a request in its mailbox,
+    and the orchestrator (`_serve_selfcheck`) runs `sandbox_selfcheck` from its
+    own frozen copy and writes the verdict back. The sandbox therefore never has
+    to hold a readable copy of the implementation -- the 2026-11-13 review read
+    `p06_postchecks.py` in 207 tool calls instead of running the pre-flight.
+    `PAPER_PIPELINE_SELFCHECK_COPY=1` restores the self-contained bundle for an
+    operator who runs the agent by hand (no orchestrator waiting); when that
+    bundle IS staged (a manual run sets it), the staged driver is named FIRST
+    because nothing would answer the client.
+
+    The ROOT's frozen copy stays authoritative (rule 11); the exported
+    `PAPER_PIPELINE_SELF`/`PAPER_PIPELINE_MOUNT`/`PAPER_PIPELINE_ORIGIN` paths
+    remain the fallbacks when the client is absent or unanswered.
     """
+    driver_rel = SELFCHECK_DRIVER_REL
+    driver_staged = bool(sb is not None and (Path(sb) / driver_rel).is_file())
+    client_rel = SELFCHECK_CLIENT_REL
+    client_staged = bool(sb is not None and (Path(sb) / client_rel).is_file())
+    staged_cmd = (f"    python {driver_rel} selfcheck --sandbox . --stage {kind} "
+                  f"--run-id {run_id} --round {int(r)}")
+    client_cmd = (f"    python {client_rel} --sandbox . --stage {kind} "
+                  f"--run-id {run_id} --round {int(r)}")
     alt_lines = [
         f'    python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage {kind} '
         f'--run-id {run_id} --round {int(r)}',
@@ -377,23 +440,42 @@ def selfcheck_block(kind: str, run_id: str, r: int) -> str:
     except Exception:                                           # noqa: BLE001
         pass
     alternate = "\n".join(alt_lines)
-    alt_text = (f"IF THAT PATH DOES NOT EXIST OR CANNOT BE READ in this session (a sandboxed or\n"
-                f"jailed harness may mount the run root elsewhere), run the SAME frozen driver from\n"
-                f"the exported ROOT copy, the harness's read-only mount, or the verified snapshot:\n"
-                f"{alternate}\n"
-                f"`PAPER_PIPELINE_SELF` is the ROOT's frozen driver; `PAPER_PIPELINE_MOUNT` is the\n"
-                f"harness's mount; `PAPER_PIPELINE_ORIGIN` (when listed above) is the snapshot this\n"
-                f"root was set up from. It is the same bytes; the verdict is the same.\n")
+    first = staged_cmd if driver_staged else (client_cmd if client_staged else alt_lines[0])
+    if driver_staged:
+        how = ("The driver is staged in THIS sandbox (the same frozen bytes as the ROOT's copy),\n"
+               "so the pre-flight needs no orchestrator answer; the ROOT's frozen copy stays\n"
+               "authoritative (AGENTS.md rule 11).\n")
+    elif client_staged:
+        how = ("The pre-flight is answered by the orchestrator from its own frozen copy of the\n"
+               "driver; the client above carries no pipeline code (it drops a request in the sandbox\n"
+               "and prints the verdict).\n")
+    else:
+        how = "Run the ROOT's frozen driver (AGENTS.md rule 11).\n"
+    state = ""
+    # Only a sandbox that EXISTS has a verdict: in a render/test context the path may
+    # not be created, and 'the sandbox <random path> does not exist' would make the
+    # prompt size depend on the temp-directory name (the size table and the golden
+    # must be deterministic).
+    if sb is not None and Path(sb).is_dir():
+        try:
+            _ok, _errs, _warns = sandbox_selfcheck(
+                Path(sb), kind, run_id, int(r), prompt_text=prompt_text)
+            shown = [str(e) for e in _errs][:20]
+            if shown:
+                state = ("\n=== THE PRE-FLIGHT'S CURRENT VERDICT FOR THIS SANDBOX ===\n"
+                         + "\n".join(f"  [FAIL] {e}" for e in shown)
+                         + (f"\n  ... and {len(_errs) - 20} more" if len(_errs) > 20 else "")
+                         + "\nA finished attempt must leave none of these behind; the list "
+                           "shrinks as you write.\n")
+            else:
+                state = ("\n=== THE PRE-FLIGHT'S CURRENT VERDICT FOR THIS SANDBOX ===\n"
+                         "  (no problems right now)\n")
+        except Exception:                                       # noqa: BLE001
+            state = ""
     return (f"""
 SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
-    python {SELFCHECK_DRIVER_REL} selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
-The driver is staged in THIS sandbox at `{SELFCHECK_DRIVER_REL}` (the same frozen bytes as the ROOT's
-copy), so run that first. The ROOT's frozen copy is authoritative (AGENTS.md rule 11); if the staged
-copy is missing (an older or resumed sandbox), run it instead:
-    python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
-(In a manual run, set `PAPER_PIPELINE_SELF` to the ROOT's `paper_pipeline.py`; set
-`PAPER_PIPELINE_MOUNT` or `PAPER_PIPELINE_ORIGIN` only when you use those lines.)
-It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
+{first}
+{how}It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
 required deliverable, the seeded decision tables' dispositions, the audit sheet, the manual TODO
 inventory and source gates of a package-producing stage, the M30 ledger when the round carries an
 M30 finding, and the journal letter/ledger -- and prints what the postcheck would reject for every
@@ -403,10 +485,19 @@ a judge's M20 and the journal ledger a response is checked against) still run at
 so a PASS HERE IS A PREVIEW, NEVER A CERTIFICATION. Fix everything it reports, run it again until it
 says OK, and only THEN write the completion marker. An attempt that ends with its problems still in
 the files does not get repaired: it FAILS and the whole stage is re-run in a rebuilt sandbox.
-{alt_text}Do not skip the self-check because the first path is missing: a session that cannot run it
-says so in its final report AND re-reads every deliverable schema by hand.
-""")
-
+IF THE CLIENT OR THAT PATH DOES NOT RESOLVE in this session (a sandboxed or jailed harness may mount
+the run root elsewhere), run the SAME frozen driver from the exported ROOT copy, the harness's
+read-only mount, or the verified snapshot:
+{alternate}
+`PAPER_PIPELINE_SELF` is the ROOT's frozen driver; `PAPER_PIPELINE_MOUNT` is the
+harness's mount; `PAPER_PIPELINE_ORIGIN` (when listed above) is the snapshot this
+root was set up from. It is the same bytes; the verdict is the same.
+THE POSTCHECK'S ERROR LIST IS YOUR INPUT; ITS IMPLEMENTATION IS NOT. Do not read
+`paper_pipeline.py` or `paper_pipeline_parts/` in this sandbox or in the run root: the
+contract you must satisfy is printed below and in the pre-flight's own output. Reading the
+implementation is not a step of this stage, it cannot change a verdict, and it spends the
+context the deliverables need.
+{_postcheck_contract(kind, author_to_complete)}{state}""")
 
 def judge_selfcheck_block(run_id: str) -> str:
     """The judge session's pre-flight (blinding-safe wording).
@@ -3518,7 +3609,14 @@ the surface, and the revisers may not change a claim here."""
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack)
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(GUIDED_REVIEW_DIR))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("guided_review", run_id, r))
+    # The pre-flight preview reads THIS session's scope and split from the prompt
+    # text; the blocks that declare them are appended below, so pass them too.
+    # Without them the preview would demand the full package's discovery round
+    # from a formatting-writing or split-A session (its own scope block forbids
+    # it) while the client, reading the finished PROMPT.md, would not.
+    text = text.replace("@@SELFCHECK@@", selfcheck_block(
+        "guided_review", run_id, r, sandbox, text + split_block + scope_block,
+        author_to_complete=author_to_complete))
     text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
     text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     text = text + shared + split_block + scope_block + attached_head(prof) + "\n" \
@@ -3618,7 +3716,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "revised/work/R6_language.md"))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVISED_DIR))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r, sandbox, text,
+                                       author_to_complete=author_to_complete))
     text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
     text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     shared = shared_blocks()
@@ -3670,7 +3769,8 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     text = apply_evidence_integrity(text, "audit")
     text = render_venue_tokens(text, prof)
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r, sandbox, text,
+                                      author_to_complete=author_to_complete))
     text = page_stage_prompt(sandbox, AUDIT_NO_NEW_FINDINGS + text + shared_blocks()
                              + AUDIT_TAIL + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete),
@@ -3956,7 +4056,8 @@ def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: 
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
-            .replace("@@SELFCHECK@@", selfcheck_block("cold_start_review", run_id, r)))
+            .replace("@@SELFCHECK@@", selfcheck_block("cold_start_review", run_id, r, sandbox,
+                                             author_to_complete=author_to_complete)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(COLD_START_DIR))
     # This role is handed NO checklist: it gets the shared taxonomy and evidence
     # rules, not ADOPTED_SWEEPS_BLOCK. `pageable_rule_blocks` also carries the
@@ -4025,7 +4126,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@DIFF_LEDGER_RULE@@", DIFF_LEDGER_RULE)
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(INTEGRATED_DIR))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r, sandbox, text,
+                                          author_to_complete=author_to_complete))
     text = apply_hierarchy_reconcile(text, "integrate")
     text = apply_evidence_integrity(text, "integrate")
     # The policy transform must run BEFORE paging: `page_stage_prompt` writes
@@ -4091,7 +4193,8 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REWRITTEN_DIR))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r, sandbox, text,
+                                        author_to_complete=author_to_complete))
     text = apply_hierarchy_reconcile(text, "rewrite")
     text = apply_evidence_integrity(text, "rewrite")
     text = page_stage_prompt(sandbox, text + shared_blocks() + attached_head(prof) + "\n"

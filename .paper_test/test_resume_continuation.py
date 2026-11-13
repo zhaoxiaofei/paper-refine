@@ -174,6 +174,40 @@ def test_context_overflow_gate():
     check("an ordinary process failure has no context class",
           nb.agent_failure_kind("", "agent exited rc=1") == "")
 
+    # 2026-11-13, brief communication: the guided-review agent read the
+    # pipeline's own postcheck source into its transcript. Those source
+    # comments quote every overflow spelling below, so the scanner reported an
+    # HTTP 413 that never happened while the real cause was the turn guard.
+    source_comments = "\n".join((
+        "    # `unexpected status 413`, `HTTP 413: ...`, `status code 413`",
+        '    r"|^\\s*(?:error[:\\s]+)?payload too large\\b"',
+        '    # both word orders: "context window ... exceeded" and "exceeds ... context window"',
+    ))
+    check("the classifier's own source comments are not provider evidence",
+          nb.agent_failure_kind("", source_comments) == "",
+          source_comments[:60])
+    guard = ("[2026-11-13 20:42:43] [codex-qwen] runaway guard: the agent session "
+             "issued 1001 model turns (PAPER_EVAL_PAPER_REFINE_MAX_TURNS=1000); "
+             "it is looping instead of finishing the stage")
+    check("a guard stop outranks the comments it printed",
+          nb.agent_failure_kind("", source_comments + "\n" + guard) == "runaway",
+          nb.agent_failure_kind("", source_comments + "\n" + guard))
+    check("the guard's own sentence is kept",
+          nb.agent_runaway_reason(guard).startswith("the agent session issued 1001"),
+          nb.agent_runaway_reason(guard))
+    # The guard phrase itself appears in a pipeline source comment, and a
+    # transcript that quotes it must not become the reported sentence.
+    guard_comment = ("    # the proxy's own `runaway guard` sentence is the real "
+                     "failure cause")
+    check("a source line quoting the guard phrase is not the sentence",
+          nb.agent_runaway_reason(guard_comment + "\n" + guard)
+          == nb.agent_runaway_reason(guard),
+          nb.agent_runaway_reason(guard_comment + "\n" + guard))
+    check("a real 413 still classifies",
+          nb.agent_failure_kind(
+              "", "ERROR: unexpected status 413 Payload Too Large")
+          == "context_overflow")
+
     root = scratch("paper_resume_overflow_")
     sb = root / "runs" / "r1_guided_review"
     sb.mkdir(parents=True)
@@ -185,6 +219,14 @@ def test_context_overflow_gate():
            "postcheck": {"ok": False, "errors": [], "warnings": []}}
     argv, key, reason = nb.resume_gate(ctx, rec, ["codex", "exec", "-"])
     check("the gate refuses to resend the oversized session",
+          argv == [] and key == SID and reason == "", f"{argv} / {reason}")
+
+    rec_runaway = dict(rec, last_failure_kind="runaway",
+                       last_error=("the agent session issued 1001 model turns "
+                                   "(PAPER_EVAL_PAPER_REFINE_MAX_TURNS=1000); it "
+                                   "is looping instead of finishing the stage"))
+    argv, key, reason = nb.resume_gate(ctx, rec_runaway, ["codex", "exec", "-"])
+    check("the gate does not resume a session that was stopped for looping",
           argv == [] and key == SID and reason == "", f"{argv} / {reason}")
 
     prompts = (nb.review_prompt(Path("/tmp/sb"), "r1_guided_review", 1),
@@ -387,12 +429,58 @@ def test_end_to_end_context_overflow():
           and "payload/context limit" in str(rec.get("last_error")), str(rec.get("last_error")))
 
 
+def test_turn_cap() -> None:
+    """The per-session model-turn cap: 3000 by default, counted from dsh events.
+
+    A long-horizon stage (a thesis revision) needs thousands of turns, so the
+    cap is generous; it exists to stop a LOOP. The counter reads the harness's
+    own `turn_end` events, so it is enforced for the default dsh agent and the
+    attempt records `turn_cap_enforced` when the stream carried no such signal.
+    """
+    print()
+    print("== the per-session model-turn cap (default 3000) ==")
+    old = os.environ.get("PAPER_PIPELINE_MAX_TURNS")
+    try:
+        os.environ.pop("PAPER_PIPELINE_MAX_TURNS", None)
+        check("the default cap is 3000", nb.pipeline_max_turns() == 3000,
+              str(nb.pipeline_max_turns()))
+        os.environ["PAPER_PIPELINE_MAX_TURNS"] = "0"
+        check("0 disables the cap", nb.pipeline_max_turns() == 0)
+        for n_lines, cap, want_hit in ((5, 3, True), (2, 3, False)):
+            os.environ["PAPER_PIPELINE_MAX_TURNS"] = str(cap)
+            sb = scratch("turncap_")
+            (sb / "PROMPT.md").write_text("noop", encoding="utf-8")
+            script = ("import sys\n"
+                      f"for _ in range({n_lines}):\n"
+                      "    sys.stdout.write('{\"type\": \"turn_end\"}\\n'); "
+                      "sys.stdout.flush()\n")
+            rec = {"id": "r1_guided_review", "kind": "guided_review",
+                   "round": 1, "sandbox": str(sb)}
+            res = nb._execute_attempt_in(sb, rec, [sys.executable, "-c", script], 60)
+            check(f"{n_lines} turn_end event(s), cap {cap}: hit={want_hit}",
+                  bool(rec.get("turn_cap_hit")) is want_hit, str(res.get("error")))
+            check(f"{n_lines} turn_end event(s), cap {cap}: the cap was enforceable",
+                  bool(rec.get("turn_cap_enforced")) is True)
+            if want_hit:
+                check("the cap verdict is a runaway, not a provider 413",
+                      res.get("failure_kind") == "runaway"
+                      and f"{cap}-turn cap" in (res.get("error") or ""), str(res))
+                check("the attempt header records the cap",
+                      f"max_turns: {cap}" in (sb / "_agent.log").read_text(encoding="utf-8"))
+    finally:
+        if old is None:
+            os.environ.pop("PAPER_PIPELINE_MAX_TURNS", None)
+        else:
+            os.environ["PAPER_PIPELINE_MAX_TURNS"] = old
+
+
 def main() -> int:
     try:
         test_argv_forms()
         test_session_id_capture()
         test_gate()
         test_context_overflow_gate()
+        test_turn_cap()
         test_end_to_end_continuation()
         test_end_to_end_partial_continuation()
         test_end_to_end_limit()

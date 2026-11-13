@@ -5,6 +5,14 @@
 # the single-file source.
 from __future__ import annotations
 
+# The turn cap counts the harness's own turn-end events. `agent_common` is
+# importable from part 1 onward; the default agent (dsh, --json) is the one
+# that emits them.
+from agent_common.dsh_events import (
+    is_turn_end as _is_turn_end,
+    parse_event as _parse_event,
+)
+
 # =====================================================================
 # AGGREGATION (Section D -- pure deterministic code, no LLM arithmetic)
 # =====================================================================
@@ -1744,7 +1752,65 @@ def _coerce_text(s) -> str:
     return str(s)
 
 
-def _read_stream_capped(stream, cap: int) -> tuple:
+DEFAULT_MAX_TURNS = 3000
+
+
+def pipeline_max_turns() -> int:
+    """The per-session model-turn cap (PAPER_PIPELINE_MAX_TURNS, default 3000).
+
+    `run --max-turns` writes the value into the environment before any session
+    starts, so the attempt runner reads one source of truth. A long-horizon
+    stage legitimately runs hundreds or thousands of turns; the cap exists to
+    stop a LOOP, not to shorten a healthy session. 0 disables it.
+    """
+    raw = (os.environ.get("PAPER_PIPELINE_MAX_TURNS") or "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_MAX_TURNS
+    except (TypeError, ValueError):
+        value = DEFAULT_MAX_TURNS
+    return value if value > 0 else 0
+
+
+class _TurnCounter:
+    """Count the harness's turn-end events and stop the session at the cap.
+
+    A harness that streams NDJSON (`dsh --json`, the default agent) emits one
+    `turn_end`/`status: turn_end` event per model turn. The counter parses those
+    events from stdout and kills the whole process tree once the session has
+    used more than `cap` turns: a varied loop is otherwise bounded only by the
+    stage timeout. A harness without a per-turn signal leaves `count` at 0, and
+    the attempt record states the cap was not enforced for that stream.
+    """
+
+    def __init__(self, cap: int, kill) -> None:
+        self.cap = cap
+        self.kill = kill
+        self.count = 0
+        self.hit = False
+        self._buf = ""
+
+    def feed(self, chunk: str) -> None:
+        if self.hit or self.cap <= 0 or not chunk:
+            return
+        self._buf += chunk
+        # A line that never ends must not grow the buffer without bound.
+        if len(self._buf) > 1_000_000:
+            self._buf = self._buf[-65536:]
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            event = _parse_event(line)
+            if event is None:
+                continue
+            if not _is_turn_end(event):
+                continue
+            self.count += 1
+            if self.count > self.cap:
+                self.hit = True
+                self.kill()
+                return
+
+
+def _read_stream_capped(stream, cap: int, on_chunk=None) -> tuple:
     """(kept text, total characters read) for one agent pipe.
 
     The overflow is DISCARDED as it arrives (the child is not blocked on a full
@@ -1759,6 +1825,10 @@ def _read_stream_capped(stream, cap: int) -> tuple:
             chunk = stream.read(65536)
             if not chunk:
                 break
+            if on_chunk is not None:
+                # A counter must never break the transcript read itself.
+                with contextlib.suppress(Exception):
+                    on_chunk(chunk)
             if size < cap:
                 kept.append(chunk[:cap - size])
             size += len(chunk)
@@ -2011,6 +2081,52 @@ def agent_session_env(sb: Path) -> dict:
     return env
 
 
+def _serve_selfcheck(sb: Path, rec: dict, stop: threading.Event) -> None:
+    """Answer the sandbox's pre-flight requests from the ORCHESTRATOR.
+
+    The sandbox holds a client only (`SELFCHECK_CLIENT_REL`), never the driver:
+    the verdict is computed here, by the same in-process postcheck code the
+    orchestrator already runs. The client's own fields are ignored -- the stage
+    and run id come from `rec`, so a crafted request cannot probe another run.
+    The request/result files are ordinary sandbox files, so this works inside a
+    jail with no root mount, and standalone with no extra setup.
+    """
+    box = sb / SELFCHECK_TOOL_DIR / ".mailbox"
+    request = box / "request.json"
+    result = box / "result.json"
+    seen = ""
+    while not stop.wait(0.4):
+        try:
+            if not request.is_file() or request.is_symlink():
+                continue
+            if request.stat().st_size > 8192:
+                continue
+            raw = request.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            continue
+        request_id = str((payload or {}).get("id") or "") if isinstance(payload, dict) else ""
+        if not request_id or request_id == seen:
+            continue
+        seen = request_id
+        try:
+            ok, errs, warns = sandbox_selfcheck(
+                sb, str(rec.get("kind") or ""), str(rec.get("id") or ""),
+                int(rec.get("round") or 0))
+        except Exception as e:                                   # noqa: BLE001
+            ok, errs, warns = False, [f"the pre-flight raised {type(e).__name__}: {e}"], []
+        body = {"id": request_id, "ok": bool(ok),
+                "errors": [str(e) for e in errs][:200],
+                "warnings": [str(w) for w in warns][:200]}
+        try:
+            write_text_atomic(result, json.dumps(body, ensure_ascii=False))
+        except OSError:
+            pass
+
+
 def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
                         prompt_name: str = PROMPT_FILE, log_name: str = "_agent.log",
                         archive_marker: bool = True) -> dict:
@@ -2039,6 +2155,10 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
                 "error": (f"{prompt_name} could not be read (a symlink/non-regular file, "
                           f"unreadable, or over the byte budget); the attempt was not launched")}
     rec["prompt_sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    max_turns = pipeline_max_turns()
+    rec["max_turns"] = max_turns
+    turn_counter = None
+    turn_cap_hit = False
     if archive_marker:
         # A previous attempt's marker must never be mistaken for this attempt's result.
         archive_stale_marker(sb, rec["id"])
@@ -2070,8 +2190,15 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     except Exception as e:  # noqa: BLE001
         proc = None
         rc, exc = None, f"execution error: {e}"
+    service_stop = threading.Event()
     if proc is not None:
         _register_active_agent(proc)
+        if max_turns:
+            turn_counter = _TurnCounter(max_turns, lambda: _terminate_agent_tree(proc))
+        # The sandbox's pre-flight client is answered from here, out of process:
+        # no pipeline code has to be readable inside the sandbox.
+        threading.Thread(target=_serve_selfcheck, args=(sb, rec, service_stop),
+                         daemon=True, name="selfcheck-service").start()
         # Stream both pipes through capped readers instead of `communicate()`:
         # the whole transcript used to be held in memory before it was appended
         # to _agent.log (F39).
@@ -2091,7 +2218,9 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         readers.append(feeder)
         for key, stream in (("out", proc.stdout), ("err", proc.stderr)):
             def _pump(stream=stream, key=key):
-                captured[key] = _read_stream_capped(stream, MAX_TOOL_OUTPUT_BYTES)
+                captured[key] = _read_stream_capped(
+                    stream, MAX_TOOL_OUTPUT_BYTES,
+                    turn_counter.feed if (key == "out" and turn_counter is not None) else None)
             reader = threading.Thread(target=_pump, daemon=True)
             reader.start()
             readers.append(reader)
@@ -2107,6 +2236,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
             for reader in readers:
                 reader.join(15)
         finally:
+            service_stop.set()
             _unregister_active_agent(proc)
         out, out_total = captured.get("out", ("", 0))
         err, err_total = captured.get("err", ("", 0))
@@ -2118,6 +2248,17 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         if dropped:
             truncation = ("\n[OUTPUT TRUNCATED at " + f"{MAX_TOOL_OUTPUT_BYTES} chars per "
                           f"stream: " + ", ".join(dropped) + "]\n")
+    turn_cap_hit = bool(turn_counter is not None and turn_counter.hit)
+    rec["turn_cap_hit"] = turn_cap_hit
+    # Whether this stream carried a per-turn signal at all: a silent or
+    # single-shot harness has no turn_end event, so the cap cannot be counted
+    # here (the attempt record says so instead of claiming enforcement).
+    rec["turn_cap_enforced"] = bool(turn_counter is not None
+                                    and turn_counter.count > 0)
+    if turn_cap_hit and exc is None:
+        exc = (f"the agent session hit the {max_turns}-turn cap "
+               f"(PAPER_PIPELINE_MAX_TURNS={max_turns}); it is looping instead of "
+               f"finishing the stage")
     dur = time.time() - t0
     # The transcript is the audit trail the operator reads after a failure, and
     # an agent can print anything (including a provider key) before it is
@@ -2130,7 +2271,8 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     try:
         append_text_no_follow(logf,
                               f"\n===== attempt {next_attempt_number(rec)} start {started_at} =====\n"
-                              f"cmd: {safe_cmd}{truncation}\n--- stdout ---\n{safe_out}\n"
+                              f"cmd: {safe_cmd}{truncation}\n"
+                              f"max_turns: {max_turns}\n--- stdout ---\n{safe_out}\n"
                               f"--- stderr ---\n{safe_err}\n"
                               f"===== rc={rc} dur={dur:.1f}s error={safe_exc} =====\n")
     except OSError:
@@ -2148,6 +2290,19 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         exc = ("the agent request exceeded the provider's payload/context limit "
                "(HTTP 413 / request too large); a continuation would resend the same "
                "oversized context, so a fresh attempt is required")
+    elif failure_kind == "runaway":
+        # The proxy stopped the session itself; keep its sentence, because it
+        # names which cap tripped (turns, compactions, a repeated call).
+        exc = agent_runaway_reason(err) or (
+            "the agent session was stopped for looping instead of finishing the "
+            "stage; a fresh attempt is required")
+    if turn_cap_hit:
+        # The ORCHESTRATOR stopped this session: the harness may have printed no
+        # guard line, so the verdict is set from the counter, not from stderr.
+        failure_kind = "runaway"
+        exc = (f"the agent session hit the {max_turns}-turn cap "
+               f"(PAPER_PIPELINE_MAX_TURNS={max_turns}); it is looping instead of "
+               f"finishing the stage")
     # The same redaction applies to the error the run record and the console
     # keep: a process failure can quote a command line or a provider response.
     if exc is not None:

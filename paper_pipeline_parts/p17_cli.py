@@ -1006,6 +1006,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"concurrent agent sessions (default: {DEFAULTS['jobs']})")
     run_opts.add_argument("--timeout", type=int, default=None,
                     help="per-run timeout seconds (default: 4h; manual mode: none)")
+    run_opts.add_argument("--max-turns", type=int, default=DEFAULTS["max_turns"],
+                    help=f"model-turn cap for one agent session (default: "
+                         f"{DEFAULTS['max_turns']}; 0 = unlimited). A long-horizon stage "
+                         f"needs hundreds of turns, but a looping session must still stop: "
+                         f"the orchestrator counts the harness's own turn-end events and "
+                         f"kills the session at the cap")
     run_opts.add_argument("--retries", type=int, default=DEFAULTS["retries"],
                     help=f"automatic retries for a failed run (default: "
                          f"{DEFAULTS['retries']} -> three attempts); each retry waits "

@@ -639,7 +639,10 @@ def cmd_setup(args) -> None:
     _missing_assets += [
         f"agent-common/agent_common/{name}"
         for name in ("model_runtime.py", "llm_retry.py", "llm_policy.json",
-                     "model_catalog.json")
+                     "model_catalog.json",
+                     # Part 08 imports it for the turn-cap counter; without it a
+                     # frozen root cannot load even though the directory exists.
+                     "dsh_events.py")
         if not (script.parent / "agent-common" / "agent_common" / name).is_file()
     ]
     # The companion MODULES are just as required: the agent commands call
@@ -3413,6 +3416,21 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # error (exit 2), not be masked by "agent executable not found" (exit 1).
     if args.timeout is not None and args.timeout < 0:
         die("--timeout must be a non-negative number of seconds", code=2)
+    # The per-session model-turn cap. It is a RUN property (like --timeout), not
+    # a root property: the same root can be re-run with a different bound, and
+    # the value this invocation used is recorded on every attempt record.
+    _max_turns = getattr(args, "max_turns", DEFAULTS["max_turns"])
+    if _max_turns < 0:
+        die("--max-turns must be a non-negative number of turns", code=2)
+    os.environ["PAPER_PIPELINE_MAX_TURNS"] = str(int(_max_turns))
+    print(f"[run] turn cap: {int(_max_turns)} model turns per agent session "
+          f"(PAPER_PIPELINE_MAX_TURNS; 0 = unlimited)")
+    # A manual run has no orchestrator serving the sandbox's pre-flight client
+    # (`_serve_selfcheck` runs only around a launched attempt), so the client
+    # would wait for an answer that never comes. Stage the self-contained driver
+    # bundle instead, exactly as the prompt's first command expects.
+    if getattr(args, "manual", False) and not getattr(args, "agent_cmd", None):
+        os.environ["PAPER_PIPELINE_SELFCHECK_COPY"] = "1"
     # The benchmark-only content-edit policy: a per-INVOCATION override of the
     # policy `setup` recorded. None means "use the root's config", so a plain
     # `run` cannot perturb a root it did not need to describe.

@@ -1160,6 +1160,9 @@ schedule: `2 3` = two rounds following the schedule's rounds 2 and 3, `3`/`-1`
 `--jobs N`, `--agent-harness NAME`, `--agent-model NAME_OR_URL`,
 `--agent-model-api-key KEY`, `--agent-model-name MODEL`,
 `--manual`, `--agent-cmd JSON`, `--judge-manual`, `--retries N`,
+`--max-turns N` (model-turn cap for one agent session; default **3000**, `0` = unlimited;
+the orchestrator counts the harness's own `turn_end` events and kills a session that
+exceeds it, so a long-horizon stage still has a bound),
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
 2; see *Running only some of the steps*). Opt-in audits:
 `--defect-audit {codex-lite,codex,claude,dsh,qwen,dots,manual}`, `--defect-audit-cmd JSON`,
@@ -2644,12 +2647,12 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 119 KB | 49 KB | 58% |
-| cold_start_review | 60 KB | 24 KB | 59% |
-| audit | 89 KB | 46 KB | 48% |
-| revise | 118 KB | 65 KB | 45% |
-| integrate | 117 KB | 64 KB | 45% |
-| rewrite | 110 KB | 60 KB | 45% |
+| review | 122 KB | 52 KB | 57% |
+| cold_start_review | 61 KB | 25 KB | 58% |
+| audit | 89 KB | 47 KB | 47% |
+| revise | 119 KB | 66 KB | 45% |
+| integrate | 117 KB | 65 KB | 44% |
+| rewrite | 111 KB | 61 KB | 45% |
 | judge | 103 KB | 74 KB | 29% |
 | revision_audit | 23 KB | 13 KB | 41% |
 | revision_repair | 22 KB | 9 KB | 57% |

@@ -4055,7 +4055,7 @@ WRITE:
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "feedback", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
-{selfcheck_block("feedback", sb.name, int(r))}
+{selfcheck_block("feedback", sb.name, int(r), sb)}
 """
 
 
@@ -4169,7 +4169,7 @@ THE FINDING LIST (the revision session consumes it):
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "concerns", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
-{selfcheck_block("concerns", sb.name, int(r))}
+{selfcheck_block("concerns", sb.name, int(r), sb)}
 """
 
 
@@ -4273,7 +4273,7 @@ ABSOLUTE RULES:
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "response", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
-{selfcheck_block("response", sb.name, int(r))}
+{selfcheck_block("response", sb.name, int(r), sb)}
 """
 
 
@@ -7172,7 +7172,8 @@ def stage_source_gates(sb: Path, kind: str, pkg_dir: Path) -> tuple:
     return errs, warns
 
 
-def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tuple:
+def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
+                      prompt_text: str | None = None) -> tuple:
     """(ok, errors, warnings) for the paperwork of one sandbox (read-only).
 
     `kind` is the run's stage; `run_id`/`r` are only used to CHECK the marker.
@@ -7229,14 +7230,28 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             errs.append(problem)
     # 4. the stage-specific contracts, each through the postcheck's own helper
     if kind == "guided_review":
-        # The session prompt is read TWICE in this block: by the review-contract
-        # branch for its scope, and by the discovery-contract check at the end,
-        # which runs whether or not findings.json parsed. Initialise it here --
-        # the branch that reads the file sits inside an `else`, so a missing or
-        # broken findings.json (exactly the pre-flight state this selfcheck
-        # exists to diagnose) raised NameError instead of reporting the missing
-        # deliverable.
-        _prompt = ""
+        # The session prompt is read BEFORE the findings branch: it states the
+        # round's review scope (and a split round's half), and BOTH the
+        # review-contract check and the discovery-contract check below gate on
+        # it. It used to be read inside the `else`, so a missing/broken
+        # findings.json (exactly the pre-flight state this selfcheck exists to
+        # diagnose, and the only state the prompt preview starts from) left it
+        # empty and the pre-flight demanded the full package's discovery round
+        # from a formatting-writing or split-A session whose own prompt forbids
+        # it.
+        _prompt = (str(prompt_text) if prompt_text is not None
+                   else (read_text_bounded(sb / PROMPT_FILE) or ""))
+        _scope = ("formatting-writing"
+                  if "FORMATTING AND WRITING ONLY" in _prompt else "full")
+        # A SPLIT round's two halves owe different artifacts. The postcheck
+        # reads the plan; the selfcheck usually runs in its own process with no
+        # ctx, so it reads the split mode its own prompt states and the half its
+        # own sandbox name states (`r<r>_guided_review_b`), and the two verdicts agree.
+        _split = "off"
+        if "SPLIT REVIEW" in _prompt:
+            _split = ("aspects"
+                      if ("PACKAGING/compliance" in _prompt
+                          or "CONTENT/scientific" in _prompt) else "phases")
         fj = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
         if not isinstance(fj, dict):
             errs.append(f"{FINDINGS_REL} is missing or does not parse as a JSON object "
@@ -7244,24 +7259,6 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
         elif not isinstance(fj.get("findings"), list):
             errs.append(f"{FINDINGS_REL} has no 'findings' list")
         else:
-            # Read THIS session's prompt FIRST: it states the round's review scope,
-            # and the pre-flight must preview the verdict the postcheck (which
-            # derives the scope from the plan) will reach. With the default
-            # `scope="full"` a formatting-writing session's selfcheck demanded the
-            # content rounds' parity artifacts its prompt scopes out -- the
-            # pre-flight disagreeing with the verdict it previews.
-            _prompt = read_text_bounded(sb / PROMPT_FILE) or ""
-            _scope = ("formatting-writing"
-                      if "FORMATTING AND WRITING ONLY" in _prompt else "full")
-            # A SPLIT round's two halves owe different artifacts. The postcheck
-            # reads the plan; the selfcheck usually runs in its own process with no
-            # ctx, so it reads the split mode its own prompt states and the half its
-            # own sandbox name states (`r<r>_guided_review_b`), and the two verdicts agree.
-            _split = "off"
-            if "SPLIT REVIEW" in _prompt:
-                _split = ("aspects"
-                          if ("PACKAGING/compliance" in _prompt
-                              or "CONTENT/scientific" in _prompt) else "phases")
             # `check_review_contract` needs no pipeline state (it verifies the
             # corpus pointer, the coverage table and the M1b long-form gate), so
             # the session gets the whole contract, not a summary of it.
