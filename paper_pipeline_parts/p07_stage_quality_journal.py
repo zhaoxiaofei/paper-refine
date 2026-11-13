@@ -7198,6 +7198,21 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     rec = {"id": run_id, "kind": kind, "round": (int(r) if r else None)}
     if not sb.is_dir():
         return False, [f"the sandbox {sb} does not exist"], []
+    # The REVIEW prompt is read BEFORE the deliverables loop: it states the
+    # round's review scope and (for a split round) this session's half, and
+    # both decide whether the discovery phase's deliverables are owed at all.
+    # It used to be read inside the findings branch, so the pre-flight demanded
+    # the full package's discovery round -- including its `findings_extra.json`
+    # warning -- from a formatting-writing or split-A session whose own prompt
+    # forbids that phase.
+    _prompt, _scope, _split, _review_part_b = "", "full", "off", False
+    _no_discovery = False
+    if kind == "guided_review":
+        _prompt = (str(prompt_text) if prompt_text is not None
+                   else (read_text_bounded(sb / PROMPT_FILE) or ""))
+        _scope, _split, _review_part_b = review_prompt_scope(_prompt, sb)
+        _no_discovery = (_scope != "full"
+                         or (_split != "off" and not _review_part_b))
     # 1. the completion signal: it must be at the ROOT and it must name THIS run
     marker = marker_json(sb, kind)
     _marker_checks(rec, marker, kind, errs, warns, sb=sb)
@@ -7215,6 +7230,14 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     _handoff_rel = handoff_target(_handoff_mode)
     for rel in table.get("expected", ()):
         expected = rel
+        # The discovery round's extra-findings file belongs to a review pass
+        # that OWES that phase. A formatting-writing round and a split-A
+        # session are told not to run D0-D5, so warning that its file is
+        # missing asks for work their own prompt forbids (the postcheck does
+        # not warn either).
+        if (kind == "guided_review" and _no_discovery
+                and Path(expected).name == "findings_extra.json"):
+            continue
         _is_manual_list = Path(rel).name == "MANUAL_STEPS.md"
         if _is_manual_list:
             expected = (Path(rel).parent / _handoff_rel).as_posix()
@@ -7230,28 +7253,12 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             errs.append(problem)
     # 4. the stage-specific contracts, each through the postcheck's own helper
     if kind == "guided_review":
-        # The session prompt is read BEFORE the findings branch: it states the
-        # round's review scope (and a split round's half), and BOTH the
-        # review-contract check and the discovery-contract check below gate on
-        # it. It used to be read inside the `else`, so a missing/broken
-        # findings.json (exactly the pre-flight state this selfcheck exists to
-        # diagnose, and the only state the prompt preview starts from) left it
-        # empty and the pre-flight demanded the full package's discovery round
-        # from a formatting-writing or split-A session whose own prompt forbids
-        # it.
-        _prompt = (str(prompt_text) if prompt_text is not None
-                   else (read_text_bounded(sb / PROMPT_FILE) or ""))
-        _scope = ("formatting-writing"
-                  if "FORMATTING AND WRITING ONLY" in _prompt else "full")
-        # A SPLIT round's two halves owe different artifacts. The postcheck
-        # reads the plan; the selfcheck usually runs in its own process with no
-        # ctx, so it reads the split mode its own prompt states and the half its
-        # own sandbox name states (`r<r>_guided_review_b`), and the two verdicts agree.
-        _split = "off"
-        if "SPLIT REVIEW" in _prompt:
-            _split = ("aspects"
-                      if ("PACKAGING/compliance" in _prompt
-                          or "CONTENT/scientific" in _prompt) else "phases")
+        # The scope/split were read with the prompt above, BEFORE the findings
+        # branch, so the state the preview starts from (no findings.json yet)
+        # still knows a formatting-writing round and a split-A session owe no
+        # discovery phase. `check_review_contract` verifies the corpus pointer,
+        # the coverage table and the M1b long-form gate; it needs no pipeline
+        # state, so the session gets the whole contract, not a summary of it.
         fj = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
         if not isinstance(fj, dict):
             errs.append(f"{FINDINGS_REL} is missing or does not parse as a JSON object "
@@ -7259,16 +7266,10 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
         elif not isinstance(fj.get("findings"), list):
             errs.append(f"{FINDINGS_REL} has no 'findings' list")
         else:
-            # `check_review_contract` needs no pipeline state (it verifies the
-            # corpus pointer, the coverage table and the M1b long-form gate), so
-            # the session gets the whole contract, not a summary of it.
             check_review_contract(None, sb, fj, errs, warns, scope=_scope, split=_split)
         # The discovery round's D0-D5 contract, unless THIS session's own prompt
         # says the phase is not its job (the formatting-writing scope, or the
         # mechanical half of a split review).
-        _no_discovery = ("FORMATTING AND WRITING ONLY" in _prompt
-                         or ("SPLIT REVIEW" in _prompt
-                             and "YOUR SCOPE (B)" not in _prompt))
         if not _no_discovery:
             _derrs, _dwarns = discovery_contract_problems(sb)
             errs.extend(f"discovery round: {d}" for d in _derrs)

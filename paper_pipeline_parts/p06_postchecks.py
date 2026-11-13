@@ -312,6 +312,48 @@ def _stage_driver_bundle() -> bool:
     return raw not in {"", "0", "false", "no", "off"}
 
 
+def _drop_staged_driver_bundle(sb: Path, keep_client: bool = True) -> None:
+    """Remove a readable driver bundle a previous (manual/older) run staged.
+
+    The default is the CLIENT only: the sandbox must not carry the pipeline
+    implementation, so the prompt names the client (or the ROOT's frozen copy
+    as its fallback). A sandbox created by an older root or by
+    `PAPER_PIPELINE_SELFCHECK_COPY=1` still holds the old bundle; leaving it
+    would keep the implementation readable AND make `selfcheck_block` name that
+    stale copy first. The client (`selfcheck/client.py`) is never removed.
+    """
+    tool_dir = sb / SELFCHECK_TOOL_DIR
+    try:
+        if tool_dir.is_symlink() or (tool_dir.exists() and not tool_dir.is_dir()):
+            tool_dir.unlink()
+            return
+        if not tool_dir.is_dir():
+            return
+        # Remove the bundle's entries, NOT the whole directory: the client and
+        # its mailbox live there.
+        for name in (SELFCHECK_DRIVER, DOCX_FORMAT_MODULE, DOCX_FORMAT_PARTS_DIR,
+                     MANUSCRIPT_WORDS_FILE.split("/", 1)[0], *PIPELINE_ASSET_DIRS):
+            p = tool_dir / name
+            if p.is_symlink() or p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                rmtree_force(p, ignore_errors=True)
+        for name in PIPELINE_MODULE_FILES:
+            p = tool_dir / name
+            if p.is_symlink() or p.is_file():
+                p.unlink()
+        if not keep_client:
+            # A BLINDED sandbox gets neither the implementation nor the client.
+            for name in ("client.py", ".mailbox"):
+                p = tool_dir / name
+                if p.is_symlink() or p.is_file():
+                    p.unlink()
+                elif p.is_dir():
+                    rmtree_force(p, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def _copy_session_tools(sb: Path, stamp: float = None,
                         include_driver: bool | None = None) -> None:
     """Put the code-side scanner/validator next to PROMPT.md.
@@ -401,6 +443,12 @@ def _copy_session_tools(sb: Path, stamp: float = None,
                 # shared word rules are required to import the frozen driver.
                 _safe_restore_copy(driver_src.parent / MANUSCRIPT_WORDS_FILE,
                                    tool_dir / MANUSCRIPT_WORDS_FILE, sb)
+        else:
+            # A sandbox reused from an older root or a manual run must not keep
+            # a readable driver bundle: the default contract is the client
+            # only, and `selfcheck_block` names the client (or the ROOT copy)
+            # from the files actually present.
+            _drop_staged_driver_bundle(sb, keep_client=serve)
     except OSError as e:
         # A partial/refused copy used to be swallowed: the stage then called a
         # missing or incomplete formatter (or driver) and had no diagnostic
@@ -422,13 +470,22 @@ def _copy_session_tools(sb: Path, stamp: float = None,
             client = tool_dir / "client.py"
             current = ""
             if client.is_file() and not client.is_symlink():
-                current = client.read_text(encoding="utf-8", errors="replace")
+                # Agent-writable path: a planted huge file must not OOM the
+                # orchestrator (the bounded reader refuses over-budget input;
+                # the mismatch is then repaired by the write below).
+                current = read_text_bounded(client) or ""
             if current != SELFCHECK_CLIENT_SOURCE:
                 write_text_atomic(client, SELFCHECK_CLIENT_SOURCE)
         except OSError as e:
             raise RuntimeError(
                 f"could not stage the pre-flight client {SELFCHECK_CLIENT_REL} "
                 f"into {sb}: {type(e).__name__}: {e}") from e
+    else:
+        # A blinded sandbox gets no selfcheck/ at all: a stale bundle was just
+        # removed above, and an empty orchestrator-owned directory left behind
+        # would still be an orchestrator artifact beside the blinded packages.
+        with contextlib.suppress(OSError):
+            (sb / SELFCHECK_TOOL_DIR).rmdir()
     # Stamping is cosmetic (it keeps the copy from dating the sandbox): a
     # timestamp failure must not turn into a staging failure.
     if stamp is not None:
@@ -7029,18 +7086,35 @@ _ERROR_SHAPED_STDOUT_RE = re.compile(
 # The pipeline's own implementation is not provider evidence.  A review session
 # reads `paper_pipeline_parts/*` to find out what the postcheck wants (the
 # brief-communication run did it in 90 slices), and its transcript then carries
-# THIS file -- including the comments below, which quote every overflow
-# spelling the pattern above matches.  On that run the scan reported an HTTP
-# 413 that never happened, and the `resume` policy refused a continuation for
-# the wrong reason.  A provider error never begins with '#' or a raw-string
-# prefix, so those lines are dropped before the scan.
-_STDERR_SOURCE_LINE_RE = re.compile(r"\s*(?:#|r[\"'])")
+# THIS file -- including the comments and string literals that quote every
+# overflow spelling the pattern above matches.  On that run the scan reported
+# an HTTP 413 that never happened, and the `resume` policy refused a
+# continuation for the wrong reason.  Dropping only '#'/raw-string lines was
+# not enough: a normal string continuation (`"(HTTP 413 ...`) and an assignment
+# (`why = (...)`) still reproduced the false 413 from p08/p06, so the filter
+# covers the whole Python source line.  A provider error never begins with a
+# comment, a string literal, an assignment, a statement keyword or a call.
+_STDERR_SOURCE_LINE_RE = re.compile(
+    r"""^\s*(?:
+        \#
+      | (?:[rbfuRBFU]{1,2})?["']
+      | (?:def|class|return|yield|if|elif|else|for|while|try|except|finally|
+             with|raise|import|from|assert|pass|break|continue|lambda|async|
+             await|del|global|nonlocal)\b
+      | [A-Za-z_][\w.]*\s*=\s*(?:[\(\[\{]|["']|[A-Za-z_])
+      | [A-Za-z_][\w.]*\s*\(
+      | [\)\]\}]
+    )""", re.X)
+# A pretty-printed JSON error object puts its message on a `"key": value` line;
+# that line IS provider evidence, even though it starts with a quote.
+_STDERR_JSON_FIELD_RE = re.compile(r'^\s*"[^"\n]*"\s*:')
 
 
 def _stderr_evidence(stderr: str) -> str:
     return "\n".join(
         line for line in (stderr or "").splitlines()
-        if not _STDERR_SOURCE_LINE_RE.match(line))
+        if _STDERR_JSON_FIELD_RE.match(line)
+        or not _STDERR_SOURCE_LINE_RE.match(line))
 
 
 # The agent proxy stops a session that is looping (model-turn cap, compaction
@@ -7083,8 +7157,8 @@ def agent_failure_kind(stdout: str = "", stderr: str = "") -> str:
 
     Only error-shaped stdout lines are considered (the process already failed,
     but its normal output can quote a manuscript); stderr is the error channel
-    and is read whole, except the source lines a session may have printed into
-    it (see `_stderr_evidence`).
+    and is read whole, except the Python source lines a session may have
+    printed into it (see `_stderr_evidence`).
     """
     stdout_errors = "\n".join(
         line for line in (stdout or "").splitlines()

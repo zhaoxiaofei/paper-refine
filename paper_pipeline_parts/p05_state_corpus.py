@@ -3346,6 +3346,13 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
         "prompt": PROMPT_FILE,
         # Which CLI session produced this attempt (used by the CONTINUATION).
         "agent_session_id": rec.get("agent_session_id"),
+        # The turn cap THIS attempt ran under, and whether it was enforceable
+        # and hit. `rec` keeps only the current attempt's values, so a history
+        # entry without them lost a cap-hit verdict as soon as the run was
+        # retried; the per-attempt record is where the operator reads it.
+        "max_turns": rec.get("max_turns"),
+        "turn_cap_hit": rec.get("turn_cap_hit"),
+        "turn_cap_enforced": rec.get("turn_cap_enforced"),
         "checked_at": (rec.get("postcheck") or {}).get("checked_at"),
         # Filled in when the failed sandbox is actually kept (moved): the attempt
         # record must not claim a path that does not exist yet (`sandbox_attempts`

@@ -1407,7 +1407,9 @@ def _coerce_text(s) -> str:
     return str(s)
 
 
-DEFAULT_MAX_TURNS = 3000
+# One source of truth: the CLI/documented default. The attempt runner reads the
+# environment first (`run --max-turns` writes it); this is only the fallback.
+DEFAULT_MAX_TURNS = DEFAULTS["max_turns"]
 
 
 def pipeline_max_turns() -> int:

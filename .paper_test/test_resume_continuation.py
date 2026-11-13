@@ -186,6 +186,15 @@ def test_context_overflow_gate():
     check("the classifier's own source comments are not provider evidence",
           nb.agent_failure_kind("", source_comments) == "",
           source_comments[:60])
+    # The 2026-11-13 review printed a WHOLE parts file, not only its comments:
+    # p06's `why = ("... request as too large ...")` and p08's string
+    # continuation `"(HTTP 413 / request too large)"` still matched after the
+    # first filter, so the filter must cover every Python source line.
+    for _name in ("p06_postchecks.py", "p08_selection_driver.py"):
+        _source = (WS / "paper_pipeline_parts" / _name).read_text(encoding="utf-8")
+        check(f"the full {_name} is not provider evidence",
+              nb.agent_failure_kind("", _source) == "",
+              nb.agent_failure_kind("", _source))
     guard = ("[2026-11-13 20:42:43] [codex-qwen] runaway guard: the agent session "
              "issued 1001 model turns (PAPER_EVAL_PAPER_REFINE_MAX_TURNS=1000); "
              "it is looping instead of finishing the stage")
@@ -461,6 +470,13 @@ def test_turn_cap() -> None:
                   bool(rec.get("turn_cap_hit")) is want_hit, str(res.get("error")))
             check(f"{n_lines} turn_end event(s), cap {cap}: the cap was enforceable",
                   bool(rec.get("turn_cap_enforced")) is True)
+            check(f"{n_lines} turn_end event(s), cap {cap}: the run record carries the cap",
+                  rec.get("max_turns") == cap)
+            entry = nb.record_attempt(None, rec, False, ["noop"])
+            check(f"{n_lines} turn_end event(s), cap {cap}: the per-attempt history records it",
+                  entry.get("max_turns") == cap
+                  and entry.get("turn_cap_hit") is want_hit
+                  and entry.get("turn_cap_enforced") is True)
             if want_hit:
                 check("the cap verdict is a runaway, not a provider 413",
                       res.get("failure_kind") == "runaway"

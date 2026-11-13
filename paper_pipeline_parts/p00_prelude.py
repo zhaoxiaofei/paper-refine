@@ -302,11 +302,13 @@ from pathlib import Path
 #   pattern matches, so the 2026-11-13 brief-communication guided review was
 #   reported as "HTTP 413 / request too large" (and its continuation refused for
 #   that reason) when the agent proxy had stopped it at the 1000-turn guard. The
-#   scan now drops source lines (a leading `#` or a raw-string prefix) from
-#   stderr and classifies the proxy's own `runaway guard` sentence first, as
-#   `runaway`; `resume_gate` refuses that class and the attempt keeps the
-#   guard's own sentence as its error.
-#   A real 413 still classifies: a provider error is never a source comment.
+#   scan now drops whole PYTHON SOURCE lines (comments, string literals,
+#   assignments, statement keywords and calls -- a normal string continuation
+#   and `why = (...)` quote the spelling too) from stderr and classifies the
+#   proxy's own `runaway guard` sentence first, as `runaway`; `resume_gate`
+#   refuses that class and the attempt keeps the guard's own sentence as its
+#   error.
+#   A real 413 still classifies: a provider error is never a source line.
 # 3.11.1 -- THE COMPLETION MARKER IS A TOOL CALL, NOT A CLOSING MESSAGE. Every
 #   stage prompt already stated WHERE the marker goes; on 2026-11-12 the last of
 #   six revise attempts (three archived sandboxes) left a complete package

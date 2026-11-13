@@ -116,6 +116,22 @@ def test_staged_driver_bundle_is_opt_in() -> None:
               and (sb / pp.SELFCHECK_TOOL_DIR / "paper_pipeline_parts").is_dir())
         check("the formatter is staged beside the driver on request",
               (sb / pp.SELFCHECK_TOOL_DIR / pp.DOCX_FORMAT_MODULE).is_file())
+        # Turning the opt-in OFF must remove the readable implementation again:
+        # a reused/older sandbox otherwise keeps it and the prompt names it.
+        os.environ.pop("PAPER_PIPELINE_SELFCHECK_COPY", None)
+        pp._copy_session_tools(sb)
+        check("turning the opt-in off removes the staged driver bundle",
+              not (sb / pp.SELFCHECK_TOOL_DIR / pp.SELFCHECK_DRIVER).exists()
+              and not (sb / pp.SELFCHECK_TOOL_DIR / "paper_pipeline_parts").exists()
+              and (sb / pp.SELFCHECK_CLIENT_REL).is_file())
+        sb3 = scratch("pr-selfcheck-bundle-blind-")
+        os.environ["PAPER_PIPELINE_SELFCHECK_COPY"] = "1"
+        pp._copy_session_tools(sb3)
+        os.environ.pop("PAPER_PIPELINE_SELFCHECK_COPY", None)
+        pp._copy_session_tools(sb3, include_driver=False)
+        check("a blinded staging removes a previously staged bundle and client",
+              not (sb3 / pp.SELFCHECK_TOOL_DIR).exists()
+              and (sb3 / pp.DOCX_FORMAT_MODULE).is_file())
         sb2 = scratch("pr-selfcheck-bundle-run-")
         os.environ["PAPER_PIPELINE_SELFCHECK_COPY"] = "1"
         pp._copy_session_tools(sb2)
@@ -171,6 +187,31 @@ def test_review_prompt_names_the_client_first() -> None:
           "discovery round" not in _verdict(split_a), _verdict(split_a)[-300:])
     check("a full pre-flight still names the discovery round",
           "discovery round" in _verdict(text))
+
+    def _contract(prompt: str) -> str:
+        start = prompt.index("WHAT THE POSTCHECK REQUIRES")
+        end = prompt.index("THE PRE-FLIGHT'S CURRENT VERDICT", start)
+        return prompt[start:end]
+
+    check("a formatting-writing contract does not expect the discovery deliverable",
+          "round2/findings_extra.json" not in _contract(scoped),
+          _contract(scoped))
+    check("a formatting-writing contract lists only its own sweep artifacts",
+          "M2_citations.md" not in _contract(scoped)
+          and "M9_files.md" in _contract(scoped), _contract(scoped))
+    aspects_b = pp.review_prompt(sb, "r1_guided_review_b", 1, venue=prof, split="b",
+                                 split_mode="aspects", execution_profile="high")
+    check("an aspects-B contract lists only its own half's sweep artifacts",
+          "M2_citations.md" not in _contract(aspects_b)
+          and "M9_files.md" in _contract(aspects_b), _contract(aspects_b))
+    ok, errs, warns = pp.sandbox_selfcheck(sb, "guided_review", "r1_guided_review", 1,
+                                           prompt_text=scoped)
+    check("a formatting-writing pre-flight does not warn about findings_extra.json",
+          not any("findings_extra.json" in w for w in warns), str(warns))
+    ok, errs, warns = pp.sandbox_selfcheck(sb, "guided_review", "r1_guided_review", 1,
+                                           prompt_text=text)
+    check("a full pre-flight still warns about findings_extra.json",
+          any("findings_extra.json" in w for w in warns), str(warns))
 
 
 def test_judge_prompt_uses_the_harness_mount() -> None:

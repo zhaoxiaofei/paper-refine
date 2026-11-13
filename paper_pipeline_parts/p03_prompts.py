@@ -358,17 +358,54 @@ def _contract_deliverable(rel: str, author_to_complete: str = None) -> str:
     return (path.parent / target).as_posix()
 
 
-def _postcheck_contract(kind: str, author_to_complete: str = None) -> str:
+def review_prompt_scope(prompt_text: str = None, sb: Path | None = None) -> tuple:
+    """(scope, split_mode, part_b) the review prompt itself declares.
+
+    The pre-flight has no `ctx` to read the round plan from, so it derives the
+    same two facts the prompt states: a "formatting-writing" round runs no
+    discovery phase, and a split session owns only its half's checks/artifacts.
+    `part_b` comes from the prompt's own "YOUR SCOPE (B)" line; the sandbox
+    name is the fallback for a prompt that carries the split marker without the
+    half line (the postcheck derives it from the sandbox name).
+    """
+    text = str(prompt_text or "")
+    scope = ("formatting-writing"
+             if "FORMATTING AND WRITING ONLY" in text else "full")
+    split = "off"
+    if "SPLIT REVIEW" in text:
+        split = ("aspects"
+                 if ("PACKAGING/compliance" in text
+                     or "CONTENT/scientific" in text) else "phases")
+    part_b = "YOUR SCOPE (B)" in text
+    if split != "off" and "YOUR SCOPE (A)" not in text and "YOUR SCOPE (B)" not in text:
+        part_b = bool(sb is not None and Path(sb).name.endswith("_review_b"))
+    return scope, split, part_b
+
+
+def _postcheck_contract(kind: str, author_to_complete: str = None,
+                        scope: str = "full", split: str = "off",
+                        part_b: bool = False) -> str:
     """The stage's acceptance contract, generated from the postcheck's tables.
 
     Printed in the prompt so a session never has to infer -- or read the
     implementation to discover -- what the postcheck will require. The text is
     stage contract, not profile guidance, so it is byte-identical in `high` and
     `medium` (rule 12).
+
+    The review's contract is the POSTCHECK'S contract, not the full-package
+    one: a formatting-writing round runs no discovery phase (so the discovery
+    deliverable is not expected) and a split half owns only its half's sweep
+    artifacts. Printing the full set told a scoped/split session to leave
+    artifacts its own prompt forbids -- the postcheck does not require them.
     """
     table = STAGE_DELIVERABLES.get(kind) or {}
     required = tuple(table.get("required") or ())
     expected = tuple(table.get("expected") or ())
+    no_discovery = bool(kind == "guided_review"
+                        and (scope != "full" or (split != "off" and not part_b)))
+    if no_discovery:
+        expected = tuple(rel for rel in expected
+                         if Path(rel).name != "findings_extra.json")
     lines = ["", "=== WHAT THE POSTCHECK REQUIRES OF THIS STAGE "
                  "(generated from its own tables -- do not infer it) ==="]
     if required:
@@ -384,10 +421,17 @@ def _postcheck_contract(kind: str, author_to_complete: str = None) -> str:
                      f"{FINDINGS_REL} (a real disposition and its basis); a missing "
                      f"row fails the attempt:")
         lines.append("  " + ", ".join(required_review_check_ids()))
-        if SWEEP_ARTIFACTS:
+        if scope != "full" or split != "off":
+            lines.append("A check this session's review scope or split does not run is "
+                         "disposed 'out of scope -- <reason>'; silence is still a missing row.")
+        in_scope = set(scoped_review_checks(scope))
+        artifacts = [(cid, name) for cid, name in SWEEP_ARTIFACTS.items()
+                     if (not in_scope or cid in in_scope)
+                     and (split == "off" or _split_check_owned(split, part_b, cid))]
+        if artifacts:
             lines.append("Each mechanical check below must also leave its enumeration table:")
             lines += [f"  * {cid} -> {ARTIFACTS_REL}/{name}"
-                      for cid, name in SWEEP_ARTIFACTS.items()]
+                      for cid, name in artifacts]
     return "\n".join(lines) + "\n"
 
 
@@ -472,6 +516,7 @@ def selfcheck_block(kind: str, run_id: str, r: int, sb: Path | None = None,
                          "  (no problems right now)\n")
         except Exception:                                       # noqa: BLE001
             state = ""
+    _scope, _split, _part_b = review_prompt_scope(prompt_text, sb)
     return (f"""
 SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
 {first}
@@ -497,7 +542,7 @@ THE POSTCHECK'S ERROR LIST IS YOUR INPUT; ITS IMPLEMENTATION IS NOT. Do not read
 contract you must satisfy is printed below and in the pre-flight's own output. Reading the
 implementation is not a step of this stage, it cannot change a verdict, and it spends the
 context the deliverables need.
-{_postcheck_contract(kind, author_to_complete)}{state}""")
+{_postcheck_contract(kind, author_to_complete, _scope, _split, _part_b)}{state}""")
 
 def judge_selfcheck_block(run_id: str) -> str:
     """The judge session's pre-flight (blinding-safe wording).
