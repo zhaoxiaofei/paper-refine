@@ -9,6 +9,26 @@ from __future__ import annotations
 # SETUP
 # =====================================================================
 
+def _save_root_config(ctx: Ctx, event: str, *, detail: str) -> None:
+    """Persist the configuration and its registry mirror under the caller's lock."""
+    ctx.state["config"] = ctx.cfg
+    write_json_atomic(ctx.cfg_path, ctx.cfg)
+    ctx.log(event, detail=detail)
+    ctx.save_state()
+
+
+def _freeze_runtime_bundle(src: Path, root: Path) -> list:
+    """Copy the validated runtime into a new root and preserve file modes."""
+    try:
+        copied = copy_asset_dirs(src, root)
+        for name in PIPELINE_MODULE_FILES:
+            _safe_restore_copy(src / name, root / name, root)
+    except OSError as exc:
+        die(f"cannot freeze the runtime into {root}: {exc}. "
+            "Re-run setup with the same arguments after resolving the copy error.")
+    return copied
+
+
 def cmd_setup(args) -> None:
     rounds = int(args.rounds)
     # The venue is resolved BEFORE anything is created, so an unknown venue id
@@ -544,6 +564,12 @@ def cmd_setup(args) -> None:
     if _snap and _snap.get("origin_path"):
         _pipeline_state.update(snapshot_of=_snap.get("root"),
                                snapshot_origin=_snap.get("origin_path"))
+    script = Path(__file__).resolve()
+    missing_assets = _missing_bundle_assets(script.parent)
+    if missing_assets:
+        die(f"setup: the running tree is missing {', '.join(missing_assets)} "
+            f"beside {script.name}; refusing to freeze an incomplete bundle")
+
     try:
         root.mkdir(parents=True, exist_ok=True)
         marker.write_text(f"setup started {utcnow()}\n", encoding="utf-8")
@@ -623,77 +649,10 @@ def cmd_setup(args) -> None:
     if _protected:
         print(f"[setup] read-only evidence: {_protected} entr(y/ies) chmod-protected under "
               f"{ctx.pristine.name}/; stage sandboxes will symlink them instead of copying")
-    # Copy the script that is RUNNING, not its basename resolved against the CWD:
-    # `setup` is normally launched as `python /path/to/paper_pipeline.py setup
-    # --root ...` from whatever directory the operator is in, and the basename
-    # then named a file that does not exist there. That failure came AFTER the
-    # root had been populated, and `setup` refuses to re-run on a non-empty root,
-    # so it left a half-built root to delete by hand.
-    script = Path(__file__).resolve()
-    shutil.copy(script, root / script.name)
-    # The loaders above are thin: their ordered implementation parts must travel
-    # with them, or the frozen bundle cannot start. Refuse to create a root that
-    # would freeze a loader without its implementation.
-    _missing_assets = [f"{name}/" for name in PIPELINE_ASSET_DIRS
-                       if not (script.parent / name).is_dir()]
-    _missing_assets += [
-        f"agent-common/agent_common/{name}"
-        for name in ("model_runtime.py", "llm_retry.py", "llm_policy.json",
-                     "model_catalog.json",
-                     # Part 08 imports it for the turn-cap counter; without it a
-                     # frozen root cannot load even though the directory exists.
-                     "dsh_events.py")
-        if not (script.parent / "agent-common" / "agent_common" / name).is_file()
-    ]
-    # The companion MODULES are just as required: the agent commands call
-    # `python paper_docx_format.py scan ...`, the redline backend resolves the
-    # adapter beside the driver, the `qwen`/`dots` presets execute their
-    # modules, and the render/track shims are probed beside the driver. These
-    # used to be copied only `if is_file()`, so a trimmed checkout produced a
-    # root that looked healthy (exit 0) and then failed every later stage on a
-    # missing tool.
-    _missing_modules = [name for name in PIPELINE_MODULE_FILES
-                        if name != script.name and not (script.parent / name).is_file()]
-    if _missing_assets or _missing_modules:
-        _missing = list(_missing_assets) + list(_missing_modules)
-        die(f"setup: the running tree is missing {', '.join(_missing)} beside "
-            f"{script.name}; refusing to freeze a bundle whose stages cannot run. Run setup "
-            f"from the maintained checkout (the tree that carries the loaders, their parts "
-            f"and the companion modules).")
-    _asset_dirs = copy_asset_dirs(script.parent, root)
+    _asset_dirs = _freeze_runtime_bundle(script.parent, root)
     if _asset_dirs:
         print(f"[setup] pipeline assets:         copied {', '.join(_asset_dirs)}/ "
               f"(the loaders execute the parts; the skills pack is read beside the driver)")
-    # The OOXML formatting scanner is a companion module (see
-    # scan_format_in_sources); copy it next to the script so the root stays
-    # self-contained and `python <root>/paper_pipeline.py` keeps working.
-    _fmt_mod = script.with_name(DOCX_FORMAT_MODULE)
-    if _fmt_mod.is_file():
-        shutil.copy(_fmt_mod, root / DOCX_FORMAT_MODULE)
-    # The redline adapter travels with the root too: the tracking stage's
-    # python-redlines backend resolves it NEXT TO THE RUNNING SCRIPT, and a root
-    # without it silently skipped that engine (the weaker fallbacks then
-    # over-marked a small edit as whole-paragraph rewrites -- exactly what
-    # `redline_fidelity` now flags).
-    _adapter = script.with_name(REDLINE_ADAPTER_NAME)
-    if _adapter.is_file():
-        shutil.copy(_adapter, root / REDLINE_ADAPTER_NAME)
-    # The provider adapters are executed by their agent presets, which resolve
-    # their paths next to the running driver. A root that lacks one cannot run
-    # that preset; copy it at setup and let the module manifest gate a later
-    # drift.
-    for _adapter_name in ("paper_qwen_agent.py", "paper_dots_agent.py",
-                          "paper_model_agent.py"):
-        _adapter = script.with_name(_adapter_name)
-        if _adapter.is_file():
-            shutil.copy(_adapter, root / _adapter_name)
-    # The render/track shims are resolved beside the running driver
-    # (`visual_renderer_choices`, the MCP probes). A root without them silently
-    # loses the highest-fidelity renderer/comparer, so they travel too.
-    for _shim_name in ("docx2pdf.sh", "docxcompare.sh"):
-        _shim = script.with_name(_shim_name)
-        if _shim.is_file():
-            shutil.copy2(_shim, root / _shim_name)
     # The venue profiles travelled with `copy_asset_dirs` above: they are a
     # frozen runtime asset in the module/asset manifest (Rule 11), so setup fails
     # on a copy error instead of warning and shipping a root whose `--list` and
@@ -1438,10 +1397,7 @@ def cmd_set_venue(args) -> None:
         ctx.cfg["caption_limit_source"] = ("operator" if caption_source == "operator"
                                            else "profile-default")
         ctx.cfg["venue_profile"] = snapshot
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-venue", detail=f"venue={profile.id} journal={journal or '(unset)'}")
-        ctx.save_state()
+        _save_root_config(ctx, "set-venue", detail=f"venue={profile.id} journal={journal or '(unset)'}")
     print(f"[set-venue] venue:   {profile.id} (\"{profile.label}\", {profile.describe_origin()})")
     print(f"[set-venue] article: {profile.article_type} (`{profile.article_type_id}`, "
           f"{'operator-set' if article_type_source == 'operator' else 'the profile default'})")
@@ -1564,10 +1520,7 @@ def cmd_set_article_type(args) -> None:
     with ctx.lock("set-article-type"):
         ctx.cfg["article_type"] = wanted
         ctx.cfg["article_type_source"] = "operator"
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-article-type", detail=wanted)
-        ctx.save_state()
+        _save_root_config(ctx, "set-article-type", detail=wanted)
     chosen = profile.with_article_type(wanted)
     limits = chosen.length_limits()
     print(f"[set-article-type] article type: {chosen.article_type} (`{wanted}`) for venue "
@@ -1625,10 +1578,7 @@ def cmd_set_journal(args) -> None:
     with ctx.lock("set-journal"):
         ctx.cfg["journal"] = journal
         ctx.cfg["journal_source"] = "operator"
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-journal", detail=journal)
-        ctx.save_state()
+        _save_root_config(ctx, "set-journal", detail=journal)
     print(f"[set-journal] journal: {journal} (venue {venue_id_of(ctx)})")
     if mismatch:
         print(f"[set-journal] warning: {mismatch}")
@@ -2606,10 +2556,7 @@ def cmd_set_tiebreak_defect_floor(args) -> None:
             f"       Re-run `set-tiebreak-defect-floor {floor} --force` if the change is intended.")
     with ctx.lock("set-tiebreak-defect-floor"):
         ctx.cfg["tiebreak_defect_floor"] = floor
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-tiebreak-defect-floor", detail=str(floor))
-        ctx.save_state()
+        _save_root_config(ctx, "set-tiebreak-defect-floor", detail=str(floor))
     print(f"[set-tiebreak-defect-floor] floor: {floor} (the severity_tier_category walk stops "
           f"when the cleanest ranked version reaches {floor} defect(s), or when every cell is "
           f"used)")
@@ -2663,10 +2610,7 @@ def cmd_set_cold_start_review(args) -> None:
             f"(rounds whose review has not been materialized yet will use it).")
     with ctx.lock("set-cold-start-review"):
         ctx.cfg["cold_start_review"] = mode_arg
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-cold-start-review", detail=mode_arg)
-        ctx.save_state()
+        _save_root_config(ctx, "set-cold-start-review", detail=mode_arg)
     detail = ("one cold-context independent discovery session per full-scope round, findings "
               "X-9xx, every declared verifier re-run at postcheck time" if mode_arg == "on"
               else "no cold-start session is planned")
@@ -2703,10 +2647,7 @@ def cmd_set_submit_code(args) -> None:
     begin_run_log("set-submit-code", ctx.root, sys.argv)
     with ctx.lock("set-submit-code"):
         ctx.cfg["submit_code"] = mode_arg
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-submit-code", detail=mode_arg)
-        ctx.save_state()
+        _save_root_config(ctx, "set-submit-code", detail=mode_arg)
     detail = ("`code/` ships in the submission package and a response letter may cite it"
               if mode_arg == "on" else
               "`code/` is stripped from the submission package and a response letter may not "
@@ -2766,10 +2707,7 @@ def cmd_set_author_to_complete(args) -> None:
     begin_run_log("set-author-to-complete", ctx.root, sys.argv)
     with ctx.lock("set-author-to-complete"):
         ctx.cfg["author_to_complete"] = mode_arg
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-author-to-complete", detail=mode_arg)
-        ctx.save_state()
+        _save_root_config(ctx, "set-author-to-complete", detail=mode_arg)
     detail = {
         "document": ("the stages mark a missing mandatory item with the literal "
                      "\"[AUTHOR TO COMPLETE: ...]\" token and list it for the author (the "
@@ -2810,10 +2748,7 @@ def cmd_set_placeholder_file(args) -> None:
     if bool(getattr(args, "clear", False)):
         with ctx.lock("set-placeholder-file"):
             ctx.cfg["placeholder_files"] = []
-            ctx.state["config"] = ctx.cfg
-            write_json_atomic(ctx.cfg_path, ctx.cfg)
-            ctx.log("set-placeholder-file", detail="cleared")
-            ctx.save_state()
+            _save_root_config(ctx, "set-placeholder-file", detail="cleared")
         print("[set-placeholder-file] cleared (no file is treated as a placeholder)")
         return
     # The declarations name PACKAGE-relative paths; on an existing root the
@@ -2843,10 +2778,7 @@ def cmd_set_placeholder_file(args) -> None:
     begin_run_log("set-placeholder-file", ctx.root, sys.argv)
     with ctx.lock("set-placeholder-file"):
         ctx.cfg["placeholder_files"] = merged
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-placeholder-file", detail=", ".join(merged))
-        ctx.save_state()
+        _save_root_config(ctx, "set-placeholder-file", detail=", ".join(merged))
     report = placeholder_files_report(pkg_root, extra_globs=merged,
                                       area_names=submission_not_carried_areas(ctx))
     print(f"[set-placeholder-file] declared {len(merged)} pattern(s); "
@@ -2888,10 +2820,7 @@ def cmd_set_dedup_mode(args) -> None:
             f"       Re-run `set-dedup-mode {mode_arg} --force` if the change is intended.")
     with ctx.lock("set-dedup-mode"):
         ctx.cfg["dedup_mode"] = mode_arg
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-dedup-mode", detail=mode_arg)
-        ctx.save_state()
+        _save_root_config(ctx, "set-dedup-mode", detail=mode_arg)
     detail = ("every sheet's rows are separate mentions" if mode_arg == "off"
               else "rows across sheets merge on the structured location key")
     print(f"[set-dedup-mode] mode: {mode_arg} ({detail})")
@@ -2950,10 +2879,7 @@ def cmd_set_champion_select(args) -> None:
     begin_run_log("set-champion-select", ctx.root, sys.argv)
     with ctx.lock("set-champion-select"):
         ctx.cfg["champion_select"] = mode_arg
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-champion-select", detail=mode_arg)
-        ctx.save_state()
+        _save_root_config(ctx, "set-champion-select", detail=mode_arg)
     print(f"[set-champion-select] mode: {mode_arg}"
           + ("" if mode_arg == "judge" else " (PROVISIONAL: no judge panel)"))
 
@@ -3239,10 +3165,7 @@ def cmd_set_revision_mode(args) -> None:
             else:
                 ctx.cfg["cold_start_review"] = str(_saved_cold).lower()
                 forced.append(f"cold_start_review={ctx.cfg['cold_start_review']} (restored)")
-        ctx.state["config"] = ctx.cfg
-        write_json_atomic(ctx.cfg_path, ctx.cfg)
-        ctx.log("set-revision-mode", detail=mode_arg)
-        ctx.save_state()
+        _save_root_config(ctx, "set-revision-mode", detail=mode_arg)
     print(f"[set-revision-mode] mode: {mode_arg} (option {info['option']}) -- {info['label']}")
     for f in forced:
         print(f"[set-revision-mode]   forced by the mode: {f}")

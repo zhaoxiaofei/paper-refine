@@ -2164,78 +2164,6 @@ def count_manual_steps(path: Path):
 # prose. Nothing here gates a version: see caption_gate().
 # ---------------------------------------------------------------------
 
-# Inline verbatim is CODE, not prose (`\verb|x y|`, `\lstinline[opts]{x y}`):
-# the command-name stripper removed only the command, so the delimiters and the
-# code tokens stayed in the M19 count. The delimiter form needs a
-# backreference, so the two shapes are separate patterns. The lookahead on
-# the captured delimiter keeps a doubled delimiter from ending the body early.
-TEX_INLINE_VERBATIM_RE = re.compile(
-    r"\\mintinline\*?(?:\[[^\[\]]*\]\s*)?\{[^{}]*\}\s*"
-    r"(?:\{[^{}]*\}|(?P<md>[^\sA-Za-z0-9])(?:\\.|(?!(?P=md))[\s\S])*?(?P=md))")
-TEX_INLINE_VERB_RE = re.compile(
-    r"\\(?:verb|lstinline)\*?(?:\[[^\[\]]*\]\s*)?"
-    r"(?:\{[^{}]*\}|(?P<vd>[^\sA-Za-z0-9])"
-    r"(?:\\.|(?!(?P=vd))[\s\S])*?(?P=vd))")
-
-
-def _strip_latex(text: str) -> str:
-    # Keep in step with paper-skills/paper-review/scripts/count_words.py: the
-    # same two gaps made the two word counters disagree with each other AND
-    # overcount prose. Optional arguments first (`\cite[p.5]{x}` left `[p.5]` and
-    # `x` behind as prose); then inline/single-line display math (`$p<0.05$`,
-    # `\(x\)`, `\[x\]`), which is not prose either.
-    # `[a-zA-Z]*ref` covers the whole reference family (`\pageref{p12}`,
-    # `\eqref{}`, `\autoref{}`, `\cref{}`): the bare `ref` alternative missed
-    # every prefixed form, so `\pageref{p12}` left the phantom word `p12` in the
-    # M19 count. And an ESCAPED dollar (`\$5`) is a literal, not math: the math
-    # pattern is lookbehind-guarded, so `\$5 to \$6` no longer swallows `5 to $`.
-    # The CITATION family is matched case-insensitively and on BOTH sides of
-    # `cite`: `[a-zA-Z]*cite[a-zA-Z]*` covers the biblatex-prefixed commands
-    # (`\nocite`, `\autocite`, `\parencite`, `\textcite`, `\footcite`) the skill
-    # already dropped, and `re.I` covers the capitalized natbib forms (`\Cite`,
-    # `\Citet`, `\Citep`) whose keys both counters used to count as prose.
-    text = re.sub(r"\\(?:[a-zA-Z]*cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
-                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text, flags=re.I)
-    text = TEX_INLINE_VERBATIM_RE.sub(" ", text)
-    text = TEX_INLINE_VERB_RE.sub(" ", text)
-    # A colour, font or graphics-file argument is an identifier, not prose:
-    # `\textcolor{red}{word}` counted `red` and `\includegraphics{fig1}` counted
-    # `fig1`. Only the formatting/asset argument is dropped; the VISIBLE text
-    # argument of \textcolor/\colorbox survives (the braces below become
-    # spaces, the words stay).
-    text = re.sub(r"\\(?:includegraphics|includesvg|includepdf)\*?\s*"
-                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text, flags=re.I)
-    text = re.sub(r"\\textcolor\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text,
-                  flags=re.I)
-    text = re.sub(r"\\colorbox\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text,
-                  flags=re.I)
-    text = re.sub(r"\\fcolorbox\s*(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}\s*\{[^{}]*\}",
-                  " ", text, flags=re.I)
-    text = re.sub(r"\\(?:color|pagecolor|definecolor)\s*(?:\[[^\[\]]*\]\s*)*"
-                  r"(?:\{[^{}]*\}\s*){1,3}", " ", text, flags=re.I)
-    # `(?:\\\\)*` consumes an EVEN run of backslashes before the math: after a
-    # LaTeX line break (`\\$x$`) the dollar is still math, while `\$5` (one
-    # backslash) is an escaped literal and stays prose.
-    text = re.sub(r"(?<!\\)(?:\\\\)*\$\$[\s\S]*?\$\$"
-                  r"|(?<!\\)(?:\\\\)*\$[^$]*\$|\\\[[\s\S]*?\\\]|"
-                  r"\\\([\s\S]*?\\\)", " ",
-                  text)
-    text = re.sub(r"\\[a-zA-Z@]+\*?", " ", text)
-    return re.sub(r"\s+", " ", text.replace("{", " ").replace("}", " ")).strip()
-
-
-def count_words(text: str) -> int:
-    """The pipeline's word definition, used for EVERY word count it reports.
-
-    A word is a maximal run of NON-SPACE characters, with a newline treated as
-    space (and, for the same reason, tabs and other whitespace). "state-of-the-
-    art" is ONE word, "2026" is ONE word, and an abbreviation with an inner
-    space ("et al.") is two. Nothing else is normalised here: callers that need
-    LaTeX commands or Word field instructions removed strip them first.
-    """
-    return len(re.findall(r"\S+", text or ""))
-
-
 def count_caption_words(text: str) -> int:
     return count_words(_strip_latex(text or ""))
 
@@ -2660,117 +2588,18 @@ LENGTH_TEXT_EXTS = (".md", ".txt", ".markdown", ".rst")
 LENGTH_UNPARSED_EXTS = (".doc", ".rtf")
 LENGTH_RENDERED_EXTS = (".pdf", ".ppt", ".pptx")
 
-LENGTH_ABSTRACT_HEAD_RE = re.compile(
-    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary)\s*[:.\u2014\u2013-]?\s*$", re.I)
-# The common inline layout: "Abstract: We studied ..." on one line. The heading
-# must be recognised or the abstract is left inside the main text; the rest of
-# the line is its first paragraph (count_words.py has the same branch).
-LENGTH_ABSTRACT_INLINE_RE = re.compile(
-    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary)\s*[:.\u2014\u2013-]\s*(\S.*)$",
-    re.I)
-LENGTH_MAIN_START_RE = re.compile(
-    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:introduction|main text|background)\s*[:.\u2014\u2013-]?\s*$",
-    re.I)
-LENGTH_SECTION_BOUND_RE = re.compile(
-    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary|keywords?|introduction|background|"
-    r"results?|discussion|conclusions?|materials (?:and|&) methods|online methods?|methods?|"
-    r"star methods|experimental procedures|"
-    r"references?|bibliography|(?:literature|works) cited|figure legends?|acknowledg\w*|"
-    r"author contributions?|"
-    r"(?:data|code) availability|competing interests?|conflicts? of interest|funding|"
-    r"supplementary (?:information|materials?|methods|figures|tables|notes?))"
-    r"\s*[:.\u2014\u2013-]?\s*$", re.I)
-# The SAME boundary headings, classified by the section kind that a profile's
-# `counting.main_text.excludes` names. The scan ends the main-text span at the
-# first boundary heading whose kind the venue EXCLUDES; a kind the venue counts
-# (Frontiers counts Methods) does not end it, and legends are not subtracted
-# when the venue counts them.
-LENGTH_SECTION_KIND_RES = (
-    ("methods", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials (?:and|&) methods|online methods?|methods?|"
-        r"star methods|experimental procedures)\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
-    ("references", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography|"
-        r"(?:literature|works) cited)\s*"
-        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
-    ("figure-legends", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?figure legends?\s*"
-        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
-    ("acknowledgements", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?acknowledg\w*\s*(?:[:.\u2014\u2013-]\s*|\s*$)",
-        re.I)),
-    ("author-contributions", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?author contributions?\s*"
-        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
-    ("data-availability", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:data|code) availability\s*"
-        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
-    ("competing-interests", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:competing interests?|conflicts? of interest)\s*"
-        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
-    ("funding", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?funding\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
-    ("supplementary", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?supplementary "
-        r"(?:information|materials?|methods|figures|tables|notes?)\s*"
-        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
-)
-
-
-def _length_heading_text(line: str) -> str:
-    """A heading line with a Markdown ATX prefix or emphasis removed.
-
-    The M19 scan reads .md too, and `## Methods` is the same heading as
-    `Methods`; the anchored patterns saw the hashes as text and never matched,
-    so the excluded section stayed in the count. The same holds for emphasis
-    used AS the heading marker (`**Abstract**`, `__Methods__`, `*Introduction*`):
-    a Markdown manuscript built that way matched no heading regex and reported
-    no M19 rows at all (the 2026-10-28 audit's F38).
-    """
-    text = re.sub(r"^\s*#{1,6}\s+", "", (line or "").strip())
-    m = re.match(r"^(\*\*|__|\*|_)(\S.*?)\1(.*)$", text)
-    if m and m.group(2).strip():
-        text = (m.group(2) + m.group(3)).strip()
-    return text
-
-
-def _length_section_kind(line: str) -> str:
-    """The M19 counting-convention kind of a boundary heading ("" when not one)."""
-    text = _length_heading_text(line)
-    if not text:
-        return ""
-    for kind, pattern in LENGTH_SECTION_KIND_RES:
-        if pattern.match(text):
-            return kind
-    return ""
-
-
-LENGTH_KEYWORDS_RE = re.compile(
-    # The optional section number is the one thing count_words.KEYWORDS accepts
-    # that this twin used to reject: "2 Keywords: ..." was body text here and a
-    # keyword boundary there, so the two M19 counters disagreed on the abstract.
-    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:key\s?words?)\s*(?:[:.\u2014\u2013-]|$)", re.I)
-
-
-def _length_keyword_continuation(line: str) -> bool:
-    """Does this line continue the keyword LIST, or start the body?
-
-    A comma/semicolon list of short items is a continuation; a comma-bearing
-    sentence is body; a short lowercase unpunctuated line is a list.
-    """
-    text = (line or "").strip()
-    if not text:
-        return False
-    words = text.split()
-    if "," in text or ";" in text:
-        parts = [p.strip() for p in re.split(r"[,;]", text) if p.strip()]
-        return (bool(parts) and not re.search(r"[.!?]\s*$", text)
-                and (text[:1].islower() or len(parts[0].split()) <= 1)
-                and 2 <= len(parts) <= 20 and len(words) <= 24
-                and all(len(p.split()) <= 4 for p in parts))
-    if re.search(r"[.!?]\s*$", text):
-        return False
-    return len(words) <= 4 and text[:1].islower()
+# Keep the names used by the scanner and by its other text consumers.
+_word_rules = _load_pipeline_module(MANUSCRIPT_WORDS_FILE)
+_strip_latex = _word_rules.strip_latex
+count_words = _word_rules.count_words
+LENGTH_ABSTRACT_HEAD_RE = _word_rules.ABSTRACT_HEAD
+LENGTH_ABSTRACT_INLINE_RE = _word_rules.INLINE_ABSTRACT_HEAD
+LENGTH_MAIN_START_RE = _word_rules.MAIN_START
+LENGTH_SECTION_BOUND_RE = _word_rules.SECTION_BOUND
+LENGTH_KEYWORDS_RE = _word_rules.KEYWORDS
+_length_heading_text = _word_rules.heading_text
+_length_section_kind = _word_rules.section_kind
+_length_keyword_continuation = _word_rules.keyword_continuation
 
 
 LENGTH_COVER_SALUTATION_RE = re.compile(
@@ -3057,66 +2886,11 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     caption_kinds = {kind for kind, section in (("figure", "figure-legends"),
                                                  ("table", "table-captions"))
                      if section in excludes}
-    n = len(lines)
-
-    def clean(s):
-        return (s or "").strip()
-
-    abs_start = abs_end = None
-    inline_abs = False
-    for i in range(n):
-        heading = _length_heading_text(lines[i])
-        inline = LENGTH_ABSTRACT_INLINE_RE.match(heading)
-        if inline:
-            # Keep the remainder as the abstract's first paragraph; the
-            # heading itself is not text.
-            lines[i] = inline.group(1)
-            abs_start, inline_abs = i, True
-            break
-        if LENGTH_ABSTRACT_HEAD_RE.match(heading):
-            abs_start = i + 1
-            break
-        # "Summary" is also a common CLOSING heading. Once a body heading has
-        # appeared (Introduction/Background or any excluded section kind), a
-        # later "Summary" is a concluding section, not a second abstract: the
-        # old whole-document search took it as abs_start=end-of-document and
-        # removed the body before it (the 2026-10-28 audit's F35).
-        if LENGTH_MAIN_START_RE.match(heading) or _length_section_kind(heading):
-            break
-    if abs_start is not None:
-        if abstract_end is not None:
-            abs_end = max(abs_start, min(int(abstract_end), n))
-        else:
-            j = abs_start
-            seen_text = inline_abs
-            first_blank = None
-            boundary = False
-            while j < n:
-                line = clean(lines[j])
-                heading = _length_heading_text(line)
-                if LENGTH_SECTION_BOUND_RE.match(heading) or \
-                        LENGTH_MAIN_START_RE.match(heading) or LENGTH_KEYWORDS_RE.match(heading):
-                    boundary = True
-                    break
-                if not line:
-                    if seen_text and first_blank is None:
-                        first_blank = j
-                    j += 1              # leading blanks right after the heading
-                    continue
-                seen_text = True
-                j += 1
-            # A multi-paragraph abstract is legitimate; only a document
-            # with no section boundary at all falls back to its first
-            # blank line, so the later paragraphs are not charged to the
-            # main text.
-            if not boundary and first_blank is not None:
-                j = first_blank
-            abs_end = j
-    main_start = None
-    for i in range(n):
-        if LENGTH_MAIN_START_RE.match(_length_heading_text(lines[i])):
-            main_start = i + 1
-            break
+    bounds = _word_rules.section_bounds(lines, abstract_end)
+    abs_start, abs_end, main_start = bounds
+    spans = [(span[0], span[1]) for span in (caption_spans or [])
+             if subtract_captions and (len(span) <= 2 or span[2] is None
+                                       or span[2] in caption_kinds)]
     if abs_start is None and main_start is None:
         if not whole_doc_as_main and not include_abstract:
             return []                # not manuscript-shaped: skip, never guess
@@ -3125,15 +2899,8 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
             # letter to the editor) carries no Abstract/Introduction heading by
             # design: the type's cap applies to its WHOLE text (the LT4
             # contract), so this branch stays unfiltered.
-            caption_words = 0
-            if subtract_captions:
-                # A TeX span carries its kind; DOCX/text spans are pre-filtered.
-                caption_words = sum(
-                    count_caption_words(" ".join(lines[max(a, 0):min(b, n)]))
-                    for a, b, kind in ((s[0], s[1], s[2] if len(s) > 2 else None)
-                                       for s in (caption_spans or []))
-                    if a < n and b > 0 and (kind is None or kind in caption_kinds))
-            words = max(0, count_words(" ".join(lines)) - caption_words)
+            words, _ = _word_rules.count_main_text(
+                lines, 0, [True] * len(lines), spans, count_caption_words)
             main_cap = limits["main text"].get("cap")
             return [{"document": doc, "section": "main text", "words": words,
                      "relaxation": limits["main text"].get("relaxation"),
@@ -3157,76 +2924,9 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                      "relaxation": limits["abstract"].get("relaxation"),
                      "cap": abs_cap,
                      "over_limit": abs_cap is not None and words > abs_cap, "note": ""})
-    # The main-text span starts after an excluded abstract; when the venue counts
-    # the abstract INSIDE the main text, it starts at the abstract's own text.
-    if abs_start is not None:
-        start = abs_start if include_abstract else abs_end
-    elif main_start is not None:
-        start = main_start
-    else:
-        start = 0 if include_abstract else None
-    # The abstract block ends ON the next heading line ("Introduction" in most
-    # venues' Articles, which is written without a heading in the final layout).
-    # Build the counted set line by line: an excluded section heading starts a
-    # skip, and a later heading whose kind the venue does NOT exclude resumes
-    # the count. Truncating at the first excluded heading dropped a Results or
-    # Discussion section after a mid-paper Methods block even though the
-    # profile says that kind is inside the count.
-    span_start = start or 0
-    included = [False] * n
-    excluded_now = False
-    end_found = False
-    in_keyword_block = False
-    for i in range(span_start, n):
-        line = clean(lines[i])
-        heading = _length_heading_text(line)
-        if LENGTH_KEYWORDS_RE.match(heading):
-            # A Keywords line is a boundary, not a section kind: the generic
-            # branch below reset `excluded_now` for it, which put the keyword
-            # list (and any Methods prose after it) back into the main-text
-            # count. count_words.py's M19 counter keeps the same state; this
-            # is the same rule for the deterministic scan.
-            in_keyword_block = True
-            excluded_now = True
-            continue
-        if in_keyword_block:
-            if not line:
-                in_keyword_block = False
-                excluded_now = False
-                continue
-            if _length_keyword_continuation(line):
-                continue                # a wrapped keyword list is not prose
-            # A non-empty line that is not a keyword continuation ends the
-            # block AND is body text. The old branch kept skipping every such
-            # line until a blank or a heading, so a Brief Communication written
-            # as "Keywords: ..." immediately followed by its body (no blank
-            # line, no headings) lost the whole body and reported 0 main-text
-            # words (the 2026-10-28 audit's F34).
-            in_keyword_block = False
-            excluded_now = False
-        if LENGTH_SECTION_BOUND_RE.match(heading) or \
-                LENGTH_MAIN_START_RE.match(heading):
-            in_keyword_block = False
-            kind = _length_section_kind(heading)
-            if kind and kind in excludes:
-                excluded_now = True
-                end_found = True
-            else:
-                excluded_now = False
-            continue
-        included[i] = not excluded_now
-    body = [lines[i] for i in range(span_start, n) if included[i]]
-    caption_words = 0
-    if subtract_captions:
-        caption_words = sum(
-            # The span's BODY lines only, like count_words.py's caption span (F020).
-            count_caption_words(" ".join(lines[j] for j in
-                                         range(max(a, span_start), min(b, n)) if included[j]))
-            for a, b, kind in ((span[0], span[1], span[2] if len(span) > 2 else None)
-                               for span in (caption_spans or []))
-            if a < n and b > span_start and (kind is None or kind in caption_kinds)
-            and any(included[i] for i in range(max(a, span_start), min(b, n))))
-    words = max(0, count_words(" ".join(body)) - caption_words)
+    span_start, included, end_found = _word_rules.main_text_lines(lines, bounds, excludes)
+    words, caption_words = _word_rules.count_main_text(
+        lines, span_start, included, spans, count_caption_words)
     notes = []
     if abs_start is None:
         if main_start is None:

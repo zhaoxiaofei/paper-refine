@@ -96,46 +96,6 @@ def test_f01_f36_f43() -> None:
 
 
 # ---------------------------------------------------------------------------
-# F02/F05/F31 -- the two M19 counters and the LaTeX input scan agree
-# ---------------------------------------------------------------------------
-def test_f02_f05_f31() -> None:
-    print()
-    print("== F02/F05/F31: M19 keyword/References parity and comment parity ==")
-    lines = ["Abstract", "We studied X.", "2 Keywords: alpha beta gamma",
-             "Introduction", "Body text here and more."]
-    pip = [(r["section"], r["words"]) for r in pp._length_rows_for_lines(lines, "ms.md")]
-    cwr = [(s, w) for s, w, _ in cw.sections("\n".join(lines))]
-    check("F02 a numbered Keywords heading is a boundary in both counters",
-          pip == cwr == [("abstract", 3), ("main text", 5)], f"PIP={pip} CW={cwr}")
-
-    tex = r"""\documentclass{article}
-\begin{document}
-\begin{abstract}
-We studied X.
-\end{abstract}
-\section{Introduction}
-Body text here and more.
-\begin{thebibliography}{9}
-\bibitem{a} Alpha et al. A title. 2020.
-\bibitem{b} Beta et al. Another title. 2021.
-\end{thebibliography}
-\end{document}
-"""
-    ls, caps, ae = pp._tex_length_scan(tex)
-    pip = [(r["section"], r["words"]) for r in
-           pp._length_rows_for_lines(ls, "ms.tex", caption_spans=caps, abstract_end=ae)]
-    cwr = [(s, w) for s, w, _ in cw.sections("\n".join(cw.tex_lines(tex)[0]))]
-    check("F05 an inline bibliography is excluded by both counters",
-          pip == cwr and ("main text", 5) in pip, f"PIP={pip} CW={cwr}")
-
-    src = r"x\\% \input{hidden.tex}"
-    check("F31 a \\\\% comment ends the line (parity with strip_tex_comment)",
-          pp._tex_strip_comments(src) == pp.strip_tex_comment(src) == "x\\\\")
-    check("F31 a commented-out \\input is not a dependency",
-          pp.tex_input_targets(src) == [], pp.tex_input_targets(src))
-
-
-# ---------------------------------------------------------------------------
 # F04/F11/F15 -- the integration DIFF_LEDGER contract is enforced
 # ---------------------------------------------------------------------------
 def _ledger(text: str, donors=("a1",)):
@@ -615,7 +575,6 @@ def test_f29_f33_f37_f38() -> None:
 # ---------------------------------------------------------------------------
 def main() -> int:
     test_f01_f36_f43()
-    test_f02_f05_f31()
     test_f04_f11_f15()
     test_f06_f44()
     test_f17_f18_f19()

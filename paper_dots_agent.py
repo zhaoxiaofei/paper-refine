@@ -66,7 +66,6 @@ from __future__ import annotations
 
 import argparse
 import atexit
-import contextlib
 import http.client
 import json
 import os
@@ -89,7 +88,14 @@ except ImportError:  # a test loader may not put the submodule root on sys.path
 
 from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
 from agent_common.chat import completion_budget, finish_reason_error, message_text
-from agent_common.dsh_events import line_turn_end_failed as _line_turn_end_failed
+# These scripts are also loaded by absolute filename by the test runner.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import paper_dsh_runtime
+finally:
+    sys.path.pop(0)
+
+_dsh_turn_failed = paper_dsh_runtime.line_turn_end_failed
 
 #: Every default below is a shared model setting: the catalog and the runtime
 #: in ``agent-common`` own them, so a revision (reasoning level, context
@@ -370,45 +376,12 @@ def claude_env(cfg: dict) -> dict:
     )
 
 
-def _writable(path: Path) -> bool:
-    try:
-        probe = path / ".paper_dots_write_test"
-        probe.write_text("x", encoding="utf-8")
-        probe.unlink()
-        return True
-    except OSError:
-        return False
-
-
 def ensure_dsh_home() -> tuple:
-    """(DSH_HOME, error). A read-only installed home gets a light temp copy."""
     global _DSH_HOME_TMP
-    home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh")).expanduser()
-    if home.is_dir() and _writable(home):
-        return str(home), ""
-    src = home / "profiles" / "headless"
-    if not src.is_dir():
-        return "", (f"the dsh profile is missing: {src}; install "
-                    f"@deepseek-ai/dsh and create the headless profile")
-    tmp = Path(tempfile.mkdtemp(prefix="paper-dots-dsh-"))
-    _DSH_HOME_TMP = tmp
-    dst = tmp / "profiles" / "headless"
-    dst.mkdir(parents=True, exist_ok=True)
-    for name in ("package.json", "cordis.yml", "cordis.patch.yml",
-                 "pnpm-workspace.yaml", "pnpm-lock.yaml"):
-        s = src / name
-        if s.is_file():
-            shutil.copy2(s, dst / name)
-    nm = src / "node_modules"
-    if nm.is_dir():
-        try:
-            os.symlink(nm, dst / "node_modules")
-        except OSError:
-            shutil.copytree(nm, dst / "node_modules", symlinks=True)
-    cred = home / ".credentials.yaml"
-    if cred.is_file():
-        shutil.copy2(cred, tmp / ".credentials.yaml")
-    return str(tmp), ""
+    home, error, temporary = paper_dsh_runtime.prepare_dsh_home("dots")
+    if temporary is not None:
+        _DSH_HOME_TMP = temporary
+    return home, error
 
 
 def _cleanup() -> None:
@@ -518,73 +491,8 @@ def _print_probe(cfg: dict) -> int:
     return 0
 
 
-MAX_DSH_LINE_BYTES = 1 << 20      # one JSON event line larger than this is discarded
-
-
-def _echo_stdout(data: bytes) -> None:
-    """Forward child bytes to our stdout, text-mode or buffer."""
-    buf = getattr(sys.stdout, "buffer", None)
-    if buf is not None:
-        buf.write(data)
-        buf.flush()
-    else:
-        sys.stdout.write(data.decode("utf-8", "replace"))
-        sys.stdout.flush()
-
-
-def _dsh_turn_failed(line: bytes):
-    """True/False for a turn-end event line, None for every other line."""
-    return _line_turn_end_failed(line)
-
-
 def run_dsh_streaming(cmd: list, env: dict) -> tuple:
-    """(returncode, turn_failed) with the harness's stdout ECHOED, not buffered.
-
-    `dsh --json` emits one JSON object per line; a verbose harness must not be
-    accumulated whole. The stream is read in bounded chunks, echoed as it
-    arrives, and only complete lines are parsed.
-    """
-    proc = subprocess.Popen(cmd, stdin=sys.stdin, stdout=subprocess.PIPE,
-                            stderr=sys.stderr, env=env)
-    turn_failed = None
-    saw_turn_end = False
-    carry = b""
-    try:
-        # `read1`, not `read`: a buffered `read(n)` waits for n bytes (or EOF),
-        # so a slow harness's first event would not be echoed until the stream
-        # filled or the process exited -- the opposite of streaming.
-        read_chunk = getattr(proc.stdout, "read1", proc.stdout.read)
-        while True:
-            chunk = read_chunk(1 << 20)
-            if not chunk:
-                break
-            _echo_stdout(chunk)
-            carry += chunk
-            *lines, carry = carry.split(b"\n")
-            for line in lines:
-                failed = _dsh_turn_failed(line)
-                if failed is not None:
-                    turn_failed = failed
-                    saw_turn_end = True
-            if len(carry) > MAX_DSH_LINE_BYTES:
-                carry = b""           # a single event line over budget: unusable
-        if carry:
-            failed = _dsh_turn_failed(carry)
-            if failed is not None:
-                turn_failed = failed
-                saw_turn_end = True
-        proc.wait()
-    finally:
-        if proc.poll() is None:
-            with contextlib.suppress(OSError):
-                proc.kill()
-            proc.wait()
-    if not saw_turn_end:
-        # Exit status 0 with no turn_end event is NOT a completed turn: the
-        # harness may have died before answering.
-        print("dots: the harness emitted no turn_end completion event", file=sys.stderr)
-        turn_failed = True
-    return int(proc.returncode or 0), turn_failed
+    return paper_dsh_runtime.run_dsh_streaming(cmd, env, "dots")
 
 
 def _api_key_problem(cfg: dict) -> str:

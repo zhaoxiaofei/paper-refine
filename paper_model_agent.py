@@ -62,7 +62,14 @@ except ImportError:  # a test loader may not put the submodule root on sys.path
     from agent_common import model_runtime as rt
 
 from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
-from agent_common.dsh_events import line_turn_end_failed as _line_turn_end_failed
+# These scripts are also loaded by absolute filename by the test runner.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import paper_dsh_runtime
+finally:
+    sys.path.pop(0)
+
+MAX_DSH_LINE_BYTES = paper_dsh_runtime.MAX_DSH_LINE_BYTES
 
 DEFAULT_HARNESS = rt.DEFAULT_AGENT_HARNESS
 DEFAULT_MODEL = "deepseek-flash"
@@ -100,7 +107,6 @@ DEFAULT_ENDPOINT_MAX_TOKENS = rt.DEFAULT_ENDPOINT_MAX_TOKENS
 
 #: One JSON event line larger than this is discarded (matches the shared
 #: stream readers in the qwen/dots adapters; this router lacked the constant).
-MAX_DSH_LINE_BYTES = 1 << 20
 
 _DSH_HOME_TMP = None
 _PATCH_TMP = None
@@ -478,45 +484,12 @@ def stop_prep_proxy() -> None:
     _PROXY_THREAD = None
 
 
-def _writable(path: Path) -> bool:
-    try:
-        probe = path / ".paper_model_write_test"
-        probe.write_text("x", encoding="utf-8")
-        probe.unlink()
-        return True
-    except OSError:
-        return False
-
-
 def ensure_dsh_home() -> tuple:
-    """(DSH_HOME, error). A read-only installed home gets a light temp copy."""
     global _DSH_HOME_TMP
-    home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh")).expanduser()
-    if home.is_dir() and _writable(home):
-        return str(home), ""
-    src = home / "profiles" / "headless"
-    if not src.is_dir():
-        return "", (f"the dsh profile is missing: {src}; install "
-                    f"@deepseek-ai/dsh and create the headless profile")
-    tmp = Path(tempfile.mkdtemp(prefix="paper-model-dsh-"))
-    _DSH_HOME_TMP = tmp
-    dst = tmp / "profiles" / "headless"
-    dst.mkdir(parents=True, exist_ok=True)
-    for name in ("package.json", "cordis.yml", "cordis.patch.yml",
-                 "pnpm-workspace.yaml", "pnpm-lock.yaml"):
-        s = src / name
-        if s.is_file():
-            shutil.copy2(s, dst / name)
-    nm = src / "node_modules"
-    if nm.is_dir():
-        try:
-            os.symlink(nm, dst / "node_modules")
-        except OSError:
-            shutil.copytree(nm, dst / "node_modules", symlinks=True)
-    cred = home / ".credentials.yaml"
-    if cred.is_file():
-        shutil.copy2(cred, tmp / ".credentials.yaml")
-    return str(tmp), ""
+    home, error, temporary = paper_dsh_runtime.prepare_dsh_home("model")
+    if temporary is not None:
+        _DSH_HOME_TMP = temporary
+    return home, error
 
 
 def _cleanup() -> None:
@@ -606,60 +579,8 @@ def claude_env(cfg: dict) -> dict:
     return env
 
 
-def _echo_stdout(data: bytes) -> None:
-    buf = getattr(sys.stdout, "buffer", None)
-    if buf is not None:
-        buf.write(data)
-        buf.flush()
-    else:
-        sys.stdout.write(data.decode("utf-8", "replace"))
-        sys.stdout.flush()
-
-
-def _dsh_turn_failed(line: bytes):
-    """True/False for a turn-end event line, None for every other line."""
-    return _line_turn_end_failed(line)
-
-
 def run_dsh_streaming(cmd: list, env: dict) -> tuple:
-    """(returncode, turn_failed) with the harness's stdout ECHOED, not buffered."""
-    proc = subprocess.Popen(cmd, stdin=sys.stdin, stdout=subprocess.PIPE,
-                            stderr=sys.stderr, env=env)
-    turn_failed = None
-    saw_turn_end = False
-    carry = b""
-    try:
-        read_chunk = getattr(proc.stdout, "read1", proc.stdout.read)
-        while True:
-            chunk = read_chunk(1 << 20)
-            if not chunk:
-                break
-            _echo_stdout(chunk)
-            carry += chunk
-            *lines, carry = carry.split(b"\n")
-            for line in lines:
-                failed = _dsh_turn_failed(line)
-                if failed is not None:
-                    turn_failed = failed
-                    saw_turn_end = True
-            if len(carry) > MAX_DSH_LINE_BYTES:
-                carry = b""
-        if carry:
-            failed = _dsh_turn_failed(carry)
-            if failed is not None:
-                turn_failed = failed
-                saw_turn_end = True
-        proc.wait()
-    finally:
-        if proc.poll() is None:
-            with contextlib.suppress(OSError):
-                proc.kill()
-            proc.wait()
-    if not saw_turn_end:
-        print("model: the harness emitted no turn_end completion event",
-              file=sys.stderr)
-        turn_failed = True
-    return int(proc.returncode or 0), turn_failed
+    return paper_dsh_runtime.run_dsh_streaming(cmd, env, "model")
 
 
 def _print_probe(cfg: dict) -> int:

@@ -391,42 +391,16 @@ def _copy_session_tools(sb: Path, stamp: float = None,
                 if tool_dir.is_symlink() or (tool_dir.exists() and not tool_dir.is_dir()):
                     tool_dir.unlink()
                 tool_dir.mkdir(parents=True, exist_ok=True)
-                _safe_restore_copy(driver_src, tool_dir / SELFCHECK_DRIVER, sb)
-                parts_name = "paper_pipeline_parts"
-                if (driver_src.parent / parts_name).is_dir():
-                    copy_asset_dirs(driver_src.parent, tool_dir, names=(parts_name,))
-                # The shared runtime lives in `agent-common/agent_common/` beside
-                # the driver and resolves its catalog/policy relative to
-                # `__file__`.
-                if (driver_src.parent / "agent-common").is_dir():
-                    copy_asset_dirs(
-                        driver_src.parent, tool_dir, names=("agent-common",)
-                    )
-                # The staged DRIVER also loads its companion formatter from
-                # beside ITSELF (`_format_module()`), and the package-stage
-                # self-check runs the format-regression family. Staging only
-                # the driver made that pre-flight report the scanner as
-                # UNAVAILABLE for rewrite/revise/integrate -- a false failure
-                # the session could never fix (the sandbox-root copy is not
-                # where `__file__` points). Stage the formatter bundle beside
-                # the driver too, so the preview sees the same code the root
-                # postcheck does.
-                fmt_src = driver_src.parent / DOCX_FORMAT_MODULE
-                if fmt_src.is_file():
-                    _safe_restore_copy(fmt_src, tool_dir / DOCX_FORMAT_MODULE, sb)
-                if (driver_src.parent / DOCX_FORMAT_PARTS_DIR).is_dir():
-                    copy_asset_dirs(driver_src.parent, tool_dir,
-                                    names=(DOCX_FORMAT_PARTS_DIR,))
-                # The staged driver imports its companion modules too.
-                # Staging only the driver + parts made the pre-flight fail
-                # with ModuleNotFoundError; copy the whole frozen module set
-                # next to the staged driver.
-                for _name in PIPELINE_MODULE_FILES:
-                    if _name in (SELFCHECK_DRIVER, DOCX_FORMAT_MODULE):
-                        continue
-                    _companion = driver_src.parent / _name
-                    if _companion.is_file():
-                        _safe_restore_copy(_companion, tool_dir / _name, sb)
+                missing = _missing_bundle_assets(driver_src.parent)
+                if missing:
+                    raise OSError(f"incomplete driver bundle: {', '.join(missing)}")
+                copy_asset_dirs(driver_src.parent, tool_dir, names=PIPELINE_ASSET_DIRS)
+                for name in PIPELINE_MODULE_FILES:
+                    _safe_restore_copy(driver_src.parent / name, tool_dir / name, sb)
+                # The full skill pack is optional in a manual sandbox. The
+                # shared word rules are required to import the frozen driver.
+                _safe_restore_copy(driver_src.parent / MANUSCRIPT_WORDS_FILE,
+                                   tool_dir / MANUSCRIPT_WORDS_FILE, sb)
     except OSError as e:
         # A partial/refused copy used to be swallowed: the stage then called a
         # missing or incomplete formatter (or driver) and had no diagnostic

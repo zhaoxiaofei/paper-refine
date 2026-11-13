@@ -421,8 +421,11 @@ def main():
           and "state-of-the-art" in _sw)
     _cw_path = os.path.join(root, "paper-review", "scripts", "count_words.py")
     _cw = read(_cw_path) if os.path.isfile(_cw_path) else ""
-    check("D17 count_words.py ships the deterministic counting rule",
-          "\\S+" in _cw and "state-of-the-art" in _cw and "lenient_cap" in _cw)
+    _word_rules = os.path.join(root, "paper-review", "scripts", "manuscript_words.py")
+    check("D17 count_words.py uses the shipped deterministic counting rule",
+          "import manuscript_words" in _cw and "state-of-the-art" in _cw
+          and "lenient_cap" in _cw and os.path.isfile(_word_rules)
+          and "\\S+" in read(_word_rules))
     _sw2 = " ".join(sweeps.split()).lower()
     _cw2 = " ".join(_cw.split()).lower()
     check("D21 M18 always enumerates legends and M19 carries the cover-letter preference",

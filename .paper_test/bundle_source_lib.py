@@ -10,15 +10,17 @@ layout.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import shutil
+import sys
 from pathlib import Path
 
 
 MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
                 "paper_redlines_adapter.py", "paper_qwen_agent.py",
-                "paper_dots_agent.py", "paper_model_agent.py",
+                "paper_dots_agent.py", "paper_model_agent.py", "paper_dsh_runtime.py",
                 "docx2pdf.sh", "docxcompare.sh")
-ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent-common")
+ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent-common", "paper-skills")
 
 
 def bundle_files(path) -> list:
@@ -66,3 +68,13 @@ def copy_bundle(src_dir, dst_dir) -> None:
             shutil.rmtree(dst)
         shutil.copytree(src, dst,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
+
+
+
+def load_bundle(name, path):
+    """Import an entry point by filename, including its bundled dependencies."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module

@@ -554,7 +554,10 @@ judged again from scratch, which wastes the whole session and leaves the panel i
 """)
 
 
-REVIEW_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+ORCHESTRATION_DIRECTIVES_HEADER = "ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):"
+
+
+REVIEW_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
 
 You are REVIEW run @@RUN_ID@@ — round @@ROUND@@, PHASE 1 OF 2 — inside an isolated orchestration
 pipeline. Your sandbox is:
@@ -1194,7 +1197,7 @@ def apply_content_edit_policy(text: str, insertions_allowed: bool = True,
     return text.replace("@@CONTENT_EDIT_POLICY@@\n", "")
 
 
-REVISE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+REVISE_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
 
 You are REVISE run @@RUN_ID@@ — round @@ROUND@@, PHASE 2 OF 2, revision @@REVISE_INDEX@@ of
 @@REVISE_TOTAL@@ — inside an isolated orchestration pipeline. Your sandbox is:
@@ -1490,7 +1493,7 @@ to "clean up" by guessing.
 """
 
 
-AUDIT_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+AUDIT_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
 
 You are AUDIT run @@RUN_ID@@ — round @@ROUND@@ — the INDEPENDENT AUDITOR between the reviewer and
 the revisers, inside an isolated orchestration pipeline. Your sandbox is:
@@ -1701,7 +1704,7 @@ next to PROMPT.md, NOT inside `audit/` -- carrying
 """
 
 
-INTEGRATE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+INTEGRATE_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
 
 You are INTEGRATION run @@RUN_ID@@ — round @@ROUND@@ — inside an isolated orchestration pipeline.
 Your sandbox is:
@@ -1955,7 +1958,7 @@ as a defect or as a difference worth scoring.
 """
 
 
-REWRITE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+REWRITE_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
 
 You are REWRITE run @@RUN_ID@@ — round @@ROUND@@, rewrite @@REWRITE_INDEX@@ of @@REWRITE_TOTAL@@ —
 inside an isolated orchestration pipeline, and you run FIRST in this round, before the review. Your
@@ -3780,7 +3783,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     return apply_author_to_complete_prompt(text, author_to_complete)
 
 
-COLD_START_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+COLD_START_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
 
 You are the COLD-START REVIEW run @@RUN_ID@@ — round @@ROUND@@ — an INDEPENDENT DISCOVERY
 session inside an
@@ -4288,7 +4291,7 @@ JUDGE_PROMPT = judge_prompt
 # REVISION AUDIT + BOUNDED REPAIR (after revise, before integrate/judge)
 # =====================================================================
 
-REVISION_AUDIT_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+REVISION_AUDIT_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
 
 You are the REVISION AUDITOR — run @@RUN_ID@@, round @@ROUND@@ — inside an orchestrated
 manuscript-revision pipeline. Your sandbox is:
@@ -4429,7 +4432,7 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
                              "revision_audit", execution_profile)
 
 
-REVISION_REPAIR_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+REVISION_REPAIR_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
 
 You are the BOUNDED REPAIR session — run @@RUN_ID@@, round @@ROUND@@ — a REVISE-class session inside
 an orchestrated manuscript-revision pipeline. Your sandbox is:

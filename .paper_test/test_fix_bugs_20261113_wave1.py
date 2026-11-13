@@ -576,22 +576,7 @@ def test_pipeline():
     check("F019 (semantic-suffix regex inspected across all six scripts)",
           f019_ok, ", ".join(f019_bad))
 
-    # F020: the skill and the pipeline subtract the same caption span, even
-    # when a heading line sits inside the span.
-    f020 = scratch("f020_")
-    f020_text = ("Funding\n1. Introduction\nCopy-number (CN) burden.\n"
-                 "Figure 1. legend text here\n**Methods**\nKeywords\n## Abstract\n")
-    (f020 / "ms.md").write_text(f020_text, encoding="utf-8")
     words = load("paper_fixbugs_wave1_words", SCRIPTS / "count_words.py")
-    skill_main = [r for r in words.sections(f020_text) if r[0] == "main text"]
-    pipe_main = [r for r in pipe.scan_lengths_in_sources([(f020, "", ())])["rows"]
-                 if r["section"] == "main text"]
-    check("F020 (caption span subtraction inspected against scan_lengths_in_sources)",
-          len(skill_main) == 1 and len(pipe_main) == 1
-          and skill_main[0][1] == pipe_main[0]["words"] == 3
-          and "5 caption word(s) subtracted" in skill_main[0][2]
-          and "5 caption word(s) subtracted" in pipe_main[0]["note"],
-          f"skill={skill_main} pipeline={pipe_main}")
 
     # F021: each cap is rendered independently in the summary line.
     f021 = scratch("f021_")

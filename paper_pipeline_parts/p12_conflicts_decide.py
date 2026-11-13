@@ -7861,66 +7861,15 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     # a report rebuilt by hand -- gets a readable report instead of the
     # UnboundLocalError the 2026-10-15 hand-off work hit (2026-10-15).
     r, agg, stored, plan = 0, {}, {}, {}
-    L = []
-    L.append("# Round Pipeline — Decision Report")
-    L.append("")
-    L.append(f"Generated: {utcnow()}  |  pipeline root: `{ctx.root}`  |  orchestrator v{VERSION}")
-    L.append(f"Config: rounds={ctx.rounds_count()} judges/version={judges_config_note(ctx)} "
-             f"integrators/round={integrators_config_note(ctx)} "
-             f"| source: `{ctx.cfg.get('source')}`")
-    for line in venue_status_lines(ctx):
-        L.append(f"- {line}")
-    if certification:
-        _cert = certification
-        _verdict = certification_label(_cert)
-        _why = (_cert.get("blockers") or _cert.get("notes")
-                or ["every gate passed"])
-        L.append("")
-        L.append(f"**Certification: {_verdict}.** " + "; ".join(str(x) for x in _why))
-        _cv = _cert.get("clean_version") or {}
-        if _cv.get("published"):
-            L.append(f"- final_clean_version/: published by this decision "
-                     f"({_cv.get('status') or _verdict.lower()}); status in "
-                     f"`{_cv.get('readme') or FINAL_CLEAN_README_NAME}`")
-        else:
-            L.append(f"- final_clean_version/: NOT (re)built by this decision"
-                     + (f" -- {_cv['skipped_reason']}" if _cv.get("skipped_reason") else "")
-                     + f" (status still recorded in `{FINAL_CLEAN_README_NAME}`)")
-    L.append("")
-    L.append("## 0. Integrity")
-    L.append("")
-    L.append(f"- pristine original: {'ok' if integrity['pristine_ok'] else 'CHANGED'} "
-             f"({integrity['pristine_detail']})")
-    L.append(f"- pinned champion chain: {'ok' if not integrity['pinned_errors'] else 'CHANGED'} "
-             f"({len(ctx.state.get('pinned') or [])} pinned version(s))")
-    for e in integrity["pinned_errors"]:
-        L.append(f"  - {e}")
-    if integrity.get("evidence_not_verifiable"):
-        L.append(f"- evidence NOT verifiable for {len(integrity['evidence_not_verifiable'])} "
-                 f"run(s): their sandboxes are missing (pruned or removed by hand), so the "
-                 f"decision rests on the recorded manifests alone")
-        for e in integrity["evidence_not_verifiable"][:8]:
-            L.append(f"  - {e}")
-    if integrity.get("recovery"):
-        L.append(f"- orchestrator RECOVERY: {len(integrity['recovery'])} run(s) dropped base "
-                 f"file(s) that were restored mechanically (advisory; the judged package is "
-                 f"complete, and this never changes a score)")
-        for rec in integrity["recovery"][:8]:
-            L.append(f"  - {rec['run']} ({rec['version']}): {rec['count']} restored file(s)"
-                     + (f", e.g. {', '.join(rec['files'][:3])}" if rec.get("files") else ""))
-    if integrity.get("visual_not_verified"):
-        L.append(f"- visual verification INCOMPLETE in {len(integrity['visual_not_verified'])} "
-                 f"run(s) (a renderer was unavailable or the agent recorded 'not visually "
-                 f"verified'); the author must complete those pages: "
-                 + ", ".join(integrity["visual_not_verified"][:8]))
-    if problems:
-        L.append("")
-        L.append("**Problems found while recomputing the decision (the stored chain is NOT "
-                 "re-derived silently):**")
-        L.append("")
-        for p in problems:
-            L.append(f"- {p}")
-    L.append("")
+    config_line = (f"Config: rounds={ctx.rounds_count()} judges/version={judges_config_note(ctx)} "
+                   f"integrators/round={integrators_config_note(ctx)} "
+                   f"| source: `{ctx.cfg.get('source')}`")
+    L = _load_pipeline_module("paper_pipeline_parts/decision_report.py").header_lines(
+        generated=utcnow(), root=ctx.root, version=VERSION, config_line=config_line,
+        venue_lines=venue_status_lines(ctx), certification=certification,
+        verdict=certification_label(certification) if certification else "",
+        clean_readme_name=FINAL_CLEAN_README_NAME, integrity=integrity,
+        pin_count=len(ctx.state.get("pinned") or []), problems=problems)
     L.append("## 1. Final answer")
     L.append("")
     pin = final["pin"] or {}
@@ -8607,6 +8556,10 @@ def cmd_sync_code(args) -> None:
         die(f"sync-code: {root} is locked by pid {holder[0]} ({holder[1]}); stop the live "
             f"run before replacing the code it is executing.")
     with ctx.lock("sync-code"):
+        missing = _missing_bundle_assets(src)
+        if missing:
+            die(f"sync-code: the maintained tree is missing {', '.join(missing)}; "
+                "refusing a partial bundle")
         changed, unchanged = [], []
         for name in PIPELINE_MODULE_FILES:
             s, d = src / name, root / name

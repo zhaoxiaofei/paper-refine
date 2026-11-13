@@ -4473,6 +4473,25 @@ def _write_cold_start_reproduction(sb: Path, repro: dict) -> None:
     write_text_atomic(sb / COLD_START_REPRO_REL, "\n".join(lines))
 
 
+def cold_start_coverage_problems(sb: Path) -> list:
+    errs = []
+    coverage = sb / COLD_START_COVERAGE_REL
+    if coverage.is_symlink() or not coverage.is_file():
+        errs.append(f"{COLD_START_COVERAGE_REL} is missing: the areas examined, the counts and the "
+                    f"round's honest limits are part of the deliverable")
+    else:
+        # Agent-written prose: use the shared regular-file/no-follow/byte-budget
+        # reader. A huge or blocking COVERAGE.md could hang/OOM postcheck (F57).
+        coverage_text = read_text_bounded(coverage)
+        if coverage_text is None:
+            errs.append(f"{COLD_START_COVERAGE_REL} could not be read (it is a symlink/"
+                        f"non-regular file or over the byte budget)")
+        elif not coverage_text.strip():
+            errs.append(f"{COLD_START_COVERAGE_REL} is EMPTY: account for the areas examined, the "
+                        f"findings they produced and what could not be checked")
+    return errs
+
+
 def postcheck_cold_start_review(ctx: Ctx, rec: dict):
     """The cold-start session's contract: the checked inventory, the findings, and
     every DECLARED verifier RE-RUN.
@@ -4494,20 +4513,7 @@ def postcheck_cold_start_review(ctx: Ctx, rec: dict):
     perrs, pwarns, findings = _cold_start_contract_problems(sb)
     errs.extend(perrs)
     warns.extend(pwarns)
-    coverage = sb / COLD_START_COVERAGE_REL
-    if coverage.is_symlink() or not coverage.is_file():
-        errs.append(f"{COLD_START_COVERAGE_REL} is missing: the areas examined, the counts and the "
-                    f"round's honest limits are part of the deliverable")
-    else:
-        # Agent-written prose: use the shared regular-file/no-follow/byte-budget
-        # reader. A huge or blocking COVERAGE.md could hang/OOM postcheck (F57).
-        coverage_text = read_text_bounded(coverage)
-        if coverage_text is None:
-            errs.append(f"{COLD_START_COVERAGE_REL} could not be read (it is a symlink/"
-                        f"non-regular file or over the byte budget)")
-        elif not coverage_text.strip():
-            errs.append(f"{COLD_START_COVERAGE_REL} is EMPTY: account for the areas examined, the "
-                        f"findings they produced and what could not be checked")
+    errs.extend(cold_start_coverage_problems(sb))
     repro = cold_start_reproduction(sb, findings)
     if findings:
         _write_cold_start_reproduction(sb, repro)

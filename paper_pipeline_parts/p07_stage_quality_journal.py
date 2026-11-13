@@ -7291,23 +7291,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
         perrs, pwarns, findings = _cold_start_contract_problems(sb)
         errs.extend(perrs)
         warns.extend(pwarns)
-        # The coverage file's FULL contract, the postcheck's own way: a symlinked
-        # file, an unreadable one and an EMPTY one all failed there while this
-        # pre-flight only tested `is_file()` (which follows a symlink and accepts
-        # a zero-byte file). A 39-minute cold-start pass would have learned that
-        # only after the marker.
-        coverage = sb / COLD_START_COVERAGE_REL
-        if coverage.is_symlink() or not coverage.is_file():
-            errs.append(f"{COLD_START_COVERAGE_REL} is missing: the areas examined, the counts and "
-                        f"the round's honest limits are part of the deliverable")
-        else:
-            coverage_text = read_text_bounded(coverage)
-            if coverage_text is None:
-                errs.append(f"{COLD_START_COVERAGE_REL} could not be read (it is a symlink/"
-                            f"non-regular file or over the byte budget)")
-            elif not coverage_text.strip():
-                errs.append(f"{COLD_START_COVERAGE_REL} is EMPTY: account for the areas examined, "
-                            f"the findings they produced and what could not be checked")
+        errs.extend(cold_start_coverage_problems(sb))
         if findings:
             repro = cold_start_reproduction(sb, findings)
             for r in repro["results"]:

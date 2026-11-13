@@ -836,32 +836,29 @@ def _parts_dir() -> _Path:
     return _Path(__file__).resolve().with_name(_PARTS_DIRNAME)
 
 
-def _missing_bundle_assets() -> list:
-    """Companion modules/dirs the ordered parts import before `setup` can check.
-
-    The p00 prelude carries the manifest; p01 already imports
-    `agent_common.model_runtime`, so a tree missing `agent-common/agent_common/` (or
-    `paper_docx_format.py`) used to die in a
-    raw ModuleNotFoundError/ConfigError before setup's own friendly missing-asset
-    diagnostic. The preflight runs after p00 and before the rest.
-    """
-    here = _Path(__file__).resolve().parent
-    missing = []
-    for dirname in globals().get("PIPELINE_ASSET_DIRS") or ():
-        if not (here / dirname).is_dir():
-            missing.append(f"{dirname}/")
-    # `agent-common/` is an asset directory, but the four files of its inner
-    # `agent_common` package are individually required: an empty directory
-    # would satisfy the check above and then fail in p01's import with a raw
-    # ModuleNotFoundError.
-    for name in ("model_runtime.py", "llm_retry.py", "llm_policy.json",
-                 "model_catalog.json"):
-        if not (here / "agent-common" / "agent_common" / name).is_file():
-            missing.append(f"agent-common/agent_common/{name}")
-    for name in globals().get("PIPELINE_MODULE_FILES") or ():
-        if name != _Path(__file__).name and not (here / name).is_file():
-            missing.append(str(name))
+def _missing_bundle_assets(here: _Path) -> list:
+    """Required directories and files defined by the pipeline prelude."""
+    missing = [f"{name}/" for name in PIPELINE_ASSET_DIRS
+               if not (here / name).is_dir()]
+    missing.extend(name for name in PIPELINE_MODULE_FILES + PIPELINE_REQUIRED_ASSET_FILES
+                   if not (here / name).is_file())
     return missing
+
+
+_pipeline_modules = {}
+
+
+def _load_pipeline_module(relative_path: str):
+    """Import a module from this driver snapshot, independently of the cwd."""
+    if relative_path not in _pipeline_modules:
+        from importlib.util import module_from_spec, spec_from_file_location
+
+        path = _Path(__file__).resolve().parent / relative_path
+        spec = spec_from_file_location(path.stem, path)
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _pipeline_modules[relative_path] = module
+    return _pipeline_modules[relative_path]
 
 
 def _load_parts() -> None:
@@ -880,7 +877,7 @@ def _load_parts() -> None:
         code = compile(part.read_text(encoding="utf-8"), str(part), "exec")
         exec(code, globals(), globals())
         if not preflighted and part.name.startswith("p00_"):
-            missing = _missing_bundle_assets()
+            missing = _missing_bundle_assets(parts.parent)
             if missing:
                 raise SystemExit(
                     "paper_pipeline.py: the running tree is missing "

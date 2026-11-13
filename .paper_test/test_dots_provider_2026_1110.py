@@ -220,8 +220,13 @@ def test_pipeline_integration():
         os.environ.pop("PAPER_DOTS_HARNESS", None)
     check("the module manifest carries the adapter",
           "paper_dots_agent.py" in pipe.PIPELINE_MODULE_FILES)
-    check("setup copies the adapter beside the driver",
-          "paper_dots_agent.py" in (WS / "paper_pipeline_parts" / "p09_setup.py").read_text())
+    from tempfile import TemporaryDirectory
+    with TemporaryDirectory(prefix="paper_dots_bundle_") as directory:
+        frozen = Path(directory)
+        pipe._freeze_runtime_bundle(WS, frozen)
+        check("setup copies the adapter and its shared harness support beside the driver",
+              all((frozen / name).is_file()
+                  for name in ("paper_dots_agent.py", "paper_dsh_runtime.py")))
 
 
 def test_dsh_turn_events():

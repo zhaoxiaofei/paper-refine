@@ -163,15 +163,34 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
 
 # `retry --runs`: the SAME selection grammar as `run --only`.
 #
-# Targets are reset in the round plan's own dependency order within each round
-# (and by ascending round): a target whose upstream is still done is
-# re-materialized at reset time, and the rest are left stale for the next
-# `run`'s staging loop -- so resetting a downstream BEFORE the upstream it
-# consumes would rebuild it from input that is about to be replaced.
-RETRY_KIND_RANK = {"a1": 0, "feedback": 1, "concerns": 1, "rewrite": 2,
-                    "guided_review": 2,
-                   "cold_start_review": 3, "audit": 4, "revise": 5, "response": 6, "integrate": 7,
-                   "judge": 8}
+def _order_retry_targets(ctx: Ctx, targets: list) -> list:
+    """Reset selected upstream runs before their dependents."""
+    by_id = {str(rec["id"]): rec for rec in targets}
+    plans = {
+        r: {entry["id"]: entry["deps"] for entry in round_run_plan(ctx, r)}
+        for r in {int(rec["round"]) for rec in targets}
+    }
+    ordered = []
+    visiting, visited = set(), set()
+
+    def visit(rid):
+        if rid in visited:
+            return
+        if rid in visiting:
+            die(f"retry: selected runs have a dependency cycle at {rid!r}")
+        visiting.add(rid)
+        rec = by_id[rid]
+        planned = plans[int(rec["round"])].get(rid, ())
+        for dep in dict.fromkeys([*planned, *upstream_deps(rec, ctx)]):
+            if dep in by_id:
+                visit(dep)
+        visiting.remove(rid)
+        visited.add(rid)
+        ordered.append(rec)
+
+    for rid in sorted(by_id, key=lambda rid: (int(by_id[rid]["round"]), nat_key(rid))):
+        visit(rid)
+    return ordered
 
 
 def _judge_selection_for_retry(ctx: Ctx, r: int, spec: str):
@@ -267,10 +286,7 @@ def retry_targets_for_selection(ctx: Ctx, only) -> tuple:
         if not found:
             notes.append(f"r{r}: the judge selection {spec or '(the whole configured panel)'} "
                          f"matches no judge run of this root (nothing to reset)")
-    targets.sort(key=lambda rec: (int(rec.get("round") or 0),
-                                  RETRY_KIND_RANK.get(str(rec.get("kind") or ""), 99),
-                                  str(rec.get("id") or "")))
-    return targets, notes
+    return _order_retry_targets(ctx, targets), notes
 
 
 def cmd_retry(args) -> None:
@@ -323,6 +339,7 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
         if not targets:
             print("No failed or stale runs to reset.")
             return
+        targets = _order_retry_targets(ctx, targets)
     else:
         die("specify --run <ID>, --runs <SELECTION> or --all-failed")
 
