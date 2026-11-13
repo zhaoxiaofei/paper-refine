@@ -842,8 +842,6 @@ def _missing_bundle_assets(here: _Path) -> list:
                if not (here / name).is_dir()]
     missing.extend(name for name in PIPELINE_MODULE_FILES + PIPELINE_REQUIRED_ASSET_FILES
                    if not (here / name).is_file())
-    missing.extend(name for name in PIPELINE_REQUIRED_PARTS
-                   if not (here / name).is_file())
     return missing
 
 

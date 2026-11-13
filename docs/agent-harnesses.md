@@ -125,15 +125,10 @@ complete a pipeline stage that must write artifacts. Set
 probe a hard preflight for a production run. The platform applies per-key RPM
 and TPM limits; keep `--jobs` modest when the key is rate-limited (the
 pipeline's normal retry/backoff policy applies to a 429). The optional LLM
-audits have their own backends. The defect audit resolves its backend in this
-order: an explicit `--defect-audit` / `--defect-audit-cmd`, then
-`PAPER_DEFECT_AUDIT_CMD`, then the agent backend a previous round recorded
-(which is the judge's backend when the judge is an agent preset), then the
-lightweight `codex-lite` default, then `PAPER_AGENT_CMD`; a manual or custom
-judge backend leaves it off unless one of those is given, and the conflict
-audit is off. Pass `--defect-audit dots` / `--conflict-agent dots` to keep those
-passes on Dots too (the judge panel already defaults to the producer's
-harness/model pair).
+audits have their own backends: the defect audit defaults to `codex-lite` and
+the conflict audit is off; pass `--defect-audit dots` / `--conflict-agent dots`
+to keep those passes on Dots too (the judge panel already defaults to
+the producer's harness/model pair).
 
 ## Choosing the model and harness (`--agent-harness` / `--agent-model`)
 

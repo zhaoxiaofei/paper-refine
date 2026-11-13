@@ -5,6 +5,26 @@
 # the single-file source.
 from __future__ import annotations
 
+
+_ranking = _load_pipeline_module("paper_pipeline_parts/ranking.py")
+A1_ID = _ranking.A1_ID
+BASIS_TIERS = _ranking.BASIS_TIERS
+VS_ORIGINAL_TOLERANCE = _ranking.VS_ORIGINAL_TOLERANCE
+TIEBREAK_SEVERITY_GROUPS = _ranking.TIEBREAK_SEVERITY_GROUPS
+SEVERITY_TIE_ORDER = _ranking.SEVERITY_TIE_ORDER
+TIEBREAK_SOURCES = _ranking.TIEBREAK_SOURCES
+DEFAULT_TIEBREAK_DEFECT_FLOOR = _ranking.DEFAULT_TIEBREAK_DEFECT_FLOOR
+tiebreak_cell_specs = _ranking.tiebreak_cell_specs
+tiebreak_cell_names = _ranking.tiebreak_cell_names
+tiebreak_group_severities = _ranking.tiebreak_group_severities
+_census_row = _ranking._census_row
+issue_matrix_and_cumulative = _ranking.issue_matrix_and_cumulative
+tiebreak_prefix_cells = _ranking.tiebreak_prefix_cells
+_issue_summary_from_census = _ranking._issue_summary_from_census
+champion_sort_key = _ranking.champion_sort_key
+derive_ranking = _ranking.derive_ranking
+lenient_word_limit = _load_pipeline_module(MANUSCRIPT_WORDS_FILE).lenient_cap
+
 # =====================================================================
 # JOURNAL REVISION MODES (options 1-4)
 #
@@ -1087,7 +1107,6 @@ JUDGE_TOKEN_PREFIX = "t"
 # Version ids. Fresh ids are local to one round; a pinned version carries its
 # round prefix so ids stay unique inside a field (e.g. "r1_a2").
 ORIGINAL_ID = "orig"
-A1_ID = "a1"
 
 # ---- THE ROUND'S CANDIDATE POOL (M rewrites, N revisions, then integration) --
 # Every round is planned with two per-round counts (both are command-line
@@ -1810,8 +1829,6 @@ JUDGE_CONTRACT_VERSION = 5
 # deliverable, and a prose defect whose meaning survives must not outrank (or be
 # outranked by) mechanical layout. Meaning-changing rows are refiled to
 # correctness by the class rule, so `consistency` here is the residual class.
-BASIS_TIERS = ("correctness", "preservation", "completeness", "consistency", "writing",
-               "formatting")
 BASIS_VALUES = BASIS_TIERS + ("none",)
 # FOUR severity rungs, weakest first, and EVERY tier carries all four: minor 1 /
 # major 2 / critical 3 / fatal 4. The rungs are a DISTANCE FROM CORRECT (a
@@ -1875,13 +1892,6 @@ DEFAULT_CAPTION_LIMIT = 0
 # The constants below are the shipped nature-biotechnology profile in its old
 # module-level spelling, kept for tools and tests that import them; every stage
 # reads `length_limits(venue_profile)` instead.
-
-
-def lenient_word_limit(base: int, factor: float) -> int:
-    """The largest integer word count within `base` words relaxed by `factor`."""
-    # floor(base*factor), tolerant of the float representation error that made
-    # "100 words +15%" 114.99999999999999 -> 114 instead of 115.
-    return math.floor(float(base) * float(factor) + 1e-9)
 
 
 def _builtin_default_venue_object() -> VenueProfile:
@@ -6378,7 +6388,6 @@ MANUAL_STEPS_RELS = ("revised/MANUAL_STEPS.md", "rewritten/MANUAL_STEPS.md",
 # (requires a demonstrable improvement, not merely non-regression) and a looser
 # >= -0.5 (tolerates a panel that is slightly net-negative because one judge saw
 # a real trade-off). Either can be switched in by editing this constant.
-VS_ORIGINAL_TOLERANCE = 0.0
 # C21a/C23: the gate's DECISION RULE is explicit and switchable. `median` is the
 # pre-registered default (a candidate whose vs_original median is negative is
 # ineligible). `sign` fails only when the exact one-sided sign test over the

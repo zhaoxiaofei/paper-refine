@@ -69,6 +69,17 @@ import re
 import sys
 from collections import defaultdict
 
+from pathlib import Path
+
+# Allow direct execution and import by filename.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from evidence_names import (EVIDENCE_DIRNAMES,
+                                is_evidence as _is_evidence,
+                                _COVER_WORD_RE)
+finally:
+    sys.path.pop(0)
+
 
 def strip_tex_comment(line: str) -> str:
     """`line` up to its first unescaped `%` (the LaTeX comment marker)."""
@@ -85,31 +96,6 @@ def strip_tex_comment(line: str) -> str:
     return "".join(out)
 
 
-RAW_DATA_DIRNAMES = ("raw_data",)
-HUMAN_FEEDBACK_DIR = "human_review_feedback"
-LLM_FEEDBACK_DIR = "llm_review_feedback"
-EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
-# `<evidence area>.disabled` / `.off` is inert evidence (the pipeline's
-# `is_disabled_evidence_rel`); exact-name membership swept it as manuscript.
-DISABLED_EVIDENCE_SUFFIXES = ("disabled", "off")
-
-
-def _is_evidence_part(part: str) -> bool:
-    low = str(part or "").strip().lower()
-    if low in EVIDENCE_DIRNAMES:
-        return True
-    return any(low.startswith(area + ".")
-               and low[len(area) + 1:] in DISABLED_EVIDENCE_SUFFIXES
-               for area in EVIDENCE_DIRNAMES)
-# A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
-# `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
-_ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
-    r"^(?:(?:the[.\s_-]+)?editorial(?:[.\s_-]+board)?|"
-    r"letters?[.\s_-]+(?:to|for)[.\s_-]+(?:the[.\s_-]+)?editor)"
-    r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
-# `.reply`/`.review`/`.notes` name the DOCUMENT kind, not another extension.
-_SEMANTIC_SUFFIX_RE = re.compile(
-    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
 EXTERNAL_FEEDBACK_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
     r"to[-_ ]?authors))*|"
@@ -124,22 +110,6 @@ EXTERNAL_FEEDBACK_RE = re.compile(
 AUTHORED_REPLY_RE = re.compile(
     r"(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)",
     re.I)
-# A scientific compound that merely ENDS in a role word is not a reply or a
-# feedback file: `dose_response.txt` / `immune_response.md` / `biofeedback_results.txt`
-# are real manuscripts and must reach M1/M1b.
-_SCIENCE_ROLE_COMPOUND_RE = re.compile(
-    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
-    r"pharmacodynamic)[-_ ]?response"
-    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
-    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
-    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
-# The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
-# `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
-# `recovered_samples.md` a cover letter (forcing them into the submission runs)
-# and masked a reply file whose name merely contains the substring.
-_COVER_WORD_RE = re.compile(
-    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
-    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 # The supplement role is a WORD too: the old `"supp" in f` swept `support.docx`
 # and `suppress.md` as supplementary text, exactly the files the pipeline keeps
 # as main text. `supp`, `suppl`, `supplement*` and `supplementary` still match.
@@ -149,40 +119,7 @@ SUPP_ROLE_RE = re.compile(
 
 
 def is_evidence_name(fname: str) -> bool:
-    """True when a corpus file name belongs to the evidence area / external prose.
-
-    convert_corpus.py keeps raw-data text out of WORK/corpus/ (it goes to
-    WORK/evidence/); this is the defense-in-depth gate for a WORK/corpus/
-    produced by an older converter or an adapted workflow.
-    """
-    parts = fname.replace("\\", "/").split("/")
-    if any(_is_evidence_part(part) for part in parts[:-1]):
-        return True
-    base = parts[-1]
-    if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
-        return True
-    # A cover letter IS a submission document -- and this test must come FIRST,
-    # exactly as in extract_citations.py: with the reply/feedback test below it,
-    # `cover_letter_response.md` was dropped as reviewers' feedback and the
-    # letter's own text never reached M1/M1b.
-    if _COVER_WORD_RE.search(base):
-        return False
-    if _SEMANTIC_SUFFIX_RE.search(base):
-        return True             # a reply/review/notes DOCUMENT, never author prose
-    stem = base
-    while True:
-        _stripped = re.sub(
-            r"\.(?:txt|docx?|md|tex|pdf|rtf|bib|csv|tsv|bak|final|tar|gz|zip)$",
-            "", stem, flags=re.I)
-        if _stripped == stem:
-            break
-        stem = _stripped
-    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(stem):
-        return False            # the authors' article-type manuscript, not a letter
-    # A previous response-to-reviewers (the authors' own document) is not
-    # manuscript prose either: it never produces an M1/M1b row.
-    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
-    return bool(EXTERNAL_FEEDBACK_RE.search(cleaned) or AUTHORED_REPLY_RE.search(cleaned))
+    return _is_evidence(fname, EXTERNAL_FEEDBACK_RE, AUTHORED_REPLY_RE)
 
 
 # Universal abbreviations exempt from redefinition anywhere

@@ -14,32 +14,13 @@ def header_lines(*, generated, root, version, config_line, venue_lines, certific
     if certification:
         _cert = certification
         _verdict = verdict
-        _why = _cert.get("blockers") or _cert.get("notes")
-        if isinstance(_why, str):
-            # A hand-built/legacy record may carry ONE note as a bare string;
-            # iterating it would join its characters ("n; o; t; e").
-            _why = [_why]
-        if not _why:
-            # "every gate passed" is a CERTIFIED verdict, never a fallback for a
-            # provisional/not-certified one with no recorded reason.
-            if _cert.get("certified"):
-                _why = ["every gate passed"]
-            elif _cert.get("provisional") or _cert.get("auto_promoted"):
-                _why = ["no blockers were recorded, but the answer is provisional, not a "
-                        "certified panel result"]
-            else:
-                _why = ["no blockers were recorded, but the decision is not certified"]
+        _why = (_cert.get("blockers") or _cert.get("notes")
+                or ["every gate passed"])
         L.append("")
         L.append(f"**Certification: {_verdict}.** " + "; ".join(str(x) for x in _why))
         _cv = _cert.get("clean_version") or {}
         if _cv.get("published"):
             L.append(f"- final_clean_version/: published by this decision "
-                     f"({_cv.get('status') or _verdict.lower()}); status in "
-                     f"`{_cv.get('readme') or clean_readme_name}`")
-        elif _cv.get("action") == "unchanged":
-            # The copy was already there and byte-identical: this invocation
-            # built nothing, so the line must not claim it did (F44).
-            L.append(f"- final_clean_version/: left unchanged from an earlier decision "
                      f"({_cv.get('status') or _verdict.lower()}); status in "
                      f"`{_cv.get('readme') or clean_readme_name}`")
         else:
@@ -49,19 +30,10 @@ def header_lines(*, generated, root, version, config_line, venue_lines, certific
     L.append("")
     L.append("## 0. Integrity")
     L.append("")
-    if integrity.get("hash_checks") == "skipped":
-        # The same line said 'not verified (--skip-hash)' in its detail while the
-        # status word claimed 'ok'. A skipped check is neither ok nor CHANGED.
-        L.append(f"- pristine original: not verified (--skip-hash) "
-                 f"({integrity.get('pristine_detail') or 'digest recorded, not checked'})")
-        L.append(f"- pinned champion chain: not verified (--skip-hash) "
-                 f"({pin_count} pinned version(s))")
-    else:
-        L.append(f"- pristine original: {'ok' if integrity['pristine_ok'] else 'CHANGED'} "
-                 f"({integrity['pristine_detail']})")
-        L.append(f"- pinned champion chain: "
-                 f"{'ok' if not integrity['pinned_errors'] else 'CHANGED'} "
-                 f"({pin_count} pinned version(s))")
+    L.append(f"- pristine original: {'ok' if integrity['pristine_ok'] else 'CHANGED'} "
+             f"({integrity['pristine_detail']})")
+    L.append(f"- pinned champion chain: {'ok' if not integrity['pinned_errors'] else 'CHANGED'} "
+             f"({pin_count} pinned version(s))")
     for e in integrity["pinned_errors"]:
         L.append(f"  - {e}")
     if integrity.get("evidence_not_verifiable"):

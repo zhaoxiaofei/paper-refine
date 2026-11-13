@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import select
 import shutil
 import subprocess
 import sys
@@ -16,14 +15,10 @@ MAX_DSH_LINE_BYTES = 1 << 20
 
 
 def _writable(path: Path, adapter: str) -> bool:
-    # A fixed probe name is followed when an attacker plants a symlink there,
-    # and two adapters sharing a home race on the same path. mkstemp creates an
-    # unpredictable name with O_CREAT|O_EXCL and never follows a link.
     try:
-        fd, probe = tempfile.mkstemp(prefix=f".paper_{adapter}_write_test_",
-                                     dir=str(path))
-        os.close(fd)
-        os.unlink(probe)
+        probe = path / f".paper_{adapter}_write_test"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
         return True
     except OSError:
         return False
@@ -38,11 +33,7 @@ def prepare_dsh_home(adapter: str) -> tuple:
     if not src.is_dir():
         return "", (f"the dsh profile is missing: {src}; install "
                     f"@deepseek-ai/dsh and create the headless profile"), None
-    try:
-        tmp = Path(tempfile.mkdtemp(prefix=f"paper-{adapter}-dsh-"))
-    except OSError as e:
-        return "", (f"cannot create a temporary dsh home ({e}); check TMPDIR and "
-                    f"the permissions of the dsh profile {src}"), None
+    tmp = Path(tempfile.mkdtemp(prefix=f"paper-{adapter}-dsh-"))
     try:
         dst = tmp / "profiles" / "headless"
         dst.mkdir(parents=True, exist_ok=True)
@@ -60,13 +51,6 @@ def prepare_dsh_home(adapter: str) -> tuple:
         cred = home / ".credentials.yaml"
         if cred.is_file():
             shutil.copy2(cred, tmp / ".credentials.yaml")
-    except OSError as e:
-        # A read-only/partially copied profile is the documented clean-error
-        # case: the callers turn `error` into the install hint and exit 2. It
-        # must not escape as an uncaught traceback.
-        shutil.rmtree(tmp, ignore_errors=True)
-        return "", (f"cannot prepare a writable dsh home from {src}: {e}; fix "
-                    f"the profile's permissions or reinstall @deepseek-ai/dsh"), None
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
@@ -84,25 +68,6 @@ def _echo_stdout(data: bytes) -> None:
         sys.stdout.flush()
 
 
-def _dsh_stream(stream):
-    """The inherited stream, or DEVNULL when it has no file descriptor.
-
-    pytest's capture object (and any StringIO/pseudo-file a caller installs)
-    has no ``fileno()``; handing it to ``Popen`` raises
-    ``io.UnsupportedOperation`` instead of a clear error.  Such a caller has no
-    prompt to forward, so the child gets an empty stdin and can still stream.
-    """
-    try:
-        stream.fileno()
-    except (AttributeError, OSError, ValueError):
-        return subprocess.DEVNULL
-    return stream
-
-
-def _dsh_stdin():
-    return _dsh_stream(sys.stdin)
-
-
 def run_dsh_streaming(cmd: list, env: dict, adapter: str) -> tuple:
     """(returncode, turn_failed) with the harness's stdout ECHOED, not buffered.
 
@@ -110,77 +75,37 @@ def run_dsh_streaming(cmd: list, env: dict, adapter: str) -> tuple:
     accumulated whole. The stream is read in bounded chunks, echoed as it
     arrives, and only complete lines are parsed.
     """
-    proc = subprocess.Popen(cmd, stdin=_dsh_stdin(), stdout=subprocess.PIPE,
-                            stderr=_dsh_stream(sys.stderr), env=env)
+    proc = subprocess.Popen(cmd, stdin=sys.stdin, stdout=subprocess.PIPE,
+                            stderr=sys.stderr, env=env)
     turn_failed = None
     saw_turn_end = False
     carry = b""
-    terminal = False
-    forced_rc = None
-    # Read the raw descriptor with a bounded wait instead of blocking in
-    # `read1()` until the pipe reaches EOF. `turn_end` is terminal: the old
-    # loop kept the adapter blocked for a child that closed stdout but kept
-    # running, or for a grandchild that inherited stdout.
-    fd = proc.stdout.fileno()
     try:
+        # `read1`, not `read`: a buffered `read(n)` waits for n bytes (or EOF),
+        # so a slow harness's first event would not be echoed until the stream
+        # filled or the process exited -- the opposite of streaming.
+        read_chunk = getattr(proc.stdout, "read1", proc.stdout.read)
         while True:
-            try:
-                ready = select.select([fd], [], [], 0.25)[0]
-            except (OSError, ValueError):
-                # select() cannot watch this descriptor (e.g. a Windows pipe):
-                # keep the old streaming shape for that platform.
-                ready = [fd]
-            if ready:
-                try:
-                    chunk = os.read(fd, 1 << 20)
-                except BlockingIOError:
-                    continue
-                except OSError:
-                    chunk = b""
-                if not chunk:
-                    break
-                _echo_stdout(chunk)
-                carry += chunk
-                *lines, carry = carry.split(b"\n")
-                for line in lines:
-                    failed = line_turn_end_failed(line)
-                    if failed is not None:
-                        turn_failed = failed
-                        saw_turn_end = True
-                        terminal = True
-                if len(carry) > MAX_DSH_LINE_BYTES:
-                    carry = b""       # a single event line over budget: unusable
-                if terminal:
-                    break
-                continue
-            # No data is ready. Once the child is gone, a pipe that only a
-            # grandchild still holds open will not deliver this turn's events.
-            if proc.poll() is not None:
+            chunk = read_chunk(1 << 20)
+            if not chunk:
                 break
-        if not terminal and carry:
+            _echo_stdout(chunk)
+            carry += chunk
+            *lines, carry = carry.split(b"\n")
+            for line in lines:
+                failed = line_turn_end_failed(line)
+                if failed is not None:
+                    turn_failed = failed
+                    saw_turn_end = True
+            if len(carry) > MAX_DSH_LINE_BYTES:
+                carry = b""           # a single event line over budget: unusable
+        if carry:
             failed = line_turn_end_failed(carry)
             if failed is not None:
                 turn_failed = failed
                 saw_turn_end = True
-        try:
-            proc.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            if saw_turn_end:
-                # The turn completed; lingering is cleanup, not the turn.
-                # Report the completed turn instead of blocking on the exit.
-                forced_rc = 0
-            with contextlib.suppress(OSError):
-                proc.terminate()
-            try:
-                proc.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(OSError):
-                    proc.kill()
-                proc.wait()
+        proc.wait()
     finally:
-        if proc.stdout is not None:
-            with contextlib.suppress(OSError):
-                proc.stdout.close()
         if proc.poll() is None:
             with contextlib.suppress(OSError):
                 proc.kill()
@@ -190,4 +115,4 @@ def run_dsh_streaming(cmd: list, env: dict, adapter: str) -> tuple:
         # harness may have died before answering.
         print(f"{adapter}: the harness emitted no turn_end completion event", file=sys.stderr)
         turn_failed = True
-    return (forced_rc if forced_rc is not None else int(proc.returncode or 0)), turn_failed
+    return int(proc.returncode or 0), turn_failed

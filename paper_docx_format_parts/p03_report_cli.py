@@ -3407,32 +3407,6 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     return num_map
 
 
-def _write_zip_atomic(out: Path, parts: dict) -> None:
-    """Write one DOCX package atomically, through an O_EXCL descriptor.
-
-    `zipfile.ZipFile(out, "w")` opened the caller's destination directly: a
-    crash left a truncated master DOCX and a pre-created symlink at `out`
-    received the bytes (the 2026-10-28 audit's F09). mkstemp() creates a
-    random sibling exclusively and returns the descriptor, so neither the
-    name nor a reopen-by-path can be swapped for a link.
-    """
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=out.parent)
-    tmp = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
-                for part_name, data in parts.items():
-                    z.writestr(part_name, data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, out)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
-
-
 def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> dict:
     """Restyle one DOCX into the venue's official Word template.
 
@@ -3566,7 +3540,7 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                     parts["word/document.xml"] = doc_xml.encode("utf-8")
                 if front_parts.get("even_odd"):
                     _with_even_odd_headers(parts)
-            _write_zip_atomic(out, parts)
+            _write_zip_parts_atomic(out, parts)
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError) as e:
         return {"file": str(src), "ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -4501,7 +4475,6 @@ def _missing_paths(paths) -> list:
     (AGENTS.md: a skipped integrity check is reported as skipped).
     """
     return [str(p) for p in paths if not Path(p).exists()]
-
 
 
 # =====================================================================

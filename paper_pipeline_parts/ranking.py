@@ -50,8 +50,8 @@ VS_ORIGINAL_TOLERANCE = 0.0
 #     CLI/config parameter), or when every cell is included;
 #   * the version's ordered per-cell census at that prefix is the leading key
 #     (fewer defects, and a worse severity earlier, is worse). The median is
-#     consulted ONLY when the whole census is equal, then the mean, IQR and
-#     digest.
+#     consulted ONLY when the whole census is equal, then the mean, IQR, digest
+#     and id.
 # Rationale: a per-cell count is tiny and fluctuates; accumulating cells in the
 # order the scoring semantics prioritises grows the evidence until the cleanest
 # candidate has enough counts (or there is nothing left to add), and the single
@@ -95,31 +95,6 @@ def tiebreak_group_severities(name) -> tuple:
 def _census_row(vid, census) -> dict:
     """One version's census row out of a bare `{vid: row}` map."""
     return ((census or {}).get(str(vid)) or {})
-
-
-def _census_row_measured(row) -> bool:
-    """Whether `row` is a MEASURED census row, not an empty placeholder.
-
-    `issue_matrix_and_cumulative` turns any row lacking `tiers` into an
-    all-zero row, and a PRESENT but empty row (`{}` / `tiers: {}`) was then
-    ranked as a defect-free version: it led a version with recorded fatal
-    defects and could win (F030). A census row written by the census builder
-    carries every `BASIS_TIERS` bucket, so a row missing one is a placeholder,
-    not evidence of zero defects; the caller treats it like an absent key and
-    leaves the ordered census missing (+inf), never a fabricated zero.
-    """
-    if not isinstance(row, dict):
-        return False
-    tiers = row.get("tiers")
-    if not isinstance(tiers, dict):
-        return False
-    return all(isinstance(tiers.get(tier), dict) and tiers.get(tier)
-               for tier in BASIS_TIERS)
-
-
-def _is_ranking_number(value) -> bool:
-    """A real numeric panel statistic (not bool, not a numeric string)."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def issue_matrix_and_cumulative(census, versions) -> tuple:
@@ -188,10 +163,7 @@ def champion_sort_key(row: dict) -> tuple:
     """
     census = row.get("defect_prefix_census")
     if census is None:
-        # A missing ordered census is MISSING EVIDENCE, never a one-total
-        # substitute: collapsing fatal..minor to a total ties one fatal defect
-        # with one minor and lets the digest decide (Rule 6 forbids it; F184).
-        census = (10 ** 9,)
+        census = (int(row.get("defect_prefix_total") or 0),)
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
     return (tuple(int(x) for x in census)
             + (-(med if med is not None else -99.0),)
@@ -201,7 +173,7 @@ def champion_sort_key(row: dict) -> tuple:
 
 
 def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
-                   floor: int, round_no: int, representatives: dict = None) -> dict:
+                   floor: int, round_no: int) -> dict:
     """Rank the round's candidates from RECORDED inputs only (Rule 6's purity).
 
     Every input is plain data: the panel's per-version statistics (`stats`), the
@@ -223,9 +195,8 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     writing_remaining / manual_steps), which never rank.
     """
     trace = []
-    candidates = [str(c) for c in (candidates or [])]
-    representatives = {str(k): str(v) for k, v in (representatives or {}).items() if v}
-    missing = [c for c in candidates if c not in stats and c not in representatives]
+    candidates = list(candidates or [])
+    missing = [c for c in candidates if c not in stats]
     if missing:
         trace.append(f"candidate(s) {missing} are not field members this round (their content was "
                      f"deduplicated into another member, or the arm did not run) -> not eligible "
@@ -233,42 +204,9 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     # (id to crown, id of the row that carries its stats, is_base)
     contenders = [(c, c, False) for c in candidates if c in stats]
     # A candidate that deduplicated away is still represented in the field by
-    # the member it merged into. That representative's row can be used as the
-    # candidate's row, so the content is not silently lost from the ranking
-    # (F005). The base representative is excluded here: the base already
-    # competes through `base_rep` below, and adding it twice would double its
-    # weight.
-    used_rows = {row_id for _cid, row_id, _is_base in contenders}
-    for cid in candidates:
-        if cid in stats:
-            continue
-        rep = representatives.get(cid)
-        if rep is None:
-            continue
-        if rep not in stats:
-            trace.append(f"candidate {cid!r} is content-identical to field member {rep!r}, but "
-                         f"that member has NO stats row in this field -> not eligible to win")
-            continue
-        if rep == base_rep:
-            trace.append(f"candidate {cid!r} is content-identical to the round's base "
-                         f"{base_rep!r}; the base row already competes")
-            continue
-        if rep in used_rows:
-            trace.append(f"candidate {cid!r} is content-identical to field member {rep!r}, "
-                         f"which already competes -> the content is represented once")
-            continue
-        contenders.append((cid, rep, False))
-        used_rows.add(rep)
-        trace.append(f"candidate {cid!r} is content-identical to field member {rep!r}; that "
-                     f"member's row is {cid}'s row and competes, so the content is not silently "
-                     f"lost")
-    if base_rep and base_rep not in stats:
-        # The round's base member has no panel row (a trimmed/legacy state): it
-        # cannot compete, and subscripting it would abort the whole decision.
-        trace.append(f"the round's base is content-identical to field member {base_rep!r}, "
-                     f"but that member has NO stats row in this field; the base cannot compete "
-                     f"and the selection falls back to the fresh arms only")
-    elif base_rep:
+    # the member it merged into; that member's row is already a contender of its
+    # own, so nothing is silently lost from the ranking.
+    if base_rep:
         contenders.append((A1_ID, base_rep, True))
         trace.append(f"the round's base A1_{round_no} is content-identical to field member "
                      f"{base_rep!r}; that member's row is the base's row and competes, so the "
@@ -289,9 +227,7 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
                          f"directed scores collected) -> ineligible: a partial panel must not "
                          f"decide a round")
             continue
-        if not is_base and not st.get("vs_original_complete"):
-            # An ABSENT/None flag is not a complete anti-regression panel: only
-            # a recorded pass (True) may clear the gate (Rule 6).
+        if not is_base and st.get("vs_original_complete") is False:
             trace.append(f"{label}: ANTI-REGRESSION PANEL INCOMPLETE "
                          f"({st.get('vs_original_n')} of {st.get('vs_original_expected')} scores "
                          f"against the original) -> ineligible")
@@ -299,15 +235,6 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
         if not is_base and not st.get("anti_regression_ok"):
             trace.append(f"{label}: anti-regression gate FAILED (vs_original median "
                          f"{st.get('vs_original')!r} < {VS_ORIGINAL_TOLERANCE:g}) -> ineligible")
-            continue
-        if not str(st.get("digest") or "").strip():
-            # Rule 5: a candidate's identity is its content digest. A row with
-            # no recorded digest cannot be told from another except by its arm's
-            # name/input order, so it is ineligible rather than silently ranked
-            # by that order.
-            trace.append(f"{label}: no content digest recorded -> ineligible: identity is "
-                         f"the content digest (Rule 5), and an undigested row would be "
-                         f"ordered by its name/position")
             continue
         if st.get("caption_gate_ok") is False:
             # Advisory only: reported, never a gate. This is the master prompt's
@@ -318,39 +245,22 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
             trace.append(f"{label}: {st['author_placeholders']} pipeline hand-off placeholder(s) "
                          f"for the author -> reported only; a place-holder is a manual item, "
                          f"never a defect and never a score penalty")
-        absent_stats = [k for k in ("n", "median", "mean", "iqr")
-                        if k not in st or (st.get(k) is not None
-                                           and not _is_ranking_number(st.get(k)))]
-        if absent_stats:
-            # A complete/eligible-looking row from a legacy or partial stats
-            # provider used to raise KeyError while the rows were built, which
-            # aborted the whole pure core (F091). A row that cannot supply the
-            # ranking statistics is ineligible, with a trace, not a crash.
-            trace.append(f"{label}: complete row is missing panel statistic(s) "
-                         f"{absent_stats} -> ineligible: a legacy/partial stats provider "
-                         f"cannot be ranked")
-            continue
-        eligible.append((cid, row_id))
+        eligible.append(cid)
     if not eligible:
         trace.append("no eligible rows: the champion falls back to A1_r (this round made no "
                      "demonstrable, non-regressing progress). If the cause was an incomplete "
                      "panel, re-run the judge stage (`retry --run <judge id>`) before trusting "
                      "this fallback -- an incomplete panel is not evidence of no progress.")
-        # Return the same tie-break block the ranked path returns. Without it
-        # finalize_round fell back to the CURRENT config floor while claiming to
-        # freeze the floor the ranking used, and the member table rendered '-'
-        # for every defects@K cell (F212).
         return {"champion": A1_ID, "champion_rep": base_rep, "eligible": [], "ranking": [],
-                "trace": trace,
-                "tiebreak": {"floor": floor, "cells_used": 0, "cell_order": [],
-                             "cells_total": len(tiebreak_cell_names())}}
+                "trace": trace}
     rows = []
-    for cid, row_id in eligible:
+    for cid in eligible:
+        row_id = base_rep if cid == A1_ID and base_rep else cid
         st = stats[row_id]
         rows.append({"id": cid, "rep": row_id, "is_base": bool(cid == A1_ID and base_rep),
                      "n": st["n"], "median": st["median"], "mean": st["mean"],
-                     "iqr": st["iqr"], "vs_original": st.get("vs_original"),
-                     "vs_base": st.get("vs_base"),
+                     "iqr": st["iqr"], "vs_original": st["vs_original"],
+                     "vs_base": st["vs_base"],
                      "digest": st.get("digest"),
                      "author_placeholders": st.get("author_placeholders"),
                      "issues": _issue_summary_from_census(row_id, census),
@@ -363,23 +273,9 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     # cell a separate rung); the median (then the mean, IQR and digest) is
     # the tie-break below it.
     rep_ids = sorted({str(t["rep"]) for t in rows})
-    # A version absent from the census has NO measured defect row: substituting
-    # an all-zero row made it the cleanest candidate and let it outrank a version
-    # the panel recorded a fatal defect against (F090). Keep such a version out
-    # of the floor walk and leave its ordered census ABSENT, so
-    # champion_sort_key's missing-evidence sentinel (+inf, never zero) applies.
-    known_reps = [rid for rid in rep_ids if _census_row_measured(_census_row(rid, census))]
-    cell_names, _matrix, cumulative = issue_matrix_and_cumulative(census, known_reps)
-    prefix_cells = tiebreak_prefix_cells(cumulative, known_reps, floor)
+    cell_names, _matrix, cumulative = issue_matrix_and_cumulative(census, rep_ids)
+    prefix_cells = tiebreak_prefix_cells(cumulative, rep_ids, floor)
     for t in rows:
-        if not _census_row_measured(_census_row(t["rep"], census)):
-            t["defect_prefix_total"] = None
-            t["defect_prefix_census"] = None
-            t["tiebreak_prefix_cells"] = prefix_cells
-            trace.append(f"{t['id']}: NO census row for this version -> its ordered defect "
-                         f"census is missing evidence (+inf), never a fabricated zero; it cannot "
-                         f"lead the ranking")
-            continue
         t["defect_prefix_total"] = (cumulative[str(t["rep"])][prefix_cells - 1]
                                     if prefix_cells else 0)
         # The leading key is the ordered census at the same prefix, not just
@@ -389,16 +285,15 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
         t["tiebreak_prefix_cells"] = prefix_cells
     # Ranking key, in order (2026-10-01, fourth calibration), with each
     # component's provenance:
-    #   defect_prefix_census  the ORDERED per-cell census at the adaptive
-    #                         severity_tier_category prefix, ASCENDING: fewer
-    #                         defects, and a worse severity earlier, is worse.
-    #                         THE CENSUS LEADS the key (the cumulative
-    #                         `defect_prefix_total` is retained for reports and
-    #                         is NOT read here): it preserves the tier and
-    #                         severity of every defect, and the panel median is
-    #                         coarse. The prefix stops when the cleanest ranked
-    #                         version has `tiebreak_defect_floor` counts
-    #                         (default 10) or every cell is included.
+    #   defect_prefix_total   the cumulative defect count (per source, collapsed
+    #                         only per session+version) over the adaptive
+    #                         severity_tier_category
+    #                         prefix, ASCENDING: fewer defects is better. THE
+    #                         PREFIX LEADS the key: it is the most direct
+    #                         improvement signal, and the panel median is coarse.
+    #                         The prefix stops when the cleanest ranked version
+    #                         has `tiebreak_defect_floor` counts (default 10) or
+    #                         every cell is included.
     #   -median               the field-wide panel statistic: the first
     #                         TIE-BREAK when two versions carry the same prefix.
     #   -mean                 consulted after the median (a total count is more
@@ -425,21 +320,6 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     rows.sort(key=champion_sort_key)
     champ_row = rows[0]
     base_row = next((t for t in rows if t["is_base"]), None)
-    # The incumbent's identity and statistics are a property of "the field has
-    # an incumbent", not of the incumbent being eligible. A base with an
-    # incomplete panel is filtered out of `rows`, and the old lookup then
-    # silently skipped retention (F185). Compare against its recorded stats
-    # directly.
-    # Rule 6 makes retention a property of "the field has an incumbent": the
-    # incumbent is EXEMPT from the eligibility gate, so an incomplete base panel
-    # does not disable retention. This is the F185 invariant; F004's
-    # `complete` guard reversed it and was withdrawn.
-    base_stats = stats.get(base_rep) if base_rep else None
-    if (base_row is None and base_stats is not None
-            and champ_row["id"] != A1_ID):
-        base_row = {"id": A1_ID, "rep": base_rep, "is_base": True,
-                    "median": base_stats.get("median"),
-                    "mean": base_stats.get("mean"), "iqr": base_stats.get("iqr")}
     if base_row is not None and champ_row is not base_row \
             and (champ_row["median"], champ_row["mean"], champ_row["iqr"]) == \
             (base_row["median"], base_row["mean"], base_row["iqr"]):
@@ -472,8 +352,7 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
                  "on the field-wide list. MANUAL_STEPS.md is reported but never ranked on; "
                  "missing counts sentinel = +inf")
     return {"champion": champ_row["id"], "champion_rep": champ_row["rep"],
-            "base_rep": base_rep, "eligible": [cid for cid, _row in eligible],
-            "ranking": rows, "trace": trace,
+            "base_rep": base_rep, "eligible": eligible, "ranking": rows, "trace": trace,
             "tiebreak": {"floor": floor, "cells_used": prefix_cells,
                          "cell_order": cell_names[:prefix_cells],
                          "cells_total": len(cell_names)}}

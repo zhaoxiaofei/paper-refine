@@ -40,7 +40,7 @@ profile. Running it needs Python 3.9+ and no third-party packages.
 | run it for the first time | *Quick start*, then *Requirements* |
 | read the result of a run | *What you get* |
 | look up a command or flag | *Everyday commands*, *Exit codes*, *Operational notes* |
-| choose the model and CLI harness | *Choosing the model and harness* |
+| choose the model and CLI harness | [Model and harness matrix](#choosing-the-model-and-harness---agent-harness---agent-model), [provider setup](docs/agent-harnesses.md) |
 | choose how to run: own rounds, new submission, or a real journal decision | *Revision modes* |
 | enforce a specific venue's rules | *Venues and journals* |
 | see how one round is built | *Round model* |
@@ -140,26 +140,26 @@ A finished decision can be certified, provisional or blocked; a blocked decision
   `git submodule update --init --recursive` (the dependency installer also
   initializes it). A source archive must carry the populated directory.
 * Optional, probed at runtime and never required: the `docx` CLI (read/render/
-  diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
-  `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
-  `pdftoppm`, the `docx-compare` MCP tool / `docxcompare.sh` (Word's own
+  diff/validate), a .docx→PDF converter (`docx2pdf.sh` + Word, the
+  `docx-converter` MCP tool, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
+  `pdftoppm`, `docxcompare.sh` / the `docx-compare` MCP tool (Word's own
   comparison engine for tracked changes), `latexdiff` (LaTeX difference
-  tracking), the `zotero` MCP service (the Zotero bridge's `zotero_status`,
-  `zotero_search_items`, `zotero_get_item` reads), and the `zot` CLI
-  (pyzotero-cli) as the LAST-RESORT route for read-only Zotero reference
-  resolution.
+  tracking), the `zot` CLI (pyzotero-cli) as the FIRST route for read-only
+  Zotero reference resolution, and the `zotero` MCP service (the Zotero
+  bridge's `zotero_status`, `zotero_search_items`, `zotero_get_item` reads).
 * Optional: the external Zotero skill (`$ZOTERO_SKILL` / `$zotero-use`) that the
   Zotero stage prompts name for the skill route and for their
   `validate_zotero_docx.py` proof step. `./install_dependencies.sh` clones the
   helper and the `$zotero-use` skill under `external/`, and `activate-deps.sh`
   exports `$ZOTERO_SKILL` (a checkout-relative path turned absolute only for the
-  current shell). The stage prompts pin the ROUTE ORDER: the Zotero MCP service
-  first when the session exposes it, then this skill, and the `zot` CLI from
-  pyzotero-cli only as the FALLBACK when the MCP service and the skill are both
-  unavailable. When none of the three routes works, the citation or live field
-  goes to manual verification. The skill script is NOT bundled in this
-  repository; when the skill is not installed, the pipeline's own code-side
-  live-field inventory and continuity gate (`paper_docx_format.py`, run by every
+  current shell). The stage prompts pin the ROUTE ORDER: the `zot` CLI from
+  pyzotero-cli first when it is available, then the Zotero MCP service when the
+  session exposes it, and this skill only as the FALLBACK when the CLI and the
+  MCP service are both unavailable. When none of the three routes works, the
+  citation or live field goes to manual verification. The skill script is NOT
+  bundled in this repository; when the skill is not installed, the pipeline's
+  own code-side live-field inventory and continuity gate
+  (`paper_docx_format.py`, run by every
   DOCX stage) is the check that actually enforces field preservation, and the
   prompts' `PROVE IT` step degrades to that gate.
 * The two DOCX MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) read the
@@ -170,133 +170,6 @@ A finished decision can be certified, provisional or blocked; a blocked decision
   launching the agent (and preserves any operator-configured roots), so the
   agent-driven path is contained even when the operator sets nothing; set it
   explicitly when you drive the servers outside the pipeline.
-
-### `--agent-harness dsh`: the DeepSeek Harness (`dsh`) as the session backend
-
-`dsh` is a separate install (node >= 22, `npm i -g @deepseek-ai/dsh@alpha`), and
-the pipeline drives it the way it drives the other two CLIs: one non-interactive
-session per stage, `PROMPT.md` piped on stdin, cwd = the stage's sandbox. The
-argv is `dsh --profile headless --json -`: `headless` is the harness's one-shot
-driver (one fresh persisted session, print the result, exit), and `--json`
-turns its stdout into a newline-delimited event stream whose opening `session`
-line names the session -- which is what lets a stopped session be CONTINUED with
-`--session-id <id>` exactly like a codex one (see *A STOPPED session is
-continued, not restarted*). The harness's own home (`$DSH_HOME`, default
-`~/.dsh`) owns the model, the MCP servers and the DeepSeek credential
-(`DEEPSEEK_API_KEY`), the way `~/.codex/config.toml` owns the codex CLI's -- so
-this preset carries no overrides, and a prompt that wants an MCP tool the
-harness does not have falls back to the next converter in its own list. Since
-that one-shot contract belongs to the installed BUILD rather than to a flag,
-`--agent-harness dsh` reads the harness's own `dsh --profile headless --help` once
-per invocation and names the gap (with the upgrade) up front instead of letting
-every session of a wave fail one by one -- including the conditions that would
-otherwise only appear as a stack trace per session: a build without the one-shot
-flags, and a `node` the harness cannot run under (it needs node >= 22 AND must be
-installed for the node that runs it, so putting a v22 first on PATH does not fix
-a harness `npm i -g`-installed under v18 -- reinstall it under v22). A missing
-`dsh` gets the install line.
-Verified end to end against dsh 0.2.1-alpha.4 and 0.2.0-rc.2. Reached through a
-custom `--agent-cmd` instead (e.g. the npx form, for a machine with no global
-install), the sessions run exactly the same way but keep the custom-command
-rule: no continuation form, so a stopped session gets a fresh attempt.
-
-### `--agent-model qwen38-27b`: Qwen3.8-27B through an OpenAI-compatible vLLM endpoint (and Claude Code's Anthropic route)
-
-`--agent-model qwen38-27b` points an existing harness at a vLLM server instead of
-reimplementing the agent loop. The adapter, `paper_qwen_agent.py`, is copied
-beside the root's driver at `setup` and travels through `sync-code`. It chooses
-the harness with `PAPER_QWEN_HARNESS`:
-
-* `codex` (default) — `codex exec` with a custom `model_provider=qwen` route.
-  The installed codex accepts only `wire_api="responses"`; vLLM exposes
-  `/v1/responses`, so the route uses it. Qwen rejects codex's `max` reasoning
-  effort; the adapter defaults to `medium` (`PAPER_QWEN_REASONING_EFFORT`).
-* `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` provider patch
-  and an `agent-default-model` override for the qwen route.
-* `claude` — `claude --print` against vLLM's Anthropic Messages endpoint (when
-  the server serves it).
-* `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
-
-The endpoint is `PAPER_QWEN_BASE_URL` (default
-`http://127.0.0.1:8000/v1`), model `PAPER_QWEN_MODEL` (default
-`qwen3.8-27b`), and key `PAPER_QWEN_API_KEY` (default `dummy`; vLLM usually
-needs none). When the endpoint is not reachable the adapter starts the SSH
-tunnel:
-
-```
-ssh -p 52080 -N -L 8000:127.0.0.1:8000 zxf@101.6.31.113
-```
-
-(`PAPER_QWEN_SSH_HOST`, `PAPER_QWEN_SSH_PORT`, `PAPER_QWEN_TUNNEL_LOCAL`,
-`PAPER_QWEN_TUNNEL_REMOTE`; `PAPER_QWEN_TUNNEL=off` forbids starting it). A
-tunnel the adapter started is stopped on exit; an operator's existing tunnel is
-left alone. Check the route without running a session:
-
-```
-python3 paper_qwen_agent.py --probe          # endpoint, model, tool support
-python3 paper_qwen_agent.py --check-tools    # exit 0/1 on tool_choice=auto
-printf 'Summarize this file: ...' | python3 paper_qwen_agent.py --chat
-```
-
-**Agentic sessions need tool calls.** vLLM accepts `tool_choice=auto` only
-when started with `--enable-auto-tool-choice --tool-call-parser <parser>` (and
-a model tool template). Without that flag, dsh fails a tool-using turn and
-codex's tools are not executed; the adapter warns on a dsh run and reports the
-gap in `--probe`. `--harness chat` is a text-only route and does not complete a
-pipeline stage that must write artifacts. Set `PAPER_QWEN_REQUIRE_TOOLS=1` to
-make the tool probe a hard preflight for a production run (the default is
-warn-and-run so the adapter can still be exercised against a text-only
-endpoint).
-
-### `--agent-model dots3-note-preview`: dots3-note-prev through the Dots API
-
-`--agent-model dots3-note-preview` keeps the harness and points it at the Dots API instead of
-reimplementing the agent loop; the platform's documentation is
-<https://dots.ai/platform/docs>. The adapter, `paper_dots_agent.py`, is copied
-beside the root's driver at `setup` and travels through `sync-code`. Create a
-key on the platform and export it as `DOTS_API_KEY`; the default endpoint is
-`https://note3-prev-api.askdiandian.com/v1` and the model is
-`dots3-note-prev`. It chooses the harness with `PAPER_DOTS_HARNESS`:
-
-* `codex` (default) — `codex exec` with a custom `model_provider=dots` route:
-  the platform's documented Responses protocol (`wire_api="responses"`),
-  `DOTS_API_KEY` read from the environment, web search disabled, and the
-  model's enforced 393,000-token window declared explicitly (it is not in Codex's
-  built-in catalog). The reasoning effort defaults to `medium`
-  (`PAPER_DOTS_REASONING_EFFORT`).
-* `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` route over the
-  platform's OpenAI-compatible Chat Completions endpoint and an
-  `agent-default-model` override. The route declares the 393,000-token window
-  and the output cap, and does not invent a reasoning parameter the platform
-  does not document.
-* `claude` — `claude --print` against the platform's Anthropic Messages
-  endpoint (its documented Claude Code route).
-* `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
-
-The endpoint and model are `PAPER_DOTS_BASE_URL` and `PAPER_DOTS_MODEL`; the
-capacity defaults are `PAPER_DOTS_CONTEXT_WINDOW=393000` and
-`PAPER_DOTS_MAX_TOKENS=65536`. `PAPER_DOTS_SKIP_PROBE=1` skips the
-`/v1/models` preflight for a gateway that does not expose that listing. Check
-the route without running a session:
-
-```
-python3 paper_dots_agent.py --probe          # endpoint, model, key, tool support
-python3 paper_dots_agent.py --check-tools    # exit 0/1 on tool_choice=auto
-printf 'Summarize this file: ...' | python3 paper_dots_agent.py --chat
-```
-
-**Agentic sessions need tool calls.** The hosted route supports them; the
-adapter checks `tool_choice=auto` before a dsh session and warns if the
-endpoint refuses it. `--harness chat` is a text-only route and does not
-complete a pipeline stage that must write artifacts. Set
-`PAPER_DOTS_REQUIRE_TOOLS=1` (or `PAPER_DOTS_CHECK_TOOLS=1`) to make the tool
-probe a hard preflight for a production run. The platform applies per-key RPM
-and TPM limits; keep `--jobs` modest when the key is rate-limited (the
-pipeline's normal retry/backoff policy applies to a 429). The optional LLM
-audits have their own backends: the defect audit defaults to `codex-lite` and
-the conflict audit is off; pass `--defect-audit dots` / `--conflict-agent dots`
-to keep those passes on Dots too (the judge panel already defaults to
-the producer's harness/model pair).
 
 ### Choosing the model and harness (`--agent-harness` / `--agent-model`)
 
@@ -319,120 +192,7 @@ options. The defaults are **`dsh` + `deepseek-flash`**:
 | `gpt-codex` | OpenAI Codex (`codex exec`) | `gpt-sol` |
 | `claude-code` | Claude Code (`claude --permission-mode bypassPermissions --print`) | `claude-sonnet` |
 
-`qwen38-27b` through `claude-code` requires a vLLM server that serves the
-Anthropic Messages API; on a server that only serves the OpenAI routes the
-first request fails rather than silently switching protocols.
-`qwen38-27b` through `gpt-codex` uses the qwen adapter's Codex route, which
-needs a vLLM server that serves `/v1/responses`; a server with only Chat
-Completions should use `dsh` for that model (or the Codex chat-completions
-bridge in the reference evaluation harness).
-
-The two axes are independent only where the wire protocol supports the pair.
-If only the harness is given, its default model is used; if only the model is
-given, its default harness is used. An unsupported pair (GPT through Claude
-Code, Claude through Codex) is refused before any session starts, never once
-per stage. `--judge-agent-harness` and
-`--judge-agent-model` select the same pair for the judge panel and default to
-the producer's pair; `--judge-manual` stages its prompts for a human.
-`PAPER_AGENT_HARNESS` / `PAPER_AGENT_MODEL` (and the `PAPER_JUDGE_AGENT_*`
-equivalents) supply defaults when the flags are absent.
-
-#### Arbitrary OpenAI-compatible endpoints
-
-`--agent-model` also accepts an `http://` or `https://` chat-completions URL.
-A custom endpoint runs on **`dsh`** (the default harness): Codex only speaks the
-Responses protocol and Claude Code only Anthropic Messages, so an arbitrary
-chat-completions URL is refused on those two rather than silently translated.
-
-```bash
-# a local vLLM/OpenAI-compatible server
-python paper_pipeline.py run --root ./paper_rounds \
-    --agent-model http://127.0.0.1:8000/v1/chat/completions \
-    --agent-model-api-key "$LOCAL_KEY"
-
-# OpenRouter (it hosts many models, so name the one to use)
-python paper_pipeline.py run --root ./paper_rounds \
-    --agent-model https://openrouter.ai/api/v1/chat/completions \
-    --agent-model-api-key "$OPENROUTER_API_KEY" \
-    --agent-model-name "anthropic/claude-sonnet-4.5"
-```
-
-The key is exported to the adapter through `PAPER_AGENT_MODEL_API_KEY` (the
-judge equivalent uses `PAPER_JUDGE_AGENT_MODEL_API_KEY`); it is never written
-into the generated DSH provider patch or the run record, and the option's
-value is redacted from the run log. Prefer the environment variable when the
-process list must not show the key. `--agent-model-name` /
-`PAPER_AGENT_MODEL_NAME` is required when the endpoint's `/v1/models` listing
-has more than one model; a single-model endpoint (such as a local vLLM) is
-detected automatically. The adapter reuses the endpoint's advertised context
-window when its catalog carries one, and otherwise uses
-`PAPER_AGENT_CONTEXT_WINDOW` (default 32768) and `PAPER_AGENT_MAX_TOKENS`
-(default 8192).
-
-`--agent-model-prep-json` merges a JSON object into every request to the
-custom endpoint, after the harness has built its normal payload:
-
-```bash
-python paper_pipeline.py run --root ./paper_rounds \
-    --agent-model http://127.0.0.1:8000/v1/chat/completions \
-    --agent-model-api-key "$LOCAL_KEY" \
-    --agent-model-prep-json '{"temperature": 0.2, "max_tokens": 8192, "reasoning_effort": "high"}'
-```
-
-The merge is recursive and the object may be incomplete: keys it omits keep
-the harness defaults (including nested keys such as `reasoning.summary`), and
-a key it carries replaces that default; provider-specific spellings (such as
-`max_token_len`) are passed through verbatim. It applies only to a custom
-endpoint URL, so to use it with a model that also has a shorthand (for example
-qwen38-27b) pass that model's endpoint URL and `--agent-model-name` instead of
-the shorthand. `PAPER_AGENT_MODEL_PREP_JSON` supplies the same object from the
-environment. Every `--agent-*` option has a `--judge-agent-*` equivalent, so
-the judge side uses `--judge-agent-model`, `--judge-agent-model-api-key`,
-`--judge-agent-model-name`, `--judge-agent-model-prep-json` (or
-`PAPER_JUDGE_AGENT_MODEL_PREP_JSON`) and `--judge-agent-cmd` in the same way.
-
-**Credentials.** The native harnesses use their own configuration first:
-`dsh` uses its `$DSH_HOME` credentials (its GPT/Claude routes use
-`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` or the stored DSH sign-in); `gpt-codex`
-uses the Codex login or `OPENAI_API_KEY`; `claude-code` uses the Claude Code
-login or `ANTHROPIC_API_KEY`. `gpt-codex` and `claude-code` running
-`deepseek-flash` use DeepSeek's documented Responses and Anthropic-compatible
-endpoints and require `DEEPSEEK_API_KEY`. `qwen38-27b` keeps the
-`PAPER_QWEN_*` vLLM settings and `dots3-note-preview` keeps `DOTS_API_KEY`.
-The "latest" ids above were read from Codex 0.167.0 and the DSH catalog on
-2026-11-10; a newer harness release can be supported by updating the small
-registry in `paper_model_agent.py` / `paper_pipeline_parts/p01_venues.py`.
-The optional `--defect-audit` and `--conflict-agent` passes keep their own
-legacy backend choices (`codex-lite`, `codex`, `claude`, `dsh`, `qwen`,
-`dots`, `manual`); pass the family that matches the run (e.g.
-`--defect-audit dsh`) when those passes should not fall back to ChatGPT.
-
-Examples:
-
-```bash
-# the new default: DeepSeek Harness + DeepSeek Flash
-python paper_pipeline.py run --root ./paper_rounds
-
-python paper_pipeline.py run --root ./paper_rounds \
-    --agent-harness gpt-codex --agent-model gpt-sol
-python paper_pipeline.py run --root ./paper_rounds \
-    --agent-harness claude-code --agent-model claude-opus
-python paper_pipeline.py run --root ./paper_rounds \
-    --agent-harness dsh --agent-model gpt-terra
-python paper_pipeline.py run --root ./paper_rounds \
-    --agent-harness gpt-codex --agent-model deepseek-flash
-# a different, cheaper judge pair
-python paper_pipeline.py run --root ./paper_rounds \
-    --agent-harness claude-code --agent-model claude-sonnet \
-    --judge-agent-harness gpt-codex --judge-agent-model gpt-terra
-```
-
-The legacy `--agent` / `--judge-agent` shortcuts are gone: they were replaced
-by `--manual` / `--judge-manual` and the `--agent-harness`/`--agent-model`
-pair. `conform` and `add-venue` still take their own `--agent` option, which is
-unrelated to the run/judge pair. The Qwen and Dots adapters are selected through
-`--agent-model qwen38-27b` / `--agent-model dots3-note-preview`, and their
-sections above remain the detailed reference for those adapters.
+See [Agent harnesses and model providers](docs/agent-harnesses.md) for provider setup, custom endpoints, and separate judge settings.
 
 ## What you get
 
@@ -569,7 +329,7 @@ evidence pack.
 | `set-submit-code off\|on` | whether `code/` is part of the submission (`off`, the default: revision content the stages revise and the judges evaluate, but stripped from `journal_submission/` like `raw_data/`, and not citeable by the response letter; `on`: the submission carries it and the letter may cite it) |
 | `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
 | `redline --root ROOT` / `track --root ROOT` | (re)write the tracked-changes `.docx` tree / the difference-tracking copies (`*.tracking-*`) plus the persistent PDF renders |
-| `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: the stage tries the Zotero MCP service first, then the Zotero skill, and the `zot` CLI only as the fallback when both are unavailable; `off` = the run policy forbids all Zotero tooling and every stage prompt says so; the pipeline does NOT uninstall the operator's MCP registration or skill, so a machine that must be incapable of Zotero access should install with `install_dependencies.sh --no-zotero-mcp --no-external`, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write through the `zot` CLI. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
+| `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: the stage tries the `zot` CLI first, then the Zotero MCP service, and the Zotero skill only as the fallback when both are unavailable; `off` = the run policy forbids all Zotero tooling and every stage prompt says so; the pipeline does NOT uninstall the operator's MCP registration or skill, so a machine that must be incapable of Zotero access should install with `install_dependencies.sh --no-zotero-mcp --no-external`, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write through the `zot` CLI. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
 | `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant. The pair carries `2*judges` scores, so the sign rule needs at least 3 judges: at 2 judges the smallest attainable one-sided p (4/4 losses) is 0.0625, and `setup` refuses that combination rather than shipping a gate that can never reject |
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
 | `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. `--judge-manual` stages the judge prompts for a human, and `--judge-agent-cmd JSON` overrides the judge command |
@@ -1011,8 +771,8 @@ those styles are removed — with the document text proven byte-identical or the
   headings imported from another publisher's template). When the venue ships a
   Word template, the orchestrator also **renders it once per root** (the
   operator's `docx-converter` MCP tool first -- the orchestrator drives the
-  configured server over a minimal stdio JSON-RPC client, the same first choice
-  every prompt mandates -- then `docx2pdf.sh`, then LibreOffice: PDF + page
+  configured server over a minimal stdio JSON-RPC client, then `docx2pdf.sh`,
+  then LibreOffice: PDF + page
   images + a
   `manifest.json` naming the renderer and each template document's page count,
   cached by template digest) and seeds that render into every producing/
@@ -2609,7 +2369,7 @@ call, a cost or latency budget), and neither the profile contract nor the paged 
 model or window it runs on.
 
 `--execution-profile {high,medium}` (default `high`) selects the instruction profile. It is NOT a
-reasoning-effort setting (`PAPER_QWEN_REASONING_EFFORT` is a different axis) and it changes no
+reasoning-effort setting (`PAPER_AGENT_REASONING_EFFORT` is a different axis) and it changes no
 postcheck.
 
 * **`high`** is the default and inlines every rule. A default root writes no new config key and
@@ -2634,6 +2394,16 @@ postcheck.
   contradiction rule; a reading-economy hint never overrides a stage instruction to read a whole
   file, package or donor set, or the re-validation read that re-opens a cited location before an
   edit, and write-economy guidance never demands a format-invalid partial deliverable.
+
+**To choose between them for a weak or small model, measure — do not assume.**
+`medium` shrinks the per-call payload but ADDS read turns (the session slices
+`INSTRUCTIONS/PROFILE_RULES.md`) and, on a long stage, more compaction and more
+chances to lose the thread; `high` inlines the same rules once and removes the
+slicing. A 2026-11-13 27B arm under `medium` compacted seven times before it
+reached its bookkeeping. The first experiment for such a model is therefore to
+re-run the same root with `--execution-profile high`: the rules, the postchecks
+and the staged sessions are identical (that is what rule 12 means), so the
+comparison is about payload shape, not about a weaker contract.
 
 **`medium` is normatively equivalent to `high`** (AGENTS.md rule 12), and the equivalence is tested,
 not assumed. The paged file carries the blocks byte-for-byte (only a level-2 heading may be demoted
@@ -3460,7 +3230,7 @@ Now every attempt is recorded and its evidence is preserved:
 
 | where | what it holds |
 |---|---|
-| `state.json` → `runs.<id>.attempts_log` | one entry per attempt: number, source (`postcheck` / `process` / `adopted` / `recheck` / `re-verify` / `manual`), timestamps, duration, status, the postcheck's errors and warnings, the decision-artifact quality report, the marker's own summary, and the paths of the attempt's archive and transcript (one entry per attempt, bounded by the run's `--retries` budget; the error/warning lists are **complete** — no message-count cap, 4000 characters per message plus a 512 KiB total guard per list, see below) |
+| `state.json` → `runs.<id>.attempts_log` | one entry per attempt of the run — a full stage attempt, a scoped repair, a continuation, or a re-verify (which runs no agent) — with number, source (`postcheck` / `process` / `adopted` / `recheck` / `re-verify` / `artifact-repair` / `continuation` / `manual`), timestamps, duration, status, the postcheck's errors and warnings, the decision-artifact quality report, the marker's own summary, and the paths of the attempt's archive and transcript. The retry budget is charged once per failed attempt and reported per invocation (`[attempt N/M; …]` on the console, `N of M attempt(s) spent` in the FAILED line); auxiliary sessions are reported beside it, and `status` shows the lifetime split as `FULL+AUX`. The error/warning lists are **complete** — no message-count cap, 4000 characters per message plus a 512 KiB total guard per list, see below |
 | `runs/<run>_try<N>_failed/` | the FAILED TRY's whole sandbox, renamed there before the retry builds a fresh `runs/<run>/`: the deliverables exactly as the postcheck judged them, the corpus copies, the agent transcript and a self-describing `record.json` (which names the attempts whose work it holds — a stage attempt and, when the scoped repair ran in it, the repair session too). `prune` reclaims these with the round they belong to |
 | `runs/_logs/<run>.<attempt…>.log` | transcripts of attempts whose sandbox was reset by a `retry` or a revalidation (a sandbox kept as `_try<N>_failed` keeps its own `_agent.log` inside) |
 
@@ -3473,6 +3243,20 @@ per session. `status` and `DECISION_REPORT.md` list every failed attempt with it
 first problem and the paths above, and `prune` reclaims the kept sandboxes of the
 rounds it prunes — the attempt RECORDS stay in `state.json`, so the history
 remains readable and says that the kept sandbox is gone.
+
+**Retries and auxiliary sessions are counted separately.** `[attempt N/M]` on the
+console is the retry-budget ordinal of the CURRENT invocation (a fresh `run`
+re-grants the budget, so a resumed run starts at attempt 1 again), so it can
+never exceed `--retries`+1; a scoped repair, a continuation or a re-verify that
+ran in the same sandbox is named after the semicolon (`[attempt 3/3; 2
+re-verifications]`), and the end-of-invocation FAILED line reads
+`2 of 3 attempt(s) spent; …`. A failed scoped repair or continuation spends the
+slot of the attempt it serves, never an extra one — the repair policy treats it
+as that attempt's failure. `status` shows the lifetime split as `FULL+AUX`
+(`2+1` = two full launches and one auxiliary session). The 2026-11-12 root
+printed `[attempt 5/3]` for its third launch because the display counted the two
+re-verifies of a process that died after writing complete artifacts as retries;
+the budget itself had not been overrun.
 
 A defect message is part of this record: a repeated disposition is now quoted in
 full and names the rows it is about (`-- rows: <document> / <heading> / para n`),
@@ -3563,8 +3347,19 @@ which files may change, and which evidence is pinned:
 |---|---|---|---|
 | `review` | the decision-artifact quality problems (empty cells, boilerplate closures, echoed OUTLINE summaries), the M1b long-form gate (undisposed residue rows — the class that failed the 2026-09-22 roots), a missing visual record | `guided_review/artifacts/` (the seeded tables **including `M1_acronyms.md`**), `guided_review/work/` | every table's row identity, all headers and column orders; `findings.json`/`md`, `round2/`, the other artifact files |
 | `audit` | `audit.json` missing/unparseable/duplicated/missing dispositions | `audit/` | every existing disposition and every `adds` row; **new dispositions must be `confirm`** (a drop hides a finding from the revisers and needs the auditor's own evidence) |
-| `rewrite` / `revise` / `integrate` | an EMPTY/thin report or ledger the stage wrote (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`: blank cells, wrong level, missing `artifact` rows), the language-pass coverage rows, the visual record, the marker | the package's bookkeeping files the stage wrote (by name) and its existing `work/` files | every manuscript file of the package; the frozen review; the corpus inputs |
+| `rewrite` / `revise` / `integrate` | an EMPTY/thin report or ledger the stage wrote (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`: blank cells, wrong level, missing `artifact` rows), the seeded revise ledger's empty verdict cells and the language-pass coverage cells, the visual record, the marker | the package's bookkeeping files the stage wrote (by name) and its existing `work/` files | every manuscript file of the package; the frozen review; the corpus inputs; every seeded row's identity |
 | `judge` | a missing `checks` coverage map, `score`/`basis` that contradict the sheet's own ledger, bookkeeping ids, a missing grounding record | `scores.json`, `judge_review/` | `resolved`/`introduced` (the ledger IS the judgement), the comparison set, existing coverage entries; new coverage entries must be `unable` |
+
+**The revise arm starts with the two late deliverables EMPTY-BUT-SHAPED.** At
+materialization the pipeline seeds `revised/revision_report.json` with one row per
+frozen finding id (empty verdict/rationale/evidence) and
+`revised/work/R6_language.md` with the L1-L11 coverage rows (empty counts). The
+seed is a head start, never a pass: an empty verdict or an empty coverage cell is
+still a postcheck ERROR (and the scoped repair may complete the cells from the
+package's own evidence), while the completion marker is deliberately NOT seeded —
+a stage that stopped before it is UNFINISHED and is continued, not repaired. The
+reason is the 2026-11-13 arm that wrote the revised brief and stopped three
+bookkeeping files short: the failure was a one-line omission, not a missing review.
 
 **Variant B — a repair finishes the paperwork of work that happened, it never
 substitutes for the work.** A repair may only CHANGE files the stage itself
@@ -3734,7 +3529,7 @@ its four integration runs never started.
 | `revision_history/ZOTERO_REFRESH_FORENSICS_2026-1009.md` | the 2026-10-09 Zotero live-field forensics that M36/FMT-Z grew from |
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
 | `docxcompare.sh` | Word→redline comparison via PowerShell (WSL/Git Bash) |
-| `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
+| `mcp-docx-converter/` | the `docx-converter` MCP tool (the MCP route to Word rendering; the agents' first choice is `docx2pdf.sh`) |
 | `mcp-docx-compare/` | the `docx-compare` MCP tool (Word's own compare engine, first choice for tracked changes) |
 | `paper-skills/` | the bundled review (`paper-review`) and revision (`paper-revise`) skills + prompts |
 | `install_dependencies.sh` | installs the conda env, Node MCP dependencies, agent skills/MCP rows and the external Zotero checkouts; writes checkout-relative `deps.env` + `activate-deps.sh` |
@@ -3801,7 +3596,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 200 suites (a few
+any failure. They are independent, so run them in parallel — 201 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

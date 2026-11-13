@@ -416,7 +416,7 @@ STATE_VERSION = 3
 # preset.
 PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
                          "paper_redlines_adapter.py", "paper_qwen_agent.py",
-                         "paper_dots_agent.py", "paper_model_agent.py",
+                         "paper_dots_agent.py", "paper_model_agent.py", "paper_dsh_runtime.py",
                          # The render/track shims are read beside the running
                          # driver (`visual_renderer_choices`), so a root that
                          # lacks them silently loses the highest-fidelity
@@ -432,6 +432,17 @@ PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
 # module manifest records each directory as ONE digest (name + sha256 of every
 # file), so a partial or stale bundle is visible to `status`/`sync-code`.
 PIPELINE_ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent-common")
+MANUSCRIPT_WORDS_FILE = "paper-skills/paper-review/scripts/manuscript_words.py"
+PIPELINE_REQUIRED_ASSET_FILES = (
+    "agent-common/agent_common/model_runtime.py",
+    "agent-common/agent_common/llm_retry.py",
+    "agent-common/agent_common/llm_policy.json",
+    "agent-common/agent_common/model_catalog.json",
+    "agent-common/agent_common/dsh_events.py",
+    "paper_pipeline_parts/ranking.py",
+    "paper_pipeline_parts/decision_report.py",
+    MANUSCRIPT_WORDS_FILE,
+)
 # venue_profiles/ is a RUNTIME asset too (load_precedence reads the root's copy
 # before the maintained one), but a trimmed checkout may legitimately omit it
 # (the config snapshot is then authoritative). It is frozen and manifested when
@@ -440,8 +451,7 @@ PIPELINE_ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent
 PIPELINE_VENUE_ASSET_DIRS = ("venue_profiles",)
 # Skills are read from beside the running driver too (adopt-sweep's default
 # sweeps.md and the guided-review/revise prompt assets), so a root freezes them; a
-# trimmed checkout without the skills pack still creates a root (the copy is
-# recorded as None rather than aborting setup).
+# trimmed checkout may omit the prompt assets but needs the shared word rules.
 PIPELINE_SKILL_ASSET_DIRS = ("paper-skills",)
 # The stage prompt's SELF-CHECK pre-flight runs the driver itself.  A jailed
 # harness can hide both the run root and the origin snapshot, so every stage

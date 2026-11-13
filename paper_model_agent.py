@@ -66,7 +66,6 @@ from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import paper_dsh_runtime
-    import paper_agent_runtime_patch  # noqa: F401  (F024/F025, parent-tracked)
 finally:
     sys.path.pop(0)
 
@@ -138,13 +137,19 @@ def _endpoint_base(url: str) -> str:
     `/chat/completions` itself. Query/fragment are dropped, but a `model=` query
     parameter is preserved as the model name by `_endpoint_model`.
     """
+    text = str(url).strip()
     try:
-        # The shared parser enforces the port range and strips userinfo, so a
-        # malformed or credential-bearing URL is a usage error here instead of
-        # an uncaught ConfigError later in the run.
-        return rt.endpoint_base(url)
-    except rt.ConfigError:
+        parsed = urllib.parse.urlsplit(text)
+        host = parsed.hostname
+        parsed.port          # a non-numeric or out-of-range port is malformed too
+    except ValueError:
         return ""
+    if parsed.scheme not in ("http", "https") or not host:
+        return ""
+    path = parsed.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        path = path[: -len("/chat/completions")]
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _endpoint_query_model(url: str) -> str:
@@ -156,18 +161,21 @@ def _endpoint_query_model(url: str) -> str:
 
 
 def _endpoint_catalog(cfg: dict) -> list:
-    """The endpoint's /models entries ([] when it exposes no listing).
-
-    A 404/405 means the endpoint serves no listing and returns []; any other
-    probe failure raises `rt._EndpointProbeError`, so a bad key, a 5xx or a
-    redirect is not reported as "the endpoint lists no models". The shared
-    probe also refuses redirects so the Bearer key never reaches the Location
-    host.
-    """
+    """The endpoint's /models entries ([] when it exposes no listing)."""
     base = cfg["base_url"]
     if not base:
         return []
-    return rt._endpoint_catalog(base, cfg.get("api_key") or "", timeout=10.0)
+    headers = {"Content-Type": "application/json"}
+    if cfg["api_key"]:
+        headers["Authorization"] = f"Bearer {cfg['api_key']}"
+    req = urllib.request.Request(f"{base}/models", headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError, TypeError):
+        return []
+    data = body.get("data") if isinstance(body, dict) else None
+    return [m for m in (data or []) if isinstance(m, dict) and m.get("id")]
 
 
 def _endpoint_context(catalog: list, model: str):
@@ -189,12 +197,7 @@ def _endpoint_context(catalog: list, model: str):
 def resolve_endpoint_model(cfg: dict) -> tuple:
     """(model_name, error) for a custom endpoint; '' on success."""
     if cfg.get("model_name"):
-        try:
-            catalog = _endpoint_catalog(cfg)
-        except rt._EndpointProbeError:
-            # The model is named explicitly, so a failed probe only costs the
-            # optional context window.
-            catalog = []
+        catalog = _endpoint_catalog(cfg)
         context = _endpoint_context(catalog, cfg["model_name"])
         if (context and not os.environ.get("PAPER_AGENT_CONTEXT_WINDOW")
                 and not cfg.get("context_explicit")):
@@ -207,10 +210,7 @@ def resolve_endpoint_model(cfg: dict) -> tuple:
     query_model = _endpoint_query_model(cfg.get("endpoint") or "")
     if query_model:
         return query_model, ""
-    try:
-        catalog = _endpoint_catalog(cfg)
-    except rt._EndpointProbeError as exc:
-        return "", str(exc)
+    catalog = _endpoint_catalog(cfg)
     models = [str(m.get("id")) for m in catalog]
     if len(models) == 1:
         context = _endpoint_context(catalog, models[0])
@@ -235,13 +235,8 @@ def config(args=None) -> dict:
     harness = (getattr(args, "harness", None)
                or _env("PAPER_AGENT_HARNESS", DEFAULT_HARNESS))
     harness = str(harness).strip().lower().replace("_", "-").replace(" ", "-")
-    explicit_model = getattr(args, "model", None)
     endpoint = (getattr(args, "endpoint", None)
                 or _env("PAPER_AGENT_MODEL_ENDPOINT", "")).strip()
-    # `args > env` is the documented precedence: an explicit --model must not
-    # be silently overridden by the AMBIENT endpoint variable (F53).
-    if explicit_model and not getattr(args, "endpoint", None):
-        endpoint = ""
     api_key_env = (getattr(args, "api_key_env", None)
                    or _env("PAPER_AGENT_MODEL_API_KEY_ENV",
                            "PAPER_AGENT_MODEL_API_KEY"))
@@ -265,7 +260,7 @@ def config(args=None) -> dict:
                                    DEFAULT_ENDPOINT_MAX_TOKENS),
             "deepseek_key": _env("DEEPSEEK_API_KEY") or _env("PAPER_DEEPSEEK_API_KEY"),
         }
-    model = (explicit_model
+    model = (getattr(args, "model", None)
              or _env("PAPER_AGENT_MODEL", DEFAULT_MODEL))
     model = str(model).strip().lower().replace("_", "-").replace(" ", "-")
     info = MODELS.get(model) or {}
@@ -322,17 +317,7 @@ def _pair_problem(cfg: dict) -> str:
         if not cfg.get("endpoint"):
             return "empty custom endpoint URL"
         if not cfg.get("base_url"):
-            # The raw value can carry userinfo/query credentials; the message is
-            # written to stderr and must not echo them (F002). `redact_endpoint_url`
-            # uses `urlsplit`, which raises on an unparsable value (a bad IPv6
-            # literal), so a malformed endpoint fell through as a traceback
-            # instead of the documented usage error; strip it textually then.
-            _endpoint_text = str(cfg.get("endpoint"))
-            try:
-                _shown = rt.redact_endpoint_url(str(cfg.get('endpoint')))
-            except ValueError:
-                _shown = rt._safe_endpoint_text(_endpoint_text)
-            return (f"cannot parse endpoint URL {_shown!r}: it must be "
+            return (f"cannot parse endpoint URL {cfg.get('endpoint')!r}: it must be "
                     f"an http(s) URL with a host")
         credential = rt.endpoint_credentials(str(cfg.get("endpoint")))
         if credential:
@@ -378,9 +363,6 @@ def deep_merge(base: dict, override: dict) -> dict:
     return base
 
 
-_PREP_OPENER = urllib.request.build_opener(rt._NoRedirectHandler)
-
-
 class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
     """Forward DSH's OpenAI-compatible requests, merging the prep object."""
 
@@ -397,43 +379,20 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
         return base + path
 
     def _forward(self, method: str, body: bytes = None) -> None:
-        headers = rt._forwardable_request_headers(
-            self.headers, extra_skip=("accept-encoding",))
+        headers = {}
+        for key, value in self.headers.items():
+            if key.lower() in ("host", "content-length", "connection",
+                               "transfer-encoding", "accept-encoding"):
+                continue
+            headers[key] = value
         if body is not None:
             headers["Content-Length"] = str(len(body))
         req = urllib.request.Request(self._target(), data=body,
                                      headers=headers, method=method)
         try:
-            # No redirects: urllib's default handler re-sends the request,
-            # including the client's Authorization header, to the Location
-            # host; a 302 would even turn a POST into a GET.
-            resp = _PREP_OPENER.open(req, timeout=600.0)
+            resp = urllib.request.urlopen(req, timeout=600.0)
         except urllib.error.HTTPError as e:
-            if 300 <= e.code < 400:
-                raw = json.dumps({"error": {"message":
-                                           "custom endpoint proxy refused a redirect "
-                                           f"(HTTP {e.code}); credentials are not "
-                                           "forwarded to another host"}}).encode()
-                self.send_response(502)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                self.end_headers()
-                with contextlib.suppress(OSError):
-                    self.wfile.write(raw)
-                return
-            try:
-                raw = e.read()
-            except (http.client.HTTPException, OSError) as read_exc:
-                raw = json.dumps({"error": {"message":
-                                           "custom endpoint proxy could not read the "
-                                           f"upstream HTTP {e.code} body: {read_exc}"}}).encode()
-                self.send_response(502)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                self.end_headers()
-                with contextlib.suppress(OSError):
-                    self.wfile.write(raw)
-                return
+            raw = e.read()
             self.send_response(e.code)
             ctype = e.headers.get("Content-Type") if e.headers else None
             self.send_header("Content-Type", ctype or "application/json")
@@ -457,7 +416,10 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(raw)
             return
         self.send_response(getattr(resp, "status", 200))
-        for key, value in rt._forwardable_response_headers(resp.headers.items()):
+        for key, value in resp.headers.items():
+            if key.lower() in ("transfer-encoding", "connection",
+                               "content-length", "content-encoding"):
+                continue
             self.send_header(key, value)
         self.end_headers()
         try:
@@ -468,10 +430,7 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
-        except (OSError, ValueError, http.client.HTTPException):
-            # A truncated chunked/Content-Length body raises IncompleteRead (an
-            # HTTPException), which escaped and killed the client connection
-            # with a traceback (F051).
+        except (OSError, ValueError):
             pass
         finally:
             with contextlib.suppress(OSError):
@@ -481,34 +440,11 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
         self._forward("GET")
 
     def do_POST(self):
-        if rt._request_is_chunked(self.headers):
-            # Without a Content-Length a chunked body was read as empty and
-            # forwarded with Content-Length: 0, so the provider saw `{}` and
-            # the client got a 200. Reject the unsupported framing instead.
-            raw = json.dumps({"error": {"message":
-                                       "chunked request bodies are not supported by "
-                                       "the custom endpoint proxy"}}).encode()
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            with contextlib.suppress(OSError):
-                self.wfile.write(raw)
-            return
         try:
-            body = rt._read_request_body(self.rfile, self.headers) or b""
-        except ValueError:
-            # Never treat an unparsable Content-Length as a zero-length body
-            # and forward a corrupted request as a valid one.
-            raw = json.dumps({"error": {"message":
-                                       "invalid Content-Length header"}}).encode()
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            with contextlib.suppress(OSError):
-                self.wfile.write(raw)
-            return
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        body = self.rfile.read(length) if length else b""
         prep = getattr(self.server, "prep", None)
         if prep and body:
             try:
@@ -595,32 +531,19 @@ def dsh_argv(cfg: dict) -> tuple:
     home, err = ensure_dsh_home()
     if err:
         return [], {}, err
-    try:
-        text = dsh_patch_text(cfg)
-    except rt.ConfigError as exc:
-        # An operator-settable context/max-token combination is a clean
-        # configuration error, not a traceback out of main() (F67).
-        return [], {}, str(exc)
+    text = dsh_patch_text(cfg)
     patch = ""
     if text:
-        try:
-            fd, patch = tempfile.mkstemp(prefix="paper-model-", suffix=".patch.yml")
-        except OSError as exc:
-            return [], {}, f"could not create the DSH patch file: {exc}"
-        # Record the path BEFORE writing: a failed write is then cleaned up by
-        # `_cleanup()` instead of leaving a partial patch behind (F80).
+        fd, patch = tempfile.mkstemp(prefix="paper-model-", suffix=".patch.yml")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
         _PATCH_TMP = patch
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-        except OSError as exc:
-            return [], {}, f"could not write the DSH patch file: {exc}"
     env = dict(os.environ, DSH_HOME=home)
     if cfg["family"] == "endpoint":
         env[cfg["api_key_env"]] = cfg.get("api_key") or "dummy"
     elif cfg["deepseek_key"]:
         env.setdefault("DEEPSEEK_API_KEY", cfg["deepseek_key"])
-    return (_build_dsh_argv(patch_path=patch or None, extra_args=("-",)), env, "")
+    return (_build_dsh_argv(patch_path=patch or None), env, "")
 
 
 def codex_argv(cfg: dict, extra: list = None) -> list:
@@ -665,7 +588,7 @@ def _print_probe(cfg: dict) -> int:
               "claude-code": "claude"}.get(cfg["harness"], "")
     print(f"harness: {cfg['harness']}")
     if cfg["family"] == "endpoint":
-        print(f"endpoint: {rt.redact_endpoint_url(str(cfg['endpoint']))}")
+        print(f"endpoint: {cfg['endpoint']}")
         print(f"base:    {cfg['base_url']}")
         print(f"model:   {cfg.get('model_name') or '(unresolved)'}")
         print(f"key:     {cfg['api_key_env']} "
@@ -679,10 +602,6 @@ def _print_probe(cfg: dict) -> int:
         print(f"key:     DEEPSEEK_API_KEY "
               f"{'set' if cfg['deepseek_key'] else 'NOT set'}")
     problem = _pair_problem(cfg) or _key_problem(cfg)
-    if binary and not shutil.which(binary):
-        # The probe prints the absence but used to report `problem: none` and
-        # exit 0, so an unusable harness passed `--probe` (F090).
-        problem = problem or f"{binary} is not on PATH"
     if problem:
         print(f"problem: {problem}")
         return 1
