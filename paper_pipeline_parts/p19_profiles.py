@@ -273,8 +273,13 @@ def _stage_rules_rel(sb: Path, stage: str) -> str:
         if (sb / PROFILE_INSTRUCTIONS_DIR).is_symlink():
             return PROFILE_RULES_REL
         if base.is_file() and not base.is_symlink():
-            head = base.read_text(encoding="utf-8", errors="replace")[:4096]
-            if f"_Stage: {stage}_" not in head:
+            head = read_text_bounded(base)
+            if head is None:
+                # Over the agent-output budget (or no longer a regular file):
+                # treat it as another stage's/unusable file rather than reading
+                # the whole thing into memory before slicing.
+                return PROFILE_RULES_REL
+            if f"_Stage: {stage}_" not in head[:4096]:
                 safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(stage)).strip("_") or "stage"
                 return f"{PROFILE_INSTRUCTIONS_DIR}/PROFILE_RULES_{safe}.md"
     except OSError:

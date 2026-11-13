@@ -38,6 +38,9 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
         version it started from.
     """
     field_ids = list(field_ids)
+    k0 = len(field_ids)
+    slot_problems = set()          # versions whose panel has a dup/missing opponent
+    sheet_slots = {}               # (target, judge index) -> set(opponents seen)
     # `dedup` is the mode the round was DECIDED with when a decision is being
     # re-derived. `decide` passes the recorded value: reading today's config
     # here re-counted a past round under a mode the operator changed afterwards
@@ -152,6 +155,19 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
                     f"{rec['id']} vs {label}: every frozen check is `unable`; the "
                     f"comparison is an abstention, not a judgment")
                 continue
+            # A duplicated opponent + an omitted one keeps `len(flat)` at the
+            # expected count: cardinality alone cannot see the missing
+            # comparison. Track the (target, judge, opponent) slot instead.
+            skey = (vid, rec.get("judge_index"))
+            seen_opps = sheet_slots.setdefault(skey, set())
+            if opp in seen_opps:
+                diags.setdefault("duplicate_comparisons", []).append(
+                    f"{rec['id']}: {vid} vs {opp} is reported twice; the duplicate "
+                    f"is ignored and the panel is incomplete")
+                slot_problems.add(vid)
+                slot_problems.add(opp)
+                continue
+            seen_opps.add(opp)
             census_obs.append((rec.get("id"), vid, opp, comp))
             per[vid]["own"].setdefault(opp, []).append(int(score))
             per[opp]["received"].setdefault(vid, []).append(-int(score))
@@ -170,6 +186,15 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
                     "reason": (str(comp.get("reason")) if comp.get("reason") else "")[:200],
                 })
             diags["scores_collected"] += 1
+        # After the WHOLE sheet, not after each comparison: an opponent is
+        # missing only when no comparison in this sheet named it.
+        missing = ({o for o in field_ids if o != vid}
+                   - sheet_slots.get((vid, rec.get("judge_index")), set()))
+        if missing:
+            diags["incomplete_sheets"].append(
+                f"{rec['id']}: no comparison against {', '.join(sorted(missing))} "
+                f"for {vid}")
+            slot_problems.add(vid)
     k = len(field_ids)
     # Directed scores per version = judges * (|field|-1) own scores plus
     # (|field|-1) * judges negated received scores = 2 * judges * (|field|-1).
@@ -236,7 +261,8 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             "digest": recorded_version_digest(ctx, r, vid),
             "n": len(flat),
             "expected_n": expected_for.get(vid, expected),
-            "complete": len(flat) == expected_for.get(vid, expected),
+            "complete": (len(flat) == expected_for.get(vid, expected)
+                         and vid not in slot_problems),
             "median": float(statistics.median(flat)) if flat else None,
             "mean": float(statistics.fmean(flat)) if flat else None,
             "iqr": iqr_of(flat) if flat else None,
@@ -1057,11 +1083,19 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
         elif s.get("anti_regression_ok") is False:
             note = "ineligible (regressed vs original)"
         rank_row = ranking_by_id.get(e["id"]) or {}
-        if rank_row.get("issues"):
-            iss = rank_row["issues"]
-        elif str(e["id"]) in census:
+        in_census = str(e["id"]) in census
+        rank_issues = rank_row.get("issues") or {}
+        rank_nonzero = any(
+            (int((rank_issues.get(sev) or {}).get("own") or 0)
+             + int((rank_issues.get(sev) or {}).get("peer") or 0))
+            for sev in ("fatal", "critical", "major", "minor"))
+        if rank_issues and (in_census or rank_nonzero):
+            iss = rank_issues
+        elif in_census:
             iss = champion_issue_summary(e["id"], agg)
         else:
+            # An all-zero default dict is not a census: render '-' so "no
+            # defects recorded" and "no census exists" stay distinguishable.
             iss = {}
         if iss:
             def _iss(sev):

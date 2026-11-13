@@ -33,10 +33,21 @@ function realOrResolved(p) {
 
 /** The allowed roots from DOCX_MCP_ALLOWED_ROOTS (PATH-delimiter separated). */
 export function allowedRoots(value) {
-  return String(value || '')
+  const raw = String(value ?? '');
+  if (raw === '') return [];        // unset: containment is deliberately off
+  const roots = raw
     .split(path.delimiter)
+    .map((r) => r.trim())
     .filter(Boolean)
     .map((r) => realOrResolved(r));
+  if (!roots.length) {
+    // Set but carrying only delimiters/whitespace. `containsPath` used to read
+    // the empty list as "allow anything", so a malformed value silently
+    // disabled containment; fail closed instead.
+    throw new Error('DOCX_MCP_ALLOWED_ROOTS is set but names no roots; unset it to '
+                    + 'disable containment or name at least one root');
+  }
+  return roots;
 }
 
 function hasDanglingSymlink(p) {
@@ -64,7 +75,7 @@ function hasDanglingSymlink(p) {
   return false;
 }
 
-/** True when `target` is under one of `roots` (an empty list allows anything). */
+/** True when `target` is under one of `roots` (an empty list = variable unset). */
 export function containsPath(target, roots) {
   if (!roots || !roots.length) return true;
   if (hasDanglingSymlink(target)) return false;

@@ -603,10 +603,11 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
         cid = str(row.get("id") or f"C{i}")
         md += [f"## {cid}", f"**Comment:** \"{str(row.get('quote') or '')[:120]}\"",
                "**Response:** stub", ""]
-        mapped.append({"id": cid, "status": "addressed", "response": "stub",
-                       "changes": ([{"file": files[0], "location": "whole file",
-                                     "before": "a", "after": "b"}] if files else []),
-                       "new_data": []})
+        # The response map's `before` span is a real claim: the generic stub has
+        # no verified preimage to quote, so it honestly reports a planned change
+        # rather than inventing one (F083's gate refuses a fabricated preimage).
+        mapped.append({"id": cid, "status": "planned", "response": "stub",
+                       "changes": [], "new_data": []})
     (out / "RESPONSE_TO_REVIEWERS.md").write_text("\n".join(md), encoding="utf-8")
     write_json(out / "response_map.json",
                {"journal_from": "stub-journal", "target_journal": "stub-target",

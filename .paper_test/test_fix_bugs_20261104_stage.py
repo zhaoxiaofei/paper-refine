@@ -413,11 +413,17 @@ def test_convert_corpus():
     sub, work = d / "sub", d / "sub" / "work"
     sub.mkdir()
     (sub / "b.md").write_text("B")
-    run_main(sub, work)
-    run_main(sub, work)
-    inv = json.loads((work / "inventory.json").read_text())
-    check("F41 a work dir inside the submission is not inventoried",
-          sorted(x["path"] for x in inv) == ["b.md"], str([x["path"] for x in inv]))
+    # F080: SKILL.md requires OUT/WORK to stay outside SUBMISSION_DIR. The old
+    # check accepted a nested work dir (and the review artifacts were written
+    # into the read-only package); the converter now refuses it.
+    try:
+        run_main(sub, work)
+        refused = False
+    except SystemExit as exc:
+        refused = exc.code == 2
+    check("F41 a work dir inside the submission is refused, not inventoried",
+          refused and not (work / "inventory.json").exists(),
+          f"refused={refused} work_exists={(work / 'inventory.json').exists()}")
 
 
 def test_citations():

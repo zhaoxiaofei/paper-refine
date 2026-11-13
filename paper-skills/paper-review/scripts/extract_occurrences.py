@@ -72,7 +72,7 @@ _ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
 # DOCUMENT KIND, not an arbitrary extension: test it before stripping
 # extensions, or `.reply`/`.review`/`.notes` disappear into the base name.
 _SEMANTIC_SUFFIX_RE = re.compile(
-    r"\.(?:reply|response|rebuttal|review|notes?|comments?)\.[A-Za-z0-9]+$", re.I)
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
 # The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
 # `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
 # `recovered_samples.md` a cover letter (forcing them into the submission runs)
@@ -259,10 +259,31 @@ def variant_pattern(term, mode):
     # itself contained a hyphen ("copy number" never matched "copy-number").
     # The class is `*` (not `+`) so the hyphenless spelling the old code
     # accepted for hyphenated terms ("scRNA-seq" ~ "scRNAseq") keeps matching.
-    parts = [re.escape(p) for p in re.split(r"[\s\-]+", term.strip()) if p]
-    if not parts:
+    raw_parts = [p for p in re.split(r"[\s\-]+", term.strip()) if p]
+    if not raw_parts:
         raise ValueError(f"empty term {term!r}: a term to enumerate must carry at least "
                          f"one character")
+
+    def _last_word_pattern(word: str) -> str:
+        """Regex for ONE term word plus its REGULAR plural (never impossible forms).
+
+        The old blanket `(?:es|s)?` matched `copyes`/`analysises` while missing
+        `copies`/`analyses`: a propagation pass could then claim a plural was
+        seen when it never occurred. The stem is rewritten where the plural
+        changes it (`copy` -> `cop(?:y|ies)`).
+        """
+        low = word.lower()
+        if not re.fullmatch(r"[A-Za-z]+", word):
+            return re.escape(word)
+        if low.endswith("is"):
+            return re.escape(word[:-2]) + r"(?:is|es)"      # analysis -> analyses
+        if low.endswith("y") and len(low) > 1 and low[-2] not in "aeiou":
+            return re.escape(word[:-1]) + r"(?:y|ies)"      # copy -> copies
+        if low.endswith(("s", "x", "z", "ch", "sh")):
+            return re.escape(word) + r"(?:es)?"
+        return re.escape(word) + r"s?"
+
+    parts = [re.escape(p) for p in raw_parts[:-1]] + [_last_word_pattern(raw_parts[-1])]
     # `(?<!\\w)`/`(?!\\w)` rather than `\\b`: a trailing `\\b` cannot match after
     # a term whose last character is not a word character, so `--term "CD4+"` and
     # `--term "C++"` matched NOTHING while the artifact still asserted "0
@@ -271,7 +292,7 @@ def variant_pattern(term, mode):
     # matches) and tolerate a non-word edge on either side. An empty term used to
     # compile to `(?i)(?<!\\w)(?:es|s)?(?!\\w)`, which MATCHED empty strings in
     # every word (6 matches inside a three-word sentence).
-    pat = r"(?i)(?<!\w)" + r"[\s\-\u2013\u2014]*".join(parts) + r"(?:es|s)?(?!\w)"
+    pat = r"(?i)(?<!\w)" + r"[\s\-\u2013\u2014]*".join(parts) + r"(?!\w)"
     return re.compile(pat)
 
 

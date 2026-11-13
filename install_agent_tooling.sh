@@ -548,7 +548,10 @@ if [ "$codex_enabled" = 1 ]; then
         name="${mcp_row_names[$i]}"
         command="${mcp_row_commands[$i]}"
         script="${mcp_row_scripts[$i]}"
-        state=$(codex_mcp_state "$name" "$command" "$script")
+        # With `set -euo pipefail`, `codex mcp list` exiting non-zero failed
+        # the assignment before the error branch ran; keep the state readable so
+        # the `*` branch below can diagnose it.
+        state=$(codex_mcp_state "$name" "$command" "$script" || printf 'unreadable\n')
         case "$state" in
             ok)
                 echo "codex MCP server already current: $name -> $script"
@@ -572,7 +575,7 @@ if [ "$codex_enabled" = 1 ]; then
                 exit 1
                 ;;
         esac
-        state=$(codex_mcp_state "$name" "$command" "$script")
+        state=$(codex_mcp_state "$name" "$command" "$script" || printf 'unreadable\n')
         [ "$state" = ok ] || {
             echo "error: codex still does not report $name -> $script after writing it (state: $state)" >&2
             exit 1

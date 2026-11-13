@@ -58,7 +58,10 @@ def list_track_files(sources: list, exts=TRACKABLE_EXTS) -> list:
                     or _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
+                # The corpus identity excludes `work/` (and the other scratch
+                # names) at ANY depth; testing only the first component tracked
+                # `supp/work/scratch.docx` in a corpus that omits it.
                 continue
             if is_evidence_rel(rel):
                 # The EVIDENCE areas are read-only inputs, not submission
@@ -71,8 +74,16 @@ def list_track_files(sources: list, exts=TRACKABLE_EXTS) -> list:
             full = prefix + rel
             if full in overrides[i]:
                 continue
+            try:
+                digest = sha256_file(p)
+            except OSError as e:
+                # A damaged/unreadable package document must not abort the whole
+                # track/redline pass: skip it and record the gap.
+                print(f"warning: skipped unreadable trackable file {p}: {e}",
+                      file=sys.stderr)
+                continue
             out.append({"rel": full, "path": p, "key": _doc_key(full),
-                        "digest": sha256_file(p), "ext": p.suffix.lower()})
+                        "digest": digest, "ext": p.suffix.lower()})
     return out
 
 

@@ -11,8 +11,8 @@ prints which interface it used on success, and exits with
     4  python-redlines is not importable
     5  installed, but no supported docx redline interface was found (the names it
        did find are printed, so you can wire --redline-cmd yourself)
-    6  an input file is missing or unreadable, or a stale OUT could not be
-       cleared (never a traceback)
+    6  an input file is missing or unreadable, or a partial staged output could
+       not be cleared (never a traceback)
 
 Usage: paper_redlines_adapter.py BASE.docx REVISED.docx OUT.docx
 """
@@ -33,13 +33,18 @@ def wrote(out_path):
 
 
 def clear_out(out_path):
-    """Delete a pre-existing OUT before any backend is tried.
+    """Delete OUT when a failed probe left a partial result there.
 
     ``wrote`` only asks whether a non-empty file exists, so a leftover OUT (a
     previous run of this adapter, another backend, an earlier attempt) made a
     backend that wrote nothing look successful: exit 0 was reported for content
     the adapter had not produced, and the same run reported exit 5 once the
     stale file was removed by hand.
+
+    A pre-existing OUT is NOT cleared before the probes: the backend writes a
+    staging file that is renamed onto OUT only on success, so a failed run keeps
+    the previous valid redline. This helper is only for dropping a partial file
+    a probe wrote into the staging path (see ``drop_partial``).
     """
     if not os.path.lexists(out_path):
         # `exists` is False for a broken symlink, so an OUT left as a dangling
@@ -87,12 +92,13 @@ def write_out(out_path, data):
 def drop_partial(out_path, probe):
     """Clear OUT after a probe that failed, before the next one is tried.
 
-    `clear_out` runs once before the probes, but a backend can write PART of
-    OUT and then raise: the bytes stayed in place, so the next probe that
+    `clear_out` is not run before the probes (main stages the output and keeps a
+    pre-existing OUT on failure); but a backend can write PART of the staging
+    file and then raise: the bytes stayed in place, so the next probe that
     returned without writing looked successful through `wrote()` and its name
     was printed for a corrupt file it never produced (exit 0). Clearing on
-    every failure path keeps the invariant `clear_out` documents -- a
-    non-empty OUT was written by the probe that just ran.
+    every failure path keeps the invariant -- a non-empty staged file was
+    written by the probe that just ran.
     """
     if not os.path.lexists(out_path):
         return                       # the probe wrote nothing: nothing to drop
@@ -147,9 +153,9 @@ def main(argv):
         if not os.path.isfile(path):
             fail("input file not found: %s" % path, 6)
     for path in (base, revised):
-        # OUT is the file this adapter writes (and clears first): an input path
-        # must be refused rather than destroyed when no backend can produce a
-        # redline, and a working backend would overwrite it anyway.
+        # OUT is the file this adapter writes, never an input: an input path
+        # must be refused rather than destroyed, and a successful backend
+        # renames its staged output onto OUT anyway.
         if os.path.exists(out) and os.path.samefile(out, path):
             fail("refusing to use an input file as OUT: %s" % path, 2)
     # Stage the backend's output beside OUT and rename it onto OUT only after a

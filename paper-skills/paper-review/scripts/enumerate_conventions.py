@@ -214,7 +214,7 @@ _ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
 # DOCUMENT KIND, not an arbitrary extension: test it before stripping
 # extensions, or `.reply`/`.review`/`.notes` disappear into the base name.
 _SEMANTIC_SUFFIX_RE = re.compile(
-    r"\.(?:reply|response|rebuttal|review|notes?|comments?)\.[A-Za-z0-9]+$", re.I)
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
 # The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
 # `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
 # `recovered_samples.md` a cover letter (forcing them into the submission runs)

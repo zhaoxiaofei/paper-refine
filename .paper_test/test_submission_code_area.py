@@ -144,6 +144,9 @@ def test_submit_code_switch():
     data = json.loads(map_path.read_text(encoding="utf-8"))
     data["rows"][0]["changes"] = [{"file": "code/analysis.py", "location": "stub",
                                    "before": "a", "after": "b"}]
+    # A change citation belongs to an 'addressed' row; the stub now reports
+    # 'planned' with no changes because it has no verified preimage (F083).
+    data["rows"][0]["status"] = "addressed"
     nb.write_json_atomic(map_path, data)
     ok, errs, _w, _x = nb.postcheck_response(ctx, rec)
     lib.check("SC3 with the policy on, the same citation PASSES the letter",

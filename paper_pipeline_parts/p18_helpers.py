@@ -366,6 +366,9 @@ def _tex_caption_units(text: str) -> list:
     the kind itself; a bare `\\caption` takes the enclosing float environment.
     """
     out = []
+    # A commented-out `% \caption{...}` is not a caption: M19 strips comments
+    # from the length scan, so the caption inventory must use the same text.
+    text = _blank_tex_verbatim(strip_tex_comment(text or ""))
     # \*? -- \caption*{...} is the unnumbered form of the same caption.
     # The type argument exists ONLY on \captionof: treating it as optional on
     # \caption let `\caption{Alpha} {gamma}` capture the trailing body brace.
@@ -979,7 +982,8 @@ def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
         # `_j<k>` tail makes it a judge session); the old spellings still work.
         sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(w\d+|a\d+|i\d+|guided_review|"
                            r"cold_start_review|audit|feedback|concerns|response|"
-                           r"rewriter\d+|reviser\d+|integrator\d+)((?:[_:/.-](?:b|j\d+))?)",
+                           r"rewriter\d+|reviser\d+|integrator\d+|reviewer|reviewer_b|"
+                           r"review_b)((?:[_:/.-](?:b|j\d+))?)",
                            token)
         if sel:
             session = sel.group(2) + sel.group(3)
@@ -1022,7 +1026,8 @@ def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
                     _add_judge_selector(spec, r, stage_token, part, flag)
                 continue
             elif re.fullmatch(r"(?:w\d+|a\d+|i\d+|rewriter\d+|reviser\d+|revise\d+|"
-                              r"integrator\d+|integrate\d+)(?:[_:/.-]j\d+)?", stage_token):
+                              r"integrator\d+|integrate\d+|reviewer|reviewer_b|review_b)"
+                              r"(?:[_:/.-]j\d+)?", stage_token):
                 is_judge = re.fullmatch(r".+?[_:/.-]j\d+", stage_token)
                 is_arm = re.fullmatch(r"a\d+", stage_token)     # `2:a3` = the a3 ARM
                 for r in rounds:
@@ -1274,6 +1279,44 @@ def session_id_of_entry(entry: dict) -> str:
         return vid
     rid = str((entry or {}).get("id") or "")
     return "guided_review_b" if rid.endswith("_guided_review_b") else plan_stage_of(entry)
+
+
+def _non_editable_entries(sources: list) -> dict:
+    """{corpus-relative path: digest} for the NON-editable submission files.
+
+    `collect_documents` keeps only EDITABLE_DOC_EXTS, which is what the
+    one-to-one document pairing needs. The ADDED direction of
+    `document_set_check` also has to see the other half of a submission -- a new
+    PDF, figure or archive the base never had -- because a non-editable file
+    added to a package used to be invisible to the check (the collector dropped
+    it before the comparison). The same corpus exclusions apply, and the
+    editable suffixes are left out because `added` already covers them.
+
+    The DIGEST is carried so a pure rename is not reported as an invented file.
+    """
+    out = {}
+    overrides = corpus_source_overrides(sources)
+    for i, (src, prefix, excluded) in enumerate(sources):
+        if not src.is_dir():
+            continue
+        for p in _iter_tree_files(src):
+            if _is_aux_doc(p.name):
+                continue
+            rel = p.relative_to(src).as_posix()
+            if excluded_corpus_component(rel, excluded):
+                continue
+            if (prefix + rel) in overrides[i]:
+                continue
+            if is_evidence_rel(rel):
+                continue
+            if is_author_to_complete_readme_name(p.name):
+                continue
+            if is_bookkeeping_name(p.name):
+                continue
+            if p.suffix.lower() in EDITABLE_DOC_EXTS:
+                continue
+            out[prefix + rel] = sha256_files([p], on_error="<unreadable>")[0]
+    return out
 
 
 def parse_only_stages(raw) -> set:

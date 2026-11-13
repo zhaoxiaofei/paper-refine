@@ -8,7 +8,7 @@ from __future__ import annotations
 def _text_fragments(para: str) -> list:
     """[(start, end, unescaped_text, raw_fragment)] for every <w:t> in a paragraph."""
     out = []
-    for m in re.finditer(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", para, re.S):
+    for m in re.finditer(r"<w:t(?:\s[^>]*)?(?<!/)>(.*?)</w:t>", para, re.S):
         out.append((m.start(), m.end(), unesc(m.group(1)), m.group(0)))
     return out
 
@@ -360,7 +360,7 @@ def _wt_fragments(frag: str) -> list:
     can never drift apart.
     """
     return [(m.start(), m.end(), unesc(m.group(1)))
-            for m in re.finditer(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", frag, re.S)]
+            for m in re.finditer(r"<w:t(?:\s[^>]*)?(?<!/)>(.*?)</w:t>", frag, re.S)]
 
 
 def _xml_span_for_text_range(frag: str, a: int, b: int):
@@ -2052,7 +2052,11 @@ def cover_letter_stamp_rows(path: Path, policy: dict) -> list:
     used_styles, carried = set(), []
     try:
         with zipfile.ZipFile(path) as pkg:
-            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise OSError(problem)
+            xml = _docx_xml_part_guarded(
+                pkg, "word/document.xml").decode("utf-8", "replace")
             used_styles = set(re.findall(r'<w:pStyle w:val="([^"]+)"', xml))
             if want_parts:
                 for name in pkg.namelist():
@@ -2313,7 +2317,7 @@ def stray_empty_paragraph_rows(paras: list, policy: dict, doc: str, xml: str = N
 # rewrite them through `rewrite_text_spans` and record exactly what changed.
 
 _TEXT_EDGE_TOKENS = re.compile(
-    r"<w:t(?:\s[^>]*)?>.*?</w:t>|<w:br(?=[\s/>])[^>]*/>|<w:cr(?=[\s/>])[^>]*/>|"
+    r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>|<w:br(?=[\s/>])[^>]*/>|<w:cr(?=[\s/>])[^>]*/>|"
     r"<w:tab(?=[\s/>])[^>]*/>|<w:noBreakHyphen(?=[\s/>])[^>]*/>|"
     r"<w:sym(?=[\s/>])[^>]*/>", re.S)
 
@@ -2746,15 +2750,18 @@ def style_convention_rows(paras: list, styles: dict, doc: str) -> list:
         if len(members) < 4:
             continue
         for rule, tag, label, what in checks:
-            direct = [idx for idx, ppr in members if elem(ppr, tag)]
+            # `child_elem`, not `elem`: a paragraph MARK's character spacing
+            # (`w:pPr/w:rPr/w:spacing`) is not paragraph spacing.
+            direct = [idx for idx, ppr in members if child_elem(ppr, tag)]
             if not direct or len(direct) == len(members):
                 continue                    # none, or every paragraph carries one
-            if direct[-1] - direct[0] + 1 == len(direct):
+            if len(direct) > 1 and direct[-1] - direct[0] + 1 == len(direct):
                 continue                    # one contiguous block (deliberate front matter)
             listed = ", ".join(f"p{i}" for i in direct[:4])
             if len(direct) > 4:
                 listed += f", +{len(direct) - 4} more"
-            sigs = Counter(elem(ppr, tag) for idx, ppr in members if elem(ppr, tag))
+            sigs = Counter(child_elem(ppr, tag) for idx, ppr in members
+                           if child_elem(ppr, tag))
             example = sigs.most_common(1)[0][0][:120]
             rows.append({"rule": rule, "severity": "low", "document": doc,
                          "location": f"p{direct[0]}",
@@ -5303,7 +5310,7 @@ def _part_has_zotero_item_field(raw) -> bool:
     split into two runs (`ADDIN ` + `ZOTERO_ITEM`) or spelled lowercase.
     """
     text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
-    instr = "".join(re.findall(r"<w:instrText\b[^>]*>(.*?)</w:instrText>",
+    instr = "".join(re.findall(r"<w:instrText\b[^>]*(?<!/)>(.*?)</w:instrText>",
                                text, re.S | re.I))
     return "ADDIN ZOTERO_ITEM" in re.sub(r"\s+", " ", instr).upper()
 

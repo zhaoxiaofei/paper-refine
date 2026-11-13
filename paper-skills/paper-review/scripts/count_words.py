@@ -998,7 +998,7 @@ _ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
     r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
 # `.reply`/`.review`/`.notes` name the DOCUMENT kind, not another extension.
 _SEMANTIC_SUFFIX_RE = re.compile(
-    r"\.(?:reply|response|rebuttal|review|notes?|comments?)\.[A-Za-z0-9]+$", re.I)
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
 EXTERNAL_FEEDBACK_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
     r"to[-_ ]?authors))*|"
@@ -1389,6 +1389,7 @@ def main(argv=None) -> int:
                                   excludes=counting_excludes))
         else:
             count_text = text
+            prepared = text
             rows = ([("whole file", count_words(text),
                       "the whole file (requested with --section whole)")]
                     if args.section == "whole"
@@ -1431,7 +1432,10 @@ def main(argv=None) -> int:
             # A document with no abstract / no main-text shape answered with
             # NOTHING (stdout and JSON both silent, exit 0), which an M19 sweep
             # reads as "not checked" -- a missing data point, not a clean one.
-            whole = count_words(text)
+            # Count the same PROSE the auto path counts: for LaTeX that is the
+            # `tex_lines`-prepared text (the preamble is not prose), not the raw
+            # source `_strip_latex` still carries command arguments from.
+            whole = count_words(prepared)
             keep.append({"file": str(p), "section": f"no {args.section} section detected",
                          "words": whole, "cap": None, "over_limit": False,
                          "note": f"no {args.section} shape was detected in this document; the "
@@ -1444,8 +1448,12 @@ def main(argv=None) -> int:
                               else counting_excludes)}},
                           "rows": out}, indent=2))
     else:
-        cap_text = (f"abstract <= {caps['abstract']} words, main text <= {caps['main text']} "
-                    f"words" if caps["abstract"] is not None and caps["main text"] is not None
+        _cap_bits = []
+        if caps["abstract"] is not None:
+            _cap_bits.append(f"abstract <= {caps['abstract']} words")
+        if caps["main text"] is not None:
+            _cap_bits.append(f"main text <= {caps['main text']} words")
+        cap_text = (", ".join(_cap_bits) if _cap_bits
                     else "no abstract/main-text cap configured (counts recorded)")
         _cov = (f"{cover_min}-{cover_max} words" if cover_min is not None and cover_max is not None
                 else f"at most {cover_max} words" if cover_min is None and cover_max is not None

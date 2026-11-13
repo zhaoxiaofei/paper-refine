@@ -471,7 +471,7 @@ def test_c19_convert_corpus_exts():
     write(sub / "table.tsv", "a\tb\n")
     write(sub / "note.rtf", "{\\rtf1\\ansi plain}\n")
     write(sub / "paper.ltx", "\\documentclass{article}\n")
-    work = sub / "work"
+    work = scratch("paper_audit_ccw_")   # WORK is outside SUBMISSION_DIR (F080)
     proc = run_py(WS / "paper-skills/paper-review/scripts/convert_corpus.py",
                   "--submission", sub, "--work", work)
     inv = json.loads((work / "inventory.json").read_text(encoding="utf-8"))

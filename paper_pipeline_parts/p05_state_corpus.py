@@ -264,8 +264,11 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         # corpus input. Omitting it let `retry` reach that RuntimeError as an
         # unhandled traceback instead of deferring the run as stale.
         deps = [rid_a1(r)]
-        if ctx is not None and journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER,
-                                                        JOURNAL_MODE_RESUBMIT):
+        if ctx is not None and journal_has_feedback(ctx) and not journal_is_scoped(ctx):
+            # The materializer stages `concerns/` from the feedback run for ANY
+            # unscoped journal mode (`llm` included), so the dependency must
+            # follow the same predicate: a retry used to bypass unmet_deps and
+            # raise inside materialize_rewrite instead of deferring.
             deps.append(rid_feedback(r))
         return deps
     if kind == "guided_review":
@@ -432,9 +435,10 @@ def load_state_file(path: Path) -> tuple:
         st = path.lstat()
     except OSError as e:                                          # noqa: BLE001
         return None, f"could not be read ({type(e).__name__}: {e})"
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-        return None, ("is not a regular file (a symlink, FIFO or device at the registry "
-                      "path is refused; state.json must be written by this pipeline)")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        return None, ("is not a regular file (a symlink, FIFO, device or hard-linked "
+                      "registry path is refused; state.json must be single-linked and "
+                      "written by this pipeline)")
     size = st.st_size
     if size > MAX_STATE_BYTES:
         def _mib(n):
@@ -1485,7 +1489,7 @@ def _normalize_version_refs(data: bytes, tokens) -> bytes:
         _urls.append(m.group(0))
         return b"\x00VIEWURL%d\x00" % (len(_urls) - 1)
 
-    data = re.sub(rb"https?://[^\s\"'<>)]+", _stash_url, data)
+    data = re.sub(rb"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>)]+", _stash_url, data)
     data = re.sub(rb"([-_])" + tok + rb"(?=\.[A-Za-z][A-Za-z0-9]{0,9}\b)",
                   rb"", data)
     cmd = re.compile(
@@ -1942,7 +1946,9 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
         _urls.append(m.group(0))
         return "\ue000%d\ue001" % (len(_urls) - 1)
 
-    text = re.sub(r"https?://[^\s\"'<>]+", _stash_url, text)
+    # Any URI scheme, not only http(s): an ftp/file URL's filename was rewritten
+    # to an anonymous placeholder in the judge view.
+    text = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+", _stash_url, text)
 
     def add(mapping, old, new):
         amb = ambiguous.setdefault(id(mapping), set())
@@ -2421,10 +2427,10 @@ def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> 
 
     def _rel(m):
         el = m.group(0)
-        tm = re.search(rb'Target="([^"]*)"', el)
-        if not tm:
+        t = re.search(rb'Target=(["\'])([^"\']*)\1', el)
+        if not t:
             return el
-        target = tm.group(1).decode("utf-8", "replace")
+        target = url_unquote(t.group(2).decode("utf-8", "replace"))
         if re.match(r"(?i)^(?:[a-z][a-z0-9+.-]*:|#|\\\\|/)", target):
             return el
         new = file_map.get(target)
@@ -2434,7 +2440,8 @@ def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> 
                 new = posixpath.relpath(file_map[resolved], base_dir or ".")
         if new is None:
             return el
-        return re.sub(rb'Target="[^"]*"', b'Target="' + new.encode("utf-8") + b'"', el)
+        encoded = url_quote(new, safe="/._-~")
+        return el[:t.start(2)] + encoded.encode("utf-8") + el[t.end(2):]
 
     return _RELS_ENTRY_RE.sub(_rel, payload)
 
@@ -2468,13 +2475,13 @@ def _prune_dropped_part_references(payload: bytes, name: str, dropped: set,
 
     def _rel(m):
         el = m.group(0)
-        tm = re.search(rb'TargetMode="([^"]*)"', el)
-        if tm and tm.group(1).lower() == b"external":
+        tm = re.search(rb'TargetMode=(["\'])([^"\']*)\1', el)
+        if tm and tm.group(2).lower() == b"external":
             return el
-        t = re.search(rb'Target="([^"]*)"', el)
+        t = re.search(rb'Target=(["\'])([^"\']*)\1', el)
         if not t:
             return el
-        target = t.group(1).decode("utf-8", "replace")
+        target = url_unquote(t.group(2).decode("utf-8", "replace"))
         resolved = posixpath.normpath(posixpath.join(base_dir, target)).lstrip("/")
         if resolved.lower() in dropped:
             notes.append(f"dropped the {name} relationship to the removed part {resolved}")
@@ -2540,7 +2547,8 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         nonlocal accepted
         new = re.sub(rb"<w:rsids\b[^>]*>.*?</w:rsids>", b"", payload, flags=re.S)
         new = re.sub(rb"<w:rsids\b[^>]*/>", b"", new)
-        new = re.sub(rb"\s(?:[\w]+:)?(?:rsid\w*|paraId|textId|durableId)=\"[^\"]*\"", b"", new)
+        new = re.sub(rb"\s(?:[\w]+:)?(?:rsid\w*|paraId|textId|durableId)=([\"'])[^\"']*\1",
+                     b"", new)
         new = re.sub(rb"<w:proofErr\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:lastRenderedPageBreak\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:proofState\b[^>]*/>", b"", new)
@@ -2657,10 +2665,10 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 payload = _ooxml_xml_utf8(payload)
                 payload = _normalize_word_prefix(payload)
                 payload = _accept_changes(payload)
-                new = re.sub(rb'((?:w|w15|w16):(?:author|initials))="[^"]*"', rb'\1="author"',
-                             payload)
-                new = re.sub(rb"((?:w|w15|w16):date)=\"[^\"]*\"",
-                             rb"\1=" + b'"' + fixed_date + b'"', new)
+                new = re.sub(rb'((?:w|w15|w16):(?:author|initials))=([\"\'])[^\"\']*\2',
+                             rb'\1=\2author\2', payload)
+                new = re.sub(rb"((?:w|w15|w16):date)=([\"\'])[^\"\']*\2",
+                             rb"\1=\2" + fixed_date + rb"\2", new)
                 if new != payload:
                     stripped += 1
                 payload = new
@@ -2801,8 +2809,19 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
 def _transform_view_file(old_rel: str, src: Path, file_map: dict):
     """(transformed bytes | None, notes) for one view file (None = copy as is)."""
     ext = src.suffix.lower()
+
+    def _read() -> tuple:
+        try:
+            return src.read_bytes(), []
+        except OSError as e:
+            # One unreadable payload must not abort judge materialization
+            # (F105): the caller omits it and records a named gap.
+            return None, [f"unreadable source ({e}); the file is omitted from the view"]
+
     if _view_is_text(old_rel):
-        raw = src.read_bytes()
+        raw, _bad = _read()
+        if raw is None:
+            return None, _bad
         text = raw.decode("utf-8", "surrogateescape")
         text = _rewrite_view_references(text, old_rel, file_map[old_rel], file_map)
         # The pipeline's hand-off marker prefix must not identify a package as
@@ -2810,7 +2829,9 @@ def _transform_view_file(old_rel: str, src: Path, file_map: dict):
         text = text.replace(PLACEHOLDER_TOKEN, "[TO BE COMPLETED")
         return text.encode("utf-8", "surrogateescape"), []
     if ext in VIEW_OOXML_EXTS or ext in VIEW_PDF_EXTS:
-        raw = src.read_bytes()
+        raw, _bad = _read()
+        if raw is None:
+            return None, _bad
         # The sanitized bytes do not depend on the view seed: the same figure or
         # document appears in many views, so cache by content (bounded).
         kind = "ooxml" if ext in VIEW_OOXML_EXTS else "pdf"
@@ -2848,7 +2869,11 @@ def expected_view_digest(ctx: Ctx, r: int, vid: str, view_seed: str) -> list:
     # The transform depends on each file's RELATIVE PATH (reference rewriting
     # resolves against it), not only on its bytes: a rename with identical
     # content must not reuse the old expected view (F10).
-    src_key = tuple(sorted((rel, sha256_file(p)) for rel, p in files))
+    # A chmod-000 payload must not abort judge materialization: the sentinel
+    # makes the view compare as stale (and the build records the gap) instead
+    # of raising PermissionError out of this function.
+    src_key = tuple(sorted((rel, sha256_files([p], on_error="<unreadable>")[0])
+                           for rel, p in files))
     key = (int(r), str(vid), str(view_seed), src_key)
     with _VIEW_EXPECT_LOCK:
         hit = _VIEW_EXPECT_CACHE.get(key)
@@ -2858,8 +2883,13 @@ def expected_view_digest(ctx: Ctx, r: int, vid: str, view_seed: str) -> list:
     digs = []
     for old_rel, src in files:
         data, _notes = _transform_view_file(old_rel, src, file_map)
+        if data is None and any("unreadable source" in str(n).lower()
+                                for n in (_notes or [])):
+            # build_judge_view omits the same file and records the gap, so it
+            # must not be part of the expected identity either.
+            continue
         digest = (hashlib.sha256(data).hexdigest() if data is not None
-                  else sha256_file(src))
+                  else sha256_files([src], on_error="<unreadable>")[0])
         # The anonymous NAME is part of the expected identity (F-015): a view
         # whose files carry the right bytes under the wrong names is not the
         # view this corpus materializes.
@@ -2935,6 +2965,11 @@ def build_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
                                          "compressed/unparsable", "not stripped",
                                          "could not be blanked", "budget")):
                 _transform_warnings.append(f"{file_map[rel]}: {_note}"[:400])
+        if data is None and any("unreadable source" in str(n).lower()
+                                for n in (_notes or [])):
+            _transform_warnings.append(
+                f"{file_map[rel]}: unreadable source; omitted from the judge view"[:400])
+            continue
         if data is None:
             shutil.copyfile(src, out)                 # content only: no metadata
             if Path(rel).suffix.lower() in VIEW_IMAGE_EXTS:
@@ -3911,7 +3946,7 @@ def seeded_cold_start_paths(sb: Path) -> set:
             sb / COLD_START_OBLIGATIONS_REL}
 
 
-def cold_start_obligation_rows(root: Path, limit: int = 200) -> list:
+def cold_start_obligation_rows(root: Path, limit: int = 200, area_names=None) -> list:
     """Rows for `COLD_START_OBLIGATIONS_REL`: what the submission promises, resolved.
 
     Three families, each derived from the corpus's own declarations -- nothing
@@ -3954,7 +3989,9 @@ def cold_start_obligation_rows(root: Path, limit: int = 200) -> list:
     # Written pointers and cited display items: the two shapes the submission
     # itself creates, resolved against what the package actually carries.
     try:
-        for r in non_submitted_reference_rows(root, submission_not_carried_areas_plain()):
+        for r in non_submitted_reference_rows(
+                root, area_names if area_names is not None
+                else submission_not_carried_areas_plain()):
             rows.append({"family": "written pointer",
                          "obligation": f"{r.get('reference')} (in {r.get('file')}:{r.get('line')})",
                          "resolves": "no (the submission does not carry it)",
@@ -4078,7 +4115,8 @@ def seed_cold_start_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
         "appears in the text)? A missing section or a cited-but-absent item belongs to this "
         "family even though nothing on the page is wrong.\n\n"
         + _evidence_artifact_table(
-            cold_start_obligation_rows(corpus),
+            cold_start_obligation_rows(
+                corpus, area_names=submission_not_carried_areas(ctx)),
             ["family", "obligation", "resolves", "where"],
             "no obligation could be derived (no README declaration, no pointer, no display item)")
         + "\n"))
@@ -4777,7 +4815,9 @@ def untouched_revise_seed_paths(sb: Path) -> set:
     untouched = set()
     for path, text in expected.items():
         try:
-            if path.is_file() and path.read_text(encoding="utf-8") == text:
+            # The seeded files live in the agent-writable sandbox: never read a
+            # multi-GB file (or a planted symlink) whole just to compare it.
+            if read_text_bounded(path) == text:
                 untouched.add(path)
         except (OSError, UnicodeError):
             continue

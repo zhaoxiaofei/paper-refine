@@ -316,14 +316,16 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       without process scratch, auxiliaries or self-written reports, ready to
       seed a new pipeline run (`setup --source
       <root>/final_clean_version_<root name>`).
-      It is written on EVERY decide, certified or not, and is idempotent; the
-      certification verdict (and why a package is not signed) is stated in the
+      It is attempted on EVERY decide, certified or not, and is idempotent; it
+      is written whenever a publishable champion corpus exists, and otherwise
+      only the sibling readme records the skip reason. The certification verdict
+      (and why a package is not signed) is stated in the
       sibling <root>/final_clean_version.readme.md.
     * ONE CONTENT-HASH VERSION TOKEN PER PACKAGE (replaces the old letter/digit
       increments): every producing stage names all of its editable documents
       with the SAME 7-character token, the first 7 hex of SHA-256 over the
       package's sorted payload-content digests (the tool is shipped as
-      `paper-revise/scripts/revision_token.py`; reports, auxiliaries and `work/`
+      `paper-skills/paper-revise/scripts/revision_token.py`; reports, auxiliaries and `work/`
       are excluded, file NAMES do not enter the hash, and version-token
       references inside contents are normalized before hashing, so applying the
       token never changes it -- `--verify` proves that). The orchestrator
@@ -640,7 +642,8 @@ USAGE
     standalone `conflicts` command (its --agent defaults to manual) refreshes
     the audit on demand.
 
-    Every command also accepts `--skip-hash`: it skips the integrity
+    Every root-loading command also accepts `--skip-hash` (`selfcheck` and
+    `adopt-sweep` excepted): it skips the integrity
     VERIFICATION passes for THIS invocation (the pristine copy, pinned
     champions, published winners, frozen run inputs, judge-view digests and the
     a1 base digest). Digests are still RECORDED, so a later invocation without
@@ -784,9 +787,11 @@ DIRECTORY LAYOUT CREATED UNDER --root
     final_clean_version_<root name>/  `decide`'s clean copy of the final champion:
                                     submission documents + code/, no scratch,
                                     auxiliaries or self-written reports -- a
-                                    `setup --source` for the next run (always
-                                    generated; its certification status is in
-                                    the sibling final_clean_version.readme.md)
+                                    `setup --source` for the next run (attempted
+                                    on every decide, but written only when a
+                                    publishable champion corpus exists; its
+                                    certification status is in the sibling
+                                    final_clean_version.readme.md)
     redlines/r<R>_<version>/        tracked-changes .docx per candidate:
                                     from-base/, from-original/,
                                     from-setup-source/, plus manifest.json and

@@ -339,8 +339,12 @@ def test_upstream_deps_journal():
           pp.upstream_deps({"kind": "guided_review", "round": 1}, ctx) ==
           ["r1_a1", "r1_feedback"])
     ctx.cfg = {"revision_mode": "llm"}
-    check("the no-journal path keeps its old dependency list",
-          pp.upstream_deps(rec, ctx) == ["r1_a1"], str(pp.upstream_deps(rec, ctx)))
+    # F082: an llm-mode rewrite DOES stage concerns/ from the feedback run, so
+    # it is a dependency exactly like transfer/resubmit (the old assertion pinned
+    # the missing dependency that made a retry raise inside the materializer).
+    check("the llm mode lists the feedback run too",
+          pp.upstream_deps(rec, ctx) == ["r1_a1", "r1_feedback"],
+          str(pp.upstream_deps(rec, ctx)))
 
 
 # ---------------------------------------------------------------------------

@@ -82,7 +82,7 @@ _ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
 # DOCUMENT KIND, not an arbitrary extension: test it before stripping
 # extensions, or `.reply`/`.review`/`.notes` disappear into the base name.
 _SEMANTIC_SUFFIX_RE = re.compile(
-    r"\.(?:reply|response|rebuttal|review|notes?|comments?)\.[A-Za-z0-9]+$", re.I)
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
 # The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
 # `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
 # `recovered_samples.md` a cover letter (forcing them into the submission runs)
@@ -179,7 +179,10 @@ LABEL_PATTERNS = [
         r"([0-9](?:\.\d+)?%?)(?!\d|\.\d)", re.I)),
     ("percentage", re.compile(
         # The sign is part of the value: -12.5% is a decrease, not 12.5.
-        r"(?<![\w.])([+\-\u2212]?(?:\.\d+|\d{1,4}(?:\.\d+)?))\s*%")),
+        # Thousands separators are part of the number (12,345% used to match
+        # only `345`), and a 5-digit percentage is still a percentage.
+        r"(?<![\w.])([+\-\u2212]?(?:\d{1,3}(?:[,\u00a0\u202f]\d{3})+|"
+        r"\d+(?:\.\d+)?|\.\d+))\s*%")),
     ("CI", re.compile(
         # Confidence intervals are written with square brackets, parentheses,
         # or none at all.
@@ -217,7 +220,7 @@ def _metric_key(label: str, val) -> str:
     if label == "p-value":
         # Preserve the comparator so equal numeric thresholds with different
         # operators are not collapsed (F-030).
-        _om = re.match(r"^(<=|>=|[<>])\s*(.*)$", text)
+        _om = re.match(r"^(<=|>=|[<>≤≥])\s*(.*)$", text)
         if _om:
             _op, text = _om.group(1), _om.group(2)
         # `p = 5 × 10^-8`, `5 \times 10^{-8}` and `5 × 10⁻⁸` are one number;

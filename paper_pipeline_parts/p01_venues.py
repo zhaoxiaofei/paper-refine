@@ -3551,8 +3551,13 @@ def raw_data_dirname(dirp: Path) -> str:
 
 
 def area_dir(sb: Path, area: str) -> Path:
-    """The directory a recorded input-area key names inside a sandbox."""
-    return sb / area
+    """The directory a recorded input-area key names inside a sandbox.
+
+    The key comes from a state record, not from the operator's argv: resolve it
+    with `contained_under` so a tampered `../outside` cannot make a read-only
+    integrity probe hash (and report on) a tree outside the root.
+    """
+    return contained_under(sb, area)
 
 
 def norm_raw_data_name(rel: str) -> str:

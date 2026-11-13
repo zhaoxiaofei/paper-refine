@@ -2976,10 +2976,20 @@ def prior_proposal_dispositioned(pid: str, probe_blob: str, note_blob: str) -> b
     "prior proposal <id>: no instances in base/" disposition).
     """
     _pid_re = re.compile(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])")
+    # A bare negation word anywhere near the id is NOT a denial: "M37: no
+    # anomalies -- checked: base/" is a compliant zero-finding re-probe, and the
+    # old ±80-character window read its "no" as "did not probe". Require the
+    # negation to govern a probe/check verb.
+    _denial_re = re.compile(
+        r"\b(?:not|never|without)\b[^.;\n]{0,25}\b(?:re-?probe[ds]?|probed|probing|"
+        r"check(?:ed|s|ing)?|examin(?:e|ed|es|ing)|test(?:ed|s|ing)?|re-?run|"
+        r"revisit(?:ed|ing)?|address(?:ed|ing)?|disposition(?:ed)?)\b"
+        r"|\bno\s+(?:new\s+)?(?:re-?probe|probe|check|re-?run|examination|test)\b",
+        re.I)
     _probe_hit = None
     for _m in _pid_re.finditer(probe_blob):
-        _window = probe_blob[max(0, _m.start() - 80):_m.end() + 80].lower()
-        if re.search(r"\b(?:not|never|no|without)\b", _window):
+        _window = probe_blob[max(0, _m.start() - 80):_m.end() + 80]
+        if _denial_re.search(_window):
             continue          # "we did not re-probe M37" is not a re-probe
         _probe_hit = _m
         break
@@ -4280,13 +4290,15 @@ _M1B_REASON_RE = re.compile(
 def _m1b_coverage_reason(text: str) -> bool:
     """Does the M1 coverage row NAME M1b and give a reason (not just the token)?"""
     text = str(text or "")
-    i = text.lower().find("m1b")
-    if i < 0:
+    if "m1b" not in text.lower():
         return False
-    clause = text[i + 3:]
-    if len(clause.strip()) < 12 or not re.search(r"[A-Za-z]{3}", clause):
+    # The reason may be written BEFORE the token ("All 25 long forms are quoted
+    # article titles, not findings (M1b rows)"): remove the token and read the
+    # whole row, instead of only the text after it.
+    rest = re.sub(r"(?i)m1b", " ", text)
+    if len(rest.strip()) < 12 or not re.search(r"[A-Za-z]{3}", rest):
         return False
-    return bool(_M1B_REASON_RE.search(clause))
+    return bool(_M1B_REASON_RE.search(rest))
 
 
 def coverage_row_text(row) -> str:
@@ -6541,7 +6553,10 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
         if n / max(1, len(rows)) < DISPOSITION_BOILERPLATE_SHARE \
                 and n < DISPOSITION_BOILERPLATE_HARD_ROWS:
             continue
-        if any(_names_check_or_finding(str(r.get(key) or "")) for r in same):
+        # The contract is EVERY row: only then is the group a row-per-id
+        # closure rather than a template. `any` let one id-bearing row hide a
+        # 25-row boilerplate closure.
+        if all(_names_check_or_finding(str(r.get(key) or "")) for r in same):
             continue
         where = [l for l in (row_label(r) for r in same) if l][:4]
         problems.append(

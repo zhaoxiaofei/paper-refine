@@ -49,6 +49,23 @@ def is_evidence_part(part: str) -> bool:
                and low[len(area) + 1:] in DISABLED_EVIDENCE_SUFFIXES
                for area in EVIDENCE_DIRNAMES)
 
+def xml_guard_text(data: bytes) -> str:
+    """Decoded text for the DTD/ENTITY refusal, honouring BOM-less UTF-16.
+
+    `ElementTree` reads a BOM-less UTF-16 part from its own XML declaration, but
+    a guard that only decoded UTF-16 when a BOM was present saw `<!DOCTYPE` /
+    `<!ENTITY` as interleaved NULs and let the declaration through. Pick the
+    endianness from the first non-NUL byte the way the XML declaration does.
+    """
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", "ignore")
+    head = data[:400]
+    if b"\x00" in head:
+        enc = "utf-16-be" if head[:1] == b"\x00" else "utf-16-le"
+        return data.decode(enc, "ignore")
+    return data.decode("utf-8", "ignore")
+
+
 POLICY_DEFAULTS = {
     # FMT-IM4: a raster placed below this effective resolution is reported
     # (advisory). 0 disables it; a venue profile that states a number sets it.
@@ -194,7 +211,7 @@ _FRAG_OR_BREAK_RE = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>"
                                re.S)
 RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
 FIELD_CHAR_RE = re.compile(r"<w:fldChar[^>]*w:fldCharType=\"(\w+)\"[^>]*/?>")
-INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?>.*?</w:instrText>", re.S)
+INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?(?<!/)>.*?</w:instrText>", re.S)
 # A paragraph can carry no text and still hold an anchor a reader needs: a
 # footnote/endnote/comment reference, a bookmark, a simple field or a content
 # control. Deleting that "empty" paragraph loses the target/structure.
@@ -1221,8 +1238,7 @@ def parse_styles(pkg: zipfile.ZipFile) -> dict:
     raw = pkg.read("word/styles.xml")
     # The same untrusted-DOCX rule as the pipeline reader: a part carrying an
     # XML DTD/entity declaration is refused before ElementTree expands it.
-    text = raw.decode("utf-16", "ignore") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") \
-        else raw.decode("utf-8", "ignore")
+    text = xml_guard_text(raw)
     if "<!DOCTYPE" in text or "<!ENTITY" in text:
         return out
     root = ET.fromstring(raw)
@@ -1316,13 +1332,18 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
     """
     try:
         with zipfile.ZipFile(path) as pkg:
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise OSError(problem)
             names = set(pkg.namelist())
-            doc = pkg.read("word/document.xml").decode("utf-8", "replace")
-            rels = (pkg.read("word/_rels/document.xml.rels").decode("utf-8", "replace")
+            doc = _docx_xml_part_guarded(pkg, "word/document.xml").decode("utf-8", "replace")
+            rels = (_docx_xml_part_guarded(pkg, "word/_rels/document.xml.rels").decode(
+                        "utf-8", "replace")
                     if "word/_rels/document.xml.rels" in names else "")
-            settings = (pkg.read("word/settings.xml").decode("utf-8", "replace")
+            settings = (_docx_xml_part_guarded(pkg, "word/settings.xml").decode(
+                            "utf-8", "replace")
                         if "word/settings.xml" in names else "")
-            hf_parts = {n: pkg.read(n) for n in names
+            hf_parts = {n: _docx_xml_part_guarded(pkg, n) for n in names
                         if n.startswith(("word/header", "word/footer")) and n.endswith(".xml")}
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return {}
@@ -1416,7 +1437,11 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
     tpl_doc, layout = "", {}
     try:
         with zipfile.ZipFile(template) as tpkg:
-            tpl_doc = tpkg.read("word/document.xml").decode("utf-8", "replace")
+            problem = _docx_zip_problem(tpkg)
+            if problem:
+                raise OSError(problem)
+            tpl_doc = _docx_xml_part_guarded(
+                tpkg, "word/document.xml").decode("utf-8", "replace")
         layout = _template_front_layout(tpl_doc)
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         layout = {}

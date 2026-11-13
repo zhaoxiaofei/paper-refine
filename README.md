@@ -120,8 +120,9 @@ python paper_pipeline.py run-decide --root ./paper_rounds
 `status --root ./paper_rounds` prints what the root is configured to do at any
 time, and `--help` lists every command and flag.
 
-A finished decision can be certified, provisional or blocked; `decide` exits 4 or 5 in the
-last two cases — see *Exit codes*.
+A finished decision can be certified, provisional or blocked; a blocked decision makes
+`decide` exit 5, and a provisional one exits 0 unless `--require-complete` is given (then 4)
+— see *Exit codes*.
 
 ## Requirements
 
@@ -563,7 +564,7 @@ evidence pack.
 | `set-venue` / `set-journal` / `set-article-type` | change the rule set / target journal / content type |
 | `add-venue ID` | an agent writes/updates the venue profile + README row and downloads OA exemplars; the code then derives the pinned structure-only template pack |
 | `build-venue-templates --venue ID` | re-derive that pack from the exemplars (`<venue-id>.manuscripts/`) without an agent |
-| `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor` | switch the revision mode |
+| `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor\|llm` | switch the revision mode (`llm` is option 5) |
 | `set-champion-select judge\|revise\|integrate` | how a future round's champion is chosen: the panel (default), or the no-judge auto-promotion of the revised / integrated revised submission (PROVISIONAL; see the champion-selection section) |
 | `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
 | `set-submit-code off\|on` | whether `code/` is part of the submission (`off`, the default: revision content the stages revise and the judges evaluate, but stripped from `journal_submission/` like `raw_data/`, and not citeable by the response letter; `on`: the submission carries it and the letter may cite it) |
@@ -1607,8 +1608,9 @@ manuscript files:
 
 * **`raw_data/`** — factual evidence (measurements, tables, figures' source
   data, protocols, notes). The stages READ it to check facts; it is never
-  treated as the manuscript, a cover letter or supplementary information, and it
-  is never shipped in the published package.
+  treated as the manuscript, a cover letter or supplementary information. It is
+  stripped from the derived `journal_submission/`, but the published package
+  `final_clean_version_<root name>/` is the judged corpus and DOES carry it.
 * **`human_review_feedback/`** — the REAL editors'/reviewers' comments (the
   decision letter, the reviewer reports, a previous response to reviewers). The
   four journal-feedback revision modes read it, and the blind judges may read the
@@ -2645,7 +2647,7 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | review | 119 KB | 49 KB | 58% |
 | cold_start_review | 60 KB | 24 KB | 59% |
 | audit | 89 KB | 46 KB | 48% |
-| revise | 118 KB | 64 KB | 46% |
+| revise | 118 KB | 65 KB | 45% |
 | integrate | 117 KB | 64 KB | 45% |
 | rewrite | 110 KB | 60 KB | 45% |
 | judge | 103 KB | 74 KB | 29% |
@@ -3813,7 +3815,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 198 suites (a few
+any failure. They are independent, so run them in parallel — 200 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

@@ -55,7 +55,9 @@ In this order, first match wins:
    that is running (`setup` copies this directory into the root, so a
    self-contained root has both);
 3. the built-in fallback inside `paper_pipeline.py` (`nature-biotechnology` and
-   `generic`), so a single-file copy of the script still runs.
+   `generic`). The fallback covers those two profiles only: the loader still
+   requires the `paper_pipeline_parts/` bundle beside it, so a single-file copy
+   of the script does NOT run.
 
 The **snapshot in `pipeline_config.json` wins over all three** for a root that
 already recorded one: editing a profile file never silently changes the rules
@@ -68,7 +70,7 @@ documentation.
 
 | field | type | meaning |
 |---|---|---|
-| `id` | slug | the id `set-venue` resolves. Letters, digits, `.`, `_`, `+`, `-`. |
+| `id` | slug | the id `set-venue` resolves. Must START with a letter or digit; the rest may also use `.`, `_`, `+`, `-`. |
 | `label` | string | human name used in the prompt prose (`"Nature Biotechnology"`). Default: the id. |
 | `short` | string | short form used in phrases like "not an NBT rule". Default: the label. |
 | `sources` | object of URL/string | the profile's own provenance map (which guideline page each number came from). Carried through the loader unchanged so a stage that reads the profile through `VenueProfile.data` can name its source, as the skill instructs. Only its TYPE is validated (the loader reports a non-object value); the entries themselves are documentation, never checked. |

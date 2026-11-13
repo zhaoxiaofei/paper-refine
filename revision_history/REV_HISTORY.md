@@ -13,7 +13,7 @@ it are local artefacts, not committed).
 
 | path | what it is |
 |---|---|
-| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`, `conflicts`, `selfcheck`, `adopt-sweep`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `set-cold-start-review`, `set-submit-code`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform`. |
+| `paper_pipeline.py` | the orchestrator: a thin loader that executes the ordered `paper_pipeline_parts/` bundle (stdlib only; it refuses to run without the parts). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`, `conflicts`, `selfcheck`, `adopt-sweep`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `set-cold-start-review`, `set-submit-code`, `set-champion-select`, `set-author-to-complete`, `set-placeholder-file`, `sync-code`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform`. |
 | `paper_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`) and the Zotero live-field parity check (`zotero-check FILE.docx`, FMT-Z1..Z5 / M36). |
 | `paper_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
 | `docxcompare.sh` + `mcp-docx-compare/` | Word's own comparison engine (`Word.Application.CompareDocuments` through PowerShell COM) -- the FIRST choice whenever two `.docx` files must be tracked (the `docx-compare` MCP tool wraps the script). |
@@ -494,7 +494,7 @@ python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \
 
 # validation (see README.md -> Tests for the full list)
 python3 -m py_compile paper_pipeline.py paper_docx_format.py
-python3 .paper_test/run_all.py                 # every suite, offline (24 jobs by default)
+python3 .paper_test/run_all.py                 # every suite, offline (32 jobs by default)
 sh .paper_test/run_one.sh test_venue_config.py
 ```
 
@@ -539,9 +539,9 @@ An explicit recorded mode always wins, and renaming the area to
 `llm_review_feedback.disabled` (or `.off`) is the inert off-switch: the renamed
 tree is never read as feedback or evidence and never becomes submission
 content (`is_disabled_evidence_rel` keeps it out of scans, views and packages).
-`continue` is the historical workflow; `none` is its pre-rename
-spelling and is still accepted everywhere as an alias (it normalises to
-`continue` and is never returned by `journal_mode_of`). `init` starts a NEW
+`continue` is the historical workflow; `none` was removed, is refused by
+`set-revision-mode` and is not a spelling of `continue` (a config that records it
+fails loudly). `init` starts a NEW
 submission: the conform stage runs before round 1 (inside the venue's own Word
 template when one ships, else to the journal's own author guidelines and then
 academic convention) and reads no feedback. The modes are documented in README
@@ -813,15 +813,15 @@ touching this area:
   `[AUTHOR TO COMPLETE: versions of bedtools, Seurat, cellsnp-lite and UCSC
   liftOver]`, and the NeoHeteroclitic Reporting Summary was six markers and no
   filled form. The default is now `readme`
-  (`--with-author-to-complete-in-readme`): no document carries the marker; each
+  (`--author-to-complete readme`): no document carries the marker; each
   missing item is recorded in ONE `README-AUTHOR-TO-COMPLETE.md` in the package
   root, beside the cover letter and main text, and the submission copy drops it
   because it matches `README*.md` (no shipped document may depend on it). The
   prompt asks the stage to write the README; when a stage instead leaves the
   item in `MANUAL_STEPS.md` in marker form, the postcheck moves the item into
-  the README. `--with-author-to-complete` keeps the old in-document marker
-  convention (`document`), and `--without-author-to-complete`
-  (`set-author-to-complete off`) still sends the item to `MANUAL_STEPS.md`.
+  the README. `--author-to-complete document` keeps the old in-document marker
+  convention, and `--author-to-complete off` (`set-author-to-complete off`)
+  still sends the item to `MANUAL_STEPS.md`.
   Outside `document`, a marker a stage ADDS fails the attempt, a marker still
   in a delivered package is a gating residual, and `package_readiness` names it
   as `AUTH-1` (in `document` it is an advisory hand-off and, if the residual

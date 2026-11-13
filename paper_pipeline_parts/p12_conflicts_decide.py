@@ -63,7 +63,7 @@ def _conflict_numbers(text, floor: float = 10.0) -> set:
     text = str(text or "")
     out = set()
     for m in _JUDGE_CONFLICT_NUMBER_RE.finditer(text):
-        tok = m.group(1).rstrip(",").replace(",", "")
+        tok = m.group(1).replace("\u2212", "-").rstrip(",").replace(",", "")
         try:
             v = float(tok)
         except ValueError:
@@ -1800,10 +1800,13 @@ def _pkg2_name_resolution(ref: str, index: tuple):
         key = key[2:]
     low = key.lower()
     base = low.rsplit("/", 1)[-1]
-    if low in shipped_paths or base in shipped_names:
+    if low in shipped_paths:
         return "shipped", []
     if low in absent_paths:
         return "absent", [absent_paths[low]]
+    if "/" not in low and base in shipped_names: return "shipped", []
+    if "/" in low:
+        return "unknown", []
     hits = absent_names.get(base) or []
     if hits:
         return "absent", sorted(hits)

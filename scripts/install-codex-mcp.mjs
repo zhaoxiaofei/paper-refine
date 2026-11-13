@@ -698,19 +698,36 @@ function isEffectivelyEmpty(text) {
 }
 
 function mergePatch(existing, block) {
+  const begin = existing.indexOf(BEGIN);
+  const end = begin >= 0 ? existing.indexOf(END, begin) : -1;
   const remainder = stripManagedBlock(existing);
+  if (!block) {
+    if (isEffectivelyEmpty(remainder)) {
+      // Preserve leading comment headers, drop the empty flow sequence.
+      const comments = remainder
+        .split('\n')
+        .filter((line) => line.trim().startsWith('#'))
+        .join('\n');
+      return `${comments ? `${comments}\n` : ''}[]\n`;
+    }
+    const trimmed = remainder.replace(/\s+$/, '');
+    return `${trimmed}\n`;
+  }
+  if (begin >= 0 && end >= 0) {
+    // Splice the new block into the OLD block's span: appending it after the
+    // trimmed remainder moved every entry written below the managed block
+    // (e.g. a trailing `- insert:`) ABOVE it, changing row order silently.
+    const prefix = existing.slice(0, begin);
+    let suffix = existing.slice(end + END.length);
+    if (suffix.startsWith('\n') && block.endsWith('\n')) suffix = suffix.slice(1);
+    return prefix + block + suffix;
+  }
   if (isEffectivelyEmpty(remainder)) {
-    // Preserve leading comment headers, drop the empty flow sequence.
     const comments = remainder
       .split('\n')
       .filter((line) => line.trim().startsWith('#'))
       .join('\n');
-    if (!block) return `${comments ? `${comments}\n` : ''}[]\n`;
     return `${comments ? `${comments}\n` : ''}${block}`;
-  }
-  if (!block) {
-    const trimmed = remainder.replace(/\s+$/, '');
-    return `${trimmed}\n`;
   }
   const trimmed = remainder.replace(/\s+$/, '');
   return `${trimmed}\n\n${block}`;
@@ -877,6 +894,16 @@ function main() {
   }
 
   const servers = readServers(opts);
+  if (opts.only.size > 0) {
+    // A typo in --only used to match nothing, emit an empty block and DELETE
+    // the managed block while printing `imported 0 server(s)` + exit 0.
+    const known = new Set(servers.map((server) => server.name));
+    const unmatched = [...opts.only].filter((name) => !known.has(name));
+    if (unmatched.length > 0) {
+      die(`--only names no Codex server: ${unmatched.map((n) => JSON.stringify(n)).join(', ')}; `
+          + `known server(s): ${[...known].sort().join(', ') || '(none)'}`);
+    }
+  }
   const plugin = ensurePlugin({
     profile: opts.profile,
     profileDir,

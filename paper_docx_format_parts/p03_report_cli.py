@@ -59,7 +59,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
         ppr = ppr_of(para)
         style = ppr_style(ppr)
         if style and style.startswith("Heading"):
-            if policy["heading_keep_with_next"] and not (ppr and "<w:keepNext" in ppr):
+            if policy["heading_keep_with_next"] and not is_on(ppr, "keepNext"):
                 row("FMT-T3a", "medium", f"p{idx}", f"heading {text[:40]!r} has no keepNext",
                     "headings can be orphaned at the bottom of a page; add keepNext + keepLines")
             direct = {elem_val(rpr_of(r[2]), "sz") for r in runs(para)
@@ -330,7 +330,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # ---- header / title page / tracked changes --------------------------------
     first_sect = first_section_props(xml)
     if first_sect and re.search(r"<w:headerReference", first_sect) \
-            and "<w:titlePg" not in first_sect \
+            and not is_on(first_sect, "titlePg") \
             and policy["title_page_header"] == "suppress":
         row("FMT-S3", "low", "document", "the running head is printed on the title page",
             "add w:titlePg to the section properties so page 1 carries no header")
@@ -543,8 +543,7 @@ def _docx_zip_problem(pkg: zipfile.ZipFile) -> str:
 
 def _docx_entity_problem(data: bytes, name: str) -> str:
     """A one-line reason an XML part carries a DTD/entity declaration."""
-    text = data.decode("utf-16", "ignore") if data[:2] in (b"\xff\xfe", b"\xfe\xff") \
-        else data.decode("utf-8", "ignore")
+    text = xml_guard_text(data)
     if "<!DOCTYPE" in text or "<!ENTITY" in text:
         return f"part {name!r} carries an XML DTD/entity declaration"
     return ""
@@ -820,6 +819,10 @@ def scan_paths(paths: list, policy: dict) -> dict:
     strips both from every judged/pinned corpus), so they are skipped: scanning
     them inflated one real sandbox report to 971 findings and hid the signal.
     There is deliberately no switch back: they are never corpus content.
+
+    The scratch/evidence test is made on the path RELATIVE to the scanned root:
+    a package that merely lives below an ancestor named `work/` or `raw_data/`
+    (for example the run's own `--root` tree) is still the package to scan.
     """
     docs = []
     for p in paths:
@@ -829,9 +832,11 @@ def scan_paths(paths: list, policy: dict) -> dict:
         for f in files:
             if f.name.startswith("~$") or _is_aux_name(f.name):
                 continue
-            if any(part == "work" for part in f.parts[:-1]):
+            rel_parts = (f.relative_to(p).parts[:-1]
+                         if p.is_dir() and f.is_relative_to(p) else ())
+            if any(part == "work" for part in rel_parts):
                 continue
-            if any(is_evidence_part(part) for part in f.parts[:-1]):
+            if any(is_evidence_part(part) for part in rel_parts):
                 # The EVIDENCE areas are not submission content: a reviewer's
                 # .docx report or a data-source document is never a submission
                 # formatting finding.
@@ -860,7 +865,8 @@ def scan_paths(paths: list, policy: dict) -> dict:
                     # may be sent to OCR); the corpus walker refuses one too.
                     continue
                 if any(part == "work" or is_evidence_part(part)
-                       for part in q.parts[:-1]):
+                       for part in (q.relative_to(p).parts[:-1]
+                                    if p.is_dir() and q.is_relative_to(p) else ())):
                     continue
                 images.append(q)
         if images:
@@ -1243,13 +1249,19 @@ def fix_document(xml: str, styles: dict, policy: dict,
         if not style or not style.startswith("Heading"):
             continue
         new_para = para
-        if policy["heading_keep_with_next"] and not (ppr and "<w:keepNext" in ppr):
+        if policy["heading_keep_with_next"] and not is_on(ppr, "keepNext"):
             # `keepNext` precedes `keepLines` in CT_PPr; inserting both after an
             # existing `keepLines` put the pair out of order and duplicated the
             # element. When keepLines is already there, add only keepNext.
-            element = ("<w:keepNext/>" if ppr and "<w:keepLines" in ppr
-                       else "<w:keepNext/><w:keepLines/>")
-            new_para = insert_into_ppr(new_para, element, after=("pStyle",))
+            live = child_elem(ppr, "keepNext")
+            if live is not None:
+                # `<w:keepNext w:val="0"/>` is explicitly OFF: flip it on in
+                # place instead of adding a duplicate element.
+                new_para = new_para.replace(live, "<w:keepNext/>", 1)
+            else:
+                element = ("<w:keepNext/>" if ppr and "<w:keepLines" in ppr
+                           else "<w:keepNext/><w:keepLines/>")
+                new_para = insert_into_ppr(new_para, element, after=("pStyle",))
             kept += 1
         if policy["align_heading_sizes"]:
             want = style_sz(styles, style)
@@ -1278,9 +1290,14 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # w:titlePg added.
         s = next(SECT_READ_RE.finditer(xml), None)
         if s is not None and "<w:headerReference" in s.group(0) \
-                and "<w:titlePg" not in s.group(0):
+                and not is_on(s.group(0), "titlePg"):
             body = s.group(0)
-            if body.rstrip().endswith("/>"):
+            live_title = elem(body, "titlePg")
+            if live_title is not None:
+                # Explicitly OFF: turn it on in place.
+                at = s.start() + body.find(live_title)
+                xml = apply_edits(xml, [(at, at + len(live_title), "<w:titlePg/>")])
+            elif body.rstrip().endswith("/>"):
                 # A legal self-closing (empty) section has no closing tag to
                 # insert before: expand it, or the splice lands OUTSIDE the
                 # element and the scanner keeps reporting FMT-S3 while the fixer
@@ -1471,6 +1488,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
         edits, n = [], 0
         for m in re.finditer(r"<w:hyperlink(?=[\s>]).*?</w:hyperlink>", xml, re.S):
             block = m.group(0)
+            opening = block[:block.find(">") + 1]
+            # An internal cross-reference (`w:anchor`) or a location in another
+            # document (`w:docLocation`) is navigation, not a URL: flattening it
+            # destroyed the reference although no FMT-T7 row fired.
+            if "w:anchor=" in opening or "w:docLocation=" in opening:
+                continue
             inner = block[block.find(">") + 1:block.rfind("</w:hyperlink>")]
             inner = re.sub(r"<w:rStyle[^>]*/>", "", inner)
             inner = re.sub(r"<w:color[^>]*/>", "", inner)
@@ -2179,12 +2202,17 @@ def _set_para_style(para: str, style: str) -> str:
         if block.rstrip().endswith("/>"):
             new = (block[:block.rfind("/>")].rstrip() + ">"
                    + f'<w:pStyle w:val="{style}"/>' + "</w:pPr>")
-        elif "<w:pStyle" in block:
-            new = re.sub(r"<w:pStyle(?=[\s>])[^>]*/>", f'<w:pStyle w:val="{style}"/>',
-                         block, count=1)
         else:
-            om = re.match(r"<w:pPr(?=[\s>])[^>]*>", block)
-            new = block[:om.end()] + f'<w:pStyle w:val="{style}"/>' + block[om.end():]
+            live = child_elem(block, "pStyle")
+            if live is not None:
+                # Replace the LIVE direct child only: a `w:pPrChange` history
+                # record can carry its own `w:pStyle`, and `count=1` used to hit
+                # that first when the paragraph had no live style.
+                at = block.find(live)
+                new = block[:at] + f'<w:pStyle w:val="{style}"/>' + block[at + len(live):]
+            else:
+                om = re.match(r"<w:pPr(?=[\s>])[^>]*>", block)
+                new = block[:om.end()] + f'<w:pStyle w:val="{style}"/>' + block[om.end():]
         return para.replace(block, new, 1)
     # No pPr: `insert_into_ppr` owns the self-closing `<w:p .../>` expansion
     # (an empty paragraph): the old fallback inserted the pPr AFTER the `/>`,
@@ -2458,7 +2486,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
             part = synthesize(dest)
         if part:
             out[f"footer_{role}"] = part
-    out["even_odd"] = ("evenAndOddHeaders" in tset
+    out["even_odd"] = (is_on(tset, "evenAndOddHeaders")
                        or any(k.startswith(("header_even", "footer_even")) for k in out))
     out["logo"] = bool(issued.get(out.get("header_first", ""), False))
     out["copied"] = copied
@@ -2518,8 +2546,13 @@ def template_style_roles(template: Path) -> dict:
     """
     try:
         with zipfile.ZipFile(template) as tpkg:
-            styles = tpkg.read("word/styles.xml").decode("utf-8", "replace")
-            doc = tpkg.read("word/document.xml").decode("utf-8", "replace")
+            problem = _docx_zip_problem(tpkg)
+            if problem:
+                raise OSError(problem)
+            styles = _docx_xml_part_guarded(
+                tpkg, "word/styles.xml").decode("utf-8", "replace")
+            doc = _docx_xml_part_guarded(
+                tpkg, "word/document.xml").decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return {}
     roles = {"headings": {}}
@@ -3065,11 +3098,28 @@ def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
 
 
 def _strip_direct_props(frag: str, strip_num: bool = False) -> str:
-    for pat in (r"<w:ind(?=[\s/>])[^>]*/>", r"<w:spacing(?=[\s/>])[^>]*/>",
-                r"<w:jc(?=[\s/>])[^>]*/>"):
-        frag = re.sub(pat, "", frag)
-    if strip_num:
-        frag = re.sub(r"<w:numPr>[\s\S]*?</w:numPr>", "", frag, count=1)
+    """Remove direct ind/spacing/jc from the paragraph's LIVE `w:pPr` only.
+
+    The old global regexes also deleted revision history
+    (`w:pPrChange`/`w:rPrChange`) and a run's character spacing
+    (`w:rPr/w:spacing`), which is not paragraph geometry. `child_elem` returns
+    a DIRECT child of the live pPr, so neither is touched.
+    """
+    m = re.search(r"<w:pPr(?=[\s/>])[^>]*/>|<w:pPr(?=[\s>])[^>]*>[\s\S]*?</w:pPr>", frag)
+    if m:
+        ppr = m.group(0)
+        new_ppr = ppr
+        for tag in ("ind", "spacing", "jc"):
+            el = child_elem(new_ppr, tag)
+            while el is not None:
+                new_ppr = new_ppr.replace(el, "", 1)
+                el = child_elem(new_ppr, tag)
+        if strip_num:
+            el = child_elem(new_ppr, "numPr")
+            while el is not None:
+                new_ppr = new_ppr.replace(el, "", 1)
+                el = child_elem(new_ppr, "numPr")
+        frag = frag[:m.start()] + new_ppr + frag[m.end():]
     return frag
 
 
@@ -3179,8 +3229,15 @@ def _with_even_odd_headers(parts: dict) -> bool:
             parts["word/_rels/document.xml.rels"] = rels.encode("utf-8")
         return True
     text = settings.decode("utf-8", "replace")
-    if "evenAndOddHeaders" in text:
+    if is_on(text, "evenAndOddHeaders"):
         return False
+    live = elem(text, "evenAndOddHeaders")
+    if live is not None:
+        # Present but explicitly OFF (`w:val="0"`): flip it on in place; adding
+        # a second element would be invalid and the original would still win.
+        parts["word/settings.xml"] = text.replace(
+            live, "<w:evenAndOddHeaders/>", 1).encode("utf-8")
+        return True
     element = "<w:evenAndOddHeaders/>"
     anchors = [i for i in (text.find("<w:characterSpacingControl"),
                            text.find("<w:footnotePr"),
@@ -3645,13 +3702,15 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
     for p in paths:
         p = Path(p)
         if p.is_dir():
+            rel_of = lambda q: (q.relative_to(p).parts[:-1]
+                                if q.is_relative_to(p) else q.parts[:-1])
             files += [q for q in docx_files_under(p)
                       if not q.name.startswith("~$") and not _is_aux_name(q.name)
-                      and not any(is_evidence_part(part) for part in q.parts[:-1])]
+                      and not any(is_evidence_part(part) for part in rel_of(q))]
             files += [q for q in sorted(p.rglob("*"))
                       if q.is_file() and not q.is_symlink()
                       and q.suffix.lower() in (".tex", ".ltx")
-                      if not any(is_evidence_part(part) for part in q.parts[:-1])
+                      if not any(is_evidence_part(part) for part in rel_of(q))
                       # A difference-tracking copy (a latexdiff file, or the
                       # commented-out logging fallback) is not a document of the
                       # package: compiling it would report the AUXILIARY as a
@@ -3772,14 +3831,14 @@ def _xfa_dataset_packets(data: bytes) -> list:
             continue
         raw = data[start:end]
         try:
-            dec = zlib.decompress(raw)
+            dec = _inflate_bounded(raw)
         except zlib.error:
             # An UNCOMPRESSED stream is legal (`/Length` with no `/Filter`) and
             # the XFA packet set may be written that way by a non-Adobe tool:
             # skipping it made `all_datasets` read 0 on a form that carries two
             # packet sets (the 2026-10-15 hand-off test).
             dec = raw
-        if b"xfa:datasets" in dec:
+        if dec is not None and b"xfa:datasets" in dec:
             packets.append((start, dec.decode("utf-8", "replace")))
     return packets
 
@@ -3799,6 +3858,30 @@ XFA_LEAF_RE = re.compile(r"<([A-Za-z_][\w.\-]*)\s*>\s*([^<>]*?)\s*</\1\s*>")
 # audit's F39). The DOCX readers already have a per-part budget; this is the
 # PDF-side equivalent.
 MAX_PDF_BYTES = 64 * 1024 * 1024
+# The compressed-size cap above does not bound a DECOMPRESSED PDF stream: a
+# tiny zlib bomb expands to gigabytes. Every stream read below goes through
+# this bounded inflater, which returns None once the output would exceed the
+# per-part budget.
+MAX_PDF_PART_BYTES = 64 * 1024 * 1024
+
+
+def _inflate_bounded(raw: bytes, limit: int = MAX_PDF_PART_BYTES):
+    """zlib-decompress `raw`, returning None when the result exceeds `limit`.
+
+    Raises `zlib.error` for a non-zlib stream, exactly like `zlib.decompress`,
+    so callers keep their "uncompressed stream" fallback.
+    """
+    d = zlib.decompressobj()
+    out = d.decompress(raw, limit + 1)
+    if len(out) > limit:
+        return None
+    try:
+        out += d.flush()
+    except zlib.error:
+        raise
+    if len(out) > limit:
+        return None
+    return out
 
 
 def _read_pdf_bounded(path: Path):
@@ -3845,10 +3928,10 @@ def _xfa_dataset_report(path: Path):
             if end < 0:
                 continue
             try:
-                dec = zlib.decompress(data[start:end])
+                dec = _inflate_bounded(data[start:end])
             except zlib.error:
                 continue
-            if PDF_PLACEHOLDER_BYTES_RE.search(dec):
+            if dec is not None and PDF_PLACEHOLDER_BYTES_RE.search(dec):
                 # The placeholder lives in a COMPRESSED stream: the shell is
                 # real even when pdftotext cannot render the page.
                 is_shell = True
@@ -3897,8 +3980,10 @@ def _pdf_object_bodies(data: bytes) -> dict:
         if stop >= 0:
             raw = raw[:stop]
         try:
-            dec = zlib.decompress(raw)
+            dec = _inflate_bounded(raw)
         except zlib.error:
+            continue
+        if dec is None:
             continue
         fm = re.search(rb"/First (\d+)", body)
         nm = re.search(rb"/N (\d+)", body)
@@ -3931,7 +4016,7 @@ def _obj_stream_text(body: bytes):
     if stop >= 0:
         raw = raw[:stop]
     try:
-        return zlib.decompress(raw)
+        return _inflate_bounded(raw)
     except zlib.error:
         return raw
 
@@ -4114,10 +4199,11 @@ def _pdf_carries_an_image(path: Path) -> bool:
         if raw[:3] == b"\xff\xd8\xff" or raw[:8] == b"\x89PNG\r\n\x1a\n":
             return True
         try:
-            dec = zlib.decompress(raw)
+            dec = _inflate_bounded(raw)
         except zlib.error:
             continue
-        if dec[:3] == b"\xff\xd8\xff" or dec[:8] == b"\x89PNG\r\n\x1a\n":
+        if dec is not None and (dec[:3] == b"\xff\xd8\xff"
+                                or dec[:8] == b"\x89PNG\r\n\x1a\n"):
             return True
     return False
 
@@ -5357,8 +5443,14 @@ def _parse_p(token: str) -> float | None:
             exp = int(m.group("exp") or m.group("exp2") or 0)
             if (m.group("sign") or m.group("sign2")) in ("−", "-"):
                 exp = -exp
+            # A crafted table cell can carry an exponent like 10^99999: the
+            # power itself is a huge int and float() raises OverflowError,
+            # which used to escape the whole package scan instead of yielding
+            # FMT-X1. Bound the exponent and catch the conversion as well.
+            if exp > 308:
+                return None
             return float(m.group("mant")) * (10 ** exp)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
     m = _PLAIN_P_RE.match(token)
     return float(m.group("p")) if m else None

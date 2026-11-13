@@ -1211,7 +1211,16 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
                 and target.parent.name == PRISTINE_DIR)
 
     def walk(d: Path, ancestors: frozenset) -> None:
-        for p in sorted(d.iterdir()):
+        try:
+            entries = sorted(d.iterdir())
+        except OSError as e:
+            # An unreadable DIRECTORY is the same class as an unreadable file:
+            # hash_manifest's on_error only covered file hashing, so a
+            # chmod-000 subdirectory aborted every integrity pass. Record the
+            # gap and keep the rest of the manifest.
+            print(f"warning: cannot read directory {d}: {e}; its files are not in the manifest", file=sys.stderr)
+            return
+        for p in entries:
             if p.is_symlink() and p.is_dir():
                 if not follow_dir_links or not _followable_evidence_dir(p, d == root):
                     continue
@@ -1319,7 +1328,8 @@ def corpus_tree_manifest(dirp: Path) -> dict:
         return {"files": {}, "count": 0}
     paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True)
              if not _is_aux_doc(p.name)]
-    digs = sha256_files(paths)
+    # One unreadable payload must not crash the pass: record the sentinel (both manifests).
+    digs = sha256_files(paths, on_error="<unreadable>")
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
     return {"files": files, "count": len(files)}
 
@@ -1383,7 +1393,7 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
         return True
 
     paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True) if keep(p)]
-    digs = sha256_files(paths)
+    digs = sha256_files(paths, on_error="<unreadable>")
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
     # `count` is `len(files)`, not `len(paths)`: `manifest_digest` hashes this
     # whole dict, so a count that included a file `keep()` rejected would put
@@ -2440,7 +2450,7 @@ def corpus_source_overrides(sources: list) -> list:
             if not p.is_file() or _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             ks.add(prefix + rel)
         return ks
@@ -2481,7 +2491,12 @@ def scan_captions_in_sources(sources: list, limit=None) -> dict:
                 # 162-byte `~$…docx` and a legend count for a `:Zone.Identifier`).
                 continue
             rel = p.relative_to(src).as_posix()
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
+                continue
+            if is_code_rel(prefix + rel):
+                # The analysis-code area is revision content, never manuscript
+                # prose: a `code/notes.md` was charged to the abstract/main-text
+                # cap and its captions inventoried.
                 continue
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
@@ -3204,13 +3219,13 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     caption_words = 0
     if subtract_captions:
         caption_words = sum(
-            count_caption_words(" ".join(lines[max(a, span_start):min(b, n)]))
+            # The span's BODY lines only, like count_words.py's caption span (F020).
+            count_caption_words(" ".join(lines[j] for j in
+                                         range(max(a, span_start), min(b, n)) if included[j]))
             for a, b, kind in ((span[0], span[1], span[2] if len(span) > 2 else None)
                                for span in (caption_spans or []))
-            if a < n and b > span_start
-            and (kind is None or kind in caption_kinds)
-            and any(included[i] for i in range(max(a, span_start), min(b, n)))
-        )
+            if a < n and b > span_start and (kind is None or kind in caption_kinds)
+            and any(included[i] for i in range(max(a, span_start), min(b, n))))
     words = max(0, count_words(" ".join(body)) - caption_words)
     notes = []
     if abs_start is None:
@@ -3384,7 +3399,10 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                     or is_non_submitted_readme_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
+                continue
+            if is_code_rel(prefix + rel):
+                # `code/` is not manuscript prose (see scan_captions_in_sources).
                 continue
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
@@ -3927,7 +3945,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue                      # carried, never submitted
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             if is_non_manuscript_rel(rel):
                 # Evidence areas and feedback/response documents are inputs: a
@@ -3970,7 +3988,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue                      # carried, never submitted
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             if is_non_manuscript_rel(rel):
                 continue        # evidence area, not submission prose (see above)
@@ -4017,7 +4035,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue
             if (prefix + rel) in overrides[i]:
                 continue
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             if is_non_manuscript_rel(rel):
                 continue
@@ -4105,7 +4123,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                     continue
                 if (prefix + rel) in overrides[i]:
                     continue                  # a later source provides this path
-                if excluded and rel.split("/", 1)[0] in excluded:
+                if excluded and excluded_corpus_component(rel, excluded):
                     continue
                 if "work" in rel.split("/")[:-1]:
                     continue                  # stage scratch is never corpus content
@@ -4146,7 +4164,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                             continue
                         if (prefix + rel) in overrides[i]:
                             continue
-                        if excluded and rel.split("/", 1)[0] in excluded:
+                        if excluded and excluded_corpus_component(rel, excluded):
                             continue
                         if "work" in rel.split("/")[:-1]:
                             continue
@@ -7218,7 +7236,7 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
             rel = p.relative_to(src).as_posix()
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             if is_non_manuscript_rel(rel):
                 # Evidence areas and feedback/response documents are never
@@ -7253,7 +7271,7 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
             if (prefix + p.relative_to(src).as_posix()) in overrides[i]:
                 continue                      # a later source provides this path
             rel = p.relative_to(src).as_posix()
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             if is_non_manuscript_rel(rel):
                 continue        # evidence area, not submission prose (see above)
@@ -7373,7 +7391,7 @@ def data_table_texts(sources: list, limit: int = 40, coverage: dict = None) -> l
             rel = p.relative_to(src).as_posix()
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             if "work" in rel.split("/")[:-1]:
                 continue
@@ -8640,7 +8658,7 @@ def scan_placeholders_in_sources(sources: list) -> dict:
             if is_non_document_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
-            if excluded and rel.split("/", 1)[0] in excluded:
+            if excluded and excluded_corpus_component(rel, excluded):
                 continue
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
@@ -8807,42 +8825,6 @@ def collect_documents(sources: list) -> dict:
     return out
 
 
-def collect_non_editable_submission_files(sources: list) -> set:
-    """The submission files a source carries that are NOT editable documents.
-
-    `collect_documents` keeps only EDITABLE_DOC_EXTS, which is what the
-    one-to-one document pairing needs. The ADDED direction of
-    `document_set_check` also has to see the other half of a submission -- a new
-    PDF, figure or archive the base never had -- because a non-editable file
-    added to a package used to be invisible to the check (the collector dropped
-    it before the comparison). The same corpus exclusions apply, and the
-    editable suffixes are left out because `added` already covers them.
-    """
-    out = set()
-    overrides = corpus_source_overrides(sources)
-    for i, (src, prefix, excluded) in enumerate(sources):
-        if not src.is_dir():
-            continue
-        for p in _iter_tree_files(src):
-            if _is_aux_doc(p.name):
-                continue
-            rel = p.relative_to(src).as_posix()
-            if excluded_corpus_component(rel, excluded):
-                continue
-            if (prefix + rel) in overrides[i]:
-                continue
-            if is_evidence_rel(rel):
-                continue
-            if is_author_to_complete_readme_name(p.name):
-                continue
-            if is_bookkeeping_name(p.name):
-                continue
-            if p.suffix.lower() in EDITABLE_DOC_EXTS:
-                continue
-            out.add(prefix + rel)
-    return out
-
-
 def document_set_check(base_sources: list, cand_sources: list) -> dict:
     """Did every base document survive, and does the candidate carry rename twins?
 
@@ -8923,9 +8905,20 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
     # collection above cannot see a PDF/figure/archive, so an invented
     # non-editable file was never reported. This stays a separate list (rather
     # than widening `added`) so the paired editable counts keep their meaning.
-    added_non_editable = sorted(
-        collect_non_editable_submission_files(cand_sources)
-        - collect_non_editable_submission_files(base_sources))
+    # Compare by CONTENT before calling a non-editable file invented: a pure
+    # rename (`fig1.png` -> `fig1-renamed.png`, bytes identical) is preserved,
+    # not added. A same-path file is never "added" (it may be edited).
+    base_ne = _non_editable_entries(base_sources)
+    cand_ne = _non_editable_entries(cand_sources)
+    base_remaining = Counter(base_ne.values())
+    added_non_editable = []
+    for rel, dig in sorted(cand_ne.items()):
+        if rel in base_ne:
+            continue
+        if base_remaining.get(dig, 0) > 0:
+            base_remaining[dig] -= 1      # moved/renamed, bytes preserved
+            continue
+        added_non_editable.append(rel)
     return {"missing": missing, "content_preserved_under_other_name": content_only,
             "added": added,
             "added_non_editable": added_non_editable,
@@ -9001,7 +8994,10 @@ def contained_under(root, rel) -> Path:
     target = raw if raw.is_absolute() else base / raw
     try:
         resolved = target.resolve()
-    except (OSError, RuntimeError) as e:
+    except (OSError, RuntimeError, ValueError) as e:
+        # `ValueError` is what a recorded NUL-containing path raises
+        # (`lstat: embedded null character in path`): a damaged state value must
+        # be reported, not traceback out of a read-only command.
         die(f"the recorded path {rel!r} cannot be resolved under {base}: {e}")
     try:
         resolved.relative_to(base)
@@ -9115,9 +9111,16 @@ def readme_internal_note_rows(p: Path, limit: int = 12) -> list:
     """
     p = Path(p)
     try:
-        if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+        # `stat`/`read_text` FOLLOW a symlink: a package link to an outside
+        # README had its text read and copied into reports/readme_notes/.
+        st = p.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
             return []
-        text = p.read_text("utf-8", "replace")
+        if st.st_size > PACKAGE_TEXT_BYTES_LIMIT:
+            return []
+        text = read_text_bounded(p)
+        if text is None:
+            return []
     except OSError:
         return []
     rows = []
@@ -9799,7 +9802,14 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
 
     def _ignore(dirpath, names):
         out = set(_corpus_ignore(skip_aux, strip_bookkeeping)(dirpath, names) or ())
+        rel = os.path.relpath(dirpath, src)
         for name in names:
+            # A symlink planted at the DESTINATION was followed by copy2 (the
+            # source link checks below never looked at it): refuse to write
+            # through it, which would overwrite an arbitrary outside file.
+            dest = dst if rel == "." else dst / rel
+            if (dest / name).is_symlink():
+                raise OSError(f"refusing to copy onto a symlinked destination entry {dest / name}")
             full = os.path.join(dirpath, name)
             if name in exclude_top and os.path.isdir(full) and not os.path.islink(full):
                 # A NAMED DIRECTORY at ANY depth is process scratch, not corpus
@@ -9834,6 +9844,8 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
                 and is_bookkeeping_name(entry.name):
             continue
         target = dst / entry.name
+        if target.is_symlink():
+            raise OSError(f"refusing to copy onto a symlinked destination entry {target}")
         if entry.is_dir():
             shutil.copytree(entry, target, dirs_exist_ok=True, ignore=_ignore)
         elif entry.is_file():

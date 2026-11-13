@@ -69,6 +69,10 @@ try {
     const out = path.join(root, 'new-redline.docx');
     assert.equal(containsPath(out, allowedRoots(root)), true);
   });
+  check('a set-but-empty root list fails closed instead of allowing anything', () => {
+    assert.throws(() => allowedRoots(path.delimiter), /names no roots/);
+    assert.throws(() => allowedRoots(` ${path.delimiter} `), /names no roots/);
+  });
   check('a PATH-delimiter separated list keeps every root', () => {
     assert.equal(allowedRoots([root, outside].join(path.delimiter)).length, 2);
   });

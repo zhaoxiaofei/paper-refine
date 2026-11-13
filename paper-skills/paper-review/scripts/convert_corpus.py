@@ -469,10 +469,24 @@ ROW_RE = re.compile(r"<row[^>]*>(.*?)</row>", re.S)
 SHEET_TAG_RE = re.compile(r"<sheet\b[^>]*/?>")
 
 
+def _xlsx_part(z, name):
+    """Bytes of one XLSX part inside the same 64 MiB budget as a DOCX part."""
+    try:
+        info = z.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > MAX_DOCX_PART_BYTES:
+        return None
+    return z.read(name)
+
+
 def _xlsx_shared_strings(z):
     shared = []
     if "xl/sharedStrings.xml" in z.namelist():
-        ss = z.read("xl/sharedStrings.xml").decode("utf-8", errors="replace")
+        _raw = _xlsx_part(z, "xl/sharedStrings.xml")
+        if _raw is None:
+            return shared
+        ss = _raw.decode("utf-8", errors="replace")
         for si in re.findall(r"<si>(.*?)</si>", ss, re.S):
             # Shared strings carry XML entities ("A&amp;B", "caf&eacute;") and the
             # inline-string path already unescapes them; leaving them literal here
@@ -484,13 +498,16 @@ def _xlsx_shared_strings(z):
 
 def _xlsx_sheet_plan(z):
     """[(sheet name, worksheet path)] in workbook order, via the rels map."""
-    try:
-        wb = z.read("xl/workbook.xml").decode("utf-8", errors="replace")
-    except KeyError:
+    _wb = _xlsx_part(z, "xl/workbook.xml")
+    if _wb is None:
         return []
+    wb = _wb.decode("utf-8", errors="replace")
     rels = {}
     if "xl/_rels/workbook.xml.rels" in z.namelist():
-        rx = z.read("xl/_rels/workbook.xml.rels").decode("utf-8", errors="replace")
+        _rx = _xlsx_part(z, "xl/_rels/workbook.xml.rels")
+        if _rx is None:
+            return []
+        rx = _rx.decode("utf-8", errors="replace")
         for m in re.finditer(r"<Relationship\b[^>]*/?>", rx):
             tag = m.group(0)
             rid = re.search(r'Id="([^"]*)"', tag)
@@ -658,7 +675,14 @@ def xlsx_to_text(path: str) -> tuple:
             for name, sf in resolved:
                 sname = name or sf
                 lines.append("### corpus-marker: sheet: %s" % _xlsx_escape_cell(sname))
-                sh = z.read(sf).decode("utf-8", errors="replace")
+                _raw_sheet = _xlsx_part(z, sf)
+                if _raw_sheet is None:
+                    notes.append("xlsx-partial: worksheet %s is over the %d-byte part "
+                                 "budget; its data are not rendered"
+                                 % (sf, MAX_DOCX_PART_BYTES))
+                    lines.append("### corpus-marker: sheet-data omitted: %s" % _xlsx_escape_cell(sname))
+                    continue
+                sh = _raw_sheet.decode("utf-8", errors="replace")
                 try:
                     _ET.fromstring(sh)
                 except _ET.ParseError as e:
@@ -1044,9 +1068,12 @@ def main():
         print("ERROR: SUBMISSION_DIR %s does not exist. Stop and ask the user." % sub)
         sys.exit(2)
     sub_real, work_real = os.path.realpath(sub), os.path.realpath(work)
-    if sub_real == work_real or sub_real.startswith(work_real + os.sep):
-        print("ERROR: the work directory overlaps the submission (work is the "
-              "submission or one of its parents): %s vs %s" % (work, sub))
+    if (sub_real == work_real or sub_real.startswith(work_real + os.sep)
+            or work_real.startswith(sub_real + os.sep)):
+        # Both directions: WORK inside SUBMISSION_DIR wrote review artifacts
+        # into the read-only package (and a re-run deleted them there).
+        print("ERROR: the work directory overlaps the submission (one is the "
+              "other or inside it): %s vs %s" % (work, sub))
         sys.exit(2)
     corpus_dir = os.path.join(work, "corpus")
     evidence_dir = os.path.join(work, EVIDENCE_DIRNAME)

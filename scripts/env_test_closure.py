@@ -50,8 +50,13 @@ def requirement_applies(req: str) -> bool:
         return True                       # unknown marker variable: keep it
 
 
+def _norm_dist(name) -> str:
+    """PEP 503 normalization: `python_docx` and `python-docx` are one distribution."""
+    return re.sub(r"[-_.]+", "-", str(name or "").strip().lower())
+
+
 def closure(roots=DEFAULT_ROOTS) -> dict:
-    """{lowercased name: (Name, version)} for the roots and everything they need."""
+    """{normalized name: (Name, version)} for the roots and everything they need."""
     seen, stack = {}, list(roots)
     while stack:
         name = stack.pop()
@@ -59,7 +64,7 @@ def closure(roots=DEFAULT_ROOTS) -> dict:
             dist = md.distribution(name)
         except md.PackageNotFoundError:
             continue
-        key = (dist.metadata["Name"] or name).lower()
+        key = _norm_dist(dist.metadata["Name"] or name)
         if key in seen:
             continue
         seen[key] = (dist.metadata["Name"] or name, dist.version)
@@ -67,7 +72,7 @@ def closure(roots=DEFAULT_ROOTS) -> dict:
             if not requirement_applies(req):
                 continue
             dep = re.split(r"[ (;<>=!~\[]", req.strip())[0].strip()
-            if dep and dep.lower() not in seen:
+            if dep and _norm_dist(dep) not in seen:
                 stack.append(dep)
     return seen
 
@@ -88,7 +93,7 @@ def main(argv: list) -> int:
     roots = tuple(argv[1:]) or DEFAULT_ROOTS
     seen = closure(roots)
     missing = [r for r in roots
-               if r.lower() not in seen]
+               if _norm_dist(r) not in seen]
     if missing:
         print(f"error: root distribution(s) not installed: {', '.join(missing)}",
               file=sys.stderr)

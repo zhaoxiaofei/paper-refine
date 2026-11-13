@@ -109,7 +109,7 @@ _ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
     r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
 # `.reply`/`.review`/`.notes` name the DOCUMENT kind, not another extension.
 _SEMANTIC_SUFFIX_RE = re.compile(
-    r"\.(?:reply|response|rebuttal|review|notes?|comments?)\.[A-Za-z0-9]+$", re.I)
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
 EXTERNAL_FEEDBACK_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
     r"to[-_ ]?authors))*|"
