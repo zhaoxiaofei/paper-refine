@@ -122,7 +122,7 @@ def test_docs():
           bool(m) and int(m.group(1)) == n_suites,
           f"README={m.group(1) if m else None} tree={n_suites}")
     check("F057 the execution-profile revise row matches the live render",
-          "| revise | 118 KB | 65 KB | 45% |" in readme)
+          "| revise | 119 KB | 66 KB | 45% |" in readme)
     check("F058 REV_HISTORY describes the loader + ordered parts bundle",
           "single file, stdlib only" not in hist and "paper_pipeline_parts/" in hist)
     state = (WS / "paper_pipeline_parts" / "p05_state_corpus.py").read_text("utf-8")
