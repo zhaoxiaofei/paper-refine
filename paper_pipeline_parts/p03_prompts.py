@@ -1466,7 +1466,15 @@ Explicit requirements that override skill defaults where they conflict:
      available remedy would remove a fact, leave the fact in the package and mark the finding
      manual-required -- do not trade the fact for a green finding. When a value is corrected,
      propagate the correction to every occurrence of the same quantity in every document; a
-     single-site fix is incomplete.
+     single-site fix is incomplete. Two spellings of one identity value in one package are never
+     both correct: a statement in the package that declares itself authoritative for the identity
+     fields decides, so the other occurrence is corrected to it -- an identity typo is a decidable
+     correction, never an author query. Two surfaces that describe the same display must also
+     agree: a caption and the body sentence that references it state the same quantity, and the
+     body's claim decides when they differ -- this check does NOT depend on a figure file being
+     shipped. Resolve every Section/Table/Figure pointer against the object it names and read that
+     object; a pointer whose target does not carry the claim is corrected to the right number,
+     never deleted.
 
 @@REWRITE_PARITY@@
 
@@ -4458,7 +4466,12 @@ is seeded truncated to a fixed character budget: keep that truncated text exactl
   * `OK — <why no fact is lost>` for a duplicate, artifact or obsolete paragraph, or for a paragraph
     whose every fact, number, definition and claim survives at a NAMED location in `revised/`
     (`OK — merged into Results paragraph 3; all values survive`). Do not write a bare `OK` or repeat
-    one generic sentence: the orchestrator treats repeated boilerplate as an undisposed row.
+    one generic sentence: the orchestrator treats repeated boilerplate as an undisposed row. This
+    disposition is CHECKED, not taken on trust: the orchestrator re-reads every `OK` row against the
+    delivered package's own prose, and a numeric value or identifier the paragraph carried that
+    appears nowhere in that prose fails the audit (a value recorded only in
+    `README-AUTHOR-TO-COMPLETE.md` or `MANUAL_STEPS.md` is `manual-required`, not `OK`). A value
+    that must go is `fact removed — RP-xxx` or `manual-required`, never `OK`.
   * `fact removed — RP-xxx` when a fact, number, definition, method step or claim has no surviving
     carrier, AND add that row to `REPAIR_PLAN.json` with the exact restoration/rewrite. A paragraph
     carrying a fact may not be removed to resolve a finding.
@@ -4468,7 +4481,13 @@ The audit FAILS (and the stage is retried) while any row's disposition cell is e
 is still a valid result only after every deleted-paragraph row is disposed.
 
 For every row you must give a LOCATION, the WRONG text or value, the CORRECT value, and the BASIS
-(the exact file/line/table/identifier that decides it, re-runnable by another session). A PURE
+(the exact file/line/table/identifier that decides it, re-runnable by another session). `wrong` and
+`correct` are LITERAL text, not a description: `wrong` quotes the shortest verbatim fragment of the
+named file that contains the change, with its own characters and spacing; `correct` is the exact
+replacement text to write there (it need not already appear in the file). Put the location in
+`location` and the reasoning in `basis`/`edit`. A `wrong` that carries a line number, a parenthetical,
+several separated quotes or an ellipsis is not the text the bounded repair can find or apply, so the
+repair fails on it. A PURE
 DELETION has no correct value: put the deleted text in `wrong`, leave `correct` as the empty string
 `""`, and state the deletion in `edit` (`delete the duplicated sentence`); at least one of
 `wrong`/`correct` must be non-empty. If you cannot decide a candidate row, do not guess: put it in

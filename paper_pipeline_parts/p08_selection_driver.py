@@ -3173,6 +3173,97 @@ def _repair_bookkeeping_rel(rel: str) -> bool:
             or is_author_to_complete_readme_name(name))
 
 
+def repair_plan_literal_problems(sb: Path, rows: list) -> list:
+    """Plan rows whose `wrong` is not literal text of the file they name.
+
+    The bounded repair re-reads `wrong` as literal text: a descriptive value (a
+    line number, a parenthetical, several separated quotes) cannot be found in
+    the file, so the repair fails AFTER editing the package -- and the failure
+    used to blame the applied edits instead of the plan. Catching it at the
+    audit keeps the failure where the operator can fix it, and keeps a
+    descriptive row from being "verified" only because the check could not find
+    its text.
+
+    The comparison MUST be the repair's own reader and normaliser
+    (`_repair_file_text` / `_repair_text_norm`): a real DOCX is a deflated zip
+    whose paragraph text is not in its raw bytes, `.py` indentation is syntax
+    (not collapsible whitespace), and an opaque file has no text at all. Reading
+    the raw bytes here rejected every valid DOCX/`.py` row and every opaque
+    file before the repair could even try them.
+    """
+    problems = []
+    for row in rows or ():
+        rel = strip_leading_dot_slash(str(row.get("file") or ""))
+        wrong = str(row.get("wrong") or "")
+        if not rel or not wrong.strip():
+            continue
+        path = Path(sb) / REVISED_DIR / rel
+        text = _repair_file_text(path)
+        if text is None:
+            continue                   # absent/opaque: the repair's span audit decides
+        if _repair_text_norm(rel, wrong) in _repair_text_norm(rel, text):
+            continue
+        problems.append(
+            f"{row.get('id') or '?'} `wrong` is not literal text of {rel}: {wrong[:100]!r}. "
+            f"Quote the shortest VERBATIM fragment of the file (the location and the "
+            f"reasoning belong in `location`/`basis`/`edit`); a description cannot be found "
+            f"or applied by the bounded repair.")
+    return problems
+
+
+def _restore_revised_from_prerepair(sb: Path) -> str:
+    """Put the audited pre-repair package back; return "" or a failure reason.
+
+    A bounded repair that violated its own contract ("applies only the
+    confirmed rows") is not the role's product (rule 1), so its bytes must not
+    become the arm's candidate (rule 5). The pre-repair package was already
+    audited and accepted, so restoring it is the safe outcome; the stage
+    postcheck then decides the restored bytes exactly as it decides any other
+    package. The run record (`rec["revision_repair"]`) still carries the
+    failure; the rejected repair's own `revised/REPAIR_LEDGER.json` is replaced
+    by the snapshot together with the rest of the rejected bytes.
+
+    The swap never deletes the only copy: the current package is renamed aside
+    first, the staged snapshot is renamed into place, and the old package is
+    removed only after the new one exists (a failed rename puts it back).
+    """
+    pre = Path(sb) / "revised_prerepair"
+    cur = Path(sb) / REVISED_DIR
+    if not pre.is_dir():
+        return "the pre-repair snapshot revised_prerepair/ is missing"
+    stage = Path(sb) / (REVISED_DIR + ".restore-tmp")
+    parked = Path(sb) / (REVISED_DIR + ".restore-old")
+    try:
+        rmtree_force(stage)
+        rmtree_force(parked)
+        shutil.copytree(pre, stage)
+    except OSError as exc:
+        rmtree_force(stage)
+        return f"the snapshot could not be staged ({type(exc).__name__}: {exc})"
+    try:
+        if cur.exists() or cur.is_symlink():
+            cur.rename(parked)
+        stage.rename(cur)
+    except OSError as exc:
+        # Put the package we moved aside back: the arm must never be left with
+        # no package because the swap failed.
+        try:
+            if parked.exists() and not cur.exists():
+                parked.rename(cur)
+        except OSError:
+            pass
+        try:
+            rmtree_force(stage)
+        except OSError:
+            pass
+        return f"the staged restore could not be put in place ({type(exc).__name__}: {exc})"
+    try:
+        rmtree_force(parked)
+    except OSError:
+        pass                              # the restored package is in place; cleanup only
+    return ""
+
+
 def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: set,
                                with_reasons: bool = False):
     """Files changed by the bounded repair that no CONFIRMED plan row covers.
@@ -3547,12 +3638,50 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
             rec["revision_chain"] = "complete"
             ctx.save_state()
             return
-        if (rec.get("revision_repair") or {}).get("status") in ("done", "failed"):
+        _repair_rec = rec.get("revision_repair") or {}
+        if _repair_rec.get("status") in ("done", "failed"):
             # The repair finished (or failed) before a crash but the chain's own
-            # postcheck may not have run: finish it now, once. A FAILED repair is
-            # not fatal by contract -- the stage postcheck decides whether the
-            # package itself is valid. `revision_chain` is the done marker, so a
-            # crash during this postcheck is retried instead of re-auditing.
+            # postcheck may not have run: finish it now, once. The stage postcheck
+            # decides whether the package is valid, but a FAILED repair's package
+            # must be the audited pre-repair one, never the rejected edits.
+            # `revision_chain` is the done marker, so a crash during this postcheck
+            # is retried instead of re-auditing.
+            if _repair_rec.get("status") == "failed" and not _repair_rec.get("rolled_back"):
+                # The crash may have landed between recording the failure and
+                # restoring the audited bytes. Postchecking the rejected edits
+                # would let them become the arm's candidate (rule 5), so finish
+                # the rollback first -- and refuse to touch a snapshot whose
+                # digest no longer matches (it may have been tampered with).
+                if _repair_rec.get("rollback_unsafe"):
+                    rec["status"] = "failed"
+                    rec["last_error"] = (
+                        "the failed bounded repair's baseline is untrusted; refusing to "
+                        "postcheck the rejected edits")
+                    ctx.save_state()
+                    return
+                _sb = ctx.sandbox_of(rec)
+                _pre = _sb / "revised_prerepair"
+                _expected_pre = rec.get("revision_prerepair_digest")
+                _actual_pre = (manifest_digest(
+                    hash_manifest(_pre, on_error="<unreadable>", follow_dir_links=True))
+                    if _pre.is_dir() else "")
+                if not _expected_pre or _actual_pre != _expected_pre:
+                    rec["status"] = "failed"
+                    rec["last_error"] = (
+                        "the failed bounded repair's baseline revised_prerepair/ cannot be "
+                        "trusted (digest missing or changed); refusing to postcheck the "
+                        "rejected edits")
+                    ctx.save_state()
+                    return
+                _rollback_error = _restore_revised_from_prerepair(_sb)
+                _repair_rec["rolled_back"] = not _rollback_error
+                if _rollback_error:
+                    _repair_rec["rollback_error"] = _rollback_error
+                    rec["status"] = "failed"
+                    rec["last_error"] = (f"the rejected repair's edits could not be rolled "
+                                         f"back ({_rollback_error}); refusing to postcheck them")
+                    ctx.save_state()
+                    return
             postcheck(ctx, rec, source="revision-audit")
             rec["revision_chain"] = ("complete" if rec.get("status") == "done"
                                      else "failed")
@@ -3677,6 +3806,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                            "_revision_audit.log")
     (sb / REVISION_AUDIT_PROMPT_FILE).unlink(missing_ok=True)
     rows = _revision_plan_rows(sb)
+    _plan_literal = repair_plan_literal_problems(sb, rows or [])
     _plan_ids = [str(r.get("id") or "") for r in (rows or []) if isinstance(r, dict)]
     deletion_problems = deletion_audit_problems(
         sb, expected_rows=len(_deleted_rows),
@@ -3691,6 +3821,9 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     elif rows is None:
         audit_rec["error"] = ("no valid revision_audit/REPAIR_PLAN.json (every row needs a "
                               "unique id and a package-relative file)")
+    elif _plan_literal:
+        audit_rec["error"] = ("the repair plan quotes text the file does not carry: "
+                              + _plan_literal[0][:400])
     elif deletion_problems:
         audit_rec["error"] = ("the deletion audit is incomplete: "
                               + deletion_problems[0][:400])
@@ -3773,10 +3906,13 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                     repair_rec["status"] = "failed"
                     repair_rec["error"] = (
                         "the pre-repair baseline revised_prerepair/ was modified during "
-                        "the repair; the applied-change audit is untrustworthy")
+                        "the repair; the applied-change audit is untrustworthy, so the "
+                        "rejected edits cannot be rolled back and must not be published")
+                    # Restoring from a tampered baseline would ship the tamper.
+                    repair_rec["rollback_unsafe"] = True
                     rec["revision_repair"] = repair_rec
                     ctx.save_state()
-                    unplanned = {"revised_prerepair/": "baseline digest changed"}
+                    unplanned = None
                 else:
                     unplanned = _revised_repair_violations(pre, sb / REVISED_DIR, rows,
                                                            confirmed_ids, with_reasons=True)
@@ -3787,16 +3923,42 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                         "plan rows cover: "
                         + "; ".join(f"{_rel} ({_why})" if _why else _rel
                                     for _rel, _why in list(unplanned.items())[:6]))
-                else:
+                elif repair_rec["status"] == "done":
                     repair_rec["ledger"] = counts
     rec["revision_repair"] = repair_rec
     ctx.save_state()
     if repair_rec["status"] != "done":
-        # Recorded and printed, but NOT fatal: the repository documents the
-        # stage postcheck as the authority for a failed bounded repair (the
-        # verification ledger rejected making it fatal). The postcheck below
-        # decides whether the final package itself is valid.
+        # A repair that broke its contract leaves edited bytes behind. The package
+        # the postcheck decides must be the last VERIFIED one, so restore the
+        # audited pre-repair package instead of publishing the rejected edits
+        # (rule 5). When that restore is impossible -- a tampered baseline, or a
+        # missing/stale snapshot -- the rejected bytes cannot be told apart from
+        # valid ones, so the arm fails instead of being postchecked and possibly
+        # accepted.
+        if repair_rec.get("rollback_unsafe"):
+            repair_rec["rolled_back"] = False
+            rec["status"] = "failed"
+            rec["last_error"] = str(repair_rec.get("error") or
+                                    "the bounded repair's bytes cannot be rolled back")
+            print(f"  [revision-repair] {rec['id']}: FAILED — "
+                  f"{str(repair_rec['error'])[:240]}")
+            rec["revision_chain"] = "failed"
+            ctx.save_state()
+            return
+        _rollback_error = _restore_revised_from_prerepair(sb)
+        repair_rec["rolled_back"] = not _rollback_error
+        if _rollback_error:
+            repair_rec["rollback_error"] = _rollback_error
+            rec["status"] = "failed"
+            rec["last_error"] = (f"the rejected repair's edits could not be rolled back "
+                                 f"({_rollback_error}); refusing to publish them")
+            print(f"  [revision-repair] {rec['id']}: FAILED — {rec['last_error'][:240]}")
+            rec["revision_chain"] = "failed"
+            ctx.save_state()
+            return
         print(f"  [revision-repair] {rec['id']}: FAILED — {str(repair_rec['error'])[:240]}")
+        print(f"  [revision-repair] {rec['id']}: rolled {REVISED_DIR}/ back to the "
+              f"audited pre-repair package (revised_prerepair/)")
     # The SAME postcheck decides the final revised version.
     postcheck(ctx, rec, source="revision-audit")
     rec["revision_chain"] = ("complete" if rec.get("status") == "done" else "failed")

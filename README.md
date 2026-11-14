@@ -2220,7 +2220,41 @@ readable `REPAIR_PLAN.md`): one row per defect it confirms IN THE REVISION
 item, a missing low-priority re-verification row, or a defect the revision
 introduced). Every row carries the location, the wrong and correct text, and a
 basis another session can re-run; a pure deletion carries its removed text in
-`wrong` and an empty `correct`. An empty plan is a valid, complete audit.
+`wrong` and an empty `correct`. An empty plan is a valid, complete audit. The
+`wrong` value must be LITERAL text of the file it names (the shortest verbatim
+fragment that contains the change); a descriptive value — a line number, a
+parenthetical, several separated quotes — cannot be found or applied by the
+repair, so the audit rejects it before the repair session starts instead of
+failing the repair after it has already edited the package.
+
+The audit's own `revision_audit/DELETED_PARAGRAPHS.md` is checked, not taken on
+trust: every deleted base paragraph is disposed `OK — <why no fact is lost>`,
+`manual-required`, or `fact removed — RP-xxx`, and an `OK` row whose numeric
+value or identifier appears nowhere in the delivered package's own prose fails
+the audit (a fact recorded only in the author hand-off is `manual-required`, not
+`OK`). The same fact survival rule runs at the revise/rewrite/integrate
+postcheck whenever a deletion is permitted — the strict no-deletion mode already
+reports every missing unit — so a base sentence that has no counterpart in the
+delivered package may not take a value or identifier with it. Removing the
+sentence is not how a wrong value, name, definition or claim is repaired (rule
+D8); a value that cannot be decided from the package is recorded as
+manual-required, never dropped silently.
+
+An identity value is the same kind of fact, and the same three postchecks now
+reject two spellings of one address in the submitted prose: when two occurrences
+share their local part and their domains differ by at most two characters, one
+is a typo, and the package's own authoritative identity statement decides which
+(the front matter is corrected to it). A pair that is genuinely two people is
+recorded `manual-required` for the author in `README-AUTHOR-TO-COMPLETE.md` /
+`MANUAL_STEPS.md` beside the documents, and that record clears the gate. Only
+the package root's hand-off files are read: a same-named file in `work/` or an
+evidence area is scratch, not an author record, and cannot clear it. A near-miss
+that only appears in bookkeeping — a manual list that quotes the old spelling —
+is not scanned. The prompt states the matching rule, with the caption/pointer
+case beside it: a
+caption and the body sentence that references the same display must agree about
+what it shows, the body's claim decides when they disagree, and a pointer whose
+target does not carry the claim is corrected to the right number, never deleted.
 
 When the plan is non-empty, ONE **BOUNDED REPAIR** session re-validates every
 row against `revised/`, `base/` and the source hierarchy, applies only the rows
@@ -2228,7 +2262,11 @@ it confirms, records its verdicts in `revised/REPAIR_LEDGER.json`, and updates
 the changelog/report/manual items. The audited bytes are preserved as
 `revised_prerepair/`, and the revise postcheck runs again on the final package;
 there is exactly one repair pass (a defect the post-repair verification still
-finds is recorded for the round's decision, never repaired in a loop). The
+finds is recorded for the round's decision, never repaired in a loop). If the
+repair violates its own contract — it changes a file, or a span, that no
+confirmed plan row covers — its edit is rejected and `revised/` is restored from
+`revised_prerepair/` before the final postcheck, so the rejected bytes never
+become the arm's candidate or the published package. The
 chain is on by default; `--revision-audit off` (setup) or
 `PAPER_REVISION_AUDIT=off` (an existing root) records the skip and leaves that
 arm's revised version final for the arm before integration. It does not run in a
@@ -2413,7 +2451,7 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | integrate | 118 KB | 65 KB | 45% |
 | rewrite | 111 KB | 61 KB | 45% |
 | judge | 104 KB | 74 KB | 29% |
-| revision_audit | 23 KB | 13 KB | 41% |
+| revision_audit | 24 KB | 14 KB | 40% |
 | revision_repair | 22 KB | 9 KB | 57% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
@@ -3577,7 +3615,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 219 suites (a few
+any failure. They are independent, so run them in parallel — 220 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
