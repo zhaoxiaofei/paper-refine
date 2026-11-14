@@ -3184,8 +3184,13 @@ def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
     if not forms or not mains:
         return []
     main_paras = []
+    main_gaps = []
     for p in mains:
-        main_paras.extend(_docx_paragraphs(p) or [])
+        paras = _docx_paragraphs(p)
+        if paras is None:
+            main_gaps.append(f"{p.relative_to(root).as_posix()}: unreadable or unsupported DOCX")
+            continue
+        main_paras.extend(paras)
     # A table header ("Software and algorithms") is not a software paragraph:
     # require a real sentence with a version-like token in it.
     soft_paras = []
@@ -3207,10 +3212,10 @@ def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
     soft = "\n".join(soft_paras)
     soft = re.sub(r"(?i)^\s*software(?:\s+and\s+code)?\s*[.:]?\s*", "", soft)
     if not soft:
-        return []
+        return _with_table_gaps([], main_gaps, "PKG-16", limit)
     tools = _tool_tokens(soft)
     if not tools:
-        return []
+        return _with_table_gaps([], main_gaps, "PKG-16", limit)
     rows = []
     for form in forms:
         if form.suffix.lower() == ".pdf" and not shutil.which("pdftotext"):
@@ -3261,7 +3266,7 @@ def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
                                     f"reader comparing the two surfaces sees a contradiction). "
                                     f"Add it to the form with its version, or say in the "
                                     f"manuscript that it was not used in the reported results")})
-    return rows
+    return _with_table_gaps(rows, main_gaps, "PKG-16", limit)
 
 
 # ---- Cross-surface claim checks (2026-10-17, third pass) --------------------
@@ -3294,11 +3299,16 @@ def _package_document_texts(root: Path, texts=None) -> list:
     not manuscript surfaces; bookkeeping and scratch are skipped like every
     other corpus scan. `texts` lets a caller that runs several scans build the
     (expensive, PDF-parsing) list once and share it.
+
+    The returned `_DocumentTexts` also carries `.gaps`: every submitted
+    document whose text could not be read. A parse failure is never turned into
+    an empty document.
     """
     if texts is not None:
         return texts
     root = Path(root)
     out = []
+    gaps = []
     # `supplementary_source_files/` is an INPUT area for the SI build (figure
     # PDFs, table sources), not a prose surface: parsing its PDFs added seconds
     # per scan and produced no claim.
@@ -3318,10 +3328,17 @@ def _package_document_texts(root: Path, texts=None) -> list:
         if is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
             continue
         if ext == ".docx":
-            paras = [t for t in (_docx_paragraphs(p) or []) if t.strip()]
+            raw_paras = _docx_paragraphs(p)
+            if raw_paras is None:
+                gaps.append(f"{rel}: unreadable or unsupported DOCX")
+                continue
+            paras = [t for t in raw_paras if t.strip()]
             text = "\n".join(paras)
         elif ext == ".pdf":
-            text = _pdf_text(p)
+            text, failure = _pdf_text_info(p)
+            if failure:
+                gaps.append(f"{rel}: PDF text extraction failed ({failure})")
+                continue
             paras = [t.strip() for t in re.split(r"\n\s*\n", text) if t.strip()]
             if len(paras) <= 1:
                 # A PDF export without blank lines would otherwise read as ONE
@@ -3333,11 +3350,12 @@ def _package_document_texts(root: Path, texts=None) -> list:
             # not be loaded whole during decide (F68).
             text = read_text_bounded(p)
             if text is None:
+                gaps.append(f"{rel}: unreadable or over the size budget")
                 continue
             paras = [t for t in text.splitlines() if t.strip()]
         if text.strip():
             out.append((rel, paras, text))
-    return out
+    return _DocumentTexts(out, gaps)
 
 
 def _sentences(text: str) -> list:
@@ -4278,17 +4296,25 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
                    if p.is_file() and p.suffix.lower() in (".docx", ".tex", ".ltx", ".pdf")
                    and docx_document_role(p.name) in ("cover", "main")]
     rows = []
+    gaps = []
     for rel in sorted(letters):
         p = root / rel
         if p.suffix.lower() == ".docx":
-            paras = _docx_paragraphs(p) or []
+            paras = _docx_paragraphs(p)
+            if paras is None:
+                gaps.append(f"{rel}: unreadable or unsupported DOCX")
+                continue
             text = "\n".join(paras)
         elif p.suffix.lower() == ".pdf":
-            text = _pdf_text(p) or ""
+            text, failure = _pdf_text_info(p)
+            if failure:
+                gaps.append(f"{rel}: PDF text extraction failed ({failure})")
+                continue
         else:
             try:
                 text = p.read_text("utf-8", "replace")
             except OSError:
+                gaps.append(f"{rel}: unreadable")
                 continue
         if not PRIOR_SUBMISSION_CLAIM_RE.search(text):
             continue
@@ -4321,8 +4347,8 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
                            f"mentions them"),
             })
             if len(rows) >= limit:
-                return rows
-    return rows
+                return _with_table_gaps(rows, gaps, "PKG-14", limit)
+    return _with_table_gaps(rows, gaps, "PKG-14", limit)
 
 
 def _first_date(text: str) -> str:
@@ -5305,6 +5331,7 @@ def package_front_matter_glue_rows(root: Path, limit: int = 20) -> list:
     is scanned: that is where a correspondence block lives.
     """
     rows = []
+    gaps = []
     mod = _format_module()
     root = Path(root)
     if mod is None or not hasattr(mod, "correspondence_glue_rows") or not root.is_dir():
@@ -5319,17 +5346,17 @@ def package_front_matter_glue_rows(root: Path, limit: int = 20) -> list:
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel) or not _decl_is_submitted(rel):
             continue
-        try:
-            paras = _docx_paragraphs(p)
-        except Exception:                                             # noqa: BLE001
+        paras = _docx_paragraphs(p)
+        if paras is None:
+            gaps.append(f"{rel}: unreadable or unsupported DOCX")
             continue
         if not paras:
             continue
         for r in mod.correspondence_glue_rows(paras[:14], [False] * min(14, len(paras))):
             rows.append(dict(r, document=p.relative_to(root).as_posix(), stage="published"))
             if len(rows) >= limit:
-                return rows
-    return rows[:limit]
+                return _with_table_gaps(rows, gaps, "FMT-X2", limit)
+    return _with_table_gaps(rows, gaps, "FMT-X2", limit)
 
 
 # PKG-6..9 (2026-10-15): the CONTRADICTION class.
@@ -5434,9 +5461,10 @@ def package_document_texts(root: Path, limit_files: int = 25) -> list:
     so which documents were read is reproducible.
     """
     out = []
+    gaps = []
     root = Path(root)
     if not root.is_dir():
-        return out
+        return _DocumentTexts()
     for p in sorted(root.rglob("*")):
         # A file symlink is not package content (copy_into refuses it); reading
         # one pulled an outside file's prose into the decision report (F30).
@@ -5449,15 +5477,27 @@ def package_document_texts(root: Path, limit_files: int = 25) -> list:
         parts = Path(rel).parts
         if "supplementary_source_files" in parts[:-1] or "source_data" in parts[:-1]:
             continue
-        if not p.name.lower().endswith((".docx", ".pdf", ".tex", ".ltx", ".md",
-                                        ".markdown", ".txt", ".bib", ".rst")):
+        suffix = p.suffix.lower()
+        if suffix not in (".docx", ".pdf", ".tex", ".ltx", ".md", ".markdown", ".txt",
+                          ".bib", ".rst"):
             continue
+        # `_pkg_text_of_doc` returns "" for BOTH an empty document and an
+        # unparseable one; distinguish them so a corrupt submitted DOCX is a
+        # named gap, not a clean package (F14).
+        if suffix == ".docx" and _docx_paragraphs(p) is None:
+            gaps.append(f"{rel}: unreadable or unsupported DOCX")
+            continue
+        if suffix == ".pdf":
+            _text, failure = _pdf_text_info(p)
+            if failure:
+                gaps.append(f"{rel}: PDF text extraction failed ({failure})")
+                continue
         text = _pkg_text_of_doc(p)
         if text.strip():
             out.append((rel, text))
         if len(out) >= limit_files:
             break
-    return out
+    return _DocumentTexts(out, gaps)
 
 
 # The two statement shapes PKG-6 pairs. The NON-USE sentence must carry an
@@ -5849,7 +5889,7 @@ def package_contradiction_rows(root: Path, texts=None, limit: int = 20) -> list:
             if index < len(group) and len(rows) < limit:
                 rows.append(group[index])
         index += 1
-    return rows
+    return _with_table_gaps(rows, getattr(texts, "gaps", None) or (), "PKG-6..9", limit)
 
 
 # PKG-4 (2026-10-15): a display item the submission CITES (and often legends)
@@ -6043,6 +6083,7 @@ def front_matter_gap_rows(ctx: Ctx, root: Path, limit: int = 8) -> list:
     if not label:
         return rows
     _decl, _decl_is_submitted = declared_submission_filter(root)
+    gaps = []
     for p in sorted(root.rglob("*.docx")):
         # A FILE symlink is not package content (see docx_files_under /
         # copy_into): following it read an outside document into this report.
@@ -6053,9 +6094,9 @@ def front_matter_gap_rows(ctx: Ctx, root: Path, limit: int = 8) -> list:
         if is_evidence_rel(rel) or not _decl_is_submitted(rel) \
                 or docx_document_role(p.name) != "main":
             continue
-        try:
-            paras = _docx_paragraphs(p) or []
-        except Exception:                                             # noqa: BLE001
+        paras = _docx_paragraphs(p)
+        if paras is None:
+            gaps.append(f"{rel}: unreadable or unsupported DOCX")
             continue
         head = "\n".join(paras[:12])
         if label.lower() in head.lower():
@@ -6072,7 +6113,7 @@ def front_matter_gap_rows(ctx: Ctx, root: Path, limit: int = 8) -> list:
             "fix": "manual"})
         if len(rows) >= limit:
             break
-    return rows[:limit]
+    return _with_table_gaps(rows, gaps, "FMT-TP1", limit)
 
 
 # PKG-5 (2026-10-15): two SHIPPED surfaces attribute one display item to
@@ -6603,6 +6644,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                 tmp, texts=_pkg_texts),
             "caption_definition_gaps": scan_caption_definition_gaps(tmp, texts=_pkg_texts),
             "form_failure_claims": scan_form_failure_claims(tmp, texts=_pkg_texts),
+            "document_read_gaps": _document_read_gap_rows(_pkg_texts),
         }
     except Exception as e:                                            # noqa: BLE001
         hygiene["package_consistency"] = {"error": f"{type(e).__name__}: {e}"}
@@ -7623,12 +7665,14 @@ def package_readiness(final_clean: dict, residuals: dict = None,
     for r in hyg.get("front_matter_glue") or []:
         # The shapes the mechanical repair cannot split. Advisory: the space is
         # the author's (only they know where the name ends), but the delivered
-        # file must not carry it unseen.
+        # file must not carry it unseen. A gap has no location/evidence pair,
+        # so it keeps its own detail and the document the scan named (R04).
+        detail = (str(r.get("detail") or "") if r.get("gap") else
+                  f"{r.get('location') or ''}: {r.get('evidence')} -- "
+                  f"{r.get('detail')}".strip(" -"))
         findings.append({"rule": r.get("rule") or "FMT-X2",
                          "document": r.get("document"),
-                         "advisory": True,
-                         "detail": f"{r.get('location') or ''}: {r.get('evidence')} -- "
-                                   f"{r.get('detail')}".strip(" -")})
+                         "advisory": True, "detail": detail})
     for r in hyg.get("display_items") or []:
         # PKG-4: a cited figure the submission carries nowhere. Advisory on
         # purpose: shipping the figure, embedding it, or dropping the citation is

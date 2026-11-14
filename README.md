@@ -2461,9 +2461,13 @@ root created before this feature carries no key and runs `high`.
 
 ## Content-edit policy (`--disable-insertions`, `--disable-deletions`)
 
-By default the pipeline behaves exactly as it always has: a revision may add prose, remove prose,
-or rewrite a sentence in place. A defect is normally repaired inside its existing unit, but the
-prompts also permit an editorial decision to drop duplicate, obsolete or unsupported text.
+By default the pipeline behaves exactly as it always has at the UNIT level: a revision may add
+prose, remove prose, or rewrite a sentence in place. The shared fact-survival gate (D8) still
+runs whenever a deletion is permitted — including this default — so a deleted sentence may not
+take a numeric value or identifier with it (see the fact-survival section above; a value that
+must leave the manuscript is recorded as `manual-required`). A defect is normally repaired inside
+its existing unit, but the prompts also permit an editorial decision to drop duplicate, obsolete
+or unsupported text, provided that deletion carries no value the package cannot account for.
 
 Some evaluation harnesses score a DELETED claim as no repair at all, even when the error is gone
 (their definition of "repair" is "the original claim is back", not "the package no longer contains
@@ -3615,7 +3619,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 220 suites (a few
+any failure. They are independent, so run them in parallel — 221 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

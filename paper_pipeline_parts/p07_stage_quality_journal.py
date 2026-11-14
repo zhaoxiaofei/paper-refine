@@ -823,9 +823,20 @@ def _frozen_review_findings(sb: Path) -> list:
 
 
 def _probe_audit_verdict(row) -> str:
-    """The verdict token of one PROBE_AUDIT row ("" when none is stated)."""
-    for v in row.values():
-        cell = " ".join(str(v or "").split())
+    """The verdict token of one PROBE_AUDIT row ("" when none is stated).
+
+    The prompt names the columns `probe id | reviewer's disposition | your
+    verdict | evidence`; only the row's OWN verdict/disposition column decides
+    the disposition. Reading every cell let a blank verdict pass because its
+    evidence cell began "stands ...", so no probe was actually decided (F13).
+    """
+    keys = [k for k in row if "verdict" in str(k or "").strip().lower()]
+    if not keys:
+        keys = [k for k in row
+                if "disposition" in str(k or "").strip().lower()
+                and "reviewer" not in str(k or "").strip().lower()]
+    for k in keys:
+        cell = " ".join(str(row.get(k) or "").split())
         low = cell.lower()
         if low.startswith(("stands", "needs-evidence", "needs evidence")):
             return cell
@@ -5342,22 +5353,31 @@ def _text_paragraphs_with_lines(text: str):
         yield start, para
 
 
-def deletion_audit_paragraphs(root: Path) -> list:
+def deletion_audit_paragraphs(root: Path, skipped: list = None) -> list:
     """[(document, line, text)] for the prose paragraphs a package carries.
 
     Only submitted prose is read: process scratch (`work/`), evidence areas,
     README/bookkeeping files and OS by-products are not part of the manuscript.
-    DOCX text comes from the shared visible-paragraph reader, so the audit sees
-    the same words a reader does.
+    A file the package's own README declares NOT submitted is not manuscript
+    prose either: the same `declared_submission_filter` the content policy uses
+    applies here (F01). DOCX text comes from the shared visible-paragraph
+    reader, so the audit sees the same words a reader does.
+
+    `skipped` (when a list is passed) collects the submitted files this scan
+    could NOT read. Conflating an unparseable DOCX with an empty document let a
+    corrupt submitted file seed no deletion row at all with no record (F02).
     """
     rows = []
     root = Path(root)
     if not root.is_dir():
         return rows
+    _decl, _is_submitted = declared_submission_filter(root)
     for p in _iter_tree_files(root):
         try:
             rel = p.relative_to(root).as_posix()
         except ValueError:
+            continue
+        if not _is_submitted(rel):
             continue
         top = rel.split("/", 1)[0].lower()
         if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
@@ -5368,7 +5388,11 @@ def deletion_audit_paragraphs(root: Path) -> list:
             continue
         ext = p.suffix.lower()
         if ext == ".docx":
-            paras = _docx_paragraphs(p) or []
+            paras = _docx_paragraphs(p)
+            if paras is None:
+                if skipped is not None:
+                    skipped.append(rel)
+                continue
             for index, text in enumerate(paras, 1):
                 prose = _deleted_para_candidate(text)
                 if prose:
@@ -5376,6 +5400,8 @@ def deletion_audit_paragraphs(root: Path) -> list:
         elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx"):
             text = read_text_bounded(p)
             if text is None:
+                if skipped is not None:
+                    skipped.append(rel)
                 continue
             for start, para in _text_paragraphs_with_lines(text):
                 # A TEXT block's first line can be a Markdown `# Methods` or a
@@ -5393,7 +5419,8 @@ def deletion_audit_paragraphs(root: Path) -> list:
     return rows
 
 
-def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None) -> list:
+def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None,
+                        skipped: list = None) -> list:
     """Base prose paragraphs whose normalised text is absent from `revised`.
 
     A paragraph that was moved, merged or lightly reworded appears here too:
@@ -5407,9 +5434,13 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None) -> list:
     (or worse, plan to restore) a dangling reference the orchestrator was
     required to delete. A paragraph that also lost session-written content keeps
     its row.
+
+    `skipped` (when a list is passed) collects every submitted file either side
+    could not read, so the caller can fail the chain instead of seeding an
+    incomplete audit from a corrupt document (F02).
     """
     revised_paras = {}
-    for rel, _line, text in deletion_audit_paragraphs(revised):
+    for rel, _line, text in deletion_audit_paragraphs(revised, skipped=skipped):
         # Case is part of the identity: lowercasing made `50 mM` and `50 MM`
         # (or a case-only gene/unit edit) compare equal, so a fact-changing
         # edit produced no deletion-audit row (F-059).
@@ -5421,7 +5452,7 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None) -> list:
         if norm:
             exempt.setdefault(str(document), []).append(norm)
     rows, seen = [], set()
-    for rel, line, text in deletion_audit_paragraphs(base):
+    for rel, line, text in deletion_audit_paragraphs(base, skipped=skipped):
         norm = _deleted_para_norm(text)
         low = norm
         removed_here = exempt.get(rel, [])
@@ -5770,12 +5801,18 @@ def _is_handoff_marker(text) -> bool:
     return bool(_CONTENT_HANDOFF_MARKER_RE.match(str(text or "")))
 
 
-def _citation_keys(package: Path) -> set:
+def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
     """Citation keys the package's submitted prose and .bib/.bbl entries name.
 
     The same submission surface as the prose scan: a citation in `code/`, an
     evidence area, a scratch file or a file the package's README declares not
     submitted is not a manuscript insertion.
+
+    `include_bibliography=False` returns the PROSE citation occurrences only.
+    The insertion check must use that form: a key that already sits in the
+    package's `.bib` but is cited nowhere in the base is still a NEW citation
+    when the candidate starts citing it, and the union with the `.bib` entry
+    keys hid exactly that insertion (F31).
     """
     keys = set()
     package = Path(package)
@@ -5803,9 +5840,10 @@ def _citation_keys(package: Path) -> set:
             continue
         if not text:
             continue
-        for m in _CITATION_RE.finditer(text):
-            keys.update(k.strip() for k in m.group(1).split(",") if k.strip())
-        if ext in (".bib", ".bbl"):
+        if ext not in (".bib", ".bbl"):
+            for m in _CITATION_RE.finditer(text):
+                keys.update(k.strip() for k in m.group(1).split(",") if k.strip())
+        if include_bibliography and ext in (".bib", ".bbl"):
             keys.update(m.group(1).strip() for m in _BIB_ENTRY_RE.finditer(text))
     return keys
 
@@ -5962,7 +6000,8 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
               "only be resolved by new text, record it as manual-required/unable and leave the "
               "unit unchanged.")
     if not insert:
-        new_keys = _citation_keys(candidate_package) - _citation_keys(base_package)
+        new_keys = (_citation_keys(candidate_package, include_bibliography=False)
+                    - _citation_keys(base_package, include_bibliography=False))
         if new_keys:
             problems.append(
                 f"{label}{len(new_keys)} new citation key(s) are in the delivered package "
@@ -5997,7 +6036,59 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
 _FACT_SURVIVAL_NUMBER_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w.])")
 _FACT_SURVIVAL_IDENT_RE = re.compile(
     r"(?i)(?:https?://[^\s)>]+|doi:\s*10\.[^\s,;)]+|10\.\d{4,9}/[^\s,;)]+|"
-    r"orcid[:\s]+\d[\dX-]+|accession[:\s]+[A-Z0-9][A-Z0-9.\-]+)")
+    r"orcid[:\s]+\d[\dX-]+|"
+    r"accession(?:\s+(?:number|no\.?|id))?\s*[:\s]\s*"
+    r"(?P<accession>[A-Za-z0-9][A-Za-z0-9._\-]*))")
+# A measurement unit printed immediately after a value is part of the FACT: 55
+# mg and 55 ml are different measurements, and a deletion that changes only the
+# unit was reported as "value survived" (F07). Only recognised unit spellings
+# qualify, so an ordinary following word ("55 of the animals") leaves the value
+# unit-free instead of inventing a unit.
+_FACT_SURVIVAL_UNIT_RE = re.compile(
+    r"^[ \t]*(?P<unit>%|\u2030|\u00b0C|\u00b0F|[A-Za-z\u00b5\u03bc][A-Za-z0-9\u00b5\u03bc]*"
+    r"(?:/[A-Za-z0-9\u00b5\u03bc]+)?)")
+_FACT_SURVIVAL_UNITS = frozenset("""
+% \u2030 \u00b0C \u00b0F
+m cm mm um \u00b5m nm km ft
+g mg ug \u00b5g ng pg kg
+L l mL ml uL \u00b5L cL dL nL
+M mM uM \u00b5M nM pM mol mmol umol \u00b5mol nmol pmol
+s ms us \u00b5s ns min h hr hrs d day days wk week weeks mo month months yr year years
+Pa kPa MPa GPa Hz kHz MHz GHz V mV kV W kW MW A mA uA \u00b5A J kJ MJ
+Da kDa bp kb Mb Gb nt rpm
+""".split())
+# Equivalent spellings/case of the SAME unit are one measurement (F07/R01):
+# `55 ml` and `55 mL`, `55 hr` and `55 h`, `55 mg` and `55 milligrams` are the
+# same fact. Genuinely case-distinct units (`m`/`M`, `mg`/`Mg`) are absent from
+# this table, so they stay distinct keys.
+_FACT_SURVIVAL_UNIT_ALIASES = {
+    "ml": ("ml", "mL"),
+    "ul": ("ul", "uL", "\u00b5L", "\u03bcL"),
+    "l": ("l", "L"),
+    "h": ("h", "hr", "hrs"),
+    "mg": ("mg", "milligram", "milligrams"),
+    "g": ("g", "gram", "grams"),
+    "kg": ("kg", "kilogram", "kilograms"),
+    "um": ("um", "\u00b5m", "\u03bcm"),
+    "ug": ("ug", "\u00b5g", "\u03bcg"),
+    "uM": ("uM", "\u00b5M", "\u03bcM"),
+    "us": ("us", "\u00b5s", "\u03bcs"),
+    "umol": ("umol", "\u00b5mol", "\u03bcmol"),
+    "uA": ("uA", "\u00b5A", "\u03bcA"),
+    "s": ("s", "sec", "secs", "second", "seconds"),
+    "min": ("min", "mins", "minute", "minutes"),
+    "d": ("d", "day", "days"),
+    "wk": ("wk", "week", "weeks"),
+    "mo": ("mo", "month", "months"),
+    "yr": ("yr", "year", "years"),
+}
+_FACT_SURVIVAL_UNIT_CANON = {
+    alias: canonical
+    for canonical, aliases in _FACT_SURVIVAL_UNIT_ALIASES.items()
+    for alias in aliases
+}
+_FACT_SURVIVAL_COMPOUND_SIDE_RE = re.compile(
+    r"^[A-Za-z\u00b5\u03bc][A-Za-z0-9\u00b5\u03bc]*$")
 # A two-digit floor: a lone "1" or "2" is a list marker, a section number or a
 # cross-reference in nearly every paragraph, so it cannot prove a fact survived.
 _FACT_SURVIVAL_MIN_DIGITS = 2
@@ -6016,35 +6107,182 @@ def _fact_survival_key(token) -> str:
         return raw.replace(",", "")
 
 
+def _fact_survival_canonical_unit(token) -> str:
+    """The canonical spelling of a recognised unit token, or ""."""
+    token = str(token or "")
+    if token in _FACT_SURVIVAL_UNIT_CANON:
+        return _FACT_SURVIVAL_UNIT_CANON[token]
+    return token if token in _FACT_SURVIVAL_UNITS else ""
+
+
+def _fact_survival_unit_after(text, end: int) -> str:
+    """The recognised, canonicalised measurement unit after a value, or ""."""
+    window = str(text or "")[int(end):int(end) + 24]
+    m = _FACT_SURVIVAL_UNIT_RE.match(window)
+    if not m:
+        return ""
+    unit = m.group("unit")
+    if len(unit) == 1 and re.match(r"-[A-Za-z]", window[m.end():]):
+        # The one-letter label of a hyphenated word ("12 A-rated") is not the
+        # ampere (R01); a genuine unit is not glued to a following word.
+        return ""
+    canonical = _fact_survival_canonical_unit(unit)
+    if canonical:
+        return canonical
+    # A compound unit ("mg/mL", "umol/L", "cells/mL") is one fact token: each
+    # side must look like a unit word, and at least one side must be a
+    # recognised unit so an ordinary "and/or" is not invented as a unit (R02).
+    parts = unit.split("/")
+    if len(parts) != 2 or not all(
+            _FACT_SURVIVAL_COMPOUND_SIDE_RE.match(p) for p in parts):
+        return ""
+    sides = [_fact_survival_canonical_unit(p) for p in parts]
+    if not any(sides):
+        return ""
+    if any(not side and len(part) == 1 for side, part in zip(sides, parts)):
+        return ""
+    return "/".join(side or part.lower() for side, part in zip(sides, parts))
+
+
+def _fact_survival_value_key(raw, unit: str = "") -> str:
+    """The comparable key of one numeric value, unit included when printed."""
+    key = _fact_survival_key(raw)
+    return f"{key} {unit}" if unit else key
+
+
 def _fact_survival_tokens(text) -> list:
     """Numeric values and identifiers a text carries, in printing order."""
     found = []
-    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(str(text or "")):
+    text = str(text or "")
+    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
         raw = match.group(0)
         if len(re.sub(r"\D", "", raw)) >= _FACT_SURVIVAL_MIN_DIGITS:
             found.append(raw)
-    for match in _FACT_SURVIVAL_IDENT_RE.finditer(str(text or "")):
-        found.append(match.group(0))
+    for match in _FACT_SURVIVAL_IDENT_RE.finditer(text):
+        # The accession NUMBER, never the word "number" in front of it: the old
+        # `accession[:\s]+[A-Z0-9]` captured "number" from "accession number
+        # 12345" and lost the identifier itself (F08).
+        found.append(match.group("accession") or match.group(0))
     return found
 
 
 def _fact_survival_keys(units) -> set:
     keys = set()
     for unit in units or ():
-        for token in _fact_survival_tokens(unit.get("text") or ""):
-            keys.add(_fact_survival_key(token))
+        text = str(unit.get("text") or "")
+        for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
+            raw = match.group(0)
+            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+                continue
+            keys.add(_fact_survival_value_key(
+                raw, _fact_survival_unit_after(text, match.end())))
+        for match in _FACT_SURVIVAL_IDENT_RE.finditer(text):
+            keys.add(_fact_survival_key(match.group("accession") or match.group(0)))
     return keys
 
 
-def _fact_loss_examples(missing_units, surviving_keys) -> list:
+def _fact_survival_lost_tokens(text, surviving_keys, handoff_keys=()) -> list:
+    """Values in `text` with no surviving carrier, unit included.
+
+    A unit-bearing value survives only when the SAME value+unit key survives;
+    a bare value recorded in the author hand-off (which names the number, not
+    always its unit) still clears it, so the documented manual route is not
+    broken.
+    """
+    lost = []
+    text = str(text or "")
+    handoff_keys = set(handoff_keys or ())
+    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
+        raw = match.group(0)
+        if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+            continue
+        unit = _fact_survival_unit_after(text, match.end())
+        num_key = _fact_survival_key(raw)
+        if unit:
+            if _fact_survival_value_key(raw, unit) in surviving_keys:
+                continue
+            if num_key in handoff_keys:
+                continue
+            lost.append(f"{raw} {unit}")
+        elif num_key not in surviving_keys and num_key not in handoff_keys:
+            lost.append(raw)
+    for match in _FACT_SURVIVAL_IDENT_RE.finditer(text):
+        token = match.group("accession") or match.group(0)
+        key = _fact_survival_key(token)
+        if key not in surviving_keys and key not in handoff_keys:
+            lost.append(token)
+    return lost
+
+
+def _fact_loss_examples(missing_units, surviving_keys, handoff_keys=()) -> list:
     """[(unit, [lost tokens])] for deleted units that took a fact with them."""
     lost = []
     for unit in missing_units or ():
-        tokens = [token for token in _fact_survival_tokens(unit.get("text") or "")
-                  if _fact_survival_key(token) not in surviving_keys]
+        tokens = _fact_survival_lost_tokens(
+            unit.get("text") or "", surviving_keys, handoff_keys)
         if tokens:
             lost.append((unit, tokens))
     return lost
+
+
+def _fact_number_units(units) -> dict:
+    """{bare number key: {unit, ...}} for the numeric values a text states."""
+    out = {}
+    for unit in units or ():
+        text = str(unit.get("text") or "")
+        for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
+            raw = match.group(0)
+            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+                continue
+            out.setdefault(_fact_survival_key(raw), set()).add(
+                _fact_survival_unit_after(text, match.end()))
+    return out
+
+
+def _fact_unit_change_examples(base_units, cand_units) -> list:
+    """[(unit, printed value, surviving units)] for a unit-only change.
+
+    A sentence that survives fuzzy matching can still have had its measurement
+    unit changed (`55 mg` -> `55 ml`). The deletion gate never saw that: the
+    unit was not part of the key and the sentence was not "missing" (F07). A
+    changed NUMBER is a correction, not this class, so only a value that
+    survives with a DIFFERENT unit is reported.
+    """
+    surviving = _fact_number_units(cand_units)
+    changed = []
+    for unit in base_units or ():
+        text = str(unit.get("text") or "")
+        seen = set()
+        for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
+            raw = match.group(0)
+            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+                continue
+            printed_unit = _fact_survival_unit_after(text, match.end())
+            if not printed_unit:
+                continue
+            num_key = _fact_survival_key(raw)
+            if (num_key, printed_unit) in seen:
+                continue
+            seen.add((num_key, printed_unit))
+            others = surviving.get(num_key)
+            if others and printed_unit not in others:
+                changed.append((unit, f"{raw} {printed_unit}",
+                                sorted(u or "(unitless)" for u in others)))
+    return changed
+
+
+def _fact_unit_change_message(changed, label: str) -> str:
+    def one(item):
+        unit, printed, others = item
+        return (f"{unit.get('document') or '?'}:{int(unit.get('line') or 0)} {printed!r} "
+                f"survives only as {', '.join(others)}")
+
+    return (f"{label}{len(changed)} measurement(s) keep the number but change its UNIT: "
+            + "; ".join(one(x) for x in changed[:5])
+            + (" ..." if len(changed) > 5 else "")
+            + ". A unit is part of the fact: restore the original measurement or record the "
+              "correct value in place; do not let a surviving sentence in another unit hide "
+              "the change.")
 
 
 # ---------------------------------------------------------------------
@@ -6230,11 +6468,22 @@ def fact_preservation_problems(base_package: Path, candidate_package: Path,
                   and (u["document"], u["norm"]) not in exempt_document]
     cand_units = _content_unit_sentences(candidate_package, skipped=skipped)
     missing, _added = _match_content_units(base_units, cand_units)
-    surviving = _fact_survival_keys(cand_units) | _manual_handoff_keys(candidate_package)
-    lost = _fact_loss_examples(missing, surviving)
-    if not lost:
-        return []
-    return [_fact_loss_message(lost, f"{stage}: " if stage else "")]
+    surviving = _fact_survival_keys(cand_units)
+    handoff = _manual_handoff_keys(candidate_package)
+    lost = _fact_loss_examples(missing, surviving, handoff)
+    # A unit-only change can live in a SURVIVING sentence (the fuzzy matcher
+    # pairs "55 mg" with "55 ml"), so check matched units too. Units already in
+    # `missing` are covered by the loss message; do not report them twice.
+    missing_ids = {id(u) for u in missing}
+    changed = _fact_unit_change_examples(
+        [u for u in base_units if id(u) not in missing_ids], cand_units)
+    label = f"{stage}: " if stage else ""
+    problems = []
+    if lost:
+        problems.append(_fact_loss_message(lost, label))
+    if changed:
+        problems.append(_fact_unit_change_message(changed, label))
+    return problems
 
 
 def deletion_row_fact_loss_problems(sandbox: Path, rows, full_by_ref=None) -> list:
@@ -6261,8 +6510,7 @@ def deletion_row_fact_loss_problems(sandbox: Path, rows, full_by_ref=None) -> li
             continue
         paragraph = str((full_by_ref or {}).get(str(row.get("#") or "").strip())
                         or row.get("paragraph") or "")
-        lost = [token for token in _fact_survival_tokens(paragraph)
-                if _fact_survival_key(token) not in surviving]
+        lost = _fact_survival_lost_tokens(paragraph, surviving)
         if not lost:
             continue
         problems.append(

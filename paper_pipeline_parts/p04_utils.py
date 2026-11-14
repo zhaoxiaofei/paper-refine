@@ -6868,6 +6868,7 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             "caption_definition_gaps": scan_caption_definition_gaps(corpus_dir,
                                                                    texts=_pkg_texts),
             "form_failure_claims": scan_form_failure_claims(corpus_dir, texts=_pkg_texts),
+            "document_read_gaps": _document_read_gap_rows(_pkg_texts),
         }
     except Exception as e:                                            # noqa: BLE001
         evidence["package_consistency"] = {"error": f"{type(e).__name__}: {e}"}

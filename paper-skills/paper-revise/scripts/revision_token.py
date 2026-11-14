@@ -48,7 +48,9 @@ files); 1 on a verify mismatch, or when payload files exist but none could be
 read or hashed; 2 on a symlinked package root (a link is not package content).
 An unreadable or over-budget payload file is SKIPPED and reported in `notes`
 (the readable remainder is still hashed, exactly like the pipeline's
-`revision_token_for_dir`); a partial skip does not change the exit status.
+`revision_token_for_dir`); an unreadable SUBDIRECTORY is skipped the same way
+and named in `notes`, so a chmod-000 directory no longer crashes the tool. A
+partial skip does not change the exit status.
 """
 from __future__ import annotations
 
@@ -132,7 +134,7 @@ def is_payload(p: Path, root: Path) -> bool:
     return True
 
 
-def tree_files(root: Path) -> list:
+def tree_files(root: Path, gaps: list = None) -> list:
     """Every file under `root`, descending into symlinked DIRECTORIES.
 
     Keep in step with paper_pipeline._iter_tree_files(follow_dir_links=True): a
@@ -140,6 +142,11 @@ def tree_files(root: Path) -> list:
     human_review_feedback/) as symlinks to the root's canonical copy (see
     ensure_pristine_input), and the payload must see the same files whether the
     area is linked or copied. An ancestor-inode set keeps a link cycle finite.
+
+    `gaps`, when given, receives the package-relative path of every directory
+    whose entries could not be listed. The pipeline twin records the same gap;
+    letting `iterdir()` raise killed this tool with an opaque PermissionError
+    while the twin hashed the readable remainder (F18).
     """
     if not root.is_dir() or root.is_symlink():
         # A package ROOT that is a link is not package content: walking it
@@ -179,7 +186,21 @@ def tree_files(root: Path) -> list:
                 and target.parent.name == "non_revised")
 
     def walk(d: Path, ancestors: frozenset) -> None:
-        for p in sorted(d.iterdir()):
+        try:
+            entries = sorted(d.iterdir())
+        except OSError as e:
+            # An unreadable DIRECTORY is the same class as an unreadable file:
+            # skip it, keep hashing the readable remainder, and let the caller
+            # report the gap instead of dying with a traceback (F18).
+            if gaps is not None:
+                try:
+                    gaps.append(d.relative_to(root).as_posix())
+                except ValueError:
+                    gaps.append(str(d))
+            print(f"warning: cannot read directory {d}: {e}; its files are not in the token",
+                  file=sys.stderr)
+            return
+        for p in entries:
             if p.is_symlink() and p.is_dir():
                 if not followable_evidence_dir(p, d == root):
                     continue
@@ -208,10 +229,10 @@ def tree_files(root: Path) -> list:
     return out
 
 
-def payload_files(root: Path) -> list:
+def payload_files(root: Path, gaps: list = None) -> list:
     if not root.is_dir():
         return []
-    return sorted(p for p in tree_files(root) if p.is_file() and is_payload(p, root))
+    return sorted(p for p in tree_files(root, gaps=gaps) if p.is_file() and is_payload(p, root))
 
 
 def filename_token(name: str):
@@ -286,7 +307,8 @@ def revision_token(root: Path) -> dict:
     """{'token','files','tokens_seen','consistent','notes'} for one package."""
     if not root.is_dir():
         raise SystemExit(f"error: not a directory: {root}")
-    files = payload_files(root)
+    dir_gaps = []
+    files = payload_files(root, gaps=dir_gaps)
     named = [(p.relative_to(root).as_posix(), filename_token(p.name)) for p in files]
     tokens = [t for _rel, t in named if t]
     digs = []
@@ -318,6 +340,10 @@ def revision_token(root: Path) -> dict:
                          "so no payload file was hashed (pass the target directory)")
         else:
             notes.append("no payload file found")
+        if dir_gaps:
+            notes.append("unreadable director"
+                         + ("y" if len(dir_gaps) == 1 else "ies")
+                         + " skipped: " + "; ".join(dir_gaps[:3]))
         return {"token": "", "files": len(files), "tokens_seen": [],
                 "consistent": False, "notes": notes}
     token = hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()[:7]
@@ -330,6 +356,10 @@ def revision_token(root: Path) -> dict:
     notes = []
     if skipped:
         notes.append("unreadable payload file(s) skipped: " + "; ".join(skipped[:3]))
+    if dir_gaps:
+        notes.append("unreadable director"
+                     + ("y" if len(dir_gaps) == 1 else "ies")
+                     + " skipped: " + "; ".join(dir_gaps[:3]))
     if not hex_tokens:
         notes.append("no 7-hex token in any payload filename (legacy letter tokens, or none "
                      "applied yet)")
