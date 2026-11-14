@@ -2240,29 +2240,33 @@ _SIMPLE_PAGE_FOOTER = (
 
 
 def _set_para_style(para: str, style: str) -> str:
-    """Force `w:pStyle` on a paragraph fragment (insert or replace)."""
-    m = re.search(r"<w:pPr(?=[\s/>])[^>]*/>|<w:pPr(?=[\s>])[^>]*>[\s\S]*?</w:pPr>", para)
-    if m:
-        block = m.group(0)
-        if block.rstrip().endswith("/>"):
-            new = (block[:block.rfind("/>")].rstrip() + ">"
-                   + f'<w:pStyle w:val="{style}"/>' + "</w:pPr>")
-        else:
-            live = child_elem(block, "pStyle")
-            if live is not None:
-                # Replace the LIVE direct child only: a `w:pPrChange` history
-                # record can carry its own `w:pStyle`, and `count=1` used to hit
-                # that first when the paragraph had no live style.
-                at = block.find(live)
-                new = block[:at] + f'<w:pStyle w:val="{style}"/>' + block[at + len(live):]
-            else:
-                om = re.match(r"<w:pPr(?=[\s>])[^>]*>", block)
-                new = block[:om.end()] + f'<w:pStyle w:val="{style}"/>' + block[om.end():]
-        return para.replace(block, new, 1)
-    # No pPr: `insert_into_ppr` owns the self-closing `<w:p .../>` expansion
-    # (an empty paragraph): the old fallback inserted the pPr AFTER the `/>`,
-    # making it a sibling of the paragraph and the part schema-invalid (F23).
-    return insert_into_ppr(para, f'<w:pStyle w:val="{style}"/>')
+    """Force `w:pStyle` on a paragraph fragment (insert or replace).
+
+    The target is the SAME live pPr `ppr_of()` (and therefore the scorer)
+    reads: a commented-out pPr is not it, and the span comes from the balanced
+    reader so an identical commented element before the live one cannot be
+    spliced by `str.find`.
+    """
+    span = _property_element_span(para, "pPr")
+    if span is None:
+        # No pPr: `insert_into_ppr` owns the self-closing `<w:p .../>` expansion
+        # (an empty paragraph): the old fallback inserted the pPr AFTER the `/>`,
+        # making it a sibling of the paragraph and the part schema-invalid (F23).
+        return insert_into_ppr(para, f'<w:pStyle w:val="{style}"/>')
+    s, e = span
+    block = para[s:e]
+    if block.rstrip().endswith("/>"):
+        head = block[:block.rfind("/>")].rstrip() + ">"
+        return para[:s] + head + f'<w:pStyle w:val="{style}"/>' + "</w:pPr>" + para[e:]
+    live = _child_element_span(block, "pStyle")
+    if live is not None:
+        # Replace the LIVE direct child only: a `w:pPrChange` history record can
+        # carry its own `w:pStyle`, and `count=1` used to hit that first.
+        at = s + live[0]
+        return para[:at] + f'<w:pStyle w:val="{style}"/>' + para[s + live[1]:]
+    om = _PARAGRAPH_PROPERTIES_OPEN_RE.match(block)
+    at = s + (om.end() if om else len("<w:pPr>"))
+    return para[:at] + f'<w:pStyle w:val="{style}"/>' + para[at:]
 
 
 def _style_index(styles_xml: str) -> tuple:
@@ -2984,11 +2988,12 @@ def _apply_ppr_extra(frag: str, extra: str) -> str:
     # (which carries a `</w:pPr>` of its own) is not mistaken for its end --
     # the lazy regex that stopped at the first `</w:pPr>` truncated the block
     # inside the recorded change and spliced the template's children into the
-    # revision record.
-    pm = re.compile(r"<w:pPr(?=[\s/>])").search(frag, om.end())
-    if not pm:
+    # revision record. The same reader `ppr_of()` uses keeps a commented-out
+    # copy from being taken for the live property bag.
+    pm = _property_element_span(frag, "pPr")
+    if pm is None:
         return frag[:om.end()] + f"<w:pPr>{extra}</w:pPr>" + frag[om.end():]
-    s, e = element_span(frag, pm.start(), "pPr")
+    s, e = pm
     block = frag[s:e]
     # The direct spacing/ind/jc the template replaces: confined to the part
     # BEFORE a recorded `w:pPrChange`, whose nested pPr is revision record
@@ -3148,12 +3153,14 @@ def _strip_direct_props(frag: str, strip_num: bool = False) -> str:
     The old global regexes also deleted revision history
     (`w:pPrChange`/`w:rPrChange`) and a run's character spacing
     (`w:rPr/w:spacing`), which is not paragraph geometry. `child_elem` returns
-    a DIRECT child of the live pPr, so neither is touched.
+    a DIRECT child of the live pPr, so neither is touched. The pPr is located by
+    the same balanced reader `ppr_of()` uses (a commented-out copy before it is
+    not the live element and is left byte-identical).
     """
-    m = re.search(r"<w:pPr(?=[\s/>])[^>]*/>|<w:pPr(?=[\s>])[^>]*>[\s\S]*?</w:pPr>", frag)
-    if m:
-        ppr = m.group(0)
-        new_ppr = ppr
+    span = _property_element_span(frag, "pPr")
+    if span is not None:
+        s, e = span
+        new_ppr = frag[s:e]
         for tag in ("ind", "spacing", "jc"):
             el = child_elem(new_ppr, tag)
             while el is not None:
@@ -3164,7 +3171,7 @@ def _strip_direct_props(frag: str, strip_num: bool = False) -> str:
             while el is not None:
                 new_ppr = new_ppr.replace(el, "", 1)
                 el = child_elem(new_ppr, "numPr")
-        frag = frag[:m.start()] + new_ppr + frag[m.end():]
+        frag = frag[:s] + new_ppr + frag[e:]
     return frag
 
 

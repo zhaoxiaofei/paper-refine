@@ -207,6 +207,30 @@ def test_textbox_repairs_preserve_paragraph_ownership():
           any(row["rule"] == "FMT-T7b" for row in report["rows"])
           and leading_xml in fixed and '<w:i/>' not in fixed)
 
+    # A COMMENTED-OUT property is not the live one: `ppr_of`/`rpr_of` must skip
+    # it, or the scanner reads the comment while the fixer repairs the live pPr
+    # and the re-scan keeps the row, making `fix` reject the whole document.
+    commented = document(
+        '<w:p><!-- <w:pPr><w:pStyle w:val="Heading1"/></w:pPr> -->'
+        '<w:pPr><w:keepLines/></w:pPr><w:r><w:t>Body paragraph.</w:t></w:r></w:p>')
+    report = fmt.analyse_document(commented, {}, policy, "d.docx")
+    check("a commented pPr does not make the body paragraph a heading",
+          not any(row["rule"] == "FMT-T3a" for row in report["rows"]),
+          str(report["rows"]))
+    fixed, _, _ = fmt.fix_document(commented, {}, policy)
+    leftover = [row["rule"] for row in fmt.analyse_document(fixed, {}, policy, "d.docx")["rows"]
+                if row["fix"] == "mechanical"]
+    check("the scan and the fixer read the same live pPr, so no mechanical row is left",
+          not leftover, f"{leftover} in {fixed}")
+
+    live_heading = document(
+        '<w:p><!-- <w:pPr><w:pStyle w:val="Caption"/></w:pPr> -->'
+        '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>'
+        '<w:r><w:t>Real heading</w:t></w:r></w:p>')
+    fixed, _, _ = fmt.fix_document(live_heading, {}, policy)
+    check("the live heading after a commented pPr still gets keepNext",
+          "<w:pStyle w:val=\"Heading1\"/><w:keepNext/><w:keepLines/>" in fixed, fixed)
+
 
 def test_f16_fld_simple():
     """F16: w:fldSimple is part of the field inventory in_field() consults."""

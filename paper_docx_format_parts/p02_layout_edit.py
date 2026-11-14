@@ -3032,8 +3032,10 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
     `fixes` are (start, end, new) against `part_xml`; the scanner uses the rows
     only, the fixer applies the fixes.
     """
-    # Zero tolerance requires the nearest representable height. Only a
-    # missing or invalid tolerance falls back to the permissive default.
+    # An exact ratio is restored at the nearest REPRESENTABLE height (an EMU
+    # extent is an integer), and a height already at that value cannot be
+    # repaired further. Only a missing or invalid tolerance falls back to the
+    # permissive default.
     _tol = policy.get("image_aspect_tolerance")
     try:
         tol = 0.02 if _tol is None else float(_tol)
@@ -3135,7 +3137,14 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
                         "_dpi": dpi})
             ratio = cxf / cyf
             err = abs(ratio - expected) / expected
-            if err <= tol or (tol == 0 and cyf == _nearest_image_height(cxf, expected, unit)):
+            # A height already at the nearest representable value is the one the
+            # fixer would write, so there is nothing left to repair. This must
+            # not be gated on `tol == 0`: with a positive tolerance below the
+            # integer-height rounding residual (or an unsatisfiable negative
+            # one) the scanner would otherwise keep filing a mechanical FMT-IM1
+            # row that `_ratio_fixes` cannot change, and `fix` would reject the
+            # whole document's repairs (`remaining_mechanical_rules`).
+            if err <= tol or cyf == _nearest_image_height(cxf, expected, unit):
                 continue
             label = (target or "image").rsplit("/", 1)[-1]
             drawn = (f"{cxf:,.0f} x {cyf:,.0f} {unit}" if float(cxf).is_integer()

@@ -612,24 +612,58 @@ def has_anchor(frag: str) -> bool:
     return bool(ANCHOR_RE.search(frag))
 
 
-def _property_element(frag: str, tag: str) -> str | None:
-    """The WHOLE `<w:tag>` property element, balanced through nested copies.
+def _property_element_span(frag: str, tag: str) -> tuple[int, int] | None:
+    """(start, end) of the WHOLE live `<w:tag>` property element, or None.
 
     A tracked-formatting paragraph carries `<w:pPrChange><w:pPr>…</w:pPr>
     </w:pPrChange>` INSIDE its own pPr (and a run's rPr can carry
     `<w:rPrChange>`); the lazy regex used to stop at the inner closing tag, so a
     caller that spliced the returned block back replaced only its prefix and
-    left the rest of the element dangling. `element_span` is the balanced reader
-    the pPrChange-aware edits already use.
+    left the rest of the element dangling. The walk below balances the nested
+    copies of the SAME tag, which is how the pPrChange-aware edits read it.
+
+    The scan runs over `_CHILD_TAG_RE`, the same tokenizer `child_elem` uses, so
+    a COMMENTED-OUT property (`<!-- <w:pPr><w:pStyle .../></w:pPr> -->`) is not
+    the live element: `re.search` + `element_span` used to return the commented
+    copy, which made the scanner read the comment's style while the fixer (which
+    now splices the paragraph's OWN pPr) repaired the live one -- the re-scan
+    still saw the comment and `fix` rejected the whole document. Quoted `>`
+    inside an attribute is handled there too, so an attribute value can no
+    longer be mistaken for the tag's end. Callers that splice bytes need the
+    SPAN, not the text: an identical element can also sit inside a comment
+    before the live one, which is why `str.find` is not enough.
     """
-    m = re.search(rf"<w:{tag}(?=[\s/>])", frag)
-    if not m:
+    if not frag:
         return None
-    s, e = element_span(frag, m.start(), tag)
-    block = frag[s:e]
-    if block.endswith("/>") or re.search(rf"</w:{tag}\s*>$", block):
-        return block
+    start = None
+    depth = 0
+    for m in _CHILD_TAG_RE.finditer(frag):
+        closing, name, rest = m.group(1), m.group(2), m.group(3)
+        if name is None:                       # a comment or processing instruction
+            continue
+        short = name.split(":")[-1]
+        self_closing = (closing == "") and (rest or "").rstrip().endswith("/")
+        if start is None:
+            if not closing and short == tag:
+                if self_closing:
+                    return m.start(), m.end()
+                start, depth = m.start(), 1
+            continue
+        if short != tag:                       # a nested element of another name
+            continue
+        if closing:
+            depth -= 1
+            if depth <= 0:
+                return start, m.end()
+        elif not self_closing:
+            depth += 1
     return None
+
+
+def _property_element(frag: str, tag: str) -> str | None:
+    """The WHOLE live `<w:tag>` property element, balanced through nested copies."""
+    span = _property_element_span(frag, tag)
+    return frag[span[0]:span[1]] if span is not None else None
 
 
 def ppr_of(frag: str) -> str | None:

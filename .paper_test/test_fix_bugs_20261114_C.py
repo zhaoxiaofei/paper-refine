@@ -316,6 +316,20 @@ def test_f33_zero_aspect_tolerance() -> None:
           any(row["rule"] == "FMT-IM1" for row in rows)
           and "height:0.003333" in fixed and not remaining and not followup, fixed)
 
+    # The repaired height is the nearest REPRESENTABLE one (an integer EMU), so
+    # any tolerance below its rounding residual -- and any negative tolerance --
+    # must accept it too. Gating that on `tol == 0` filed a mechanical FMT-IM1
+    # row that no repair could change, and `fix` then rejected the document.
+    for unsatisfiable in (1e-9, -1.0):
+        tiny = dict(fmt.POLICY_DEFAULTS, image_aspect_tolerance=unsatisfiable)
+        rows, edits = fmt.drawing_geometry_rows(xml, rels, ratio_sizes, "d.docx", tiny)
+        fixed = fmt.apply_edits(xml, edits)
+        remaining, followup = fmt.drawing_geometry_rows(fixed, rels, ratio_sizes, "d.docx", tiny)
+        check("F33 a tolerance below the EMU rounding residual still converges",
+              any(row["rule"] == "FMT-IM1" for row in rows)
+              and not remaining and not followup,
+              f"tol={unsatisfiable} remaining={remaining} followup={followup}")
+
 
 # ---------------------------------------------------------------------------
 # F34 -- xfa-export distinguishes an unreadable input from an empty form
