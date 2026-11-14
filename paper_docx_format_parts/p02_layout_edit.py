@@ -2265,13 +2265,12 @@ def stray_empty_paragraph_groups(paras: list, policy: dict, xml: str = None) -> 
     "heading" or "run".
 
     `xml` is the document the paragraphs were read from; when it is given,
-    paragraphs inside a table cell are never in a delete group (see
-    `_table_paragraph_indices`).
+    paragraphs inside a table cell or text box are never in a delete group.
     """
     prescribed = prescribed_empty_indices(paras, policy)
     texts = [text_of(p[2]).strip() for p in paras]
-    in_table = _table_paragraph_indices(xml, paras)
-    is_empty = [not texts[i] and i not in in_table
+    enclosed = _table_paragraph_indices(xml, paras) | _text_box_paragraph_indices(xml, paras)
+    is_empty = [not texts[i] and i not in enclosed
                 and not has_drawing(paras[i][2])
                 and not has_field(paras[i][2])                # a field run is content
                 and not has_anchor(paras[i][2])                # footnote/comment/bookmark
@@ -2977,6 +2976,13 @@ def _attr_any(frag: str, name: str):
     return m.group(1) if m else None
 
 
+def _nearest_image_height(width: float, ratio: float, unit: str) -> float:
+    """Height representable by the corresponding OOXML extent."""
+    if unit == "EMU":
+        return max(1, round(width / ratio))
+    return max(0.01, round(width / ratio, 2))
+
+
 def _ratio_fixes(block: str, expected: float) -> list:
     """[(start, end, new)] byte-level fixes restoring one drawing's ratio."""
     fixes = []
@@ -2991,7 +2997,7 @@ def _ratio_fixes(block: str, expected: float) -> list:
             continue
         if cyi <= 0:
             continue
-        new_cy = max(1, round(cxi / expected))
+        new_cy = _nearest_image_height(cxi, expected, "EMU")
         if new_cy == cyi:
             continue
         fixes.append((m.start(), m.end(),
@@ -3005,8 +3011,8 @@ def _ratio_fixes(block: str, expected: float) -> list:
         height = re.search(r"height:\s*([0-9.]+)([a-z%]+)", style.group(1), re.I)
         if not (width and height) or width.group(2).lower() != height.group(2).lower():
             continue
-        want = round(float(width.group(1)) / expected, 2)
-        if abs(want - float(height.group(1))) < 0.01:
+        want = _nearest_image_height(float(width.group(1)), expected, width.group(2))
+        if want == float(height.group(1)):
             continue
         new_style = style.group(1)[:height.start()] + \
             f"height:{want:g}{height.group(2)}" + style.group(1)[height.end():]
@@ -3126,7 +3132,7 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
                         "_dpi": dpi})
             ratio = cxf / cyf
             err = abs(ratio - expected) / expected
-            if err <= tol:
+            if err <= tol or (tol == 0 and cyf == _nearest_image_height(cxf, expected, unit)):
                 continue
             label = (target or "image").rsplit("/", 1)[-1]
             drawn = (f"{cxf:,.0f} x {cyf:,.0f} {unit}" if float(cxf).is_integer()

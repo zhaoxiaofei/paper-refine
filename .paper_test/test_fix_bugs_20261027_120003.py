@@ -144,9 +144,9 @@ def test_f13_anchor_paragraph():
     with zipfile.ZipFile(tmp / "o.docx") as z:
         dx = z.read("word/document.xml").decode()
     check("the bookmark survives", "MethodSection" in dx, f"ok={rep.get('ok')}")
+    findings = pf.analyse_document(dx, {}, dict(pf.POLICY_DEFAULTS), "o.docx")["rows"]
     check("the scanner has the same anchor guard",
-          "has_anchor" in inspect.getsource(pf.analyse_document)
-          and "has_anchor" in inspect.getsource(pf.fix_document))
+          not any(row["rule"] == "FMT-S1" for row in findings))
 
 
 # ---------------------------------------------------------------- F14

@@ -13,6 +13,7 @@ import importlib.util
 import sys
 import tempfile
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 WS = Path(__file__).resolve().parent.parent
@@ -126,6 +127,52 @@ def test_f15_nested_textbox_paragraph():
           and "Second paragraph." in fmt.text_of(doc), repr(fmt.text_of(doc)))
 
 
+def test_textbox_repairs_preserve_paragraph_ownership():
+    def box(inner):
+        return ('<w:pict><v:shape><v:textbox><w:txbxContent>'
+                f'{inner}</w:txbxContent></v:textbox></v:shape></w:pict>')
+
+    def document(body):
+        return (f'<w:document {W} xmlns:v="urn:schemas-microsoft-com:vml">'
+                f'<w:body>{body}</w:body></w:document>')
+
+    policy = dict(fmt.POLICY_DEFAULTS)
+    break_only = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+    next_body = '<w:p><w:r><w:t>Next body paragraph.</w:t></w:r></w:p>'
+    host = f'<w:p><w:r><w:t>Host text.</w:t>{box(break_only)}</w:r></w:p>'
+    xml = document(host + next_body)
+    fixed, _, _ = fmt.fix_document(xml, {}, policy)
+    check("a text-box page break stays inside its own paragraph", fixed == xml)
+    report = fmt.analyse_document(xml, {}, policy, "d.docx")
+    check("no FMT-S1 repair is proposed for the box",
+          not any(row["rule"] == "FMT-S1" for row in report["rows"]))
+
+    inner = '<w:p><w:pPr/><w:r><w:t>Box text.</w:t></w:r></w:p>'
+    drawing_only = f'<w:p><w:r>{box(inner)}</w:r></w:p>'
+    fixed, _, _ = fmt.fix_document(document(break_only + drawing_only + next_body), {}, policy)
+    body = ET.fromstring(fixed).find(f"{{{W_NS}}}body")
+    check("a body break before a drawing-only host goes onto that host",
+          len(body) == 2
+          and body[0].find(f"{{{W_NS}}}pPr/{{{W_NS}}}pageBreakBefore") is not None
+          and body[1].find(f"{{{W_NS}}}pPr/{{{W_NS}}}pageBreakBefore") is None
+          and inner in fixed)
+
+    inner_url = ('<w:p><w:r><w:rPr><w:i/></w:rPr>'
+                 '<w:t>https://example.org/box</w:t></w:r></w:p>')
+    outer_url = ('<w:p><w:r><w:rPr><w:color w:val="FF0000"/></w:rPr>'
+                 f'<w:t>https://example.org/body</w:t>{box(inner_url)}</w:r></w:p>')
+    fixed, _, _ = fmt.fix_document(document(outer_url), {}, policy)
+    try:
+        root = ET.fromstring(fixed)
+    except ET.ParseError as exc:
+        check("host and nested URL edits leave valid XML", False, str(exc))
+        return
+    check("host and nested URL styling is fixed without overlapping edits",
+          "https://example.org/body" in fixed and "https://example.org/box" in fixed
+          and root.find(f".//{{{W_NS}}}color") is None
+          and root.find(f".//{{{W_NS}}}i") is None)
+
+
 def test_f16_fld_simple():
     """F16: w:fldSimple is part of the field inventory in_field() consults."""
     para = ('<w:p><w:r><w:fldSimple w:instr=" ADDIN ZOTERO_ITEM CSL_CITATION '
@@ -177,6 +224,7 @@ def main() -> int:
     test_f13_tab_stops()
     test_f14_alternate_content_runs()
     test_f15_nested_textbox_paragraph()
+    test_textbox_repairs_preserve_paragraph_ownership()
     test_f16_fld_simple()
     test_f18_unreadable_baseline()
     test_f19_styles_dtd()

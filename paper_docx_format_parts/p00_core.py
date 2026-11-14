@@ -252,7 +252,7 @@ class _FragOrBreakFinder:
         if _root_element_tag(frag) == "w:r":
             # A RUN never owns a paragraph: any `<w:p>` inside a drawing it
             # carries is a text-box paragraph, not this run's text.
-            nested = [(s, e) for s, e, _t in _paragraph_spans(frag)]
+            nested = [(s, e) for s, e, _parent in _paragraph_offsets(frag)]
         else:
             nested = _nested_paragraph_spans(frag)
         stops = [(m.start(), m.end()) for m in _TAB_STOP_SPANS_RE.finditer(frag)]
@@ -456,44 +456,39 @@ def _spans(xml: str, tokens: re.Pattern) -> list:
     return out
 
 
-def _paragraph_spans(xml: str) -> list:
-    """(start, end, text) for EVERY `<w:p>`, nested ones included, in start order.
-
-    `_spans` emits a span only when a same-name element's depth returns to 0, so
-    an inner `<w:p>` (the normal shape of `w:txbxContent` inside a drawing of an
-    outer `<w:p>`) was never a paragraph while its text was folded into the host.
-    A stack walk keeps both: the outer host and the box's own paragraph get one
-    span each.
-    """
-    out, stack = [], []
+def _paragraph_offsets(xml: str) -> list:
+    """Return paragraph offsets and their parent starts in opening order."""
+    offsets, stack = [], []
     for m in PARA_TOKENS.finditer(xml):
         if m.group(0).startswith("</"):
             if stack:
-                start = stack.pop()
-                out.append((start, m.end(), xml[start:m.end()]))
+                offsets[stack.pop()][1] = m.end()
             continue
-        tag_end = xml.find(">", m.start())
+        start = m.start()
+        tag_end = xml.find(">", start)
         if tag_end == -1:
             break
-        if xml[tag_end - 1] == "/":
-            out.append((m.start(), tag_end + 1, xml[m.start():tag_end + 1]))
-        else:
-            stack.append(m.start())
-    for start in stack:                    # hand-edited XML: close at EOF
-        out.append((start, len(xml), xml[start:]))
-    out.sort(key=lambda sp: sp[0])
-    return out
+        parent = offsets[stack[-1]][0] if stack else None
+        self_closing = xml[tag_end - 1] == "/"
+        end = tag_end + 1 if self_closing else len(xml)
+        offsets.append([start, end, parent])
+        if not self_closing:
+            stack.append(len(offsets) - 1)
+    return offsets
 
 
 def _nested_paragraph_spans(xml: str) -> list:
-    """(start, end) of every `<w:p>` that sits INSIDE another `<w:p>`.
+    """Return the ranges of paragraphs inside another paragraph."""
+    return [(start, end) for start, end, parent in _paragraph_offsets(xml)
+            if parent is not None]
 
-    Those are the text-box/shape paragraphs. They now get a paragraph entry of
-    their own, so the host's text (and its run list) must not read them again.
-    """
-    spans = [(s, e) for s, e, _t in _paragraph_spans(xml)]
-    return [(s, e) for s, e in spans
-            if any(a < s and e <= b for a, b in spans)]
+
+def _text_box_paragraph_indices(xml: str, paras: list) -> set:
+    """Identify text-box paragraphs even when their host is absent from paras."""
+    if not xml:
+        return set()
+    starts = {start for start, _end in _nested_paragraph_spans(xml)}
+    return {i for i, (start, _end, _para) in enumerate(paras) if start in starts}
 
 
 def _mc_hidden_spans(xml: str) -> list:
@@ -515,22 +510,19 @@ def _mc_hidden_spans(xml: str) -> list:
     return out
 
 
-def paragraphs(xml: str) -> list:
+def paragraphs(xml: str, *, include_empty_hosts: bool = False) -> list:
     hidden = _mc_hidden_spans(xml)
-    spans = _paragraph_spans(xml)
-    nested = _nested_paragraph_spans(xml)
+    offsets = _paragraph_offsets(xml)
+    hosts = {parent for _start, _end, parent in offsets if parent is not None}
     out = []
-    for sp in spans:
-        if any(a <= sp[0] < b for a, b in hidden):
+    for start, end, _parent in offsets:
+        if any(a <= start < b for a, b in hidden):
             continue
-        # A host paragraph whose only content is a nested (text-box/shape)
-        # paragraph contributes no text of its own: the nested span carries it.
-        # Keeping the empty host would add a phantom blank paragraph that the
-        # single-visible-branch contract (F28) never had.
-        if (any(sp[0] < ns and ne <= sp[1] for ns, ne in nested)
-                and not text_of(sp[2])):
+        para = xml[start:end]
+        # A host with only text-box content contributes no body text.
+        if not include_empty_hosts and start in hosts and not text_of(para):
             continue
-        out.append(sp)
+        out.append((start, end, para))
     return out
 
 

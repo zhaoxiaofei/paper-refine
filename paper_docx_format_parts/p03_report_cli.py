@@ -5,6 +5,14 @@
 # the single-file source.
 from __future__ import annotations
 
+_RUN_PROPERTIES_RE = re.compile(r"<w:r(?=[\s/>])[^>]*(?<!/)>\s*(?=<w:rPr(?=[\s/>]))")
+
+
+def _break_only_paragraph(para: str) -> bool:
+    return (bool(PAGEBREAK_RE.search(para)) and not text_of(para).strip()
+            and not has_drawing(para) and not has_field(para) and not has_anchor(para))
+
+
 def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                      sizes: dict = None, rels: dict = None) -> dict:
     rows = []
@@ -38,15 +46,10 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # break otherwise made the whole document's fix verify as failed and threw
     # away every other repair.
     in_table = _table_paragraph_indices(xml, paras)
+    in_text_box = _text_box_paragraph_indices(xml, paras)
     for idx, (p0, p1, para) in enumerate(paras):
         text = text_of(para)
-        # A field run is CONTENT, never an empty paragraph: the fixer refuses to
-        # touch one (moving its page break would unbalance the field), so a row
-        # the scan still filed `mechanical` could never be repaired and made the
-        # whole fix verify as failed. The two sides read the same definition.
-        empty = not text.strip() and not has_drawing(para) and not has_field(para) \
-            and not has_anchor(para)
-        if PAGEBREAK_RE.search(para) and empty:
+        if idx not in in_text_box and _break_only_paragraph(para):
             # In a table cell the fixer cannot move/delete the paragraph (that
             # would leave an empty `<w:tc>`); report the defect as manual rather
             # than filing a mechanical row the fixer refuses by design. A
@@ -265,7 +268,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             if not URL_RE.search(rtext):
                 continue
             in_link = any(a <= r0 < b for a, b in link_spans)
-            rpr = rpr_of(run)
+            rpr = rpr_of(run) if _RUN_PROPERTIES_RE.match(run) else None
             t = ("link" if in_link else "plain",
                  elem_val(rpr, "rStyle") or "-",
                  elem_val(rpr, "color") or "-",
@@ -937,8 +940,14 @@ PPR_SPACING_AFTER = ("pStyle", "keepNext", "keepLines", "pageBreakBefore", "fram
                      "snapToGrid")
 
 
+def _own_ppr(para: str) -> str | None:
+    # A host can lack a pPr even when its text box has one.
+    opening = re.match(r"<w:p(?=[\s/>])[^>]*(?<!/)>\s*(?=<w:pPr(?=[\s/>]))", para)
+    return ppr_of(para[opening.end():]) if opening else None
+
+
 def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepLines")) -> str:
-    ppr = ppr_of(para)
+    ppr = _own_ppr(para)
     if ppr is None:
         tag_end = para.find(">") + 1
         head, tail = para[:tag_end], para[tag_end:]
@@ -1095,23 +1104,18 @@ def fix_document(xml: str, styles: dict, policy: dict,
                            f"are now plain text (refreshable in the Zotero copy only)")
 
     # 2. break-only empty paragraph -> pageBreakBefore on the next paragraph ----
-    # A paragraph inside a table cell is NEVER the target and never the
-    # paragraph the break moves onto: splicing a cell's only (empty) paragraph
-    # out leaves `<w:tc></w:tc>`, which Word reports as a corrupt file (the same
-    # hazard `_table_paragraph_indices` documents for step 2b), and a
-    # `w:pageBreakBefore` written into a cell is not the document-level break
-    # the rule means. The next BODY paragraph still receives the break.
+    # Table cells and text boxes must keep their paragraphs. A body break
+    # moves onto the next body paragraph, even when that paragraph only holds
+    # a drawing with a text box.
     for _ in range(50):
-        plist = paragraphs(xml)
-        in_table = _table_paragraph_indices(xml, plist)
+        plist = paragraphs(xml, include_empty_hosts=True)
+        excluded = (_table_paragraph_indices(xml, plist)
+                    | _text_box_paragraph_indices(xml, plist))
         target = None
         for idx, (p0, p1, para) in enumerate(plist):
-            if idx in in_table:
+            if idx in excluded:
                 continue
-            if PAGEBREAK_RE.search(para) and not text_of(para).strip() \
-                    and not has_drawing(para) and not has_field(para) \
-                    and not has_anchor(para) \
-                    and "<w:sectPr" not in para:
+            if _break_only_paragraph(para) and "<w:sectPr" not in para:
                 # A paragraph that carries a section-break property IS the
                 # section boundary: deleting it destroys the section (the
                 # following page settings and header/footer references go).
@@ -1121,10 +1125,10 @@ def fix_document(xml: str, styles: dict, policy: dict,
             break
         idx, p0, p1, para = target
         edits = [(p0, p1, "")]
-        nxt = next((j for j in range(idx + 1, len(plist)) if j not in in_table), None)
+        nxt = next((j for j in range(idx + 1, len(plist)) if j not in excluded), None)
         if nxt is not None:
             np0, np1, npara = plist[nxt]
-            if child_elem(ppr_of(npara), "pageBreakBefore"):
+            if child_elem(_own_ppr(npara), "pageBreakBefore"):
                 # The target already carries the property: a second
                 # <w:pageBreakBefore/> is schema-invalid.
                 changes.append(f"removed the empty page-break paragraph p{idx} "
@@ -1527,12 +1531,15 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # plain runs that carry a URL/email must match: no link style, no colour,
         # no underline, no italic (the correspondence block used dark-grey italic)
         edits, n2 = [], 0
-        for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
-            for r0, r1, run in runs(para):
+        for p0, _p1, para in paragraphs(xml):
+            for r0, _r1, run in runs(para):
                 if not URL_RE.search(text_of(run)):
                     continue
+                opening = _RUN_PROPERTIES_RE.match(run)
+                if opening is None:
+                    continue
                 rpr = rpr_of(run)
-                if not rpr:
+                if rpr is None:
                     continue
                 # Strip only the LIVE segments: rPrChange is the tracked
                 # change's history and must stay byte-identical.
@@ -1545,7 +1552,10 @@ def fix_document(xml: str, styles: dict, policy: dict,
                             flags=re.S)
                 stripped = "".join(_segs)
                 if stripped != rpr:
-                    edits.append((p0 + r0, p0 + r1, run.replace(rpr, stripped, 1)))
+                    # Splice only the property element. A full host run
+                    # can enclose other runs being edited in its text box.
+                    start = p0 + r0 + opening.end()
+                    edits.append((start, start + len(rpr), stripped))
                     n2 += 1
         if edits:
             xml = apply_edits(xml, edits)
