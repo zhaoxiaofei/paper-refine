@@ -565,13 +565,44 @@ def _declaration_readme_from_author(root: Path, p: Path) -> bool:
     return False
 
 
+class _DocumentTexts(list):
+    """[(rel, [paragraph, ...], full_text)] plus the inputs that could not read.
+
+    The list carries the scan payload; `gaps` carries one line per submitted
+    document the shared reader could NOT parse. Returning the payload alone
+    made "could not parse the submitted document" indistinguishable from "the
+    document has no matching statement", so the package looked clean (F14).
+    """
+
+    def __init__(self, items=(), gaps=()):
+        super().__init__(items)
+        self.gaps = list(gaps)
+
+
+def _document_read_gap_rows(docs, rule: str = "PKG-17..25", limit: int = 20) -> list:
+    """The named coverage gap for documents the shared reader could not parse."""
+    gaps = list(getattr(docs, "gaps", None) or ())
+    if not gaps:
+        return []
+    return _with_table_gaps([], gaps, rule, limit)
+
+
 def _with_table_gaps(rows: list, gaps: list, rule: str, limit: int) -> list:
     """Prepend the scan's named coverage gap (when any) to its rows."""
     if not gaps:
         return rows[:limit]
+    gap_files = []
+    for g in gaps:
+        name = str(g).split(":", 1)[0].strip()
+        if name and name not in gap_files:
+            gap_files.append(name)
     gap = {
         "rule": rule, "severity": "low", "fix": "none", "file": "", "line": 0,
         "reference": "", "gap": True, "advisory": True,
+        # A gap that names exactly one unreadable input is attributable to that
+        # document, so a consumer that reports findings by `document` does not
+        # lose it (F14/R04). Several unreadable inputs stay in `detail`.
+        "document": gap_files[0] if len(gap_files) == 1 else None,
         "detail": (f"{rule} was NOT evaluated on {len(gaps)} input(s): "
                    + "; ".join(gaps[:6]) + (" ..." if len(gaps) > 6 else "")
                    + ". Examine them by hand; a defect there would not appear in this list"),

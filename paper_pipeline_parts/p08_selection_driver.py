@@ -3141,6 +3141,30 @@ def repair_plan_literal_problems(sb: Path, rows: list) -> list:
     return problems
 
 
+def _snapshot_revised_prerepair(sb: Path) -> str:
+    """Snapshot revised/ to revised_prerepair/ WITHOUT following nested links.
+
+    `shutil.copytree(..., symlinks=False)` followed a nested `revised/sub ->
+    /outside` link and copied outside content into the audited baseline, and a
+    planted `revised_prerepair` symlink was accepted by the old `pre.exists()`
+    guard (copytree then copied the outside tree back into revised/ on a
+    rollback). The snapshot must be a REAL directory, and nested links must stay
+    links: copy_into still refuses them, so outside bytes never become package
+    content (F12). Returns "" on success or a failure reason.
+    """
+    sb = Path(sb)
+    pre = sb / "revised_prerepair"
+    if pre.is_symlink() or (pre.exists() and not pre.is_dir()):
+        rmtree_force(pre)
+    if pre.is_symlink() or (pre.exists() and not pre.is_dir()):
+        return "revised_prerepair/ is a symlink or not a directory"
+    if not pre.exists():
+        if not (sb / REVISED_DIR).is_dir():
+            return f"{REVISED_DIR}/ is missing"
+        shutil.copytree(sb / REVISED_DIR, pre, symlinks=True)
+    return ""
+
+
 def _restore_revised_from_prerepair(sb: Path) -> str:
     """Put the audited pre-repair package back; return "" or a failure reason.
 
@@ -3159,14 +3183,14 @@ def _restore_revised_from_prerepair(sb: Path) -> str:
     """
     pre = Path(sb) / "revised_prerepair"
     cur = Path(sb) / REVISED_DIR
-    if not pre.is_dir():
-        return "the pre-repair snapshot revised_prerepair/ is missing"
+    if pre.is_symlink() or not pre.is_dir():
+        return "the pre-repair snapshot revised_prerepair/ is a symlink or not a directory"
     stage = Path(sb) / (REVISED_DIR + ".restore-tmp")
     parked = Path(sb) / (REVISED_DIR + ".restore-old")
     try:
         rmtree_force(stage)
         rmtree_force(parked)
-        shutil.copytree(pre, stage)
+        shutil.copytree(pre, stage, symlinks=True)
     except OSError as exc:
         rmtree_force(stage)
         return f"the snapshot could not be staged ({type(exc).__name__}: {exc})"
@@ -3595,7 +3619,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                 _expected_pre = rec.get("revision_prerepair_digest")
                 _actual_pre = (manifest_digest(
                     hash_manifest(_pre, on_error="<unreadable>", follow_dir_links=True))
-                    if _pre.is_dir() else "")
+                    if _pre.is_dir() and not _pre.is_symlink() else "")
                 if not _expected_pre or _actual_pre != _expected_pre:
                     rec["status"] = "failed"
                     rec["last_error"] = (
@@ -3627,7 +3651,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
         # rollback image and auditing (and accepting) the half-edited package.
         _sb = ctx.sandbox_of(rec)
         _pre = _sb / "revised_prerepair"
-        if _pre.is_dir():
+        if _pre.is_dir() and not _pre.is_symlink():
             _expected_pre = rec.get("revision_prerepair_digest")
             _actual_pre = manifest_digest(
                 hash_manifest(_pre, on_error="<unreadable>", follow_dir_links=True))
@@ -3639,8 +3663,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                 ctx.save_state()
                 print(f"  [revision-audit] {rec['id']}: FAILED — {rec['last_error']}")
                 return
-            shutil.rmtree(_sb / REVISED_DIR, ignore_errors=True)
-            shutil.copytree(_pre, _sb / REVISED_DIR)
+            rmtree_force(_sb / REVISED_DIR)
+            shutil.copytree(_pre, _sb / REVISED_DIR, symlinks=True)
         elif rec.get("revision_prerepair_digest"):
             rec["status"] = "failed"
             rec["last_error"] = ("the interrupted repair's baseline revised_prerepair/ is "
@@ -3688,7 +3712,10 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                  "revision_audit/DELETED_PARAGRAPHS.md",
                  "revised/REPAIR_LEDGER.json", "revised/REPAIR_LEDGER.md"):
         (sb / _rel).unlink(missing_ok=True)
-    shutil.rmtree(sb / "revised_prerepair", ignore_errors=True)
+    # `shutil.rmtree(..., ignore_errors=True)` refuses a SYMLINK and suppresses
+    # the refusal, so a planted `revised_prerepair -> /outside` survived the
+    # reset; rmtree_force unlinks the link itself and never descends it (F12).
+    rmtree_force(sb / "revised_prerepair")
     # Seed the deletion audit from base -> revised. The auditor must dispose
     # every row: a deleted paragraph that carried a fact is exactly the
     # "FACT REMOVED" class this stage exists to catch, and leaving the seed
@@ -3698,9 +3725,24 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     # row that restored it would reintroduce the dangling reference. Exempt
     # exactly the recorded (document, sentence) removals, including the rest of
     # a paragraph that also survives.
+    _deleted_skipped = []
     _deleted_rows = deletion_audit_rows(
         sb / "base", sb / REVISED_DIR,
-        exempt_removed=pipeline_removed_sentences(rec, with_document=True))
+        exempt_removed=pipeline_removed_sentences(rec, with_document=True),
+        skipped=_deleted_skipped)
+    if _deleted_skipped:
+        # A submitted file the audit could not read is not an empty document:
+        # seeding no row for it makes a corrupt DOCX read as "nothing was
+        # deleted", so fail the attempt instead of certifying a partial audit.
+        rec["status"] = "failed"
+        rec["last_error"] = (
+            "the deletion audit could not read submitted file(s): "
+            + ", ".join(sorted(set(_deleted_skipped))[:6])
+            + (" ..." if len(set(_deleted_skipped)) > 6 else "")
+            + "; the audit seed would be incomplete -- repair or remove them")[:600]
+        ctx.save_state()
+        print(f"  [revision-audit] {rec['id']}: FAILED — {rec['last_error'][:240]}")
+        return
     write_text_atomic(sb / "revision_audit" / "DELETED_PARAGRAPHS.md",
                       deletion_audit_markdown(_deleted_rows))
     _audit_ins, _audit_del = content_edit_policy_allowed(ctx, rec)
@@ -3791,9 +3833,15 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
         finish_revision_verification(ctx, rec, cmd, timeout)
         return
     # Preserve the audited bytes: the repair produces the final revised version.
+    _snapshot_error = _snapshot_revised_prerepair(sb)
+    if _snapshot_error:
+        rec["status"] = "failed"
+        rec["last_error"] = (f"the pre-repair snapshot could not be taken: "
+                             f"{_snapshot_error}")[:600]
+        ctx.save_state()
+        print(f"  [revision-audit] {rec['id']}: FAILED — {rec['last_error'][:240]}")
+        return
     pre = sb / "revised_prerepair"
-    if not pre.exists():
-        shutil.copytree(sb / REVISED_DIR, pre)
     # The snapshot lives inside the agent-writable sandbox. Keep its digest in
     # the run record (outside the sandbox) so a repair cannot rewrite BOTH the
     # baseline and the package to make the pre/post guard see no change (F07).
