@@ -496,7 +496,7 @@ def candidate_tiebreak_inputs(ctx: Ctx, r: int, vid: str) -> tuple:
         for rel in MANUAL_STEPS_RELS:
             n = count_manual_steps(sb / rel)
             if n is not None:
-                manual = n
+                manual = _valid_count(n)
                 break
     return crit, writing, manual
 
@@ -605,7 +605,10 @@ def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None) -> t
     ranking_row = {"id": target, "rep": target, "is_base": False,
                    "n": 0, "median": None, "mean": None, "iqr": None,
                    "vs_original": None, "vs_base": None, "vs_base_vals": [],
-                   "digest": digest, "defect_prefix_total": 0,
+                   # An unjudged round has NO defect census: 0 would read as a
+                   # perfect score. None renders '-' and champion_sort_key maps
+                   # a missing total to missing evidence, never zero (F208).
+                   "digest": digest, "defect_prefix_total": None,
                    "tiebreak_prefix_cells": 0,
                    "critical_remaining": MISSING_TIEBREAK,
                    "writing_remaining": MISSING_TIEBREAK,
@@ -838,7 +841,16 @@ def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
             f"{', '.join(str(s) for s, _p, _e in corpus_sources(ctx, r, champ_id)) or 'no source'})")
     digest = manifest_digest(manifest)
     recorded = recorded_version_digest(ctx, r, champ_id)
-    if recorded and digest != recorded:
+    if not recorded and champ_id == A1_ID:
+        # A round base is materialized from its source pin (or the original)
+        # and the a1 run records that source digest; a root created before
+        # corpus_digest existed still carries it. Use it rather than skipping
+        # the identity comparison entirely.
+        recorded = ((ctx.run(rid_for_fresh(r, A1_ID)) or {}).get("base_source_digest"))
+    if not recorded:
+        die(f"refusing to pin '{champ_id}': the version has no recorded corpus digest; "
+            f"re-run the round or repair the record")
+    if digest != recorded:
         die(f"internal inconsistency: the pinned copy of '{champ_id}' hashes to {digest[:12]} "
             f"but its run recorded {str(recorded)[:12]}")
     if docs.is_dir() and manifest_digest(corpus_dir_manifest(docs)) == digest:
@@ -901,7 +913,10 @@ def publish_winner(ctx: Ctx, r: int, champ_id: str, pin: dict, agg: dict) -> dic
         die(f"refusing to publish a round {r} winner: the champion '{champ_id}' has an empty "
             f"corpus")
     digest = manifest_digest(manifest)
-    if pin.get("digest") and digest != pin["digest"]:
+    if not pin.get("digest"):
+        die(f"refusing to publish a round {r} winner: the pin records no corpus digest; "
+            f"re-run the round or repair the record")
+    if digest != pin["digest"]:
         die(f"internal inconsistency: the round {r} winner copy hashes to {digest[:12]} but its "
             f"pin recorded {str(pin.get('digest'))[:12]}")
     if dst.is_dir() and manifest_digest(corpus_dir_manifest(dst)) == digest:
@@ -2288,8 +2303,9 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     # the failure is reported, and the operator decides whether to
                     # reset it (`retry --run <ID>`), repair it, or abandon it.
                     print(f"  [manual] {rid}: attempt FAILED and is preserved (nothing was "
-                          f"deleted). Inspect the sandbox, then either fix the artifacts and "
-                          f"re-run `run`, or reset the attempt with `retry --run {rid}`.")
+                          f"deleted). `run` does NOT re-verify a failed attempt, so inspect "
+                          f"the sandbox and reset it with `retry --run {rid}` to re-run the "
+                          f"postcheck, or abandon the attempt.")
                     ctx.save_state()
                     continue
                 elif failures_in_phase.get(rid, 0) > retries:
@@ -3200,7 +3216,14 @@ def repair_plan_literal_problems(sb: Path, rows: list) -> list:
         path = Path(sb) / REVISED_DIR / rel
         text = _repair_file_text(path)
         if text is None:
-            continue                   # absent/opaque: the repair's span audit decides
+            if not path.exists():
+                # A row that quotes `wrong` in a file that is absent cannot be
+                # repaired: the plan is invalid, not "opaque" (F207).
+                problems.append(
+                    f"{row.get('id') or '?'} names {rel}, which does not exist in "
+                    f"{REVISED_DIR}/; a replacement/deletion row must name a file the "
+                    f"pre-repair package carries.")
+            continue                   # opaque: the repair's span audit decides
         if _repair_text_norm(rel, wrong) in _repair_text_norm(rel, text):
             continue
         problems.append(
@@ -3346,6 +3369,12 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
             continue
         _text = _repair_file_text(cur / rel)
         if _text is None:
+            if not _before_q and _after_q and not (cur / rel).exists():
+                # A pure insertion into a NEW file must have created it; the
+                # old code skipped a missing file as "opaque" and accepted the
+                # row as a no-op (F207).
+                bad.setdefault(rel, "the confirmed insertion was not applied: the file "
+                                    "was never created")
             continue
         _tn = _repair_norm(_text)
         if not _before_q and _after_q:
@@ -4687,6 +4716,15 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
             rmtree_force(win_tmp)
         win_tmp.mkdir(parents=True, exist_ok=True)
         build_corpus_dir(ctx, r, a2, win_tmp)
+        # The copy must be the bytes the revision recorded, not merely whatever
+        # build_corpus_dir happened to copy: the normal path verifies the pin
+        # digest and this path used to record the digest of its own copy (F209).
+        win_manifest = corpus_dir_manifest(win_tmp)
+        win_digest = manifest_digest(win_manifest)
+        _recorded = recorded_version_digest(ctx, r, a2)
+        if _recorded and win_digest != _recorded:
+            die(f"internal inconsistency: the round {r} winner copy of '{a2}' hashes to "
+                f"{win_digest[:12]} but its run recorded {str(_recorded)[:12]}")
         if win_dst.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             aside = unique_path(superseded_dir_of(ctx) / f"{win_dst.name}.{stamp}")
@@ -4694,7 +4732,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
             shutil.move(str(win_dst), str(aside))
         os.replace(win_tmp, win_dst)
         rrec["winner_dir"] = win_dst.name
-        rrec["winner_digest"] = corpus_tree_digest(win_dst)
+        rrec["winner_digest"] = win_digest
         rrec["journal_mode"] = journal_mode_of(ctx)
         rrec["scoped"] = True
         rrec["field"] = [A1_ID, a2]

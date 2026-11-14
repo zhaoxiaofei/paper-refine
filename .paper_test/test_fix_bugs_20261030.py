@@ -413,22 +413,29 @@ def test_f12_ledger_verdict() -> None:
         write(pkg / "revision_report.json", json.dumps(payload))
         return pp.revision_ledger_problems(pkg, ["F-001"], 1)[0]
 
+    # Both explanation cells are required (F149): every payload below carries
+    # an `evidence` cell so each check exercises the verdict rule it names.
     check("an undocumented verdict string is rejected",
           any("without a VERDICT" in e for e in errs_for(
-              [{"id": "F-001", "verdict": "whatever", "rationale": "x"}])),
-          str(errs_for([{"id": "F-001", "verdict": "whatever", "rationale": "x"}])))
+              [{"id": "F-001", "verdict": "whatever", "rationale": "x",
+                "evidence": "e"}])),
+          str(errs_for([{"id": "F-001", "verdict": "whatever", "rationale": "x",
+                         "evidence": "e"}])))
     check("a documented verdict passes",
-          errs_for([{"id": "F-001", "verdict": "confirmed", "rationale": "x"}]) == [])
+          errs_for([{"id": "F-001", "verdict": "confirmed", "rationale": "x",
+                     "evidence": "e"}]) == [])
     check("a documented verdict plus final status passes",
           errs_for([{"id": "F-001", "verdict": "confirmed",
-                     "final_status": "fixed-with-caveat", "rationale": "x"}]) == [])
+                     "final_status": "fixed-with-caveat", "rationale": "x",
+                     "evidence": "e"}]) == [])
     check("a final status without a re-verification verdict is rejected (F-080)",
           any("re-verification" in e for e in errs_for(
               [{"id": "F-001", "final_status": "fixed-with-caveat",
-                "rationale": "x"}])))
+                "rationale": "x", "evidence": "e"}])))
     check("a final-status word in the verdict column is rejected (F-080)",
           any("re-verification" in e for e in errs_for(
-              [{"id": "F-001", "verdict": "fixed", "rationale": "x"}])))
+              [{"id": "F-001", "verdict": "fixed", "rationale": "x",
+                "evidence": "e"}])))
 
 
 # ---------------------------------------------------------------------------

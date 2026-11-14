@@ -86,6 +86,15 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
     # piece's start, so a per-piece set emitted it twice ("abcX" + "Xdef").
     emitted_zero = set()
 
+    def zero_insertions(at_pos: int) -> str:
+        """The not-yet-emitted zero-length insertions anchored at `at_pos`."""
+        new = []
+        for i, (a, b, new_piece, is_edit) in enumerate(keep):
+            if is_edit and a == b == at_pos and i not in emitted_zero:
+                emitted_zero.add(i)
+                new.append(new_piece)
+        return "".join(new)
+
     def carry(local: int, old: str) -> str:
         """The new text of ONE piece starting at text offset `local`."""
         out, at = [], local
@@ -99,10 +108,9 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
             zero-length insertion used to be skipped while `applied` reported it
             as done -- the FMT-X2 repair was silently a no-op.
             """
-            for i, (a, b, new_piece, is_edit) in enumerate(keep):
-                if is_edit and a == b == at_pos and i not in emitted_zero:
-                    emitted_zero.add(i)
-                    out.append(new_piece)
+            new = zero_insertions(at_pos)
+            if new:
+                out.append(new)
 
         while at < end:
             emit_zero_edits(at)
@@ -143,6 +151,14 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
         local = here
         here += len(old_text)
         if raw is None:
+            # A zero-length insertion anchored at the break has no following
+            # text piece to reach it (`carry()` is never called for a break
+            # piece), so it used to stay in `applied` while the paragraph was
+            # returned unchanged. It belongs BEFORE the break in text order.
+            _ins = zero_insertions(local)
+            if _ins:
+                pieces.append('<w:r><w:t xml:space="preserve">' + esc(_ins)
+                              + "</w:t></w:r>")
             # The break is consumed by an edit that covers its position. An
             # EMPTY replacement consumes it too (the old `if covered` treated
             # "" as "no edit" and left the break in place); and a replacement
@@ -159,6 +175,12 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
                 pieces.append(para[start_at:end_at])
             continue
         if NON_TEXT_TOKENS.fullmatch(raw):
+            # Same zero-length anchor as a break: the one placeholder character
+            # has no `carry()` call of its own.
+            _ins = zero_insertions(local)
+            if _ins:
+                pieces.append('<w:r><w:t xml:space="preserve">' + esc(_ins)
+                              + "</w:t></w:r>")
             # The one placeholder character is part of the paragraph text; an
             # edit that covers it consumes it, otherwise the glyph survives.
             cover = next(((s, e, r) for s, e, r, is_edit in keep
@@ -487,6 +509,12 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
         pass
     try:
         with zipfile.ZipFile(src) as pkg:
+            # Untrusted input budget: the sibling refresh path caps every part
+            # and the archive total, but these strip helpers read EVERY member
+            # with no limit, so a small zip bomb allocated gigabytes here.
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise OSError(problem)
             parts = {i.filename: pkg.read(i.filename) for i in pkg.infolist()}
     except (zipfile.BadZipFile, OSError, KeyError, RuntimeError, NotImplementedError) as e:
         res["error"] = f"unreadable DOCX package: {type(e).__name__}: {e}"
@@ -637,6 +665,24 @@ _REL_ENTRY_RE = re.compile(
     r"<Relationship\b[^>]*(?:/>|>.*?</Relationship>)", re.S)
 
 
+def _ooxml_part_codec(data: bytes) -> tuple:
+    """(text, encode) for one OOXML XML part, keeping its original encoding.
+
+    `ooxml_part_text` is the UTF-16-aware reader the rest of the module uses
+    for exactly this reason: a legal OOXML part may be UTF-16, and decoding it
+    as UTF-8 with `replace` produced NUL-interleaved text whose regex readers
+    found nothing (a silently EMPTY, error-free inventory). When a part is
+    rewritten it must be re-encoded in the form it arrived in -- UTF-8 text
+    under an `encoding="UTF-16"` declaration is an unreadable document.
+    """
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return ooxml_part_text(data), lambda s: s.encode("utf-16")
+    if b"\x00" in data[:400]:
+        enc = "utf-16-be" if data[:1] == b"\x00" else "utf-16-le"
+        return ooxml_part_text(data), lambda s: s.encode(enc)
+    return ooxml_part_text(data), lambda s: s.encode("utf-8")
+
+
 def local_path_link_rows(path: Path) -> list:
     """[(part, relationship_id, relationship_type, target)] of local-path links.
 
@@ -652,7 +698,7 @@ def local_path_link_rows(path: Path) -> list:
                 if not name.endswith(".rels"):
                     continue
                 try:
-                    text = pkg.read(name).decode("utf-8", "replace")
+                    text = ooxml_part_text(pkg.read(name))
                 except (KeyError, RuntimeError, NotImplementedError):
                     continue
                 for m in _REL_ENTRY_RE.finditer(text):
@@ -692,6 +738,12 @@ def strip_local_path_links(src: Path, out: Path) -> dict:
                             "a DIFFERENT path (the zip rewrite would truncate the source)")
             return res
         with zipfile.ZipFile(src) as pkg:
+            # Untrusted input budget: the sibling refresh path caps every part
+            # and the archive total, but these strip helpers read EVERY member
+            # with no limit, so a small zip bomb allocated gigabytes here.
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise OSError(problem)
             parts = {i.filename: pkg.read(i.filename) for i in pkg.infolist()}
     except (zipfile.BadZipFile, OSError, KeyError, RuntimeError, NotImplementedError) as e:
         res["error"] = f"unreadable DOCX package: {type(e).__name__}: {e}"
@@ -701,7 +753,7 @@ def strip_local_path_links(src: Path, out: Path) -> dict:
         res["skipped"].append("no word/_rels/settings.xml.rels part")
         res["verified"] = {"removed": 0, "parts": len(parts)}
         return _publish_unchanged_copy(res, out, parts)
-    rels = parts[settings].decode("utf-8", "replace")
+    rels, rels_encode = _ooxml_part_codec(parts[settings])
     kill = []
     for m in _REL_ENTRY_RE.finditer(rels):
         entry = m.group(0)
@@ -722,10 +774,10 @@ def strip_local_path_links(src: Path, out: Path) -> dict:
     doc = "word/settings.xml"
     removed = []
     parts_new = dict(parts)
-    parts_new[settings] = new_rels.encode("utf-8")
+    parts_new[settings] = rels_encode(new_rels)
     ids = {rid for _a, _b, _t, rid in kill if rid}
     if doc in parts and ids:
-        settings_xml = parts[doc].decode("utf-8", "replace")
+        settings_xml, settings_encode = _ooxml_part_codec(parts[doc])
         new_settings = settings_xml
         for rid in ids:
             # Both element spellings (Word writes the empty element; be safe
@@ -734,15 +786,18 @@ def strip_local_path_links(src: Path, out: Path) -> dict:
             # .../>` alternative also deleted an attachedTemplate whose `r:id`
             # named a REMOTE template, killing a link that was not a local path.
             rid_pat = re.escape(rid)
+            # XML permits single-quoted attribute values (and whitespace around
+            # `=`), while `attr_of` above already accepted them. Removing only
+            # the double-quoted spelling left a live r:id dangling.
             new_settings = re.sub(
-                r"<w:attachedTemplate\b[^>]*r:id=\"" + rid_pat + r"\"[^>]*/>"
-                r"|<w:attachedTemplate\b[^>]*r:id=\"" + rid_pat
-                + r"\"[^>]*>.*?</w:attachedTemplate>", "", new_settings)
+                r"<w:attachedTemplate\b[^>]*r:id\s*=\s*[\"']" + rid_pat + r"[\"'][^>]*/>"
+                r"|<w:attachedTemplate\b[^>]*r:id\s*=\s*[\"']" + rid_pat
+                + r"[\"'][^>]*>.*?</w:attachedTemplate>", "", new_settings)
         # NO dangling reference may survive: the relationship is gone, so every
         # element that referenced it must be gone too (a live `r:id` naming a
         # dropped relationship is what makes Word offer "unreadable content").
         for rid in ids:
-            if re.search(r'r:id="' + re.escape(rid) + r'"', new_settings):
+            if re.search(r"r:id\s*=\s*[\"']" + re.escape(rid) + r"[\"']", new_settings):
                 res["error"] = (f"the attached-template element referencing {rid!r} could "
                                 f"not be removed, so the relationship was left in place")
                 return res
@@ -751,11 +806,11 @@ def strip_local_path_links(src: Path, out: Path) -> dict:
             # the drop is still safe, but say so instead of pretending.
             res["skipped"].append("the attached-template element was not present in "
                                   "word/settings.xml (the relationship alone was dropped)")
-        parts_new[doc] = new_settings.encode("utf-8")
+        parts_new[doc] = settings_encode(new_settings)
     try:
-        ET.fromstring(parts_new[settings].decode("utf-8"))
+        ET.fromstring(ooxml_part_text(parts_new[settings]))
         if doc in parts:
-            ET.fromstring(parts_new[doc].decode("utf-8"))
+            ET.fromstring(ooxml_part_text(parts_new[doc]))
     except ET.ParseError as e:
         res["error"] = f"the removal produced malformed XML: {e}"
         return res
@@ -1338,7 +1393,10 @@ def _caption_continuation_runs(inner: str, styles: dict, src_style: str,
         if src != dst:
             props.append(key)
     src_sz, dst_sz = style_sz(styles, src_style), style_sz(styles, dst_style)
-    if src_sz and dst_sz and src_sz != dst_sz:
+    # `src_sz` comes from the INPUT package's styles.xml. It is interpolated
+    # into a new rPr below, so only a plain number may get there: an unusual
+    # value must not inject elements or produce schema-invalid OOXML.
+    if src_sz and dst_sz and src_sz != dst_sz and re.fullmatch(r"\d+", str(src_sz)):
         props.append("sz")
     if not props:
         return inner
@@ -1609,10 +1667,18 @@ def display_item_rows(xml: str, policy: dict, doc: str, kind: str) -> tuple:
 
     def attach(i, step):
         """(block index, text) of the nearest non-empty paragraph attached to the
-        item on one side; stops at a table (a caption belongs to the item it
-        touches, never to the one two blocks away)."""
+        item on one side; stops at a table or at another IMAGE paragraph (a
+        caption belongs to the item it touches, never to the one two blocks
+        away)."""
         j = i + step
         while 0 <= j < len(blocks) and blocks[j][0] == "p":
+            if kind == "figure" and FIGURE_DRAWING_RE.search(blocks[j][3]):
+                # `[image][image][Figure 2 legend]` used to walk past the second
+                # image (no text) and bind the legend to the FIRST one as its
+                # AFTER caption; the second figure then had none. An image
+                # paragraph is itself an item, so it ends the search -- even
+                # when it also carries its own "self" caption text.
+                return None, ""
             if j in texts:
                 return j, texts[j]
             j += step
@@ -2081,8 +2147,8 @@ def cover_letter_stamp_rows(path: Path, policy: dict) -> list:
             problem = _docx_zip_problem(pkg)
             if problem:
                 raise OSError(problem)
-            xml = _docx_xml_part_guarded(
-                pkg, "word/document.xml").decode("utf-8", "replace")
+            xml = ooxml_part_text(
+                _docx_xml_part_guarded(pkg, "word/document.xml"))
             used_styles = set(re.findall(r'<w:pStyle w:val="([^"]+)"', xml))
             if want_parts:
                 for name in pkg.namelist():
@@ -2156,7 +2222,7 @@ def empty_paragraph_slots_from_template(template) -> list:
     if isinstance(template, (str, Path)) and not str(template).lstrip().startswith("<"):
         try:
             with zipfile.ZipFile(template) as pkg:
-                xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+                xml = ooxml_part_text(pkg.read("word/document.xml"))
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
             return []
     else:
@@ -2253,6 +2319,17 @@ def _table_spans(xml: str) -> list:
     return spans
 
 
+# A paragraph that carries a tracked change is revision HISTORY, not a blank
+# line. `text_of` returns no text for `w:delText`, so a paragraph whose only
+# visible content is a tracked deletion was classified empty and the
+# stray-empty-paragraph repair spliced the whole paragraph out, silently
+# discarding the revision (the caption merge already refuses these marks).
+REVISION_CONTENT_RE = re.compile(
+    r"<w:(?:ins|del|delText|moveFrom|moveTo|moveFromRange|moveToRange|"
+    r"pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|sectPrChange|"
+    r"numberingChange|cellIns|cellDel|cellMerge)(?=[\s/>])")
+
+
 def stray_empty_paragraph_groups(paras: list, policy: dict, xml: str = None) -> tuple:
     """([(indices_to_delete, kind)], prescribed_indices).
 
@@ -2274,6 +2351,8 @@ def stray_empty_paragraph_groups(paras: list, policy: dict, xml: str = None) -> 
                 and not has_drawing(paras[i][2])
                 and not has_field(paras[i][2])                # a field run is content
                 and not has_anchor(paras[i][2])                # footnote/comment/bookmark
+                and not has_math(paras[i][2])                  # an equation is content
+                and not REVISION_CONTENT_RE.search(paras[i][2])  # a tracked change is content
                 and not PAGEBREAK_RE.search(paras[i][2])       # FMT-S1 owns breaks
                 and "<w:sectPr" not in paras[i][2]             # a section break is layout
                 for i in range(len(paras))]
@@ -2441,7 +2520,15 @@ def visual_text_lines(para: str) -> list:
     line break with it.
     """
     lines, start, offset = [], 0, 0
-    for m in _TEXT_EDGE_TOKENS.finditer(para):
+    # The SAME token walk `text_of`/`rewrite_text_spans` use. The raw
+    # `_TEXT_EDGE_TOKENS` scan also counted a `<w:tab>` inside `<w:tabs>`
+    # (a tab-STOP definition, not a character) and every token under a nested
+    # text-box paragraph, so each line span after such a token was shifted and
+    # FMT-P4 rewrote the wrong characters (with a tab stop it deleted a real
+    # line break; with a text-box host the span fell outside the text and the
+    # repair could never clear the row). `_FRAG_OR_BREAK_RE` skips exactly
+    # those non-content tokens, keeping the line spans on text_of coordinates.
+    for m in _FRAG_OR_BREAK_RE.finditer(para):
         tok = m.group(0)
         # `<w:tab/>` also starts with "<w:t", so the old prefix test read it as
         # a text token of length 0: the tab neither advanced the text offset nor
@@ -2567,24 +2654,32 @@ def hygiene_spans(para: str) -> list:
         # A soft break between the two words is part of the match. Replacing the
         # whole match with the bare word deleted the break, and a replacement
         # that spans the break is refused by rewrite_text_spans. Delete only the
-        # SECOND word (and any spaces after the last break), keeping the break.
+        # REPEATS (and any spaces after the last one), keeping the breaks.
         second_start = m.end() - len(m.group(1))
         sep = text[m.end(1):second_start]
-        start, end, repl = m.start(), m.end(), m.group(1)
         if "\n" in sep or "\r" in sep:
-            # Delete the repeats after the LAST break, keeping the break itself
-            # (FMT-P4 owns the whitespace at the line edge). Starting at the
-            # space made both spans share a start, and the overlap policy
-            # (narrower wins) then dropped G1 while the summary still claimed
-            # the duplicate was cleaned. A tripled word deletes every repeat,
-            # not just the last one.
-            start = m.end(1) + max(sep.rfind("\n"), sep.rfind("\r")) + 1
-            while start < len(text) and text[start] in " \t":
-                start += 1              # FMT-P4 owns the line-edge space
-            end = m.end()
-            while end < len(text) and text[end] in " \t":
-                end += 1              # the space after the deleted duplicate
-            repl = ""
+            # ONE span starting after the LAST break deleted only the final
+            # repeat: "the\nthe\nthe" became "the\nthe\n" and the rescan still
+            # filed FMT-G1, so the mechanical fix was rejected as a whole. Emit
+            # one deletion per repeat after the first; a single span across
+            # them would cover (and consume) the line breaks, which belong to
+            # the paragraph's structure, not to the duplicate word.
+            reps = list(re.finditer(r"\b" + re.escape(m.group(1)) + r"\b",
+                                    m.group(0), re.I))
+            for w in reps[1:]:
+                _e = m.start() + w.end()
+                # Consume the spaces/tabs that separate the duplicate from the
+                # next word, never a line break (a break is structure).
+                while _e < len(text) and text[_e] in " \t":
+                    _e += 1
+                out.append({"rule": "FMT-G1", "fix": "mechanical",
+                            "start": m.start() + w.start(),
+                            "end": _e, "repl": "",
+                            "evidence": f"doubled word: "
+                                        f"{text[max(0, m.start()-30):m.end()+30]!r}",
+                            "detail": "the same article/preposition twice in a row"})
+            continue
+        start, end, repl = m.start(), m.end(), m.group(1)
         out.append({"rule": "FMT-G1", "fix": "mechanical", "start": start, "end": end,
                     "repl": repl,
                     "evidence": f"doubled word: {text[max(0, m.start()-30):m.end()+30]!r}",
@@ -2953,7 +3048,7 @@ def part_rels(pkg: zipfile.ZipFile, part: str) -> dict:
     if relname not in pkg.namelist():
         return {}
     out = {}
-    xml = pkg.read(relname).decode("utf-8", "replace")
+    xml = ooxml_part_text(pkg.read(relname))
     for m in _REL_ENTRY_RE.finditer(xml):
         attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
         if attrs.get("Id") and attrs.get("Type", "").endswith("/image"):
@@ -3246,7 +3341,7 @@ def figure_text_size_rows(docx_path: Path, policy: dict = None) -> list:
             "fix": "manual", "protected": False, "tier": "advisory"}]
     try:
         with zipfile.ZipFile(docx_path) as pkg:
-            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+            xml = ooxml_part_text(pkg.read("word/document.xml"))
             sizes = media_pixel_sizes(pkg)
             rels = part_rels(pkg, "word/document.xml")
             seen = set()
@@ -3470,12 +3565,16 @@ BIORXIV_DOI_PREFIX = "10.1101"
 
 
 def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
-                         limit: int = 80) -> list:
+                         limit: int = 80, field_ranges: list = None) -> list:
     """FMT-R1..R5: malformed / unsupported reference-entry shapes.
 
     `paras` are paragraph texts, `is_ref` the parallel "this is a reference
     entry" flags. Rows are ordered by paragraph and capped; each carries the
     entry's first ~120 characters as evidence so the reviewer can find it.
+    `field_ranges` is the optional per-paragraph `field_result_text_ranges`
+    list: an entry inside a live Zotero field is a field RESULT (Word and
+    Zotero regenerate it), so its row is `protected=True`/`fix=style-field`
+    like every other field-result row -- the formatter must not rewrite it.
     """
     rows = []
     policy = policy or {}
@@ -3485,6 +3584,10 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
     def entry_ref(idx: int) -> str:
         return f"reference entry at paragraph {idx}"
 
+    def field_flags(idx: int) -> dict:
+        inside = bool(field_ranges and idx < len(field_ranges) and field_ranges[idx])
+        return {"protected": True, "fix": "style-field"} if inside else {"protected": False}
+
     for idx, (text, is_reference) in enumerate(zip(paras or [], is_ref or [])):
         if not is_reference:
             continue
@@ -3492,13 +3595,14 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
         if len(entry.split()) < 4:
             continue
         head = entry[:120]
+        flags = field_flags(idx)
         if REF_VOLUME_MALFORMED_RE.search(entry):
             rows.append({"rule": "FMT-R1", "severity": "medium",
                          "location": entry_ref(idx), "evidence": head,
                          "detail": "the journal/volume field is malformed (a volume glued to a "
                                    "year, e.g. 'Volume 11-2020'); a reference needs the venue's "
                                    "own volume/page form (e.g. '11, 565825 (2020)')",
-                         "protected": False})
+                         **flags})
         has_venue = bool(REF_VENUE_HINT_RE.search(entry))
         if not has_venue and REF_BARE_YEAR_END_RE.search(entry):
             rows.append({"rule": "FMT-R2", "severity": "medium",
@@ -3506,7 +3610,7 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
                          "detail": "the entry ends at a bare '(YEAR).' and names no venue, "
                                    "locator or publisher; an entry a reader cannot retrieve is "
                                    "not a citation",
-                         "protected": False})
+                         **flags})
         repo_only = (REF_REPO_HOST_RE.search(entry)
                      and not REF_DOI_RE.search(entry)
                      and not REF_PREPRINT_RE.search(entry))
@@ -3516,7 +3620,7 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
                          "detail": "a software/repository citation with no version, release or "
                                    "DOI; cite the used version (a release tag, a commit, or the "
                                    "archived DOI) so the reader can retrieve the same code",
-                         "protected": False})
+                         **flags})
         if REF_SERVER_CODE_RE.search(entry):
             # EVERY DOI of the entry decides: an entry that names a published
             # DOI first and the server's own 10.1101/ DOI after it was flagged
@@ -3530,7 +3634,7 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
                                        f"({(REF_SERVER_CODE_RE.search(entry).group(0))}) but its "
                                        f"DOI {'is ' + doi if doi else 'is missing'} instead of "
                                        f"the server's own {BIORXIV_DOI_PREFIX}/ prefix",
-                             "protected": False})
+                             **flags})
         if flag_preprints and (REF_PREPRINT_RE.search(entry)
                                or REF_TRIAL_ABSTRACT_RE.search(entry)):
             kind = ("a trial-in-progress abstract" if REF_TRIAL_ABSTRACT_RE.search(entry)
@@ -3540,7 +3644,7 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
                          "detail": f"the entry is {kind}, not a published article, and this "
                                    "venue's profile asks for a row on every one: confirm the "
                                    "venue accepts it, or cite the published version",
-                         "protected": False})
+                         **flags})
         if len(rows) >= limit:
             break
     return rows[:limit]
@@ -4148,6 +4252,10 @@ def zotero_style_ids(parts: dict) -> dict:
     """
     found = {}
     for name, xml in (parts or {}).items():
+        if isinstance(xml, bytes):
+            # A legal OOXML part may be UTF-16; a raw byte value must be read
+            # with the part's own codec, not ignored (F43).
+            xml = ooxml_part_text(xml)
         if not isinstance(xml, str):
             continue
         m = ZOTERO_STYLE_REF_RE.search(xml)
@@ -4878,6 +4986,36 @@ def _zotero_entry_span_of_run(content: str):
     return m.start(1), m.end(1), int(nm.group(1))
 
 
+def _zotero_renumber_run(run: str, rank: int) -> str:
+    """Rewrite the WHOLE visible number of one bibliography entry run.
+
+    Word may split one number across several `<w:t>` elements ("1" + "0." =
+    "10."): `_zotero_entry_span_of_run` accepts the joined run, but a
+    `re.sub(..., count=1)` rewrote only the FIRST element, leaving the rest of
+    the old number in place ("10." stayed "10." while the marker said 1). Put
+    the complete replacement number in the first text element and clear the
+    others, so the run's rendered text is exactly the new rank and every run
+    wrapper/property stays where it was.
+    """
+    pieces = list(re.finditer(r"<w:t(?:\s[^>]*)?(?<!/)>(.*?)</w:t>", run, re.S))
+    if not pieces:
+        return run
+    m = re.fullmatch(r"(\s*)(\d+)(\s*[\.\)]?\s*)", text_of(run))
+    if not m:
+        return run
+    new_text = m.group(1) + str(rank) + m.group(3)
+    out, cursor = [], 0
+    for k, pm in enumerate(pieces):
+        out.append(run[cursor:pm.start()])
+        open_tag = run[pm.start():run.find(">", pm.start()) + 1]
+        if "xml:space" not in open_tag:
+            open_tag = open_tag[:-1] + ' xml:space="preserve">'
+        out.append(open_tag + (esc(new_text) if k == 0 else "") + "</w:t>")
+        cursor = pm.end()
+    out.append(run[cursor:])
+    return "".join(out)
+
+
 def _zotero_entry_match_score(entry_text: str, item: dict) -> int:
     """Confidence that a bibliography ENTRY text describes one itemData."""
     hay = re.sub(r"[^a-z0-9 ]+", " ", unicodedata.normalize(
@@ -4963,6 +5101,7 @@ def zotero_bibliography_state(xml: str, frame: dict):
     spine = xml[p0_start:sep[1]]
     heads, contents, numbers, entries, spans = [], [], [], [], []
     gap_after_entry = False
+    last_entry_p1 = None
     for k, (p0, p1, para) in enumerate(paragraphs(xml)):
         if p0 < p0_start or p1 > p1_last:
             continue
@@ -5002,11 +5141,21 @@ def zotero_bibliography_state(xml: str, frame: dict):
         if gap_after_entry:
             return {"skip": ("a text-less paragraph sits between bibliography entries; "
                              "the rebuild cannot place it")}
+        if last_entry_p1 is not None and xml[last_entry_p1:p0].strip():
+            # The per-entry spans cover only (open tag + pPr) + runs + `</w:p>`;
+            # any element BETWEEN two entry paragraphs (a bookmarkStart, a
+            # comment range, a section property) is in no stored span and the
+            # rebuild would drop it while a matching bookmarkEnd in the tail
+            # survived, leaving an orphan. Refuse rather than silently delete
+            # document structure the refresh does not own.
+            return {"skip": ("non-whitespace XML sits between bibliography entries; "
+                             "the rebuild cannot preserve it")}
         numbers.append(span[2])
         entries.append((span[2], re.sub(r"\s+", " ", text_of(content)).strip()))
         heads.append(para[:head_end])
         contents.append(content)
         spans.append((p0, p1, end_here))
+        last_entry_p1 = p1
     if not contents:
         return {"skip": "the bibliography field carries no entries"}
     last_p1 = spans[-1][1]
@@ -5074,12 +5223,10 @@ def _zotero_bibliography_plan(xml: str, frame: dict, items_by_rank: dict):
             return {"needed": True, "xml": None, "skip": "a bibliography entry lost its number"}
         run = st["contents"][idx][span[0]:span[1]]
         # Word can split the number run as `" 12."` (a leading space or tab
-        # inside the same w:t). The old pattern required the digit immediately
-        # after the tag, so the run matched by `_zotero_entry_span_of_run` was
-        # never rewritten and the report still claimed a renumber.
-        new_run = re.sub(r"(<w:t(?:\s[^>]*)?>)(\s*)(\d+)([\.\)]?)(\s*)(</w:t>)",
-                         lambda m: m.group(1) + m.group(2) + str(rank) + m.group(4)
-                         + m.group(5) + m.group(6), run, count=1)
+        # inside the same w:t) or across SEVERAL w:t elements ("1" + "0.").
+        # Rewriting with a count=1 `re.sub` left the rest of a split number in
+        # place, so the entry stayed "10." while its marker was rewritten to 1.
+        new_run = _zotero_renumber_run(run, rank)
         contents_by_rank[rank] = (st["contents"][idx][:span[0]] + new_run
                                   + st["contents"][idx][span[1]:])
     reordered = any(rank != idx + 1 for idx, rank in assignment.items())
@@ -5125,13 +5272,19 @@ def zotero_refresh_document(xml: str, para_texts: list = None,
     edits = []
     fields_fixed = 0
     for frame in item_frames:
-        instr_m = INSTR_RE.search(xml, frame["begin"], frame["end"] or len(xml))
-        if not instr_m:
+        # Word may split ONE field instruction across several `<w:instrText>`
+        # elements. `zotero_field_report` joins them (`frame["instr"]`), but
+        # parsing only the FIRST element made a field whose split falls before
+        # the CSL_CITATION JSON look unparseable, while the report and
+        # `zotero-check` read the same field fine. Join every piece.
+        instr_pieces = list(INSTR_RE.finditer(xml, frame["begin"],
+                                              frame["end"] or len(xml)))
+        if not instr_pieces:
             out["skip"] = "a citation field carries no instruction"
             return out
-        inner = re.sub(r"^<w:instrText[^>]*>|</w:instrText>$", "",
-                       instr_m.group(0), flags=re.S)
-        instr_text = unesc(inner)
+        instr_text = "".join(
+            unesc(re.sub(r"^<w:instrText[^>]*>|</w:instrText>$", "",
+                         pm.group(0), flags=re.S)) for pm in instr_pieces)
         js_span = _zotero_json_span(instr_text)
         if js_span is None:
             out["skip"] = "a citation field's JSON does not parse"
@@ -5164,6 +5317,16 @@ def zotero_refresh_document(xml: str, para_texts: list = None,
         if not keys or any(r is None for r in ranks):
             out["skip"] = f"field {frame.get('citationID')!r} cites an item with no rank"
             return out
+        if len(set(ranks)) != len(ranks):
+            # `_zotero_cluster_for_ranks` sorts a SET, so a field whose
+            # citationItems are [K1, K1] would be rewritten with ONE number
+            # while its `formattedCitation` result claimed two cited items (the
+            # old count guard only compared the OLD marker, not the rebuilt
+            # cluster). One rendered number per item cannot express a duplicate;
+            # refusing is all-or-nothing, exactly like every other refresh skip.
+            out["skip"] = (f"field {frame.get('citationID')!r} cites the same item more than "
+                           f"once; the rendered cluster cannot be rebuilt safely")
+            return out
         region = _zotero_result_region(xml, frame)
         if region is None:
             out["skip"] = f"field {frame.get('citationID')!r} has no simple result runs"
@@ -5189,9 +5352,16 @@ def zotero_refresh_document(xml: str, para_texts: list = None,
         new_js["properties"]["plainCitation"] = new_cluster
         new_json = json.dumps(new_js, ensure_ascii=False, separators=(",", ":"))
         new_instr = instr_text[:js_start] + new_json + instr_text[js_end:]
-        open_tag = instr_m.group(0)[:instr_m.group(0).find(">") + 1]
-        edits.append((instr_m.start(), instr_m.end(), open_tag + esc(new_instr)
-                      + "</w:instrText>"))
+        # Write the rebuilt instruction back across the SAME elements: the first
+        # carries the whole instruction, the others are emptied. That keeps
+        # every run/property wrapper (and any markup between the pieces) in
+        # place, and the joined instruction text is exactly `new_instr`.
+        first_open = instr_pieces[0].group(0)[:instr_pieces[0].group(0).find(">") + 1]
+        edits.append((instr_pieces[0].start(), instr_pieces[0].end(),
+                      first_open + esc(new_instr) + "</w:instrText>"))
+        for pm in instr_pieces[1:]:
+            open_tag = pm.group(0)[:pm.group(0).find(">") + 1]
+            edits.append((pm.start(), pm.end(), open_tag + "</w:instrText>"))
         r_s, r_e, _runs, template = region
         edits.append((r_s, r_e, _zotero_result_run(template, new_cluster)))
         fields_fixed += 1
@@ -5336,14 +5506,21 @@ def zotero_style_reconcile(parts: dict, preferred: str = "") -> dict:
         if sid == target:
             continue
         raw = new_parts.get(name)
-        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
+        # Decode through the part's own codec and re-encode in the SAME form
+        # (F43): a legal UTF-16 style store is invisible to a UTF-8 replace
+        # decode, and writing UTF-8 bytes under an encoding="UTF-16"
+        # declaration corrupts the part.
+        if isinstance(raw, bytes):
+            text, _encode = _ooxml_part_codec(raw)
+        else:
+            text, _encode = str(raw or ""), (lambda s: s)
         # Zotero 6 writes an `http://` store and the XML text may carry
         # `&quot;` right after the id, so the whole URL is replaced by pattern
         # (a literal `https://` replace missed the legacy store entirely).
         new_text = re.sub(r"https?://www\.zotero\.org/styles/" + re.escape(sid) + r"\b",
                           f"https://www.zotero.org/styles/{target}", text)
         if new_text != text:
-            new_parts[name] = new_text.encode("utf-8") if isinstance(raw, bytes) else new_text
+            new_parts[name] = _encode(new_text) if isinstance(raw, bytes) else new_text
             out["to"][name] = target
     if out["to"]:
         out["changed"] = True
@@ -5362,7 +5539,11 @@ def _part_has_zotero_item_field(raw) -> bool:
     case-insensitively; a raw byte containment test missed an instruction Word
     split into two runs (`ADDIN ` + `ZOTERO_ITEM`) or spelled lowercase.
     """
-    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
+    # A legal aux part may be UTF-16; decoding it as UTF-8 with `replace`
+    # produced NUL-interleaved text and this guard saw no Zotero field, so the
+    # refresh reported success while `zotero-check` (UTF-16-aware) still saw
+    # the stale field.
+    text = ooxml_part_text(raw) if isinstance(raw, bytes) else str(raw or "")
     instr = "".join(re.findall(r"<w:instrText\b[^>]*(?<!/)>(.*?)</w:instrText>",
                                text, re.S | re.I))
     return "ADDIN ZOTERO_ITEM" in re.sub(r"\s+", " ", instr).upper()
@@ -5386,7 +5567,8 @@ def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
         return rep
     style_names = [n for n in ("word/settings.xml", "docProps/custom.xml") if n in parts]
     style_names += [n for n in parts if re.match(r"customXml/item\d*\.xml$", n)]
-    style_parts = {n: parts[n].decode("utf-8", "replace") for n in style_names}
+    style_codecs = {n: _ooxml_part_codec(parts[n]) for n in style_names}
+    style_parts = {n: style_codecs[n][0] for n in style_names}
     # The parts the FIELD READER (`ZOTERO_FIELD_PARTS` +
     # `ZOTERO_FIELD_AUX_PARTS_RE`, i.e. the set `zotero-check` scans) treats as
     # citation surfaces must all be REFUSED here, not just footnotes/endnotes: a
@@ -5406,10 +5588,12 @@ def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
         # part keeps its original bytes.
         for n in sorted(style_info.get("to") or {}):
             text = style_info["parts"][n]
-            new_parts[n] = text.encode("utf-8") if isinstance(text, str) else text
-            style_parts[n] = text.decode("utf-8", "replace") if isinstance(text, bytes) else text
+            # Re-encode a changed store in the form it arrived in (a UTF-16
+            # part rewritten as UTF-8 would contradict its own declaration).
+            new_parts[n] = style_codecs[n][1](text) if isinstance(text, str) else text
+            style_parts[n] = ooxml_part_text(text) if isinstance(text, bytes) else text
         rep["changes"].extend(style_info["changes"])
-    xml = new_parts["word/document.xml"].decode("utf-8", "replace")
+    xml, doc_encode = _ooxml_part_codec(new_parts["word/document.xml"])
     if other_field_parts:
         rep["skip"] = ("citation fields live outside word/document.xml "
                        f"({', '.join(other_field_parts)}); the offline refresh is limited to "
@@ -5419,7 +5603,7 @@ def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
                                       style_ids=zotero_style_ids(style_parts))
         rep["zotero"] = {k: v for k, v in zot.items() if k != "xml"}
         if zot.get("changed"):
-            new_parts["word/document.xml"] = zot["xml"].encode("utf-8")
+            new_parts["word/document.xml"] = doc_encode(zot["xml"])
             rep["changes"].extend(zot["changes"])
         elif zot.get("skip"):
             rep["skip"] = zot["skip"]
@@ -5790,6 +5974,7 @@ def repair_reference_entries(xml: str, records: list) -> dict:
         return out
     paras = paragraphs(xml)
     texts = [text_of(p[2]) for p in paras]
+    doc_field_results = _field_result_spans(xml)
     first = _bibliography_entry_start(texts)
     # Keyed by the paragraph's ORIGINAL span: `apply_edits` splices every edit at
     # its own offsets, so two edits for one paragraph spliced the second
@@ -5805,6 +5990,17 @@ def repair_reference_entries(xml: str, records: list) -> dict:
         entry = re.sub(r"\s+", " ", texts[idx]).strip()
         m = re.match(r"^\s*(\d+)\s*[\.\)]\s*(.+)$", entry)
         if not m or len(entry.split()) < 4:
+            continue
+        if field_result_text_ranges(para, doc_field_results, p0):
+            # The docstring above promises an entry inside a live Zotero field
+            # is a field RESULT the formatter never edits (Word/Zotero
+            # regenerate it). Without this check the sibling .bib rewrote the
+            # cached w:t of a live ZOTERO_BIBL field, and fix_package captured
+            # fields_before AFTER that repair, so its live-field fence could
+            # not see the change and reported the field preserved.
+            out["skipped"].append(
+                f"FMT-R1/R2/R3: entry {m.group(1)} is inside a live Zotero field result; "
+                f"the formatter must not rewrite it")
             continue
         rec = _bib_record_for_entry(entry, records)
         if rec is None:
@@ -5833,6 +6029,17 @@ def repair_reference_entries(xml: str, records: list) -> dict:
             core = lead.strip("()[]{}.,;:'\"")
             has_locator = bool(re.search(r"\d", core)) \
                 and not re.fullmatch(r"(?:19|20)\d{2}", core)
+            if not has_locator and page:
+                # The locator may already be written LATER in the entry
+                # ("Volume 11-2020. Article 565825."): the probe above reads
+                # only the FIRST token after the malformed volume, so "Article"
+                # hid the article number and the repair appended it again
+                # ("11, 565825. Article 565825."). Treat the record's own page
+                # token anywhere after the volume as the locator it is.
+                loc_tail = rest if rest is not None else tail
+                has_locator = bool(re.search(
+                    r"(?<![\w.])" + re.escape(page.strip()) + r"(?![\w])",
+                    loc_tail, re.I))
             if rest is not None:
                 old = old + ", "
                 new = (f"{rec['volume']}, " if has_locator

@@ -422,6 +422,16 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
                   "M34_source_data_coverage.md", "M35_disclosures.md",
                   "M36_zotero_parity.md", "M2_references.md"):
         write(art / fname, "| row | disposition |\n|---|---|\n| x | OK — tested: the row is inside its bar |\n")
+    # The postcheck's `require_files` gate expects EVERY seeded decision
+    # artifact; a genuinely clean sandbox therefore carries all of them.
+    for _rel in nb.DECISION_ARTIFACTS:
+        _p = sb / "guided_review" / _rel
+        if not _p.is_file():
+            _p.parent.mkdir(parents=True, exist_ok=True)
+            _p.write_text("| row | disposition |\n|---|---|\n"
+                          "| x | OK — tested: the row is inside its bar |\n",
+                          encoding="utf-8")
+    write(sb / "guided_review" / "work" / "FORMAT_SCAN.json", {"rows": []})
     write(sb / "guided_review" / "ARCHITECTURE.md",
           "| document | section | paragraphs | current structure | reader cost | "
           "proposed reorganization | class | severity | disposition |\n"
@@ -667,12 +677,12 @@ def test_selfcheck_covers_the_other_stages():
     sb, pkg = package_sandbox(tmp / "a", "r1_a2_revise", "revise")
     write(sb / "guided_review" / "findings.json",
           {"findings": [{"id": "F-001"}, {"id": "F-002"}]})
-    write(pkg / "revision_report.json", {"rows": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"}]})
+    write(pkg / "revision_report.json", {"rows": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed", "rationale": "source checked", "evidence": "main.md:1"}]})
     errs = nb.sandbox_selfcheck(sb, "revise", "r1_a2_revise", 1)[1]
     check("revise: a ledger that omits a frozen finding id is caught before the marker",
           any("does not name" in e and "F-002" in e for e in errs), str(errs)[:200])
-    write(pkg / "revision_report.json", {"rows": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"},
-                                                   {"id": "F-002", "verdict": "confirmed", "final_status": "fixed"}]})
+    write(pkg / "revision_report.json", {"rows": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed", "rationale": "source checked", "evidence": "main.md:1"},
+                                                   {"id": "F-002", "verdict": "confirmed", "final_status": "fixed", "rationale": "source checked", "evidence": "main.md:2"}]})
     check("revise: a complete sandbox then passes",
           nb.sandbox_selfcheck(sb, "revise", "r1_a2_revise", 1)[0] is True,
           str(nb.sandbox_selfcheck(sb, "revise", "r1_a2_revise", 1)[1])[:160])

@@ -328,6 +328,11 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     (the rule names no stage, mode, round or bookkeeping file, so it cannot
     break a judge's blinding).
     """
+    # Operator-supplied venue values carry their own `@@` sequences (F97): decode
+    # them before paging, and decode the block bodies too, because a paged
+    # section is written from the body a builder handed over.
+    text = restore_venue_literals(text)
+    blocks = [(title, restore_venue_literals(body)) for title, body in blocks]
     if profile != PROFILE_MEDIUM:
         return ensure_external_content_rule(CONTRADICTION_RULE + text)
     from pathlib import Path
@@ -486,6 +491,11 @@ def frozen_review_is_synthesized(ctx) -> bool:
     predicate is never true there (`--no-guided-review` is refused with a scoped
     mode at setup).
     """
+    if journal_is_scoped(ctx):
+        # set-revision-mode can reach a scoped mode while the root still records
+        # guided_review=off; the scoped round has no cold-start review either, so
+        # there is no synthesized frozen view to write (F264).
+        return False
     return not guided_review_enabled(ctx)
 
 

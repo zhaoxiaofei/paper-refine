@@ -68,6 +68,61 @@ def is_non_manuscript(name: str) -> bool:
     return _is_evidence(name, _NON_MANUSCRIPT_RE, _REPLY_RE)
 
 
+# A reference list is quoted bibliography, not the authors' prose: an
+# occurrence inside a cited title must never be enumerated as a propagation
+# target (F275).  The sibling extractors already skip the region and a
+# reference-role file; this enumerator did neither.
+REF_HEAD_RE = re.compile(
+    r"^\s*(?:"
+    r"\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}\s*(?:\\label\{[^{}]*\})?"
+    r"|\\begin\{thebibliography\}"
+    r"|\\(?:bibliography|printbibliography)\b.*"
+    r"|(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)"
+    r"\s*(?:\*{1,2}|_{1,2})?\s*[:.\u2014\u2013-]?\s*"
+    r")\s*(?:%.*)?$", re.I)
+REF_END_RE = re.compile(
+    r"^\s*(?:\\end\{thebibliography\}|\\(?:section|subsection|chapter)\*?\s*\{|"
+    r"#{1,6}\s+\S|"
+    r"(?:abstract|introduction|background|methods?|materials and methods|"
+    r"results?|discussion|conclusions?|acknowledg\w*|author contributions?|"
+    r"data availability|code availability|competing interests?|"
+    r"conflicts? of interest|funding|supplementary(?:\s+\w+)?|"
+    r"figure legends?|tables?)\s*(?::|\s*$))", re.I)
+NUM_ENTRY_RE = re.compile(r"^\s*(?:\[?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
+REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
+
+
+def is_reference_file(name: str) -> bool:
+    """A bibliography file by name, with the siblings' role-word rule."""
+    raw = os.path.basename(name or "").lower()
+    base = re.sub(r"\.(?:txt|md)$", "", raw)
+    base = re.sub(r"\.[a-z0-9]{1,5}$", "", base)
+    return bool(REF_ROLE_RE.search(base) or "bibliograph" in base
+                or re.search(r"\.bib(\.|$)", raw))
+
+
+def find_reference_region(lines):
+    """(start, end) line indices of a reference list, or None."""
+    start = None
+    for i, ln in enumerate(lines):
+        if REF_HEAD_RE.match(ln.strip()):
+            # The LAST heading is the real list (a table-of-contents line or a
+            # superseded list must not latch the sweep onto the wrong region).
+            start = i + 1
+    if start is None:
+        return None
+    end = len(lines)
+    for j in range(start, len(lines)):
+        s = lines[j].strip()
+        if not s or NUM_ENTRY_RE.match(s):
+            continue  # blank lines and numbered entries are inside the list
+        if REF_END_RE.match(s):
+            end = j
+            break
+    return start, end
+
+
 def slugify(s):
     s = re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")
     return s[:40] or "term"
@@ -81,11 +136,20 @@ def variant_pattern(term, mode):
         # never a decimal point: reading "1,234" as 1.234 generated an
         # alternative spelling for a different magnitude.
         num = term
+        # U+2212 MINUS SIGN and ASCII '-' are the same sign in typeset text, so
+        # a target written in one spelling must enumerate the other (F278).
+        sign_forms = []
+        if num.startswith("\u2212"):
+            sign_forms.append("-" + num[1:])
+            num = sign_forms[0]
+        elif num.startswith("-"):
+            sign_forms.append("\u2212" + num[1:])
         # The LITERAL spelling is always one of the forms: with a thousands
         # separator (`1,234`) the decimal-normalised `num` is "1.234", which
         # never matches the text that carries the number, so the sweep reported
         # an occurrence the manuscript still carries as missing.
         pats = [re.escape(num), esc]
+        pats.extend(re.escape(form) for form in sign_forms if form != num)
         if num.startswith("0."):
             pats.append(re.escape(num[1:]))           # .031
         if num.startswith("."):
@@ -110,6 +174,21 @@ def variant_pattern(term, mode):
         norm = num.replace(",", "") if grouped else num
         if norm != num:
             pats.append(re.escape(norm))
+        # The other direction: a plain integer target must also enumerate its
+        # comma-grouped spelling ("1234" ~ "1,234").  The leading guard keeps
+        # the plain digits from matching inside the grouped form, so without
+        # this pattern the other spelling was invisible (F278).
+        if not grouped and re.fullmatch(r"[+\-]?\d{4,}", num):
+            _sign = num[0] if num[0] in "+-" else ""
+            _digits = num[len(_sign):]
+            if not _digits.startswith("0"):
+                _grouped = _sign + format(int(_digits), ",")
+                pats.append(re.escape(_grouped))
+                if _sign == "-":
+                    pats.append(re.escape("\u2212" + format(int(_digits), ",")))
+                elif not _sign:
+                    # The explicit plus sign is the same value as the plain one.
+                    pats.append(r"\+" + re.escape(_grouped))
         try:
             # Decimal, not float: `float("9007199254740993")` is
             # 9007199254740992, so the generated scientific spelling named a
@@ -161,8 +240,11 @@ def variant_pattern(term, mode):
             pats.append(re.escape(mant) + mant_pad + re.escape(" × 10^" + str(exp_i)))
             # The multiplication sign is also written without the caret and
             # with a U+2212 minus ("3.1 × 10−2"); those occurrences were
-            # invisible to the M4 sweep.
-            pats.append(re.escape(mant) + mant_pad + " × 10" + re.escape(str(exp_i)))
+            # invisible to the M4 sweep. Exponent 0 is the exception: "3 × 100"
+            # is three hundred, not 3, so only the caret/superscript forms
+            # ("3 × 10^0"/"3 × 10⁰") name that value.
+            if exp_i != 0:
+                pats.append(re.escape(mant) + mant_pad + " × 10" + re.escape(str(exp_i)))
             # The U+2212 spelling is the SAME value only when the exponent is
             # negative. Emitting it for a positive exponent also matched the
             # different value ("1.5 × 10^−3" for a target of 1500).
@@ -310,13 +392,18 @@ def main():
                     continue
                 if is_non_manuscript(fname):
                     continue  # occurrences are counted in the manuscript only
+                if is_reference_file(fname):
+                    continue  # a bibliography file is quoted text, not prose
                 try:
                     lines = open(os.path.join(corpus, fname), encoding="utf-8",
                                  errors="replace").read().split("\n")
                 except OSError as e:
                     print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
                     continue
+                region = find_reference_region(lines)
                 for li, raw in enumerate(lines, 1):
+                    if region and region[0] <= li - 1 < region[1]:
+                        continue  # a cited title is never a propagation target
                     for m in pat.finditer(raw):
                         results.append({"file": fname, "line": li,
                                         "match": m.group(0),

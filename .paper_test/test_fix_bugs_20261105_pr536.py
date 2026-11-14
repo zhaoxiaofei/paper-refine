@@ -351,7 +351,9 @@ def test_pr038_feedback_staging_collision() -> None:
     (corpus / "human_review_feedback/a__b.txt").write_text("SECOND source text.\n")
 
     class Ctx:
-        cfg = {}
+        # A feedback-consuming mode: the stream guard is deliberate (a mode
+        # that reads no human feedback must not stage one as a concern).
+        cfg = {"revision_mode": "transfer"}
         pristine = corpus
 
     sb = scratch("pr536stage_sb_")

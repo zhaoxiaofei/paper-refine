@@ -642,7 +642,8 @@ def build_parser() -> argparse.ArgumentParser:
                          f"'full' runs the whole frozen sweep set, 'formatting-writing' runs only "
                          f"the surface checks (M1/M3/M6-M12/M17-M20/M24/M26) and the prose/"
                          f"architecture passes J3/J5 and records every other check as out of "
-                         f"scope. An integer/list pair, same rules as --rewrites (default: "
+                         f"scope. A per-round list of the same enum strings, same list rules as "
+                         f"--rewrites (default: "
                          f"{','.join(DEFAULTS['review_scope'])}). Use it (e.g. "
                          f"--review-scope full,full,formatting-writing) to make a later round a "
                          f"polish pass instead of another full review")
@@ -1540,15 +1541,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     prt = sub.add_parser("retry", parents=[common],
                          help="rebuild a failed/stale run's sandbox and reset it")
-    prt.add_argument("--run", default=None, help="specific run id, e.g. r2_a2_review")
-    prt.add_argument("--runs", metavar="SELECTION", default=None,
+    # argparse enforces the documented mutual exclusion and exits with the
+    # usage code 2 (the manual check in p16 remains as a defence in depth).
+    prt_excl = prt.add_mutually_exclusive_group()
+    prt_excl.add_argument("--run", default=None, help="specific run id, e.g. r2_a2_review")
+    prt_excl.add_argument("--runs", metavar="SELECTION", default=None,
                      help="reset the runs an equivalent `run --only SELECTION` invocation "
                           "selects: the SAME grammar (rounds, stages, ROUND:STAGE, single "
                           "sessions, judge selectors and judge run ids), e.g. "
                           "`--runs 1:review,1:feedback` or `--runs 1:judge,2:feedback,2:review`. "
                           "Mutually exclusive with --run and --all-failed; a selection that "
                           "names no existing run says so and resets nothing")
-    prt.add_argument("--all-failed", action="store_true",
+    prt_excl.add_argument("--all-failed", action="store_true",
                      help="reset every failed or stale run")
     prt.set_defaults(func=cmd_retry)
 
@@ -1666,3 +1670,363 @@ def main() -> None:
         # signal handler has already terminated the agent process groups; exit
         # with the shell's interrupt status instead of a traceback.
         sys.exit(130)
+
+
+# --- trend/agents reporting views (moved here from p12 to keep every part
+#     under the 10,000-line structural limit; the loader defines them before
+#     main() dispatches) ---------------------------------------------------
+def trend_read_decision(root: Path) -> dict:
+    """One root's reports/decision.json, or None when absent/unreadable."""
+    p = Path(root) / "reports" / "decision.json"
+    if not p.is_file():
+        return None
+    try:
+        dj = read_json(p, revive=False, lenient=True)
+    except Exception:                                            # noqa: BLE001
+        return None
+    return dj if isinstance(dj, dict) else None
+
+
+def trend_order(roots: list) -> list:
+    """Order roots into the chain each one's recorded `source` implies.
+
+    A root whose `config.source` lies inside another root's tree consumed that
+    root (usually its final_clean_version), so it comes AFTER it. Roots that
+    cannot be linked keep the order they were given; a cycle is also kept in the
+    given order rather than guessed at. A repeated root is listed once.
+    """
+    items = []
+    _seen = set()
+    for r in roots:
+        rp = str(Path(r).resolve())
+        if rp in _seen:
+            continue                      # the same root must not be listed twice (F245)
+        _seen.add(rp)
+        items.append((rp, Path(r), trend_read_decision(Path(r))))
+    known = {rp: (r, dj) for rp, r, dj in items}
+    pending = [rp for rp, _r, _dj in items]
+    order, guard = [], 0
+    while pending and guard <= len(pending) ** 2 + 1:
+        progressed = False
+        for rp in list(pending):
+            _r, dj = known[rp]
+            src = str(((dj or {}).get("config") or {}).get("source") or "")
+            parents = [op for op in pending
+                       if op != rp and src
+                       and (src == op or src.startswith(op.rstrip("/") + "/"))]
+            if not parents:
+                order.append(rp)
+                pending.remove(rp)
+                progressed = True
+        if not progressed:
+            # A cycle (or several unlinked roots): report it, keep the given order.
+            order.extend(pending)
+            break
+        guard += 1
+    return [known[rp][0] for rp in order]
+
+
+def _trend_cell(value):
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def trend_rows(roots: list) -> tuple:
+    """(per-round rows, per-run rows) for the trend tables, in chain order."""
+    round_rows, run_rows = [], []
+    for root in trend_order([str(r) for r in roots]):
+        dj = trend_read_decision(root)
+        if not dj:
+            run_rows.append({"run": root.name, "rounds": 0, "champion": None,
+                             "format_rows": None, "format_high": None, "format_medium": None,
+                             "format_low": None, "over_length": None, "placeholders": None,
+                             "generated": None,
+                             # None = the decision predates the certification block.
+                             "certified": None})
+            continue
+        src = (dj.get("config") or {}).get("source")
+        rounds = dj.get("rounds") or []
+        for r in rounds:
+            sel = r.get("selection") or {}
+            rep = sel.get("champion_rep") or sel.get("champion") or r.get("stored_champion")
+            st = (r.get("stats") or {}).get(rep) or {}
+            census = ((r.get("issue_census") or {}).get(rep) or {})
+            tiers = census.get("tiers") or {}
+            sevs = census.get("severities") or {}
+            row = {"run": root.name, "round": r.get("round"),
+                   "champion": sel.get("champion") or r.get("stored_champion"),
+                   "median": st.get("median"), "mean": st.get("mean"), "n": st.get("n"),
+                   # `vs_input` is the champion against the version THIS RUN
+                   # started from: the root's pristine original (`vs_original`).
+                   # `vs_incumbent` is the round's base (`vs_base`). The two are
+                   # distinct from round 2 on and are deliberately NOT collapsed:
+                   # the first is the run-level input margin, the second the
+                   # previous champion's.
+                   "vs_input": st.get("vs_original"), "vs_incumbent": st.get("vs_base")}
+            for tier in BASIS_TIERS:
+                row[tier] = (tiers.get(tier) or {}).get("total")
+            for sev in SEVERITIES:
+                row[sev] = (sevs.get(sev) or {}).get("total")
+            round_rows.append(row)
+        fin = dj.get("final") or {}
+        fmt = fin.get("format") or {}
+        lengths = fin.get("lengths") or {}
+        last = rounds[-1] if rounds else {}
+        last_rep = ((last.get("selection") or {}).get("champion_rep")
+                    or (last.get("selection") or {}).get("champion")
+                    or last.get("stored_champion"))
+        last_stat = ((last.get("stats") or {}).get(last_rep) or {})
+        run_rows.append({
+            "run": root.name, "rounds": len(rounds),
+            "champion": fin.get("champion") or last.get("stored_champion"),
+            "format_rows": (len(fmt.get("rows") or []) if fmt else None),
+            "format_high": fmt.get("high"), "format_medium": fmt.get("medium"),
+            "format_low": fmt.get("low"),
+            "over_length": (len(lengths.get("over_limit") or []) if lengths else None),
+            "placeholders": last_stat.get("author_placeholders"),
+            "generated": dj.get("generated"),
+            # `-` for decisions written before the certification block existed:
+            # the old files carry no explicit verdict, so do not imply one.
+            "certified": ((dj.get("certification") or {}).get("certified")
+                          if isinstance(dj.get("certification"), dict) else None)})
+    return round_rows, run_rows
+
+
+def format_trend(round_rows: list, run_rows: list) -> str:
+    """The markdown trend report (both tables plus the reading rules)."""
+    L = ["# Cross-run trend (read-only)", ""]
+    L.append("One row per decided round, in the chain order the recorded `source` implies "
+             "(`vs_input` = the champion against the version THAT run started from; "
+             "`vs_incumbent` = the champion against the previous round's champion). The two "
+             "margins come from different panels, so read them as PER-STEP statements: the run "
+             "that wins each step is improving on its own input, which is exactly what the "
+             "reference-moving design measures. The tier/severity columns are the champion's "
+             "ISSUE CENSUS (issues the panel attributed to it, from the judges' own ledger rows) "
+             "-- the absolute \"what is left\" number, comparable across runs, and `-` for rounds "
+             "decided before the census existed. A shrinking census with a stable margin is "
+             "progress; a stable census with a stable margin is noise-limited repetition.")
+    L.append("")
+    L.append(_tbl([[_trend_cell(r.get(k)) for k in TREND_ROUND_FIELDS] for r in round_rows],
+                  list(TREND_ROUND_FIELDS)))
+    L.append("")
+    L.append("Per-run deterministic counters (code-side, no panel; `-` when the run predates "
+             "them): the OOXML formatting rows, the over-cap section count and the champion's "
+             "hand-off placeholder count at the end of the run. `certified` is the run's own "
+             "decision.json verdict (`true`/`false`; `-` when the decision predates the "
+             "certification block) -- a `false` row is a recorded, refused decision, not a "
+             "certified answer.")
+    L.append("")
+    L.append(_tbl([[_trend_cell(r.get(k)) for k in TREND_RUN_FIELDS] for r in run_rows],
+                  list(TREND_RUN_FIELDS)))
+    L.append("")
+    return "\n".join(L)
+
+
+def cmd_trend(args) -> None:
+    """`trend`: read several roots' decision.json files and print the chain."""
+    roots = list(getattr(args, "roots", None) or [])
+    if not roots:
+        roots = [getattr(args, "root", None) or DEFAULTS["root"]]
+    roots = [str(Path(r).expanduser().resolve()) for r in roots]
+    missing = [r for r in roots if trend_read_decision(Path(r)) is None]
+    for r in missing:
+        print(f"[trend] note: {r} has no readable reports/decision.json "
+              f"(undecided, pruned or not a pipeline root) -- it is reported as an empty run")
+    round_rows, run_rows = trend_rows(roots)
+    text = format_trend(round_rows, run_rows)
+    print(text)
+    out = getattr(args, "out", None)
+    if out:
+        write_text_atomic(Path(out), text)
+        print(f"[trend] written: {Path(out)}")
+    csvp = getattr(args, "csv", None)
+    if csvp:
+        p = write_csv_atomic(
+            Path(csvp), TREND_ROUND_FIELDS,
+            [{k: r.get(k) for k in TREND_ROUND_FIELDS} for r in round_rows])
+        print(f"[trend] written: {p}")
+
+
+def agent_session_plan(ctx: Ctx, only=None) -> list:
+    """Every AGENT session each round plans, without touching the corpus.
+
+    Producing sessions come straight from `round_run_plan()`: the rewrite
+    sessions the round's `--rewrites` count gives, its review (A, and B with
+    `--review-split`), its auditor and its revise arms, plus the integration arms
+    the round's `--integrators` mask selected. Judge session ids are the salted
+    per-version tokens of `judge_token_for()` -- a few sha256 calls over
+    (round, version id), never a document hash, so the whole listing costs
+    milliseconds on any root.
+
+    The judge FIELD, though, is the one thing that cannot be known before the
+    arms exist: it is deduplicated by CONTENT (a member whose documents are
+    content-identical to another member's is dropped), so a pending round lists
+    the candidate judge sessions and says `field_exact: false`.
+
+    `--champion-select revise`/`integrate` runs NO judge panel (see
+    round_champion_select), so those rounds list no judge session -- the same
+    rule drive_round applies at run time.
+    """
+    rows = []
+    for r in range(1, ctx.rounds_count() + 1):
+        rec = ctx.round_rec(r)
+        if only is not None and (not only.covers_round(r) or not only.selects_round(ctx, r)):
+            continue
+        producing = []
+        # The round's base copy (a1) is not an agent session -- it is the
+        # orchestrator's copy of the previous round's pin -- but the run table
+        # carries it, so list it first and label it.
+        base = {"id": rid_a1(r), "vid": A1_ID, "stage": "base", "deps": [],
+                "label": "base copy (no agent session)"}
+        for e in [base] + round_run_plan(ctx, r):
+            if only is not None and not only.entry_selected(r, e):
+                continue
+            run_rec = ctx.run(e["id"]) or {}
+            producing.append({
+                "id": e["id"],
+                "session": session_id_of_entry(e),
+                "stage": plan_stage_of(e),
+                "label": str(e.get("stage") or ""),
+                "agent": e["id"] != rid_a1(r),     # a1 is the orchestrator's copy
+                "status": run_rec.get("status") or "planned",
+                "deps": [str(d) for d in (e.get("deps") or [])],
+            })
+        field = [str(v) for v in (rec.get("field") or [])]
+        # A pending round's candidates are the judgeable ids (see judgeable_ids):
+        # the original, the earlier rounds' pins and the fresh arms.
+        candidates = field or judgeable_ids(ctx, r)
+        csel = round_champion_select(ctx, r)
+        judge_selected = (only is None or only.stage_selected(r, "judge")) \
+            and csel == "judge"
+        # WHICH judge sessions of the round run: the selector the `--only` items
+        # give (a preview of `run --only`), else the panel recorded by an earlier
+        # invocation on the pending round (see judges_enabled_spec).
+        spec = (only.judge_spec_for(r) if (only is not None and judge_selected) else "") \
+            or judges_enabled_spec(ctx, r)
+        enabled = set()
+        if spec:
+            try:
+                triples = parse_judges_enabled(spec, config_rounds(ctx),
+                                               lambda rr: judgeable_ids(ctx, rr),
+                                               lambda rr: round_judges(ctx, rr))
+                enabled = {(str(v), int(k)) for rr, v, k in triples if int(rr) == int(r)}
+            except ValueError:              # a hand-edited state/config: list the full panel
+                enabled = set()
+        judges = []
+        if judge_selected:
+            for vid in candidates:
+                token = judge_token_for(ctx, r, vid)
+                for j in range(1, round_judges(ctx, r) + 1):
+                    if enabled and (str(vid), int(j)) not in enabled:
+                        continue
+                    rid = rid_judge(r, token, j)
+                    judges.append({
+                        "id": rid,
+                        "target": str(vid),
+                        "judge_index": int(j),
+                        "status": (ctx.run(rid) or {}).get("status") or "planned",
+                    })
+        rows.append({
+            "round": int(r),
+            "status": rec.get("status") or "pending",
+            "champion": rec.get("champion"),
+            "champion_select": csel,
+            "judge_panel": csel == "judge",
+            "judges_per_version": int(round_judges(ctx, r)),
+            "judges_enabled": spec or JUDGES_ENABLED_ALL,
+            "integrators": f"0x{round_integrators(ctx, r):X}",
+            "field": field,
+            "field_exact": bool(field),
+            "judges_selected": bool(judge_selected),
+            "producing": producing,
+            "judge": judges,
+        })
+    return rows
+
+
+def cmd_agents(args) -> None:
+    """`agents`: list the agent-session names every round plans.
+
+    A DRY plan: no sandbox is materialized, no agent is launched, no document is
+    hashed (see agent_session_plan). `--only` previews exactly the sessions the
+    equivalent `run --only` invocation would drive.
+    """
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    # `--json` must stay parseable: keep everything `load()` prints (the
+    # pipeline-identity note) out of the JSON body and hand it back as a field.
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        ctx.load()
+    notes = [ln for ln in captured.getvalue().splitlines() if ln.strip()]
+    only = parse_only_spec(getattr(args, "only", None))
+    if only is not None and only.is_everything():
+        only = None
+    if only is not None:
+        resolve_judge_run_ids(ctx, only, label="[agents]", sink=notes)
+        only.validate(ctx.rounds_count())
+        validate_only_selectors(ctx, only)
+    rows = agent_session_plan(ctx, only)
+    if getattr(args, "pending", False):
+        for row in rows:
+            row["producing"] = [s for s in row["producing"] if s["status"] != "done"]
+            row["judge"] = [s for s in row["judge"] if s["status"] != "done"]
+    if getattr(args, "json", False):
+        print_raw(json.dumps({"root": str(ctx.root),
+                              "only": (only.label() if only is not None else None),
+                              "notes": notes,
+                              "rounds": rows}, indent=2))
+        return
+    for note in notes:
+        print(note)
+    np_ = sum(len(x["producing"]) for x in rows)
+    nj = sum(len(x["judge"]) for x in rows)
+    what = (f"--only {only.label()}" if only is not None else
+            "every planned session")
+    print(f"[agents] root: {ctx.root}")
+    print(f"[agents] {what}: {np_} producing + {nj} judge session(s) over "
+          f"{len(rows)} of {ctx.rounds_count()} round(s)"
+          + ("  [--pending: finished sessions hidden]" if getattr(args, "pending", False) else ""))
+    candidates = []
+    for row in rows:
+        print()
+        print(f"round {row['round']}/{ctx.rounds_count()}  status={row['status']}  "
+              f"champion={row['champion'] or '-'}  integrators={row['integrators']}")
+        for s in row["producing"]:
+            note = "" if s["agent"] else "   (no agent: the round's base copy)"
+            print(f"  {s['id']:<26} {s['label'] or s['stage']:<22} {s['status']}{note}")
+        if row["judge"]:
+            head = (f"judge sessions ({row['judges_per_version']} per version; --only judge "
+                    f"sessions: {row['judges_enabled']}):")
+            print(f"  {head:<64} {len(row['judge'])}")
+            for s in row["judge"]:
+                label = f"-> {s['target']}  (judge {s['judge_index']}/{row['judges_per_version']})"
+                print(f"  {s['id']:<26} {label:<22} {s['status']}")
+            if not row["field_exact"]:
+                candidates.append(row["round"])
+        elif not row.get("judge_panel", True):
+            print(f"  judge sessions: none -- --champion-select {row.get('champion_select')} "
+                  f"runs NO judge panel (the decision is PROVISIONAL)")
+        elif not row["judges_selected"]:
+            print("  judge sessions: NOT selected by this invocation's --only")
+    if candidates:
+        print()
+        print(f"[agents] round(s) {', '.join(str(r) for r in candidates)}: the judge ids above "
+              f"are the CANDIDATES. The judge "
+              f"field keeps one member per distinct document set, so a candidate whose package is "
+              f"content-identical to another member's is dropped before judging and its sessions "
+              f"never start (`run` prints the dropped members). Everything else is exact: no "
+              f"document was hashed to produce this listing.")
+    else:
+        print()
+        print("[agents] every id above is exact: the rounds' fields are already deduplicated, so "
+              "no session here is a candidate whose membership can still change.")
+    print("[agents] every id above can be fed back to `run --only` as printed: the producing ids "
+          "(`--only r1_a2_revise`, `--only r1_w1`) and the judge ids (`--only "
+          "judge_t497f106d_j1`, or `--only judge_1` for judge 1 of every version). The base copy's "
+          "`a1` line is the only exception: it is not an agent session.")
+
+

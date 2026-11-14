@@ -96,7 +96,7 @@ def cmd_setup(args) -> None:
                 f"venue's rule set ({venue_profile.id}) applies. Run "
                 f"`set-journal <name>` at any time before or during a run to name it.")
         if strict_venue:
-            die("--strict-venue: " + note)
+            die("--strict-venue: " + note, code=2)
         print(f"[setup] venue note: {note}")
     elif not venue_profile.journal_matches(journal):
         note = (f"the journal {journal!r} is not one of the journals venue profile "
@@ -104,7 +104,7 @@ def cmd_setup(args) -> None:
                 f"the venue's rules still apply. Use `set-venue <id>` for another rule set or "
                 f"`set-journal <name>` to change the journal.")
         if strict_venue:
-            die("--strict-venue: " + note)
+            die("--strict-venue: " + note, code=2)
         print(f"[setup] venue warning: {note}")
     caption_limit = int(getattr(args, "caption_limit", None)
                         if getattr(args, "caption_limit", None) is not None
@@ -132,10 +132,6 @@ def cmd_setup(args) -> None:
         die(f"--format-fix must be one of {', '.join(FORMAT_FIX_MODES)} (got {format_fix!r})",
             code=2)
     zotero = str(getattr(args, "zotero", DEFAULT_ZOTERO_MODE) or DEFAULT_ZOTERO_MODE).strip().lower()
-    if rounds < 1:
-        # A post-parse USAGE error, like the argparse errors: the README's exit
-        # table says code 2 (F62).
-        die("--rounds must be >= 1", code=2)
     # ---- --round-indices: run a SUBSET of the built-in round schedule -------
     # `--round-indices 2 3` runs two rounds whose per-round plan follows the
     # built-in schedule's entries 2 and 3 (no rewrites); the pipeline's own
@@ -155,6 +151,12 @@ def cmd_setup(args) -> None:
             print(f"[setup] note: --round-indices implies --rounds {len(round_indices)} "
                   f"(was --rounds {args.rounds}); using {len(round_indices)}")
         rounds = len(round_indices)
+    if rounds < 1:
+        # A post-parse USAGE error, like the argparse errors: the README's exit
+        # table says code 2 (F62). Validated AFTER --round-indices: with an
+        # explicit schedule --rounds is discarded, so `--rounds 0
+        # --round-indices 2` must not be refused for the ignored value.
+        die("--rounds must be >= 1", code=2)
     judges_list = parse_round_counts(getattr(args, "judges", None) or DEFAULTS["judges"],
                                      rounds, "--judges")
     if any(j < 1 for j in judges_list):
@@ -236,7 +238,8 @@ def cmd_setup(args) -> None:
     scoped_mode_restore = None
     journal_feedback = [str(x) for x in (getattr(args, "journal_feedback", None) or [])
                         if str(x).strip()]
-    journal_feedback_from = str(getattr(args, "journal_feedback_from", None) or "").strip()
+    journal_feedback_from = _validate_feedback_from(
+        getattr(args, "journal_feedback_from", None) or "")
     if revision_mode == JOURNAL_MODE_LLM and (journal_feedback or journal_feedback_from):
         print(f"[setup] note: revision mode {JOURNAL_MODE_LLM!r} reads ONLY "
               f"{LLM_FEEDBACK_DIR}/; --journal-feedback/--journal-feedback-from are ignored")
@@ -511,7 +514,7 @@ def cmd_setup(args) -> None:
             # so a relative spelling could silently read a same-named cwd file.
             journal_feedback = _resolved_feedback
         llm_dir = source / LLM_FEEDBACK_DIR
-        llm_hits = [p for p in sorted(llm_dir.rglob("*")) if p.is_file()] \
+        llm_hits = [p for p in sorted(llm_dir.rglob("*")) if _copyable(p)] \
             if llm_dir.is_dir() else []
         if revision_mode == JOURNAL_MODE_LLM:
             if not llm_hits:
@@ -551,6 +554,11 @@ def cmd_setup(args) -> None:
         # unusable root gets.
         die(f"--root exists and is a FILE, not a directory: {root} "
             f"(choose a fresh --root or delete it)", code=2)
+    if is_within(root, source) or is_within(source, root):
+        # Checked BEFORE the interrupted-setup branch below: deleting an
+        # interrupted root that CONTAINS --source destroyed the operator's
+        # corpus and only then refused the command as nested (F213).
+        die("--root and --source must not be nested inside each other", code=2)
     if root.exists() and any(root.iterdir()):
         # A root this pipeline created and never finished (the marker is written
         # before the first copy and removed only once state.json exists) is
@@ -659,16 +667,21 @@ def cmd_setup(args) -> None:
 
     shutil.copytree(source, ctx.pristine, ignore=_ignore_symlinks)
     _mapped_feedback = []
-    for _item in journal_feedback:
-        _q = Path(_item)
-        try:
-            _rel = _q.resolve().relative_to(_source_root)
-        except (OSError, ValueError):
-            # The letter is outside --source: freeze it into the root instead of
-            # storing an absolute path that can change/delete the input later.
-            _mapped_feedback.append(_freeze_journal_feedback(root, _q))
-        else:
-            _mapped_feedback.append((ctx.pristine / _rel).relative_to(root).as_posix())
+    # Only a mode that reads a journal letter freezes it. A no-feedback mode
+    # (continue/init) or llm (feedback area only) documents the flag as
+    # ignored, and an unreadable stale path must not crash after the root was
+    # built (F214).
+    if JOURNAL_MODES[revision_mode]["feedback"] and revision_mode != JOURNAL_MODE_LLM:
+        for _item in journal_feedback:
+            _q = Path(_item)
+            try:
+                _rel = _q.resolve().relative_to(_source_root)
+            except (OSError, ValueError):
+                # The letter is outside --source: freeze it into the root instead of
+                # storing an absolute path that can change/delete the input later.
+                _mapped_feedback.append(_freeze_journal_feedback(root, _q))
+            else:
+                _mapped_feedback.append((ctx.pristine / _rel).relative_to(root).as_posix())
     journal_feedback = _mapped_feedback
     if _skipped_links:
         print(f"[setup] WARNING: skipped {len(_skipped_links)} symlink(s) in --source "
@@ -1176,6 +1189,14 @@ def _venue_command_root(args, cmd: str) -> Path:
             f"run `setup --source <dir> --root {root} --venue <venue>` first, or point "
             f"--root at an existing root. `{cmd}` edits an existing root's configuration.",
             code=2)
+    if (root / SETUP_MARKER).is_file() and not (root / "state.json").is_file():
+        # A setup interrupted between writing pipeline_config.json and
+        # save_state() leaves exactly this shape. Loading the default empty Ctx
+        # and saving it would persist a registry with no source/original digest,
+        # and both `setup` and `run` then refuse the root (F217).
+        die(f"{root} holds an INTERRUPTED setup (see {SETUP_MARKER}, no state.json yet); "
+            f"re-run `setup` with the same arguments to complete it before `{cmd}`.",
+            code=2)
     return root
 
 
@@ -1285,6 +1306,19 @@ def _validate_journal_name(name: str) -> str:
         die("the journal name must not be empty (`set-journal \"Journal Name\"`)", code=2)
     if any(ch in text for ch in "\r\n\t") or len(text) > 160:
         die(f"the journal name must be one line of at most 160 characters (got {text!r})", code=2)
+    return text
+
+
+def _validate_feedback_from(name: str) -> str:
+    """`--journal-feedback-from` is free text, but it must be one clean line.
+
+    p07 interpolates it verbatim into the response-letter prompt; the sibling
+    --journal field has exactly this one-line/length guard for that reason.
+    """
+    text = str(name or "").strip()
+    if any(ch in text for ch in "\r\n\t") or len(text) > 160:
+        die(f"--journal-feedback-from must be one line of at most 160 characters "
+            f"(got {text!r})", code=2)
     return text
 
 
@@ -1417,9 +1451,14 @@ def cmd_set_venue(args) -> None:
         else:
             journal, journal_source = "", "unset"
     caption_source = str(ctx.cfg.get("caption_limit_source") or "").strip().lower()
-    caption_limit = int(ctx.cfg.get("caption_limit")
-                        if caption_source == "operator" and ctx.cfg.get("caption_limit") is not None
-                        else profile.caption_default)
+    try:
+        caption_limit = int(ctx.cfg.get("caption_limit")
+                            if caption_source == "operator"
+                            and ctx.cfg.get("caption_limit") is not None
+                            else profile.caption_default)
+    except (TypeError, ValueError):
+        die(f"the recorded caption_limit {ctx.cfg.get('caption_limit')!r} is not numeric; "
+            f"fix the config value (or clear it) before changing the venue.", code=2)
     if journal and getattr(args, "strict_venue", False) \
             and not profile.journal_matches(journal):
         # `setup --strict-venue` and `set-journal --strict-venue` both refuse
@@ -1663,9 +1702,8 @@ def cmd_set_journal(args) -> None:
                     f"still apply. Use `set-venue <id>` for another rule set.")
         if getattr(args, "strict_venue", False):
             # `setup --strict-venue` refuses exactly this mismatch BEFORE it
-            # writes anything. Refusing after the write left the mismatched
-            # journal in the config even though the command exited non-zero.
-            die("--strict-venue: " + mismatch)
+            # writes anything, with the same usage/refusal code.
+            die("--strict-venue: " + mismatch, code=2)
     if ctx.state.get("runs") and not getattr(args, "force", False):
         die(f"this root already has {len(ctx.state['runs'])} run record(s): every prompt names "
             f"the journal it was written for.\n"
@@ -3172,10 +3210,11 @@ def cmd_set_revision_mode(args) -> None:
             f"       Re-run `set-revision-mode {mode_arg} --force` if the change is intended.")
     named = [str(x) for x in (getattr(args, "journal_feedback", None) or []) if str(x).strip()]
     info = JOURNAL_MODES[mode_arg]
-    if info["feedback"]:
-        # Resolve/validate ONLY for a mode that reads feedback: a no-feedback
-        # mode (init/continue) documents the flag as ignored, so a wrapper
-        # passing a stale path through must not be a fatal error.
+    if info["feedback"] and mode_arg != JOURNAL_MODE_LLM:
+        # Resolve/validate ONLY for a mode that reads a journal letter. A
+        # no-feedback mode (init/continue) documents the flag as ignored, and
+        # llm reads only llm_review_feedback/ (setup skips the same validation),
+        # so a stale path must not be fatal there (F215).
         _named_resolved = []
         for item in named:
             q = Path(item).expanduser()
@@ -3205,7 +3244,8 @@ def cmd_set_revision_mode(args) -> None:
             ctx.cfg["journal_feedback"] = named
         if getattr(args, "journal_feedback_from", None) and info["feedback"] \
                 and mode_arg != JOURNAL_MODE_LLM:
-            ctx.cfg["journal_feedback_from"] = str(args.journal_feedback_from).strip()
+            ctx.cfg["journal_feedback_from"] = _validate_feedback_from(
+                args.journal_feedback_from)
         forced = []
         if info["scoped"]:
             if _prev_mode not in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
@@ -3358,13 +3398,13 @@ def validate_only_selectors(ctx: Ctx, only, flag: str = "--only") -> None:
         if missing:
             die(f"{flag}: no round of this pipeline runs session(s) {', '.join(missing)}; "
                 f"round 1 plans {', '.join(planned[1])} (the revise arms are numbered from a2, "
-                f"so `reviser1` is a2)")
+                f"so `reviser1` is a2)", code=2)
     for r in sorted(k for k in only.sessions if k is not None):
         for tok in only.sessions[r]:
             if tok not in planned[r]:
                 die(f"{flag}: round {r} plans no session {tok!r}; it runs "
                     f"{', '.join(planned[r])} (the revise arms are numbered from a2, so "
-                    f"`reviser1` is a2, `reviser2` a3, ...)")
+                    f"`reviser1` is a2, `reviser2` a3, ...)", code=2)
     keys = {k for k in only.judge_selectors if k is not None}
     if only.judge_selectors.get(None):
         # a roundless selector applies to every round that has the version, so it
@@ -3378,7 +3418,7 @@ def validate_only_selectors(ctx: Ctx, only, flag: str = "--only") -> None:
             parse_judges_enabled(spec, R, lambda rr: judgeable_ids(ctx, rr),
                                  lambda rr: round_judges(ctx, rr))
         except ValueError as e:
-            die(f"{flag}: {e}")
+            die(f"{flag}: {e}", code=2)
 
 
 def no_progress_measure(row: dict):
@@ -4181,6 +4221,16 @@ def cmd_run_decide(args) -> None:
     root that could not even be started would only repeat the same error.
     """
     cmd_run(args)
+    _only = parse_only_spec(getattr(args, "only", None))
+    if _only is not None and not _only.is_everything():
+        # `--only` is a SESSION-SELECTION contract: the selected items run and
+        # nothing else is started in that invocation. Deciding afterwards would
+        # start a stage the selection did not name (and report its exit code).
+        # `--only all` is exactly a plain run (cmd_run normalizes it away), so
+        # it keeps the decide phase.
+        print("[run-decide] --only selection: the decide phase is not started; run "
+              "`decide` once the selected work is complete")
+        return
     note = configure_hash_cache_for_command("decide", getattr(args, "root", None))
     if note:
         print(f"[run-decide] note: {note}")

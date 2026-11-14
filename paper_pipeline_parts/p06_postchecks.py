@@ -836,8 +836,19 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
     if frozen_review_is_synthesized(ctx):
         # `--no-guided-review`: the producer is the cold-start review and the
         # frozen review is synthesized in the AUDIT/REVISE sandboxes, not on the
-        # producer's disk. Return its X-9xx rows instead of [] (F04).
-        return list(cold_start_findings_rows(ctx, r) or [])
+        # producer's disk. Return its X-9xx rows instead of [] (F04), with the
+        # auditor's drops/adds applied exactly like the copied-list branch: a
+        # dropped finding must not keep counting against a rewrite/integration
+        # arm's self-report (F157).
+        rows = list(cold_start_findings_rows(ctx, r) or [])
+        audit = audit_record_of(ctx, r)
+        if audit:
+            drops = {str(d.get("id") or "").strip()
+                     for d in (audit.get("dispositions") or []) if isinstance(d, dict)
+                     and str(d.get("verdict") or "").strip().lower() == "drop"}
+            rows = [f for f in rows if str(f.get("id") or "").strip() not in drops]
+            rows += [f for f in (audit.get("adds") or []) if isinstance(f, dict)]
+        return rows
     sb = ctx.sandbox_of(rev)
     if not (sb / FINDINGS_REL).is_file():
         return []
@@ -1239,7 +1250,14 @@ def frozen_findings_total(ctx: Ctx, rec: dict):
     Used by the revision postcheck to tell a legitimate all-clean ledger (the
     review carried no findings) from an agent that simply wrote no rows.
     """
-    if not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
+    frozen = ctx.sandbox_of(rec) / FINDINGS_REL
+    if not frozen.exists():
+        return None
+    doc = read_json(frozen, revive=False, lenient=True)   # agent-written
+    if not isinstance(doc, dict):
+        # The docstring promises None when the frozen review is unreadable; a
+        # parse failure used to fall through to 0 and accept an empty ledger
+        # as an all-clean one.
         return None
     return len(consumed_findings(ctx, rec))
 
@@ -1248,9 +1266,12 @@ def frozen_finding_ids(ctx: Ctx, rec: dict) -> list:
     """Ids of the findings this run must resolve (frozen review, AUDITED)."""
     ids = []
     for f in consumed_findings(ctx, rec):
-        fid = f.get("id")
-        if isinstance(fid, str) and fid.strip() and fid.strip() not in ids:
-            ids.append(fid.strip())
+        # A numeric/other id is accepted by check_review_contract (`str(...)`),
+        # so it must be required here too, not silently dropped from the
+        # required-id list (F150).
+        fid = str(f.get("id") or "").strip()
+        if fid and fid not in ids:
+            ids.append(fid)
     return ids
 
 
@@ -1359,6 +1380,17 @@ def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total, rel: str
                   "`clarification` / `manual-required` / `not-found-in-source` / "
                   "`dropped-by-audit`, and the final edit outcome belongs in "
                   "`final_status`")
+        no_explanation = _ledger_rows_without_explanation(ledger, frozen_ids)
+        if no_explanation:
+            _detail = "; ".join(
+                f"{i} (missing {' and '.join(cells)})"
+                for i, cells in sorted(no_explanation.items())[:6])
+            errs.append(
+                f"{pkg_rel} records a disposition without the required explanation "
+                f"cell(s) for {len(no_explanation)} finding id(s): {_detail}"
+                + (" ..." if len(no_explanation) > 6 else "")
+                + " -- every disposed row must say WHY (`rationale`) and WHAT was "
+                  "checked (`evidence`); a row missing either cell is not a disposal")
     return errs, warns
 
 
@@ -1429,10 +1461,12 @@ LEDGER_VERDICT_FIELDS = ("verdict", "final_status", "status", "disposition")
 LEDGER_VERDICT_RE = re.compile(
     r"(?i)^(confirmed|false[\s_-]*positive|clarification|"
     r"manual[\s_-]*required|not[\s_-]*found[\s_-]*in[\s_-]*source|"
-    r"fixed(?:[\s_-]*with[\s_-]*caveat)?|placeholder[\s_-]*inserted|discarded)\b")
+    r"fixed(?:[\s_-]*with[\s_-]*caveat)?|placeholder[\s_-]*inserted|discarded|"
+    r"dropped[\s_-]*by[\s_-]*audit)\b")
 LEDGER_VERDICTS = ("confirmed", "false-positive", "clarification",
                    "manual-required", "not-found-in-source",
-                   "fixed", "fixed-with-caveat", "placeholder-inserted", "discarded")
+                   "fixed", "fixed-with-caveat", "placeholder-inserted", "discarded",
+                   "dropped-by-audit")
 
 
 def _ledger_row_verdict(row) -> str:
@@ -1559,6 +1593,64 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
 
     visit(ledger, 0)
     return found
+
+
+# The two REQUIRED explanation cells, each with the alias spellings real
+# ledgers have used for it. They are independent: a row carrying only one of
+# them does not record both what was re-checked and why it was accepted (F149).
+_LEDGER_RATIONALE_KEYS = ("rationale", "reason", "basis")
+_LEDGER_EVIDENCE_KEYS = ("evidence", "detail", "note")
+_LEDGER_EXPLANATION_KEYS = _LEDGER_RATIONALE_KEYS + _LEDGER_EVIDENCE_KEYS
+
+
+def _ledger_rows_without_explanation(ledger, wanted=()) -> dict:
+    """{finding id: [missing cell names]} for disposed rows with an empty cell.
+
+    The prompt requires a non-empty `rationale` AND a non-empty `evidence` for
+    every disposed row (an empty rationale is explicitly invalid), but the gate
+    originally checked the verdict tokens only: a row
+    `{"id": "F-001", "verdict": "confirmed"}` passed with no explanation at all
+    (F149). Requiring only ONE of the two cells still let a row with
+    `rationale` alone (or `evidence` alone) pass, so the documented two-cell
+    proof of the re-check was not enforced. The alias keys are accepted for
+    each cell; the two groups are independent.
+    """
+    want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
+    bad = {}
+
+    def row_id(row):
+        for key in ("id", "finding", "finding_id", "frozen_id"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ""
+
+    def visit(node, depth: int, keyed_id: str = ""):
+        if depth > LEDGER_SCAN_DEPTH:
+            return
+        if isinstance(node, dict):
+            rid = row_id(node) or keyed_id
+            if (not want or rid in want) and _ledger_row_verdict(node):
+                missing = []
+                if not any(str(node.get(k) or "").strip()
+                           for k in _LEDGER_RATIONALE_KEYS):
+                    missing.append("rationale")
+                if not any(str(node.get(k) or "").strip()
+                           for k in _LEDGER_EVIDENCE_KEYS):
+                    missing.append("evidence")
+                if missing:
+                    bad[rid] = missing
+            for key, value in node.items():
+                if isinstance(value, (dict, list, tuple)):
+                    visit(value, depth + 1,
+                          key.strip() if isinstance(key, str) else "")
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                if isinstance(item, (dict, list, tuple)):
+                    visit(item, depth + 1)
+
+    visit(ledger, 0)
+    return bad
 
 
 LEDGER_REVERIFY_RE = re.compile(
@@ -1758,6 +1850,15 @@ _COVERAGE_NEGATED_CHECK_RE = re.compile(
 _COVERAGE_COUNT_NEGATED_RE = re.compile(
     r"(?i)\b(?:not|never|without|could\s+not|cannot|did\s+not|didn['\u2019]t)\b"
     r"[^.;\n]{0,25}\b(?:run|executed?|performed?)\b")
+# A tail that says no work happened ("checked nothing", "nothing was checked",
+# "no sweep was performed") is a negated check even though it uses none of the
+# "not checked" spellings above (F160).
+_COVERAGE_NOWORK_RE = re.compile(
+    r"(?i)(?:\b(?:checked|reviewed|examined|verified|inspected)\s+nothing\b"
+    r"|\b(?:nothing|none)\s+(?:was\s+|were\s+)?(?:checked|reviewed|examined|verified|"
+    r"inspected)\b"
+    r"|\bno\s+[^.;\n]{0,25}?\b(?:sweep|pass|check|scan)s?\b[^.;\n]{0,20}?"
+    r"\b(?:ran|run|performed|executed)\b)")
 _COVERAGE_NAMED_BASIS_RE = re.compile(
     r"(?i)(?:basis\s*:|unable\s*(?:--|—|–)"
     r"|out\s+of\s+scope\s*(?:--|—|–))\s*(.*)$")
@@ -1777,7 +1878,7 @@ def _coverage_reason_named(reason) -> bool:
             r"nil|null|no|none|n/?a|na|tbd|todo|unknown", reason):
         return False
     # A reason that negates the check's own verdict contradicts it.
-    if _COVERAGE_NEGATED_CHECK_RE.search(reason):
+    if _COVERAGE_NEGATED_CHECK_RE.search(reason) or _COVERAGE_NOWORK_RE.search(reason):
         return False
     # At least three alphanumeric characters: a one- or two-character token
     # (`x`, `ok`, `ab`, `12`) and punctuation alone cannot name an artifact or
@@ -1816,7 +1917,8 @@ def _coverage_disposition_ok(value) -> bool:
             if re.search(r"(?i)(?:^|[^A-Za-z])(?:none|no|zero)\b\s*(?:$|[.;,)\]])", _tail):
                 return False
         if _COVERAGE_NEGATED_CHECK_RE.search(_tail) \
-                or _COVERAGE_COUNT_NEGATED_RE.search(_tail):
+                or _COVERAGE_COUNT_NEGATED_RE.search(_tail) \
+                or _COVERAGE_NOWORK_RE.search(_tail):
             # The count form used to bypass the negation test entirely: `0 findings
             # -- not checked` (and `0 findings; the sweep did not run`) certified a
             # sweep that never ran (F112). The tail must not negate the check.
@@ -2984,12 +3086,37 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                      f"verified -- the human gate must complete those pages")
     if sandbox is not None and "not visually verified" not in text:
         tpl_manifest = sandbox / VISUAL_TEMPLATE_DIR / "manifest.json"
+        venue_word = []
+        try:
+            venue_word = sorted((sandbox / "venue_template" / "word").glob("*.docx"))
+        except OSError:
+            venue_word = []
+        if not tpl_manifest.is_file() and venue_word:
+            # The venue seeds an official Word template but the comparison
+            # record was deleted (or the renderer wrote nothing): the artifact
+            # then silently skips the required template comparison (F155).
+            errs.append(
+                f"{label}: the venue seeds {len(venue_word)} official Word template(s) under "
+                f"venue_template/word/, but {VISUAL_TEMPLATE_DIR}/manifest.json is missing -- "
+                f"the required comparison against the template was not recorded. Compare the "
+                f"delivered documents with venue_template/word/, or state explicitly that the "
+                f"template render was NOT visually verified and hand it to the author")
         if tpl_manifest.is_file():
             try:
-                tpl = json.loads(tpl_manifest.read_text(encoding="utf-8"))
+                _tpl_raw = read_text_bounded(tpl_manifest)
+                tpl = json.loads(_tpl_raw) if _tpl_raw is not None else {}
+                if not isinstance(tpl, dict):
+                    tpl = {}
             except (OSError, ValueError):
                 tpl = {}
-            docs = [d for d in (tpl.get("documents") or []) if d.get("ok")]
+            docs = [d for d in (tpl.get("documents") or []) if isinstance(d, dict) and d.get("ok")]
+            if not docs and venue_word:
+                errs.append(
+                    f"{label}: the venue seeds {len(venue_word)} official Word template(s), but "
+                    f"{VISUAL_TEMPLATE_DIR}/manifest.json records no successful render -- the "
+                    f"required template comparison did not happen. Re-render it (or state "
+                    f"explicitly that the template was NOT visually verified and hand it to "
+                    f"the author)")
             if docs:
                 missing = []
                 for d in docs:
@@ -3030,7 +3157,7 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
                 f"not clean"]
     want = {str(r.get("document") or "").strip()
             for r in (info.get("rows") or [])
-            if str(r.get("rule") or "").upper() in COVER_LETTER_STAMP_RULES}
+            if re.search(r"\bFMT-CL1\b", str(r.get("rule") or ""), re.I)}
     want = {w for w in want if w}
     if not want:
         return []
@@ -3372,7 +3499,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
             tail = re.split(r"\bno anomalies?\b", low, maxsplit=1)[1]
             # The closure is exactly `no anomalies -- checked: <locations>`;
             # a question that happens to contain "checked" is not that closure.
-            if not re.match(r"\s*(?:[-\u2013\u2014]|:)\s*checked\s*:\s*\S", tail):
+            if not re.match(r"\s*(?:-{1,2}|[\u2013\u2014]|:)\s*checked\s*:\s*\S", tail):
                 no_checked.append(pid)
         if len(re.findall(r"[A-Za-z0-9]+", text)) < 6:
             result_problems.append(f"{pid} records no usable disposition")
@@ -3435,10 +3562,11 @@ def discovery_contract_problems(sb: Path) -> tuple:
                 if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
                     bad.append(f"{fid}: severity {f.get('severity')!r} is not one of "
                                f"Fatal/Critical/Major/Minor")
-                try:
-                    ok_cat = 0 <= int(f.get("category")) <= 5
-                except (TypeError, ValueError):
-                    ok_cat = False
+                # Mirror the review gate: a JSON string/float/bool is not a
+                # category by being convertible.
+                _cat = f.get("category")
+                ok_cat = (isinstance(_cat, int) and not isinstance(_cat, bool)
+                          and 0 <= _cat <= 5)
                 if not ok_cat:
                     bad.append(f"{fid}: category {f.get('category')!r} is not an integer 0-5")
             if bad:
@@ -4246,8 +4374,8 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
             for key in ("location", "check", "evidence", "explanation"):
                 if not str(f.get(key) or "").strip():
                     malformed.append(f"{fid}: no {key}")
-            if not re.match(r"(?i)^(?:M(?:[1-9]|[12]\d|3[0-6])|J[1-5]|JF)$",
-                            str(f.get("check") or "").strip()):
+            check_id = normalise_check_id(f.get("check"))
+            if not re.match(r"(?i)^(?:M(?:[1-9]|[12]\d|3[0-6])|J[1-5]|JF)$", check_id):
                 malformed.append(f"{fid}: check {f.get('check')!r} is not an M/J check id")
             if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
                 malformed.append(f"{fid}: severity {f.get('severity')!r} is not one of "
@@ -4280,7 +4408,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                   "finding)")
         j5_missing = [str(f.get("id") or "?") for f in findings
                       if isinstance(f, dict)
-                      and str(f.get("check") or "").strip().upper() == "J5"
+                      and normalise_check_id(f.get("check")).upper() == "J5"
                       and not str(f.get("scope") or "").strip()]
         if j5_missing:
             errs.append(f"{FINDINGS_REL}: J5 architecture finding(s) {j5_missing} carry no "
@@ -4299,7 +4427,13 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         if not prior.is_file():
             continue
         pj = read_json(prior, revive=False, lenient=True)   # agent-written
-        prior_ids += [str(f.get("id") or "") for f in ((pj or {}).get("findings") or [])
+        if not isinstance(pj, dict):
+            # A present-but-unparseable prior list used to leave prior_ids
+            # empty and silently disable the reconciliation gate.
+            errs.append(f"{prior_rel} exists but could not be parsed as the prior-round "
+                        f"finding document; the carry-over reconciliation cannot run")
+            continue
+        prior_ids += [str(f.get("id") or "") for f in (pj.get("findings") or [])
                       if isinstance(f, dict) and f.get("id")]
     if prior_ids:
         # The id must be reconciled WHERE THE CONTRACT SAYS, not merely occur
@@ -4363,10 +4497,22 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                         f"non-regular, or over the byte budget)")
             m1_md = ""
         n_m1b = m1b_row_count(m1_md)
+        if not n_m1b and m1b_audit_section_missing(m1_md):
+            # Deleting the `## M1b` section made the gate below skip the whole
+            # audit: the extractor ALWAYS emits the section (with a "no rows"
+            # placeholder when clean), so an artifact that carries an inventory
+            # table but no section lost the audit, not ran it (F177).
+            errs.append(
+                f"{ARTIFACTS_REL}/M1_acronyms.md carries an acronym inventory but no `## M1b` "
+                f"long-form audit section: the extractor always emits it (an empty table with "
+                f"its `no long-form re-use detected` placeholder when clean), so the section "
+                f"was deleted or the sweep was never run. Re-run the M1 sweep, keep the M1b "
+                f"section and dispose every row (or record why it is clean in the M1 coverage "
+                f"row)")
         if n_m1b:
             m1_findings = [f for f in (findings or [])
                            if isinstance(f, dict)
-                           and str(f.get("check") or "").strip().upper() == "M1"]
+                           and normalise_check_id(f.get("check")).upper() == "M1"]
             m1_row_text = coverage_row_text(seen_rows.get("M1"))
             if not m1_findings and not _m1b_coverage_reason(m1_row_text) \
                     and not m1b_rows_disposed(m1_md):
@@ -4441,7 +4587,12 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 _named = _m.group(0).rstrip(".,;:)")
                 _rel = _named if _named.startswith(GUIDED_REVIEW_DIR + "/") \
                     else f"{GUIDED_REVIEW_DIR}/{_named}"
-                if not (sb / _rel).is_file():
+                try:
+                    (sb / _rel).resolve().relative_to(sb.resolve())
+                    _inside = True
+                except (OSError, ValueError):
+                    _inside = False
+                if not _inside or not (sb / _rel).is_file():
                     errs.append(f"{FINDINGS_REL} coverage row {_cid!r} names basis "
                                 f"{_named!r}, which does not resolve to a file in this "
                                 f"sandbox")
@@ -4538,6 +4689,21 @@ def _m1b_separator(cells: list) -> bool:
     return bool(cells) and all("-" in c and set(c) <= set("-: ") for c in cells)
 
 
+def m1b_audit_section_missing(m1_md: str) -> bool:
+    """True when an M1 artifact has an inventory table but no `## M1b` section.
+
+    The extractor emits `## M1b` unconditionally (a placeholder row when the
+    sweep is clean), so its absence is a deleted audit, not a clean one.
+    """
+    text = str(m1_md or "")
+    if not text.strip() or "## M1b" in text:
+        return False
+    # Only the extractor's OWN inventory header identifies an artifact that
+    # always carries the section. A hand-written minimal M1 table (a unit
+    # fixture) is not evidence that the M1b audit was deleted.
+    return "ACRONYM INVENTORY" in text.upper()
+
+
 def m1b_row_count(m1_md: str) -> int:
     """Data rows in the M1 artifact's M1b instance table (0 when absent/empty)."""
     return len(_m1b_table(m1_md)[1])
@@ -4583,9 +4749,10 @@ def m1b_rows_disposed(m1_md: str) -> bool:
 # coverage row has to name.
 _M1B_REASON_RE = re.compile(
     r"(?i)\b(?:because|since|reason|different|distinct|quoted|title|titles|expansion|"
-    r"expanded|expansion|defining|defined|acronym|abbreviation|legitimate|bibliograph|"
-    r"reference|references|not\s+a\s+finding|no\s+finding|ok\b|clean|disposed|"
-    r"intentional|verbatim|species|gene|proper\s+name|rendering)\b")
+    r"expanded|expansion|defining|defined|legitimate|bibliograph|"
+    r"reference|references|not\s+a\s+finding|no\s+finding|"
+    r"intentional|verbatim|species|gene|proper\s+name|rendering|"
+    r"different\s+term|term\s+of\s+art|quoted\s+title|generated\s+rendering)\b")
 
 
 def _m1b_coverage_reason(text: str) -> bool:
@@ -5088,12 +5255,12 @@ FACT_DOMAIN_ID_RE = re.compile(
 FACT_DOMAIN_RE = re.compile(
     r"(?i)\b(?:RRID|Cellosaurus|ATCC|cat(?:alog)?\.?\s*(?:no\.?|number|#)|lot|batch|"
     r"strain|plasmid|primer|antibody|reagent|protocol|registry|dbSNP|UniProt|PDB|EMDB|"
-    r"GenBank|RefSeq|Ensembl|ClinVar|COSMIC|cell\s+line|clone)\b[^\n]{0,25}?"
-    r"[:=#]?\s*([A-Za-z0-9][A-Za-z0-9._/-]{2,})\b")
+    r"GenBank|RefSeq|Ensembl|ClinVar|COSMIC|cell\s+line|clone)\b[ \t]{0,12}?"
+    r"[:=#]?[ \t]*([A-Za-z0-9][A-Za-z0-9._/-]{2,})\b")
 FACT_UID_RE = re.compile(
     r"(?i)\b(?:UID|ID|identifier|accession|protocol|registry|trial\s+registration|"
-    r"IRB|ethics(?:\s+(?:approval|number|id))?)\b[^\n]{0,20}?"
-    r"[:=#]?\s*([A-Za-z0-9][A-Za-z0-9._/-]{3,})\b")
+    r"IRB|ethics(?:\s+(?:approval|number|id))?)\b[ \t]{0,12}?"
+    r"[:=#]?[ \t]*([A-Za-z0-9][A-Za-z0-9._/-]{3,})\b")
 FACT_KIND_ALIASES = {
     "doi": "doi", "orcid": "orcid", "uuid": "uuid", "uid": "uid", "id": "uid",
     "identifier": "uid", "accession": "accession", "accession_id": "accession",
@@ -5106,11 +5273,19 @@ _FACT_COMMON_WORDS = frozenset({
     "number", "identifier", "protocol", "registry", "approval", "standard", "version",
     "release", "model", "strain", "clone", "batch", "lot", "sample", "table", "figure",
     "section", "supplementary", "accession", "grant", "funding", "award", "contract",
+    # table-header / ordinary-prose words a 20-25 character gap used to swallow
+    # as an "opaque identifier" (F167).
+    "species", "group", "value", "name", "trial", "tissue", "condition",
+    "method", "type", "category", "status",
 })
 
 
 def _clean_fact_token(raw: str) -> str:
-    return str(raw or "").strip().strip(".,;:)]}>'\"")
+    # `_clean_fact_token` runs over captured text, so a bolded DOI arrived as
+    # "10.1000/abc**" and read as a DIFFERENT value from the plain one. Strip
+    # Markdown emphasis markers (never '_' or '-', which are part of real
+    # identifiers) after the punctuation.
+    return str(raw or "").strip().strip(".,;:)]}>'\"").strip("*`").strip()
 
 
 def _fact_token_looks_opaque(cls: str, token: str) -> bool:
@@ -5234,7 +5409,8 @@ def _fact_tokens_in_sources(sources, evidence: bool = False) -> tuple:
             continue
         if not src.is_dir():
             continue
-        for path in _files_under_ci(src, suffixes):
+        walk_gaps = []
+        for path in _files_under_ci(src, suffixes, gaps=walk_gaps):
             try:
                 rel = path.relative_to(src).as_posix()
             except ValueError:                                     # pragma: no cover
@@ -5267,6 +5443,11 @@ def _fact_tokens_in_sources(sources, evidence: bool = False) -> tuple:
                 continue
             gaps.append(f"{prefix + rel}: unsupported editable format "
                         f"({path.suffix.lower()}); not scanned for identifiers")
+        for gap_dir in sorted(set(walk_gaps)):
+            # An unreadable directory hides its identifiers from the same gate
+            # (the F107 class): name it instead of reporting full coverage.
+            gaps.append(f"{prefix + gap_dir}: directory could not be read; "
+                        f"not scanned for identifiers")
     return found, gaps
 
 
@@ -5570,17 +5751,20 @@ def _raw_data_key(rel: str) -> str:
     return "/".join(parts)
 
 
-def raw_data_entries(dirp: Path) -> dict:
+def raw_data_entries(dirp: Path, gaps: list = None, symlinks: list = None) -> dict:
     """{relative path: (relative path, sha256)} for `dirp`'s raw-data directory.
 
     The key is the EXACT corpus-relative path; `raw_data_pairs` applies the
-    token-insensitive matching (see `_entries_in`).
+    token-insensitive matching (see `_entries_in`). `gaps`/`symlinks` are
+    forwarded so an enforcement caller can see an incomplete walk and any link
+    hiding in the read-only area instead of treating both as absent (F162/F172).
     """
     area = dirp / raw_data_dirname(dirp)
-    return _entries_in(area, dirp)
+    return _entries_in(area, dirp, gaps=gaps, symlinks=symlinks)
 
 
-def _entries_in(area: Path, base: Path) -> dict:
+def _entries_in(area: Path, base: Path, gaps: list = None,
+                symlinks: list = None) -> dict:
     """{relative path: (relative path, sha256)} for ONE raw-data area directory.
 
     The key is the EXACT path, not `_raw_data_key`'s token-stripped form: that
@@ -5596,10 +5780,20 @@ def _entries_in(area: Path, base: Path) -> dict:
     out = {}
     if not area.is_dir():
         return out
+    area_gaps, area_links = [], []
     try:
-        files = _iter_tree_files(area, follow_dir_links=True)
+        files = _iter_tree_files(area, follow_dir_links=True,
+                                 gaps=area_gaps, symlinks=area_links)
     except OSError:
         return out                      # an unreadable tree is reported by the caller
+    if gaps is not None:
+        gaps.extend(f"{area.name}/{g}" if g else area.name for g in area_gaps)
+    if symlinks is not None:
+        for rel in area_links:
+            try:
+                symlinks.append((area / rel).relative_to(base).as_posix())
+            except ValueError:
+                symlinks.append(rel)
     # The walk follows DIRECTORY symlinks (a sandbox links its evidence areas),
     # but a nested link may point outside the area. Its lexical path still
     # looks local, so `copyfile`/`unlink` below would write through it. Only
@@ -5719,7 +5913,15 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     src = ctx.pristine / raw_data_dirname(ctx.pristine)
     if not src.is_dir():
         return {"present": False, "files": 0, "restored": [], "dropped": []}
-    want = raw_data_entries(ctx.pristine)
+    gaps = []
+    want = raw_data_entries(ctx.pristine, gaps=gaps)
+    if gaps:
+        msg = (f"READ-ONLY raw data: the pristine raw-data tree could not be read "
+               f"({', '.join(gaps[:4])}); the restore/drop pass was SKIPPED rather than "
+               f"treating the partial walk as authoritative")
+        warns.append(msg)
+        return {"present": True, "files": len(want), "restored": [], "dropped": [],
+                "failures": [msg]}
     # The pristine area EXISTS (checked above) even when it carries no file:
     # `want` being empty must not skip the candidate scan, or a package may add
     # arbitrary files under raw_data/ whenever the author's directory is empty
@@ -5741,7 +5943,8 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
             area.unlink()
         warns.append(f"READ-ONLY raw data: {name}/ was a symlink to a different target and was "
                      f"replaced with the pristine copy")
-    got = raw_data_entries(cand_dir)
+    links = []
+    got = raw_data_entries(cand_dir, symlinks=links)
     pairs, extras = raw_data_pairs(want, got)
     # A DIRECTORY squatting on one of the original's file paths (agent scratch at
     # the wrong path) is the recovery layer's case: it refuses to delete real work
@@ -5759,8 +5962,18 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     # unchanged. Without this, a read-only raw_data copy would make the RESTORE
     # itself fail with EACCES (or, worse, leave half a package repaired).
     mode_plan = make_tree_writable(area) if area.is_dir() else []
-    restored, dropped = [], []
+    restored, dropped, failures = [], [], []
     try:
+        for rel in links:
+            p = cand_dir / rel
+            try:
+                if p.is_symlink() or p.exists():
+                    p.unlink()
+                dropped.append(rel)
+                warns.append(f"READ-ONLY raw data: removed the symlink {rel} from the "
+                             f"read-only area (a link is not package content)")
+            except OSError as e:
+                failures.append(f"could not remove symlink {rel}: {e}")
         for rel, dig, crel, cdig in pairs:
             if cdig == dig:
                 continue
@@ -5781,6 +5994,7 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
                     shutil.copymode(ctx.pristine / rel, dest)
             except OSError as e:
                 warns.append(f"READ-ONLY raw data: could not restore {dest.name}: {e}")
+                failures.append(f"could not restore {dest.name}: {e}")
                 continue
             restored.append(dest.relative_to(cand_dir).as_posix())
         for rel, _dig in extras:
@@ -5790,6 +6004,7 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
                 except OSError as e:
                     warns.append(f"READ-ONLY raw data: could not remove added file "
                                  f"{rel}: {e}")
+                    failures.append(f"could not remove added file {rel}: {e}")
                     continue
                 dropped.append(rel)
         # A directory the package had lost (or made writable) comes back with the
@@ -5808,6 +6023,8 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
         warns.append(f"READ-ONLY raw data: {s} is a directory where the pristine original has a "
                      f"file; its content was left alone (the recovery layer refuses to delete "
                      f"real work) and the attempt fails")
+        failures.append(f"{s} is a directory where the pristine original has a file "
+                        f"(a read-only input-path squat)")
     for d in sorted([p for p in area.rglob("*") if p.is_dir()],
                     key=lambda p: len(p.parts), reverse=True):
         try:
@@ -5823,10 +6040,12 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
             f"back to the pristine original ({changed}{more}). The raw-data directory is an "
             f"INPUT: never edit, rename, add or drop anything inside it -- it is copied from the "
             f"original, so a document that points into it must use the name that is there")
-    return {"present": True, "files": len(want), "restored": restored, "dropped": dropped}
+    return {"present": True, "files": len(want), "restored": restored, "dropped": dropped,
+            "failures": failures}
 
 
-def feedback_area_entries(dirp: Path, area_name: str) -> dict:
+def feedback_area_entries(dirp: Path, area_name: str, gaps: list = None,
+                          symlinks: list = None) -> dict:
     """{corpus-relative path: sha256} for one review-feedback EVIDENCE area.
 
     No version-token normalisation here: the area is an INPUT whose file names
@@ -5836,11 +6055,21 @@ def feedback_area_entries(dirp: Path, area_name: str) -> dict:
     area = Path(dirp) / area_name
     if not area.is_dir():
         return out
+    area_gaps, area_links = [], []
     try:
-        files = _iter_tree_files(area, follow_dir_links=True)
+        files = _iter_tree_files(area, follow_dir_links=True,
+                                 gaps=area_gaps, symlinks=area_links)
         area_real = area.resolve()
     except OSError:
         return out
+    if gaps is not None:
+        gaps.extend(f"{area_name}/{g}" if g else area_name for g in area_gaps)
+    if symlinks is not None:
+        for rel in area_links:
+            try:
+                symlinks.append((area / rel).relative_to(Path(dirp)).as_posix())
+            except ValueError:
+                symlinks.append(rel)
     for p in files:
         try:
             if not p.resolve().is_relative_to(area_real):
@@ -5883,9 +6112,19 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
     src = ctx.pristine / area_name
     if not src.is_dir():
         return {"present": False, "files": 0, "restored": [], "dropped": []}
-    want = feedback_area_entries(ctx.pristine, area_name)
-    if not want:
-        return {"present": False, "files": 0, "restored": [], "dropped": []}
+    gaps = []
+    want = feedback_area_entries(ctx.pristine, area_name, gaps=gaps)
+    if gaps:
+        msg = (f"READ-ONLY {label} review feedback: the pristine feedback tree could not be "
+               f"read ({', '.join(gaps[:4])}); the restore/drop pass was SKIPPED rather than "
+               f"treating the partial walk as authoritative")
+        warns.append(msg)
+        return {"present": True, "files": len(want), "restored": [], "dropped": [],
+                "failures": [msg]}
+    # The pristine area EXISTS even when it carries no file. Returning early
+    # here skipped the candidate scan, so a package could add arbitrary files
+    # under an EMPTY feedback area (the raw-data sibling was fixed for the same
+    # shape, F119/F161).
     area = cand_dir / area_name
     if area.is_symlink():
         try:
@@ -5904,9 +6143,21 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
     def inside_squat(rel: str) -> bool:
         return any(rel == s or rel.startswith(s + "/") for s in squat)
 
+    links = []
     mode_plan = make_tree_writable(area) if area.is_dir() else []
     restored, dropped = [], []
     try:
+        for rel in links:
+            p = cand_dir / rel
+            try:
+                if p.is_symlink() or p.exists():
+                    p.unlink()
+                dropped.append(rel)
+                warns.append(f"READ-ONLY {label} review feedback: removed the symlink {rel} "
+                             f"from the read-only area (a link is not package content)")
+            except OSError as e:
+                warns.append(f"READ-ONLY {label} review feedback: could not remove symlink "
+                             f"{rel}: {e}")
         for rel, dig in sorted(want.items()):
             dest = cand_dir / rel
             if dest.is_file():
@@ -5990,6 +6241,12 @@ def verify_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     if info["legacy_input_areas"]:
         warns.append("REMOVED input-area spelling in the package: "
                      + "; ".join(info["legacy_input_areas"]))
+    # Enforced-input failures are a separate channel: they must fail the
+    # attempt but must not be relabeled as the legacy-spelling list (F168).
+    info["readonly_failures"] = list(info.get("failures") or [])
+    if info["readonly_failures"]:
+        warns.append("READ-ONLY input failure in the package: "
+                     + "; ".join(info["readonly_failures"]))
     # The review-feedback areas are INPUTS like raw_data: same byte-for-byte
     # contract, same restore-from-pristine repair (human editors'/reviewers'
     # comments and the pre-filtered LLM review).
@@ -6445,6 +6702,15 @@ def _caption_and_document_checks(ctx: Ctx, rec: dict, vid: str, base_sources: li
                            "must be declared scaffolding for a mandatory item or the visible "
                            "output of a finding, and an undeclared one is invented content, the "
                            "same defect class as a lost document read in the other direction")
+        if dset.get("unreadable_dirs"):
+            # An unreadable directory was silently absent from BOTH manifests, so
+            # "nothing is missing" was a statement about the readable part only
+            # (F118). Name the coverage gap; never let it read as a clean check.
+            warns.append("document-set comparison INCOMPLETE: unreadable directories "
+                         "not compared: "
+                         + ", ".join(dset["unreadable_dirs"][:6])
+                         + " -- make them readable and re-run the stage; files under "
+                           "them could be missing from the candidate without being reported")
 
 
 def postcheck_a1(ctx: Ctx, rec: dict):
@@ -6459,8 +6725,17 @@ def postcheck_a1(ctx: Ctx, rec: dict):
     got = recompute_corpus_digest(ctx, rec["round"], A1_ID)
     # The DIGEST is still recorded below; only its verification is skipped
     # (`--skip-hash`), never the recording.
-    if want and got != want and not hash_checks_skipped():
-        errs.append(f"base/ is not byte-identical to its source ({src_id}).")
+    if not want:
+        # materialize_a1 already DERIVED a digest for a legacy/damaged pin that
+        # records none; skipping the check made the post-copy verification a
+        # no-op (F169).
+        want = str(rec.get("base_source_digest") or "").strip() or None
+    if want:
+        if got != want and not hash_checks_skipped():
+            errs.append(f"base/ is not byte-identical to its source ({src_id}).")
+    elif not hash_checks_skipped():
+        errs.append("cannot verify base/ against its source: no recorded source digest "
+                    "and the source pin is unreadable")
     rec["corpus_digest"] = got
     # The round base's own hand-off markers (report-only; see the placeholder
     # rules): recorded here too so a pin of the base carries the count.
@@ -6898,7 +7173,7 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
     # ("the run carries the letter in the journal's styles") is not an override.
     for r in filled:
         rule = str(r.get("rule") or "").strip().upper()
-        if rule not in COVER_LETTER_STAMP_RULES:
+        if not re.search(r"\bFMT-CL1\b", rule):
             continue
         disp = str(r.get(key) or "").strip()
         if not COVER_LETTER_OK_CLOSE_RE.match(disp):
@@ -6990,7 +7265,8 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
 
 
 def artifact_quality_report(review_dir: Path, require_files: bool = False,
-                           m20_seed_rows: list | None = None) -> dict:
+                           m20_seed_rows: list | None = None,
+                           seeded_row_counts: dict | None = None) -> dict:
     """{artifact: [problems]} for every decision table under guided_review/.
 
     EVERY table block of the artifact is checked, each against its own header:
@@ -7005,6 +7281,7 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
     unverified error whenever `require_files` marks this a gate.
     """
     report = {}
+    seeded_row_counts = seeded_row_counts or {}
     for rel in DECISION_ARTIFACTS:
         path = review_dir / rel
         if require_files and not path.is_file():
@@ -7016,6 +7293,22 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
             report.setdefault(rel, []).append(
                 f"{rel} carries no decision table (the seeded table was emptied)")
             continue
+        _expected = int(seeded_row_counts.get(rel) or 0)
+        if _expected > 0:
+            # The seed for this artifact is non-empty in the read-only base, so
+            # a header-only disposition block is a DELETED seed, not the
+            # documented "no rows" shape. `_disposition_table_problems` only
+            # sees a file whose EVERY block is empty; a coverage table with rows
+            # beside the emptied seed hid it (F170).
+            _empty_keyed = [b for b in blocks
+                            if any(k in b["header"] for k in DISPOSITION_COLUMNS)
+                            and not b["rows"]]
+            if _empty_keyed:
+                report.setdefault(rel, []).append(
+                    f"carries {len(_empty_keyed)} header-only disposition table(s) although "
+                    f"the read-only seed has {_expected} row(s): every seeded row must be "
+                    f"DISPOSED, not deleted -- re-emit it with its verdict in the "
+                    f"`disposition` cell")
         seeded_counts = Counter()
         if rel.endswith("M20_formatting.md"):
             # M20's seed is reproducible from the code-side scan the orchestrator
@@ -7125,7 +7418,7 @@ def judge_cover_letter_artifact_problems(sb: Path, target_rows: list) -> list:
         for r in block["rows"]:
             rule = str(r.get("rule") or "").strip().upper()
             cells = [str(v or "") for v in r.values()]
-            if not (rule == "FMT-CL1"
+            if not (re.search(r"\bFMT-CL1\b", rule)
                     or (not rule and any("FMT-CL1" in c.upper() for c in cells))):
                 continue
             disp = " ".join(str(r.get(k) or "") for k in
@@ -7198,6 +7491,41 @@ def artifact_quality_notes(review_dir: Path) -> dict:
     return notes
 
 
+def review_seeded_row_counts(ctx: Ctx, base: Path) -> dict:
+    """{artifact rel: code-seeded row count} re-derived from the read-only base.
+
+    The counters mirror the seed builders in `code_side_evidence` plus M2's
+    reference-integrity rows. They are derived HERE, from `base/`, never from
+    the session-writable artifact, so deleting a seeded table cannot lower its
+    expected count (F170).
+    """
+    counts = {}
+    try:
+        ev = code_side_evidence(ctx, base, "review")
+    except Exception:                                                 # noqa: BLE001
+        return counts
+    counts["artifacts/M18_caption_words.md"] = len(
+        (ev.get("captions") or {}).get("captions") or [])
+    counts["artifacts/M19_length.md"] = len((ev.get("lengths") or {}).get("rows") or [])
+    counts["artifacts/M8_terms.md"] = len((ev.get("terms") or {}).get("rows") or [])
+    counts["artifacts/OUTLINE.md"] = len((ev.get("outline") or {}).get("rows") or [])
+    counts["artifacts/PLACEHOLDERS.md"] = len(
+        (ev.get("placeholder_ledger") or {}).get("rows") or [])
+    counts["artifacts/CLAIM_STRENGTH.md"] = len((ev.get("claims") or {}).get("rows") or [])
+    counts["artifacts/M30_hierarchy_reconciliation.md"] = sum(
+        len((ev.get(k) or {}).get("rows") or [])
+        for k in ("hierarchy", "code_literals", "negative_claims"))
+    try:
+        mod = _format_module()
+        if mod is not None and hasattr(mod, "reference_integrity_rows"):
+            refs = mod.reference_integrity_rows(
+                corpus_text_documents([(base, "", ())], raw_text=True, include_bib=True))
+            counts["artifacts/M2_references.md"] = len(refs or [])
+    except Exception:                                                 # noqa: BLE001
+        pass
+    return counts
+
+
 def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: list) -> dict:
     """Record (and optionally fail) the review's decision-artifact quality."""
     # Re-derive the M20 seed from the read-only base/ the review was given, not
@@ -7215,8 +7543,14 @@ def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: lis
             m20_seed_rows = [r for r in (info.get("rows") or []) if isinstance(r, dict)]
         except Exception as e:                                     # noqa: BLE001 -- never gate on scan
             m20_seed_error = f"the code-side M20 scan FAILED ({type(e).__name__}: {e})"
+    seeded_counts = review_seeded_row_counts(ctx, base) if base.is_dir() else {}
+    if base.is_dir() and not seeded_counts:
+        warns.append("the decision tables' code-seeded row counts could not be re-derived "
+                     "from base/; a deleted seeded row cannot be distinguished from an "
+                     "empty seed (the seeded-row pin is UNKNOWN, not clean)")
     report = artifact_quality_report(sb / GUIDED_REVIEW_DIR, require_files=True,
-                                     m20_seed_rows=m20_seed_rows)
+                                     m20_seed_rows=m20_seed_rows,
+                                     seeded_row_counts=seeded_counts)
     if m20_seed_error:
         report.setdefault("artifacts/M20_formatting.md", []).append(
             f"M20 cannot be verified: {m20_seed_error}; the seeded-row state is UNKNOWN, "
@@ -7973,6 +8307,30 @@ def review_repair_table_rel_paths(sb: Path) -> list:
     return [rel for rel in REVIEW_REPAIR_TABLES if (sb / GUIDED_REVIEW_DIR / rel).is_file()]
 
 
+def _repair_starts_new_header(lines: list, i: int, cells: list, header) -> bool:
+    """Is line `i` a NEW table header, or a ragged ROW of the current table?
+
+    A row whose cell count differs from the current header used to be taken as
+    a new header in both parsers. The postcheck's own remediation for a short
+    decision row is to re-emit it with one cell per seeded column, so the
+    pre-repair snapshot read that repaired row as a header and then reported a
+    deleted/added row (F164). Look at the FOLLOWING table line: a new table's
+    header is followed by a separator (or data) of the SAME width, while a
+    ragged row inside a table is followed by a row of the CURRENT header width.
+    """
+    if header is None or len(cells) == len(header):
+        return False
+    for j in range(i + 1, len(lines)):
+        s = lines[j].strip()
+        if not s or not s.startswith("|"):
+            break
+        nxt = _m1b_cells(s)
+        if not nxt:
+            continue
+        return len(nxt) == len(cells)
+    return False
+
+
 def _repair_table_rows(md_text: str) -> list:
     """The row IDENTITY of every table in one decision artifact, in order.
 
@@ -7982,7 +8340,8 @@ def _repair_table_rows(md_text: str) -> list:
     even though the artifact still parses.
     """
     out, header, after_header = [], None, False
-    for line in str(md_text or "").splitlines():
+    lines = str(md_text or "").splitlines()
+    for _i, line in enumerate(lines):
         s = line.strip()
         if not s.startswith("|"):
             # A blank line or a heading ends the table block; the next `|`
@@ -8002,14 +8361,15 @@ def _repair_table_rows(md_text: str) -> list:
         if after_header and _m1b_separator(cells):
             after_header = False
             continue
-        if len(cells) != len(header):
-            # A different column count means a new table block (the documented
-            # M20 artifact carries a seeded table and the session's coverage
-            # table); take this line as the new header, exactly as
-            # _repair_table_skeleton already does.
+        if _repair_starts_new_header(lines, _i, cells, header):
             header = [c.strip().lower() for c in cells]
             after_header = True
             continue
+        if len(cells) != len(header):
+            # A ragged row INSIDE the table keeps the current header for
+            # identity: pad a short row (the documented repair) and trim a long
+            # one, exactly as the postcheck's row reader does.
+            cells = (cells + [""] * len(header))[:len(header)]
         if all(c.strip().lower() == header[i] for i, c in enumerate(cells)):
             continue                          # a repeated header, not a row
         after_header = False
@@ -8028,7 +8388,8 @@ def _repair_table_skeleton(md_text: str) -> str:
     files with the same skeleton.
     """
     out, header, after_header = [], None, False
-    for line in str(md_text or "").splitlines():
+    lines = str(md_text or "").splitlines()
+    for _i, line in enumerate(lines):
         s = line.strip()
         if not s.startswith("|"):
             out.append(line)
@@ -8042,13 +8403,16 @@ def _repair_table_skeleton(md_text: str) -> str:
         if not cells:
             out.append(line)
             continue
-        # A different column count means a new table (or a ragged row): take it as
-        # the block's header rather than blanking cells against the wrong columns.
-        if header is None or len(cells) != len(header):
+        if header is None or _repair_starts_new_header(lines, _i, cells, header):
             header = [c.strip().lower() for c in cells]
             after_header = True
             out.append(line)
             continue
+        if len(cells) != len(header):
+            # A ragged row inside the table is blanked against the CURRENT
+            # header (pad/trim), not promoted to a new header (F164).
+            cells = (cells + [""] * len(header))[:len(header)]
+            line = "| " + " | ".join(cells) + " |"
         # The divider is the row immediately under the header; a mid-table
         # dash-only row is data and must be blanked like any other row, or the
         # guard's two parsers disagree about which row is which.
@@ -8067,6 +8431,26 @@ def _repair_table_skeleton(md_text: str) -> str:
     return "\n".join(out)
 
 
+def _repair_scope_symlinks(sb: Path, kind: str) -> list:
+    """Symlinks whose lexical path lies inside the repair's writable scope.
+
+    The guard cannot certify an edit made THROUGH such a link: the bytes under
+    the link's real path are outside the sandbox, so neither the protected-file
+    digests nor the writable-file diff can see the write (F171).
+    """
+    out = []
+    for p in sorted(sb.rglob("*")):
+        if not p.is_symlink():
+            continue
+        try:
+            rel = p.relative_to(sb)
+        except ValueError:
+            continue
+        if _repair_path_writable(rel, kind) or _repair_path_creatable(rel, kind):
+            out.append(rel.as_posix())
+    return out
+
+
 def _repair_guard_files(sb: Path, kind: str) -> dict:
     """{rel path: sha256} for every file a repair may NOT touch.
 
@@ -8079,7 +8463,7 @@ def _repair_guard_files(sb: Path, kind: str) -> dict:
     """
     out = {}
     for p in sorted(sb.rglob("*")):
-        if not p.is_file():
+        if p.is_symlink() or not p.is_file():
             continue
         rel = p.relative_to(sb)
         parts = tuple(x for x in rel.parts if x)
@@ -8107,7 +8491,7 @@ def _repair_read_json(path: Path):
     if text is None:
         return None
     try:
-        return json.loads(text)
+        return _json_from_text(text, lenient=True)
     except ValueError:
         return None
 
@@ -8161,6 +8545,12 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     """
     kind = str(rec.get("kind") or "")
     tables, digests = {}, {}
+    writable = {}
+    for p in _repair_writable_files(sb, kind):
+        try:
+            writable[p.relative_to(sb).as_posix()] = sha256_file(p)
+        except OSError:
+            continue
     for rel in review_repair_table_rel_paths(sb):
         path = sb / GUIDED_REVIEW_DIR / rel
         text = read_text_bounded(path) or ""
@@ -8172,6 +8562,8 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     return {"kind": kind, "files": _repair_guard_files(sb, kind), "tables": tables,
             "editable": sorted(p.relative_to(sb).as_posix()
                                for p in _repair_writable_files(sb, kind)),
+            "writable": writable,
+            "symlinks": _repair_scope_symlinks(sb, kind),
             "artifacts": digests, "audit": _repair_audit_rows(sb),
             "judge": _repair_judge_rows(sb)}
 
@@ -8179,8 +8571,17 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
 def _repair_writable_files(sb: Path, kind: str) -> list:
     """Every file that exists inside the repair's own writable scope."""
     out = []
+    try:
+        sb_real = sb.resolve()
+    except OSError:
+        return out
     for p in sorted(sb.rglob("*")):
-        if not p.is_file():
+        if p.is_symlink() or not p.is_file():
+            continue
+        try:
+            if not p.resolve().is_relative_to(sb_real):
+                continue
+        except (OSError, RuntimeError):
             continue
         rel = p.relative_to(sb)
         if _repair_path_writable(rel, kind):
@@ -8331,6 +8732,14 @@ def repair_guard_problems(sb: Path, guard: dict, rec: dict = None) -> list:
                 continue
             problems.append(f"it CREATED {rel}, which the stage never wrote (a repair completes "
                             f"the stage's own bookkeeping; it never authors a deliverable)")
+            if len(problems) >= 6:
+                break
+    if len(problems) < 6:
+        for rel in sorted(set(guard.get("symlinks") or ())
+                          | set(_repair_scope_symlinks(sb, kind))):
+            problems.append(
+                f"the writable scope contains the symlink {rel}; a write through it lands "
+                f"outside the sandbox and the guard cannot certify it")
             if len(problems) >= 6:
                 break
     if len(problems) < 6 and kind == "guided_review":
@@ -8754,7 +9163,24 @@ def guard_changed_paths(sb: Path, guard: dict) -> list:
                 changed.append(rel)
         except OSError:
             continue
-    return changed
+    # The repair's OWN bookkeeping (revision_report.json, audit.json, ...) is
+    # writable precisely so the repair can rewrite it, so it is excluded from
+    # `files`; without this diff the record said "(no artifact changed)" after
+    # the repair's whole job was rewriting one of those files (F176).
+    before_writable = dict(guard.get("writable") or {})
+    for rel, digest in sorted(before_writable.items()):
+        path = sb / rel
+        try:
+            if not path.is_file() or sha256_file(path) != digest:
+                changed.append(rel)
+        except OSError:
+            changed.append(rel)
+    kind = str(guard.get("kind") or "")
+    for p in _repair_writable_files(sb, kind):
+        rel = p.relative_to(sb).as_posix()
+        if rel not in before_writable:
+            changed.append(rel)
+    return sorted(set(changed))
 
 def _lookup_answers(sb: Path) -> dict:
     """{kind: [lookup row]} for lookups with a conclusive verdict."""
@@ -8791,8 +9217,27 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
         for r in mod.placeholder_ledger([x[0] for x in rows]):
             searchable.append(dict(r, document=name))
     answers = _lookup_answers(sb)
-    answerable = [r for r in searchable
-                  if answers.get(str(r.get("kind") or "").strip().lower())]
+
+    def _lookup_norm(value) -> str:
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).split())
+
+    def _has_own_lookup(row) -> bool:
+        """Only a marker with its OWN question answered is answerable.
+
+        Keying on `kind` alone let one answered accession mark every accession
+        (and every kind-less version/registration marker) as answered (F163).
+        """
+        kind = str(row.get("kind") or "").strip().lower()
+        payload = _lookup_norm(row.get("payload"))
+        for a in answers.get(kind) or []:
+            query = _lookup_norm(a.get("query"))
+            if not query or not payload:
+                continue
+            if query == payload or query in payload or payload in query:
+                return True
+        return False
+
+    answerable = [r for r in searchable if _has_own_lookup(r)]
     # EVERY marker in the delivered package, searchable or not: the count is a
     # diagnostic under `author_to_complete: document` (the marker is the
     # author's own checklist) and the shipped-marker gate under `readme`/`off`.

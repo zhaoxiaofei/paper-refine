@@ -152,7 +152,10 @@ def test_pipeline_helpers():
     for _name in ("cover_letter.docx", "response_to_reviewers.docx",
                   "uncover_response.docx"):
         (prev_dir / _name).write_text("stub", encoding="utf-8")
-    ctx = types.SimpleNamespace(pristine=prev_dir.parent)
+    # A previous reply is context only for a mode that consumes the HUMAN
+    # stream; the fixture must record that mode (the stream guard is deliberate).
+    ctx = types.SimpleNamespace(pristine=prev_dir.parent,
+                                cfg={"revision_mode": "transfer"})
     prev = [label for _p, label in pp.journal_previous_responses(ctx)]
     check("F-144 the cover letter is not a previous response and real replies survive",
           prev == ["human_review_feedback/response_to_reviewers.docx",

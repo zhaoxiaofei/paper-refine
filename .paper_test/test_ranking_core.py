@@ -180,7 +180,8 @@ def test_semantics():
              BASE_REP: stat(0.0, complete=False)}
     sel = run_rank(stats)
     check("B7 no eligible row falls back to the round's base",
-          sel["champion"] == "a1" and sel["ranking"] == [] and "tiebreak" not in sel,
+          sel["champion"] == "a1" and sel["ranking"] == []
+          and (sel.get("tiebreak") or {}).get("cells_used") == 0,
           str(sel.get("champion")))
     check("B7 the fallback is explained", any("no eligible rows" in ln for ln in sel["trace"]))
 

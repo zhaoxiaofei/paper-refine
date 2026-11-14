@@ -900,11 +900,14 @@ def test_apply_template_package():
         {"main": main_tpl, "supplementary": supp_tpl}, pkg, dest)
     check("the package rebuild restyles every DOCX and copies every other file",
           rep.get("ok") is True and rep.get("documents_rebuilt") == 2
-          and rep.get("files_copied") == 2, str(rep)[:260])
+          and rep.get("files_copied") == 1, str(rep)[:260])
     names = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
-    check("process scratch and tracked-change auxiliaries stay out of the rebuilt package",
-          names == ["MANUAL_STEPS.md", "figure1.png", "mainText.docx", "suppInfo.docx"],
-          str(names))
+    # MANUAL_STEPS.md is pipeline bookkeeping: F126 (wave 2) makes the rebuild
+    # strip every is_bookkeeping_name file, because the rebuilt package is a
+    # SUBMISSION package and must not carry the pipeline's own reports.
+    check("process scratch, tracked-change auxiliaries and bookkeeping stay out of the "
+          "rebuilt package",
+          names == ["figure1.png", "mainText.docx", "suppInfo.docx"], str(names))
     check("the supplementary document uses the supplementary template",
           (rep["files"] and any(f["file"] == "suppInfo.docx"
                                 and Path(str(f.get("template") or "")).name

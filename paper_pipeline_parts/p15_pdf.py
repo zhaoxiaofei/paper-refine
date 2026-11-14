@@ -142,6 +142,11 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
     if not exe:
         return {"ok": False, "tool": None,
                 "error": "latexmk is not on PATH; the LaTeX sources were not compiled"}
+    # A failed re-render must not leave the PREVIOUS run's PDF at the recorded
+    # path: the manifest says ok=False, but the persistent tree would still
+    # serve stale bytes (F260).
+    with contextlib.suppress(OSError):
+        Path(out_pdf).unlink()
     src = pkg / rel
     links = _package_symlink_problems(pkg)
     if links:
@@ -351,7 +356,8 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
         # The cache must key on EVERY compile input, not just the root .tex:
         # an unchanged root with a changed \input, .bib, figure or .sty was
         # served a stale PDF as "this version's render".
-        _latex_digest = manifest_digest(hash_manifest(src, follow_dir_links=True))
+        _latex_digest = manifest_digest(hash_manifest(
+            src, follow_dir_links=True, on_error="<unreadable>"))
         for rel in latex_root_documents(src):
             digest = _latex_digest
             _job_src, _job_rel, out_pdf = next(_latex_jobs)
@@ -379,6 +385,8 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
         chosen.add(out_pdf.resolve())
         rec = _reuse_pdf_record(previous, label, rel, f["digest"], out_pdf, "docx")
         if rec is None:
+            with contextlib.suppress(OSError):
+                out_pdf.unlink()          # never leave a stale PDF (F260)
             if out_pdf.name == docx.stem + ".pdf":
                 res = convert_docx_to_pdf_persistent(docx, out_dir)
             else:

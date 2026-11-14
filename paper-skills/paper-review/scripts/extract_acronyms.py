@@ -192,8 +192,22 @@ FILE_RE = re.compile(
     r"bib|tex|zip|gz|json|ya?ml|sh|xls|pptx|xml|rels|fa|fq|fastq|bam|h5ad|rds|loom)\b", re.I)
 
 REF_HEADING_RE = re.compile(
-    r"^\s*(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
-    r"(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
+    r"^\s*(?:"
+    # LaTeX head forms (F269): a \section{References} list was swept for
+    # acronyms, so a cited title's token entered M1.
+    r"\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}\s*(?:\\label\{[^{}]*\})?"
+    r"|\\begin\{thebibliography\}"
+    r"|\\(?:bibliography|printbibliography)\b.*"
+    # Plain/Markdown heading, optionally ATX and optionally emphasised.
+    r"|(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)"
+    r"\s*(?:\*{1,2}|_{1,2})?\s*[:.\u2014\u2013-]?\s*"
+    r")\s*(?:%.*)?$", re.I)
+# A LaTeX reference region also ends at the closing environment or the next
+# sectioning command.
+REF_TEX_END_RE = re.compile(
+    r"^\s*(?:\\end\{thebibliography\}|\\(?:section|subsection|chapter)\*?\s*\{)",
+    re.I)
 # The reference-role file names: "ref", "refs", "references", "ref-list" --
 # the SAME word-boundary rule convert_corpus.py's role guesser uses.
 # Deliberately not a bare "ref" PREFIX: "refined_draft.txt" is not a
@@ -320,6 +334,7 @@ def find_reference_region(lines):
             prev_blank = False
             continue  # a numbered reference entry is never a section heading
         if STOP_SECTION_RE.match(s) or MD_HEADING_RE.match(s) or \
+                REF_TEX_END_RE.match(s) or \
                 FIG_CAPTION_RE.match(s) or TABLE_CAPTION_RE.match(s):
             end = j
             note = "ends at the next heading/caption (line %d)" % (j + 1)
@@ -903,7 +918,7 @@ def main():
             print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
             continue
         lines = text.split("\n")
-        if fname.endswith((".tex.txt", ".ltx.txt")):
+        if fname.lower().endswith((".tex.txt", ".ltx.txt")):
             # A commented-out sentence is not the authors' prose and must not
             # produce an M1 token (`% Old text mentioned FACS`).
             lines = [strip_tex_comment(ln) for ln in lines]
@@ -913,6 +928,7 @@ def main():
                 fname, region[0] + 1, region[1], region[2]))
         current_section = role
         legend_no = 0
+        table_no = 0
         seen_here = set()
         for li, raw in enumerate(lines, 1):
             if region and region[0] <= li - 1 < region[1]:
@@ -927,6 +943,12 @@ def main():
                 # second legend's legitimate first use became a residue row.
                 legend_no += 1
                 current_section = "figure legend %d" % legend_no
+            elif label == "table" and _caption_line(raw, TABLE_CAPTION_RE):
+                # Each table footnote is its own first-use context too.  The
+                # shared "table" bucket made the first long-form use in every
+                # later table a false M1(k) residue row (F272).
+                table_no += 1
+                current_section = "table %d" % table_no
             elif label:
                 current_section = label
             elif current_section == "references":

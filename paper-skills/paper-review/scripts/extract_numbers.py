@@ -235,8 +235,24 @@ VERSION_RE = re.compile(r"\b(?:v(?:er(?:sion)?)?\.?\s?)(\d+(?:\.\d+)+)\b", re.I)
 REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 
 REF_HEAD_RE = re.compile(
-    r"^\s*(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
-    r"(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
+    r"^\s*(?:"
+    # LaTeX head forms: a sectioning command, the bibliography environment, or
+    # a reference-list command.  Without these the list was swept as prose and
+    # a cited title's p-value entered M4 (F269).
+    r"\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}\s*(?:\\label\{[^{}]*\})?"
+    r"|\\begin\{thebibliography\}"
+    r"|\\(?:bibliography|printbibliography)\b.*"
+    # Plain/Markdown heading, optionally ATX and optionally emphasised:
+    # "**References**" was not a boundary.
+    r"|(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)"
+    r"\s*(?:\*{1,2}|_{1,2})?\s*[:.\u2014\u2013-]?\s*"
+    r")\s*(?:%.*)?$", re.I)
+# A LaTeX reference region also ends at the closing environment or the next
+# sectioning command (the plain STOP_SECTION_RE cannot see either).
+REF_TEX_END_RE = re.compile(
+    r"^\s*(?:\\end\{thebibliography\}|\\(?:section|subsection|chapter)\*?\s*\{)",
+    re.I)
 STOP_SECTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
     r"(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
@@ -338,6 +354,7 @@ def find_reference_region(lines):
             prev_blank = False
             continue  # a numbered reference entry is never a section heading
         if STOP_SECTION_RE.match(s) or MD_HEADING_RE.match(s) or \
+                REF_TEX_END_RE.match(s) or \
                 FIG_CAPTION_RE.match(s) or TABLE_CAPTION_RE.match(s):
             end = j
             note = "ends at the next heading/caption (line %d)" % (j + 1)
@@ -451,7 +468,7 @@ def main():
         except OSError as e:
             print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
             continue
-        if fname.endswith((".tex.txt", ".ltx.txt")):
+        if fname.lower().endswith((".tex.txt", ".ltx.txt")):
             # A LaTeX comment is not manuscript prose: a commented-out
             # `% p = 0.001` must not become an M4 divergence candidate.
             lines = [strip_tex_comment(ln) for ln in lines]

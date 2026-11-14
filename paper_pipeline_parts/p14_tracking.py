@@ -218,9 +218,17 @@ def latexdiff_one_pair(base: Path, cand: Path, out: Path,
         rc, stdout, err = None, b"", f"exec error: {e}"
     ok = bool(rc == 0 and stdout.strip())
     if ok:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(tmp_path_for(out), out,
-                            lambda f: f.write(stdout), binary=True)
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(tmp_path_for(out), out,
+                                lambda f: f.write(stdout), binary=True)
+        except OSError as e:
+            # The function promises "never raises": a read-only or full
+            # destination used to abort the whole tracking manifest (F257).
+            ok = False
+            err = f"could not write the diff: {e}"
+            with contextlib.suppress(OSError):
+                out.unlink()
     else:
         with contextlib.suppress(OSError):
             out.unlink()
@@ -798,16 +806,15 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                     if not rel or not (ctx.root / str(rel)).is_file():
                         return False
             elif c.get("ext") == ".tex" and c.get("in_package") \
-                    and not c.get("fallback") and not c.get("pdf_error") \
+                    and not c.get("fallback") \
                     and not str(c.get("pdf_skipped") or "").startswith("not a LaTeX root"):
-                # A .tex row with NO recorded PDF outcome -- or one skipped for
-                # a reason the current code no longer uses ("the copy carries no
-                # latexdiff markup") -- predates the tracking-PDF step: refresh
-                # it instead of keeping a PDF-less entry. A LOGGING-FALLBACK row
-                # is excluded: compile_tracking_pdfs never compiles one (a
-                # commented-out diff is not a document), so judging it by the
-                # missing PDF would make every fallback row permanently stale and
-                # the round-close pass would re-drive the tools it exists to skip.
+                # A .tex row with NO recorded PDF outcome -- or one whose
+                # compile FAILED (a transient latexmk/package/disk problem) --
+                # predates a usable PDF. Retrying on the next round-close pass
+                # is bounded by the round count; keeping a recorded pdf_error
+                # fresh meant the PDF was never retried (F258). A
+                # LOGGING-FALLBACK row is excluded: compile_tracking_pdfs never
+                # compiles one (a commented-out diff is not a document).
                 return False
             have[(c.get("baseline"), c.get("ext"), c.get("base_rel"),
                   c.get("revised_rel"))] = (c.get("base_digest"), c.get("cand_digest"))
@@ -966,7 +973,8 @@ def _track_tex_ref_target(name: str, cmd: str) -> tuple:
     return p.as_posix() + target, target
 
 
-def rewire_tracking_tex(text: str, tex_path: Path, tracked: dict) -> tuple:
+def rewire_tracking_tex(text: str, tex_path: Path, tracked: dict,
+                        pkg_root: Path = None) -> tuple:
     """Point a latexdiff copy's file references at the TRACKED siblings.
 
     `tracked` maps a usable tracked file's ORIGINAL corpus-relative path
@@ -992,6 +1000,19 @@ def rewire_tracking_tex(text: str, tex_path: Path, tracked: dict) -> tuple:
                 continue
             rel, _ext = _track_tex_ref_target(name, cmd)
             target = tracked.get(rel) or tracked.get(name)
+            if target is None and pkg_root is not None:
+                # A reference written from a SUBDIRECTORY master
+                # (`\input{../sections/intro}`) must resolve against the
+                # master's package-relative directory before lookup, or the
+                # tracked include is never found and the PDF renders the
+                # untracked file (F256).
+                try:
+                    _dir = Path(tex_path).parent.relative_to(Path(pkg_root)).as_posix()
+                except (OSError, ValueError):
+                    _dir = ""
+                if _dir:
+                    _cand = os.path.normpath(os.path.join(_dir, rel)).replace(os.sep, "/")
+                    target = tracked.get(_cand)
             if target is None:
                 new_names.append(name)
                 continue
@@ -1056,6 +1077,11 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
             continue
         src = ctx.root / str(c["in_package"])
         token = str(c.get("baseline") or "")
+        # The package root is the ancestor the row's own rel path descends to
+        # (the file name is the tracked spelling, so the depth is unchanged).
+        pkg = src
+        for _part in Path(str(c.get("revised_rel") or "")).parts:
+            pkg = pkg.parent
         if not src.is_file():
             c["pdf_ok"], c["pdf_error"] = False, "the tracking .tex is missing"
             continue
@@ -1067,7 +1093,7 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
                 c["pdf_skipped"] = "not a LaTeX root (a fragment compiled through its master)"
                 continue
             token_refs = {rel: path for (tok, rel), path in tracked.items() if tok == token}
-            new_text, rewrites = rewire_tracking_tex(text, src, token_refs)
+            new_text, rewrites = rewire_tracking_tex(text, src, token_refs, pkg_root=pkg)
             if rewrites:
                 c["ref_rewrites"] = rewrites
                 for target in (src, ctx.root / str(c.get("out") or "")):
@@ -1090,9 +1116,13 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
         digest = sha256_file(src)
         earlier = memo.get(digest)
         if earlier is not None:
-            shutil.copy2(earlier, out_pdf)
-            res = {"ok": True, "tool": "copied-from-identical-tracking-tex",
-                   "pages": _pdf_page_count(out_pdf), "error": None}
+            try:
+                shutil.copy2(earlier, out_pdf)
+                res = {"ok": True, "tool": "copied-from-identical-tracking-tex",
+                       "pages": _pdf_page_count(out_pdf), "error": None}
+            except OSError as e:
+                res = {"ok": False, "tool": "copied-from-identical-tracking-tex",
+                       "pages": 0, "error": f"could not copy the identical PDF: {e}"}
         else:
             try:
                 rel_in_pkg = src.relative_to(pkg).as_posix()
@@ -1112,10 +1142,18 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
         c["pdf_in_package"] = out_pdf.relative_to(ctx.root).as_posix()
         if c.get("out"):
             mirror_pdf = (ctx.root / str(c["out"])).with_suffix(TRACKING_PDF_EXT)
-            mirror_pdf.parent.mkdir(parents=True, exist_ok=True)
-            tracking_force_writable(mirror_pdf)
-            shutil.copy2(out_pdf, mirror_pdf)
-            c["pdf"] = mirror_pdf.relative_to(ctx.root).as_posix()
+            try:
+                mirror_pdf.parent.mkdir(parents=True, exist_ok=True)
+                tracking_force_writable(mirror_pdf)
+                shutil.copy2(out_pdf, mirror_pdf)
+                c["pdf"] = mirror_pdf.relative_to(ctx.root).as_posix()
+            except OSError as e:
+                # A mirror is a convenience; the in-package PDF exists. Record
+                # the failure instead of aborting the whole manifest (F257).
+                c["pdf_mirror_error"] = str(e)
+                if not quiet:
+                    print(f"  [track] PDF WARNING: could not mirror "
+                          f"{c.get('revised_rel')}: {e}")
         memo.setdefault(digest, out_pdf)
 
 

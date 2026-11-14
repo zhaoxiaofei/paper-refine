@@ -1150,13 +1150,20 @@ def sha256_files(paths, on_error=None) -> list:
 
 
 def _iter_tree_files(root: Path, follow_dir_links: bool = False,
-                     owner_root: Path = None, gaps: list = None) -> list:
+                     owner_root: Path = None, gaps: list = None,
+                     symlinks: list = None) -> list:
     """Every file under `root`; optionally descend into EVIDENCE-area links.
 
     `gaps`, when given, receives the relative path of every subdirectory whose
     entries could not be listed: the walk keeps the rest of the tree, and the
     caller can surface the incompleteness instead of silently certifying a
     partial identity (F95).
+
+    `symlinks`, when given, receives the relative path of every FILE symlink the
+    walk refuses. Such a link is not package content (the walker correctly
+    omits it), but a scan that must certify "every submitted file was read"
+    cannot treat it as absent: the caller records it as an unscannable
+    submitted file instead of silently passing a partial audit (F197).
 
     `pathlib.rglob` does NOT follow directory symlinks -- and the read-only
     evidence areas of a sandbox ARE symlinks to the root's canonical copy (see
@@ -1243,6 +1250,15 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
                 if key is None or key in ancestors:
                     continue
                 walk(p, ancestors | {key})
+            elif p.is_symlink() and p.is_file():
+                # A file symlink is not package content (see the paragraph
+                # below), but a caller that must account for EVERY submitted
+                # file is told the link exists instead of silently missing it.
+                if symlinks is not None:
+                    try:
+                        symlinks.append(p.relative_to(root).as_posix())
+                    except ValueError:
+                        symlinks.append(str(p))
             elif p.is_file() and not p.is_symlink():
                 # A FILE symlink is not package content: copy_into() refuses it,
                 # so hashing its target here made the input manifest/digest claim
@@ -1344,12 +1360,20 @@ def corpus_tree_manifest(dirp: Path) -> dict:
     """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
-    paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True)
+    gaps = []
+    paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True, gaps=gaps)
              if not _is_aux_doc(p.name)]
     # One unreadable payload must not crash the pass: record the sentinel (both manifests).
     digs = sha256_files(paths, on_error="<unreadable>")
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
-    return {"files": files, "count": len(files)}
+    out = {"files": files, "count": len(files)}
+    if gaps:
+        # An unreadable subtree is an INCOMPLETE identity, not an empty one: the
+        # sibling manifests (hash_manifest/corpus_dir_manifest) name the gap, so
+        # this one must too -- otherwise all-unreadable content hashes exactly
+        # like an empty tree (F106). Absent key == complete walk.
+        out["unreadable_dirs"] = sorted(gaps)
+    return out
 
 
 def excluded_corpus_component(rel, exclude_top) -> bool:
@@ -1515,7 +1539,10 @@ def strip_leading_dot_slash(value: str) -> str:
     """
     text = str(value).replace("\\", "/").strip()
     while text.startswith("./"):
-        text = text[2:]
+        # './/x' is still the relative spelling 'x': a plain two-character
+        # slice left '/x', an ABSOLUTE path that contained_under then rejected
+        # as escaping the root.
+        text = text[2:].lstrip("/")
     return text
 
 
@@ -1700,6 +1727,31 @@ def _open_reserved_tmp(tmp: Path, mode: str = "wb", encoding: str = "utf-8",
     return os.fdopen(fd, mode, **kwargs)
 
 
+# fsync errors that mean "this filesystem does not support fsync", never
+# "the bytes did not reach stable storage". Every other OSError (ENOSPC, EIO,
+# quota) must reach the caller: swallowing it published a non-durable write
+# while the caller recorded the save as complete (F110).
+_FSYNC_UNSUPPORTED_ERRNOS = frozenset(
+    e for e in (errno.EINVAL, getattr(errno, "ENOTSUP", None),
+                getattr(errno, "EOPNOTSUPP", None), errno.ENOSYS)
+    if e is not None)
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a directory entry durable (the rename in an atomic write)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        if e.errno not in _FSYNC_UNSUPPORTED_ERRNOS:
+            raise
+    finally:
+        os.close(fd)
+
+
 def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
                         encoding: str = "utf-8", newline=None,
                         fsync: bool = True, mode: int = None) -> None:
@@ -1708,9 +1760,19 @@ def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
     `write` gets the OPEN file object, never the path: reopening is the TOCTOU
     this helper exists to close. `mode` (when given) is applied to the reserved
     temp BEFORE the replace, so a copy that must stay executable is never
-    observable with the 0o666-minus-umask default mode.
+    observable with the 0o666-minus-umask default mode. With no explicit
+    `mode`, an existing regular destination's mode is preserved: os.replace
+    swaps the temp inode in, so a 0600 registry (state.json carries judge_salt)
+    was silently widened to 0666-minus-umask on every save (F109).
     """
     _refuse_symlinked_parent(dst)
+    if mode is None:
+        try:
+            dst_st = os.lstat(dst)
+        except OSError:
+            dst_st = None
+        if dst_st is not None and stat.S_ISREG(dst_st.st_mode):
+            mode = stat.S_IMODE(dst_st.st_mode)
     try:
         with _open_reserved_tmp(tmp, "wb" if binary else "w",
                                 encoding=encoding, newline=newline) as f:
@@ -1721,10 +1783,17 @@ def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
             if fsync:
                 try:
                     os.fsync(f.fileno())
-                except OSError:
-                    pass             # fsync is best-effort (some mounts refuse it)
+                except OSError as e:
+                    # Only "fsync unsupported" is best-effort; ENOSPC/EIO must
+                    # abort before the replace (F110).
+                    if e.errno not in _FSYNC_UNSUPPORTED_ERRNOS:
+                        raise
         _refuse_symlinked_parent(dst)
         os.replace(tmp, dst)
+        if fsync:
+            # The temporary's bytes are durable, but the rename that names them
+            # is not until the PARENT directory is fsynced (F111).
+            _fsync_dir(dst.parent)
     except BaseException:
         try:
             tmp.unlink()
@@ -1987,18 +2056,31 @@ def _json_from_text(text: str, lenient: bool):
     # candidate's own JSON, so a document carrying a nested object or a second
     # value is not penalized for either.
     best, best_key = None, None
+    best_end = None
+    rejected = []                    # (start, end) refused only by the prose test
     for i, end, obj in found:
         json_len = end - i
         tail = text[end:].strip()
         fenced = not tail or set(tail) <= set("`~")
         prose = outside_prose(i, end)
         if not fenced and prose > 2 * json_len:
+            rejected.append((i, end))
             continue
         # A value that runs to the end of the text is the document even when an
         # earlier top-level value is the same length: prefer it on a tie.
         key = (json_len, 1 if fenced else 0)
         if best_key is None or key > best_key:
-            best, best_key = obj, key
+            best, best_key, best_end = obj, key, end
+    if best is not None and not text[best_end:].strip():
+        # The winner runs to the end, so its `fenced` admission is what let it
+        # through. When a LARGER complete candidate before it was rejected only
+        # by the prose test, the tail is an in-prose EXAMPLE that must not be
+        # returned as the document ("… Here is why. One row looks like
+        # {"foo": 1}") -- report the ambiguity as malformed instead (F105).
+        best_len = best_key[0] if best_key else 0
+        best_start = best_end - best_len
+        if any(s < best_start and (e - s) > best_len for s, e in rejected):
+            return None
     return best
 
 
@@ -2067,6 +2149,31 @@ def read_json(path: Path, revive: bool = True, lenient: bool = False):
         return None
 
 
+def _decode_text_source(raw: bytes, errors: str = "replace") -> str:
+    """Decode a text artifact, honouring a BOM and BOM-less UTF-16.
+
+    `raw.decode("utf-8", "replace")` turned a Windows 'Save as text' UTF-16LE
+    file into NUL-separated mojibake: every heading test failed, the length
+    scan put the source in `skipped`, and no coverage gap was reported (F113).
+    UTF-8 bytes never contain a NUL, so a NUL pattern is a safe signal here;
+    the ratio test keeps an incidental NUL in a binary-ish "text" file on the
+    UTF-8-with-replacement path.
+    """
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:].decode("utf-8", errors)
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16", errors)
+    if b"\x00" in raw and len(raw) >= 2:
+        even_nul = raw[0::2].count(0)
+        odd_nul = raw[1::2].count(0)
+        quarter = len(raw) // 4
+        if odd_nul > quarter and even_nul <= quarter:
+            return raw.decode("utf-16-le", errors)
+        if even_nul > quarter and odd_nul <= quarter:
+            return raw.decode("utf-16-be", errors)
+    return raw.decode("utf-8", errors)
+
+
 def read_text_bounded(path: Path, errors: str = "replace"):
     """A UTF-8 text file inside the agent-output byte budget, or None.
 
@@ -2101,7 +2208,7 @@ def read_text_bounded(path: Path, errors: str = "replace"):
         return None
     if len(raw) > MAX_JSON_BYTES:
         return None
-    return raw.decode("utf-8", errors)
+    return _decode_text_source(raw, errors)
 
 
 def fmt_dur(sec) -> str:
@@ -2160,8 +2267,16 @@ def is_int(x) -> bool:
     return isinstance(x, int) and not isinstance(x, bool)
 
 
+MANUAL_STEPS_UNREADABLE = -1
+
+
 def count_manual_steps(path: Path):
-    """Count actionable items in a MANUAL_STEPS.md; None if the file is absent.
+    """Count actionable items in a MANUAL_STEPS.md.
+
+    None if the file is absent; MANUAL_STEPS_UNREADABLE (-1) when the path
+    exists but cannot be read (unreadable, oversized, or a symlink). A caller
+    must not coerce that gap to 0: an unread checklist is not an empty one
+    (F112).
 
     Counts bullet/numbered lines AND Markdown table data rows (minus the header
     row of EACH table). The table branch exists because a report that lists
@@ -2170,9 +2285,11 @@ def count_manual_steps(path: Path):
     never cost a package a round). This stays a heuristic: prose paragraphs are
     not counted, and nested bullets are counted individually.
     """
+    if not path.exists() and not path.is_symlink():
+        return None
     text = read_text_bounded(path)
     if text is None:
-        return None
+        return MANUAL_STEPS_UNREADABLE
     lines = text.splitlines()
     # A numbered item is at most two digits: `2024. We repeated the assay.` is a
     # sentence starting with a year, not step 2024. The same pattern lets the
@@ -2763,19 +2880,24 @@ def _tex_line_text(line: str) -> str:
     return _strip_latex(TEX_SCAFFOLD_RE.sub(" ", TEX_ENV_TOKEN_RE.sub(" ", line)))
 
 
-def text_source_paragraphs(path: Path) -> list:
+def text_source_paragraphs(path: Path, raw: str = None) -> list:
     """Prose paragraphs of a TEXT source (.tex/.md/.txt) for the style rules.
 
     LaTeX scaffolding is stripped the same way the length scan strips it, so the
     citation/parenthesis/repetition rules see prose, not markup. Paragraphs are
     split on blank lines and sectioning commands; a source written as one huge
     paragraph simply becomes one long paragraph (the repetition rule skips those).
+
+    `raw`, when given, is the already-bounded decoded text (the caller read it to
+    distinguish "unreadable" from an empty source); it is never re-read.
     """
-    raw = read_text_bounded(path)
+    if raw is None:
+        raw = read_text_bounded(path)
     if raw is None:
         # Unreadable, symlinked or over the package-text budget: the caller
         # treats it as a source with no reportable prose, never as an empty
-        # manuscript that passed every style rule.
+        # manuscript that passed every style rule. Callers that need to record
+        # the gap read the file first and report "unreadable" themselves.
         return []
     if path.suffix.lower() in (".tex", ".ltx"):
         raw = strip_tex_comment(raw)
@@ -3191,7 +3313,15 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 if p.resolve() in tex_included:
                     skipped.append(doc)     # counted in the master that includes it
                     continue
-                text = tex_cache.get(p.resolve(), "")
+                text = tex_cache.get(p.resolve())
+                if text is None:
+                    # The cache loop skips a .tex whose read_text_bounded()
+                    # returned None; the old "" default then counted that
+                    # unreadable manuscript as an EMPTY source within every
+                    # cap. An unreadable source is a NAMED gap, exactly like
+                    # the .md/.txt branch below (F103).
+                    unparsed.append(doc)
+                    continue
                 expanded = _tex_expand_includes(text, p.parent, source=p)
                 for inc in TEX_INCLUDE_RE.finditer(expanded):
                     unparsed.append(f"{doc}: unresolved include {inc.group(1)}")
@@ -3606,23 +3736,39 @@ def pre_judge_format_policy(ctx: Ctx) -> dict:
     return policy
 
 
-def _files_under_ci(dirp: Path, suffixes) -> list:
+def _files_under_ci(dirp: Path, suffixes, gaps: list = None,
+                    follow_dir_links: bool = False) -> list:
     """Files under `dirp` whose extension matches case-INsensitively.
 
     `Path.rglob("*.pdf")` is case-sensitive on Linux, so a Reporting Summary
     saved as `REPORTING_SUMMARY.PDF` (or a Word-authored `REPORT.DOCX`) was
     invisible to every scan while the corpus carried it. Symlinks are not
     submission content (see `copy_into`) and are not followed here either.
+
+    The walk is `_iter_tree_files`, not `rglob`: pathlib's recursive selector
+    SWALLOWS a PermissionError while descending, so an unreadable subdirectory
+    silently contributed no paths and every caller treated the truncated list
+    as the complete directory (F107). `gaps`, when given, receives the relative
+    path of every such directory. `follow_dir_links=True` is for the EVIDENCE
+    scan: the canonical evidence areas are directory symlinks (see
+    `_iter_tree_files`), so the non-following walk found no address in them and
+    recorded no gap (F108).
     """
     want = {s.lower() for s in suffixes}
-    return sorted({p for p in Path(dirp).rglob("*")
+    return sorted({p for p in _iter_tree_files(Path(dirp), follow_dir_links=follow_dir_links,
+                                               gaps=gaps)
                    if p.is_file() and not p.is_symlink()
                    and p.suffix.lower() in want})
 
 
-def _docx_files_under(dirp: Path) -> list:
-    """Every .docx under a directory, EITHER extension case (and mixed case)."""
-    return _files_under_ci(dirp, (".docx",))
+def _docx_files_under(dirp: Path, gaps: list = None) -> list:
+    """Every .docx under a directory, EITHER extension case (and mixed case).
+
+    `gaps`, when given, receives the relative path of every directory the walk
+    could not read (F107): a caller that treats the truncated list as the full
+    document set must surface it instead of silently omitting the hidden files.
+    """
+    return _files_under_ci(dirp, (".docx",), gaps=gaps)
 
 
 def _policy_flag(policy, key: str, default: bool) -> bool:
@@ -3640,7 +3786,11 @@ def _policy_flag(policy, key: str, default: bool) -> bool:
     if value is None:
         return default
     if isinstance(value, str):
-        return value.strip().lower() not in ("off", "false", "no", "0", "")
+        # The FORMER empty-string member made "" mean OFF here while the
+        # formatter reads "" as "not one of the off spellings" (its default):
+        # one policy file then disabled the p04 figure-OCR pass while the
+        # formatter still ran it. Resolve every value identically (F114).
+        return value.strip().lower() not in ("off", "false", "no", "0")
     return bool(value)
 
 
@@ -3682,6 +3832,10 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
+        # Every walk below passes this list, so an unreadable subdirectory is
+        # named once per source instead of being dropped from every class
+        # (F107).
+        src_gaps = []
         # The package's OWN README declares the submitted set (`Only ... will be
         # submitted`). A format sweep is about the submission surface: a carried
         # README/MANUAL_STEPS/raw-data file is not manuscript prose, and gating a
@@ -3731,7 +3885,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
         # carried comma-glued keyword lists ("DNA aneuploidy,Molecular subtyping")
         # and no scan read it at all.
         for p in _files_under_ci(src, (".tex", ".ltx", ".md", ".markdown",
-                                       ".txt", ".bib")):
+                                       ".txt", ".bib"), gaps=src_gaps):
             if _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
                     or is_non_submitted_readme_name(p.name):
                 continue
@@ -3746,16 +3900,33 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue        # evidence area, not submission prose (see above)
             if "work" in rel.split("/")[:-1]:
                 continue
+            raw = read_text_bounded(p)
+            if raw is None:
+                # An unreadable/oversize/symlinked text source is a NAMED
+                # coverage gap, like the corrupt-DOCX FMT-X1 row: returning []
+                # from text_source_paragraphs made the whole text class
+                # disappear from the sweep while format_note said "clean"
+                # (F104).
+                rows.append({
+                    "rule": "FMT-X1", "severity": "high",
+                    "document": prefix + rel, "location": "text source",
+                    "evidence": ("unreadable text source (permission, size or "
+                                 "symlink refusal)"),
+                    "detail": ("the text-level formatting/consistency class was "
+                               "NOT examined for this document; repair the file "
+                               "or read it by hand"),
+                    "fix": "manual", "protected": False, "tier": "advisory"})
+                continue
             if p.suffix.lower() == ".bib":
                 # A .bib is a DATABASE: its abstract/keyword/DOI fields are
                 # quotations, not the authors' prose. The CNB scan filed 44
                 # long-sentence rows on `abstract = {...}` fields.
                 try:
-                    paras = mod.bib_prose_paragraphs(p.read_text("utf-8", "replace"))
+                    paras = mod.bib_prose_paragraphs(raw)
                 except OSError:
                     paras = []
             else:
-                paras = text_source_paragraphs(p)
+                paras = text_source_paragraphs(p, raw=raw)
             claim_docs.append((prefix + rel, "\n".join(paras)))
             text_rows = list(mod.text_style_rows(paras, policy=policy))
             if p.suffix.lower() in (".tex", ".ltx"):
@@ -3779,7 +3950,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
         # the Summary's unanswered "Eukaryotic cell lines" field and every
         # availability claim in them were outside the sweep.
         _pdf_tool = shutil.which("pdftotext")
-        for p in _files_under_ci(src, (".pdf",)):
+        for p in _files_under_ci(src, (".pdf",), gaps=src_gaps):
             if _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
@@ -3858,6 +4029,18 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 for r in mod.reporting_summary_gap_rows(text):
                     r["document"] = prefix + rel
                     rows.append(r)
+        for gap_dir in sorted(set(src_gaps)):
+            # A directory the walk could not list hides DOCX/PDF/text files
+            # from every class above; name it instead of reporting the sweep
+            # clean over a truncated corpus (F107).
+            rows.append({
+                "rule": "FMT-X1", "severity": "low",
+                "document": prefix + gap_dir, "location": "directory scan",
+                "evidence": f"cannot list directory {gap_dir}",
+                "detail": ("the formatting/text/PDF classes were NOT examined "
+                           "for files under this directory; make it readable "
+                           "and re-run the sweep"),
+                "fix": "manual", "protected": False, "tier": "advisory"})
         # FIGURE LABELS (FMT-IM5): OCR the submitted figure rasters and compare
         # their words with the manuscript's own vocabulary. Only declared
         # figures, never an evidence area; a missing OCR engine is recorded as a
@@ -4048,10 +4231,13 @@ def format_note(info) -> str:
             else "OOXML formatting: clean")
 
 
-def _fmt_corpus_files(dirp: Path) -> list:
-    """Corpus .docx files under `dirp` (the same filter the corpus builder uses)."""
+def _fmt_corpus_files(dirp: Path, gaps: list = None) -> list:
+    """Corpus .docx files under `dirp` (the same filter the corpus builder uses).
+
+    `gaps` receives every unreadable directory the walk met (F107).
+    """
     out = []
-    for p in _docx_files_under(dirp):
+    for p in _docx_files_under(dirp, gaps=gaps):
         if not p.is_file() or p.name.startswith("~$") or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(dirp).as_posix()
@@ -4278,7 +4464,8 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
             return None
         return p
 
-    for f in _fmt_corpus_files(dirp):
+    _walk_gaps = []
+    for f in _fmt_corpus_files(dirp, _walk_gaps):
         rep = fix_docx_in_place(f, policy, template=template_for(f), containers=containers)
         per_file.append(rep)
         if rep.get("applied"):
@@ -4293,6 +4480,7 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
     summary = {
         "label": label,
         "directory": str(dirp),
+        "unreadable_dirs": sorted(set(_walk_gaps)),
         "documents": per_file,
         "fixed": len(applied),
         "changes": sum(len(r.get("changes") or []) for r in applied),
@@ -4311,6 +4499,14 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
     if artifacts_dir is not None:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         write_json_atomic(artifacts_dir / f"FORMAT_FIX_{name}.json", summary)
+    if _walk_gaps and warns is not None:
+        # The DOCX formatting pass never opened a file under these directories,
+        # so reporting "documents normalized" without naming them claimed more
+        # coverage than the walk had (F107).
+        warns.append("FORMAT-FIX: the DOCX walk could not read "
+                     + ", ".join(sorted(set(_walk_gaps))[:4])
+                     + " -- .docx documents under it were NOT normalized; make the "
+                       "directory readable and re-run the stage")
     if warns is not None and (applied or failed):
         msg = (f"FORMAT-FIX: {len(applied)} document(s) normalized "
                f"({summary['changes']} mechanical formatting change(s); findings "
@@ -4364,7 +4560,7 @@ def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
         return rep
     if errs is None:
         errs = []
-    def doc_map(root: Path) -> tuple:
+    def doc_map(root: Path, gaps: list) -> tuple:
         """({pairing key: path}, collisions) for one side of the comparison.
 
         The version-token-free key pairs `manuscript-4f3a9c1.docx` with
@@ -4374,15 +4570,28 @@ def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
         collision is reported instead of being silent.
         """
         out, seen = {}, {}
-        for p in _fmt_corpus_files(root):
+        for p in _fmt_corpus_files(root, gaps):
             key = _docx_field_key(p.relative_to(root).as_posix())
             seen.setdefault(key, []).append(p)
             out[key] = p
         clashes = {k: v for k, v in seen.items() if len(v) > 1}
         return out, clashes
 
-    base_docs, base_clash = doc_map(base_dir)
-    out_docs, out_clash = doc_map(out_dir)
+    base_gaps, out_gaps = [], []
+    base_docs, base_clash = doc_map(base_dir, base_gaps)
+    out_docs, out_clash = doc_map(out_dir, out_gaps)
+    rep["unreadable_dirs"] = {"base": sorted(set(base_gaps)),
+                              "output": sorted(set(out_gaps))}
+    if base_gaps or out_gaps:
+        # A DOCX under an unreadable directory is invisible to the walk. The
+        # continuity report must name it: otherwise it claims every document was
+        # field-checked while one was never opened (F107).
+        for _side, _gaps in (("base", base_gaps), ("output", out_gaps)):
+            for _gap in sorted(set(_gaps)):
+                warns.append(f"ZOTERO FIELD CONTINUITY: the {_side} directory {_gap!r} "
+                             f"could not be read; its DOCX documents were NOT "
+                             f"field-checked")
+                rep["warnings"] += 1
     for side, clashes in (("base", base_clash), ("output", out_clash)):
         for key, paths in sorted(clashes.items()):
             warns.append(f"ZOTERO FIELD CONTINUITY: two {side} documents pair to one key "
@@ -4418,8 +4627,14 @@ def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
     for base in list(rest_base):
         exact = [o for o in rest_out if o.name.lower() == base.name.lower()]
         role = docx_document_role(base.name)
+        # `docx_document_role` returns "main" for EVERY unrecognized name, so a
+        # role of "main" cannot tell an explicit main manuscript from a deleted
+        # `appendix.docx`. Pairing on it made a deletion look like a rename and
+        # compared the wrong documents (F115); "main" renames are handled by
+        # the sole-remainder fallback below.
         cands = exact or ([o for o in rest_out
-                           if role and docx_document_role(o.name) == role] if role else [])
+                           if role and role != "main"
+                           and docx_document_role(o.name) == role] if role else [])
         if len(cands) == 1:
             pairs.append((base, cands[0]))
             rest_out.remove(cands[0])
@@ -4462,7 +4677,7 @@ TEMPLATE_PACKAGE_DIRNAME = "template_package"
 TEMPLATE_REWRITE_DIRNAME = "template_rewrite"
 
 
-def _prompt_docx_names(src: Path) -> list:
+def _prompt_docx_names(src: Path, gaps: list = None) -> list:
     """The package-relative `.docx` paths the template postcheck will require.
 
     The prompt must name the SAME document set `template_rewrite_postcheck`'s
@@ -4473,7 +4688,7 @@ def _prompt_docx_names(src: Path) -> list:
     """
     out = []
     root = Path(src)
-    for p in _docx_files_under(root):
+    for p in _docx_files_under(root, gaps=gaps):
         if not p.is_file() or _is_aux_doc(p.name) or p.name.startswith("~$"):
             continue
         rel = p.relative_to(root)
@@ -4518,7 +4733,11 @@ def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str
                  "from source/, edited in place and formatted per the venue's guidelines)")
     main_src = ("venue_template/word/" + main.name) if main else \
         "the source document itself (no main-text template ships)"
-    docs = _prompt_docx_names(src) or ["(no .docx in source/)"]
+    _docs_gaps = []
+    docs = _prompt_docx_names(src, _docs_gaps) or ["(no .docx in source/)"]
+    docs_note = ("\n    WARNING: these directories could not be read, so their .docx\n"
+                 "    documents are NOT listed above and were not handed to you: "
+                 + ", ".join(sorted(set(_docs_gaps)))) if _docs_gaps else ""
     prof = venue_profile_of(ctx, required=False)
     label = (prof.label if prof is not None else venue_id_of(ctx))
     guide_clause = (cover_letter_guidance_clause(cover_letter_guidance(prof))
@@ -4563,7 +4782,7 @@ READ (read-only, hash-verified):
   * {supp_line}
 {cover_line.rstrip()}
   * source/ -- the package whose content you carry over:
-{chr(10).join('      - ' + n for n in docs)}
+{chr(10).join('      - ' + n for n in docs)}{docs_note}
     (figures, tables, data and the cover letter included; copy them into out/
     unchanged unless the venue's own template covers them)
 
@@ -4727,7 +4946,11 @@ def apply_guideline_conform_prompt(ctx: Ctx, src: Path) -> str:
     established academic convention. The deliverable is the WHOLE package in
     `out/`, content-identical to `source/` and re-authored to those rules.
     """
-    docs = _prompt_docx_names(src) or ["(no .docx in source/)"]
+    _docs_gaps = []
+    docs = _prompt_docx_names(src, _docs_gaps) or ["(no .docx in source/)"]
+    docs_note = ("\n    WARNING: these directories could not be read, so their .docx\n"
+                 "    documents are NOT listed above and were not handed to you: "
+                 + ", ".join(sorted(set(_docs_gaps)))) if _docs_gaps else ""
     prof = venue_profile_of(ctx, required=False)
     label = (prof.label if prof is not None else venue_id_of(ctx))
     prompt = (prof.prompt if prof is not None else {})
@@ -4769,7 +4992,7 @@ Never invent a requirement no level states, and never leave such a style unset.
 
 READ (read-only, hash-verified):
   * source/ -- the package whose content you carry over:
-{chr(10).join('      - ' + n for n in docs)}
+{chr(10).join('      - ' + n for n in docs)}{docs_note}
     (figures, tables, data and the cover letter included; copy them into out/)
 
 WRITE (only inside out/):
@@ -4997,7 +5220,11 @@ def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
             continue
         if not src.is_dir():
             continue
-        for path in _files_under_ci(src, suffixes):
+        walk_gaps = []
+        # An evidence scan follows the canonical `<area>` directory symlink: the
+        # non-following walk contributed none of its addresses and no gap (F108).
+        for path in _files_under_ci(src, suffixes, gaps=walk_gaps,
+                                    follow_dir_links=bool(evidence)):
             try:
                 rel = path.relative_to(src).as_posix()
             except ValueError:                                     # pragma: no cover
@@ -5025,7 +5252,8 @@ def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
         # `--revision-mode` also accepts a legacy `.doc`, and LibreOffice/Word
         # can open an `.odt`; neither has a text reader here. The coverage gap
         # is NAMED for that file instead of pretending its addresses were seen.
-        for path in _files_under_ci(src, EMAIL_UNSCANNED_SUFFIXES):
+        for path in _files_under_ci(src, EMAIL_UNSCANNED_SUFFIXES, gaps=walk_gaps,
+                                    follow_dir_links=bool(evidence)):
             try:
                 rel = path.relative_to(src).as_posix()
             except ValueError:                                     # pragma: no cover
@@ -5034,6 +5262,12 @@ def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
                 continue
             gaps.append(f"{prefix + rel}: unsupported editable format "
                         f"({path.suffix.lower()}); not scanned for e-mail addresses")
+        for gap_dir in sorted(set(walk_gaps)):
+            # The walk could not list this directory, so any address under it
+            # is invisible to BOTH the evidence set and the fabricated-address
+            # gate; name it instead of reporting complete coverage (F107).
+            gaps.append(f"{prefix + gap_dir}: directory could not be read; "
+                        f"not scanned for e-mail addresses")
     return found, gaps
 
 
@@ -5193,12 +5427,17 @@ def _docx_hf_signature(path: Path) -> dict:
      delivered page 1 renders from; reading the last one reported no gap on a
      two-section manuscript whose page 1 was not the venue's layout.
     """
+    unreadable = {"roles": [], "parts": [], "logo": False, "page": False,
+                  "unreadable": True}
     try:
         with zipfile.ZipFile(path) as z:
             names = z.namelist()
             raw_doc = _docx_xml_part(z, "word/document.xml")
             if raw_doc is None:
-                return {}
+                # An over-budget/missing document.xml is UNREADABLE, not a
+                # document without furniture: returning {} made _hf_gap treat
+                # the template as requiring nothing and pass vacuously (F122).
+                return unreadable
             doc = raw_doc.decode("utf-8", "replace")
             hf = {}
             for n in names:
@@ -5214,7 +5453,9 @@ def _docx_hf_signature(path: Path) -> dict:
                             "unreadable": True}
                 hf[n] = raw_hf.decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
-        return {}
+        # A corrupt/encrypted/oversize template is UNREADABLE, never "a
+        # template with no headers/footers" (F122).
+        return unreadable
     # A self-closing `<w:sectPr .../>` (a legal empty section) must match as the
     # element it is: the old fallback ran to the NEXT section's closing tag, so
     # the first section was read as a later one and the page-1 furniture check
@@ -5333,10 +5574,17 @@ def _protected_template_parts(tpl: Path) -> dict:
                     # by a plain page-number footer; the logo header, the empty
                     # headers and the plain page-number parts must stay.
                     if len(text.split()) >= 6 \
-                            or re.search(r"<w:txbxContent|<wps:wsp|<w:pict\b", body):
+                            or re.search(r"<w:txbxContent|<wps:wsp", body):
+                        # Only a real TEXT BOX may be replaced by a plain
+                        # page-number footer. `<w:pict` alone is the VML
+                        # container of the LOGO too, so it excluded the very
+                        # logo part this set must protect (F123).
                         continue
                     out[name] = hashlib.sha256(z.read(name)).hexdigest()
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
+        # RuntimeError is an ENCRYPTED entry and NotImplementedError an
+        # unsupported compression method: both make the same untrusted DOCX
+        # unreadable, exactly as _out_part_hashes already treats them (F121).
         return {}
     return out
 
@@ -6064,7 +6312,8 @@ def template_package_files(src: Path) -> list:
     `*.tracking-<token>.<ext>` / `*.logging-<token>.<ext>` auxiliaries are
     difference-tracking copies -- neither belongs to a submission, so the rebuilt
     package leaves them out (the same rule the corpus builder and the judges
-    apply). Everything else -- figures, tables, data,
+    apply). The pipeline's own stage reports (`is_bookkeeping_name`) are left
+    out too. Everything else -- figures, tables, data,
     bibliography, the author's own notes -- is copied byte-for-byte.
     An inert `<evidence area>.disabled/` tree is left out entirely: it is not
     submission content and not readable evidence.
@@ -6076,6 +6325,12 @@ def template_package_files(src: Path) -> list:
             continue
         rel = p.relative_to(src)
         if "work" in rel.parts[:-1] or _is_aux_doc(p.name):
+            continue
+        if is_bookkeeping_name(p.name):
+            # The pipeline's own stage reports are never submission content:
+            # copying them into the rebuilt package contradicted this module's
+            # "a submission package must not carry pipeline artifacts" rule
+            # (F126).
             continue
         if is_disabled_evidence_rel(rel.as_posix()):
             continue
@@ -7090,27 +7345,40 @@ def placeholder_lookup_rows(ctx: Ctx, queries: list, timeout: int = 30) -> list:
 
 def evidence_pack_summary(ev: dict) -> str:
     """One line per artifact family for the setup/report output."""
+    def _n(family, key="rows"):
+        """A scan's row count, or a NAMED error instead of a clean zero.
+
+        code_side_evidence stores a failed scan as {"error": ...}; the old
+        len(... or []) rendered that as "0 rows", i.e. a failed class looked
+        like a clean one in the first line of the seeded EVIDENCE_PACK.md (F131).
+        """
+        if not isinstance(family, dict):
+            return 0
+        if family.get("error"):
+            return f"ERROR({str(family['error'])[:60]})"
+        return len(family.get(key) or [])
+
     cap = (ev.get("captions") or {})
     lng = (ev.get("lengths") or {})
     fmt = (ev.get("format") or {})
     ph = (ev.get("placeholders") or {})
     ident = (ev.get("corpus_identity") or {})
-    over_l = len(lng.get("over_limit") or [])
+    over_l = _n(lng, "over_limit")
     return (f"M18 {cap.get('count', '?')} legend(s)"
-            + (f", {len(cap.get('over_limit') or [])} over the proxy cap" if cap.get("limit") else "")
-            + f"; M19 {len(lng.get('rows') or [])} section(s), {over_l} over cap"
-            + f"; M20 {len(fmt.get('rows') or [])} row(s) "
+            + (f", {_n(cap, 'over_limit')} over the proxy cap" if cap.get("limit") else "")
+            + f"; M19 {_n(lng)} section(s), {over_l} over cap"
+            + f"; M20 {_n(fmt)} row(s) "
               f"({fmt.get('high', 0)} high); placeholders {ph.get('count', '?')}"
             + f"; J3 claim-strength rows "
               f"{(ev.get('claims') or {}).get('count', '?')}"
             + f"; PKG-2 dangling references "
-              f"{len((ev.get('submission_references') or {}).get('rows') or [])}"
+              f"{_n(ev.get('submission_references'))}"
             + f"; PKG-4 missing display items "
-              f"{len((ev.get('display_items') or {}).get('rows') or [])}"
+              f"{_n(ev.get('display_items'))}"
             + f"; PKG-5 producer contradiction(s) "
-              f"{len((ev.get('display_provenance') or {}).get('rows') or [])}"
+              f"{_n(ev.get('display_provenance'))}"
             + f"; PKG-6/7/8/9 self-contradiction(s) "
-              f"{len((ev.get('contradictions') or {}).get('rows') or [])}"
+              f"{_n(ev.get('contradictions'))}"
             + (f"; submitted set from the package README "
                f"{(ev.get('submission_declaration') or {}).get('submitted_count')}"
                if (ev.get("submission_declaration") or {}).get("declared") else "")
@@ -7187,9 +7455,20 @@ def data_table_texts(sources: list, limit: int = 40, coverage: dict = None) -> l
             if text is None:
                 continue
             if ext not in DATA_TABLE_EXTS:
-                first = next((l for l in text.splitlines() if l.strip()), "")
-                if not (first.count("|") >= 2 or first.count("&") >= 2
-                        or first.count("\t") >= 1):
+                # A captioned Markdown table starts with its caption and a real
+                # LaTeX table starts with \documentclass/%/\begin{table}: the
+                # old FIRST-LINE-only test recognised neither and the file was
+                # treated as prose (F127). Inspect the first few non-empty lines,
+                # and accept a LaTeX tabular environment anywhere (a manuscript
+                # .tex that carries a table is a producer).
+                head = [l for l in text.splitlines() if l.strip()][:3]
+                looks_tabular = any(
+                    l.count("|") >= 2 or l.count("&") >= 2 or l.count("\t") >= 1
+                    for l in head)
+                if not looks_tabular and ext in (".tex", ".ltx"):
+                    looks_tabular = bool(re.search(
+                        r"\\begin\{(?:tabular\*?|tabularx|longtable|tabu)\}", text))
+                if not looks_tabular:
                     continue
             if len(out) >= limit:
                 # The inventory cap is REAL coverage loss: enumerate the omitted
@@ -7809,6 +8088,9 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                         + ([] if conf["class_ok"] else
                            [{"row": f"documentclass {conf['found']['documentclass']!r} != "
                                     f"required {conf['required']['documentclass']!r}"}])
+                        + [{"row": f"document could not be read (excluded from the checks): {d}"}
+                           for d in conf.get("unparsed") or []]
+                        + [{"row": r} for r in conf.get("word_template_rows") or []]
                         + [{"row": r} for r in conf.get("order_rows") or []]
                         + [{"row": r} for r in conf.get("label_rows") or []]
                         + [{"row": r} for r in conf.get("front_matter_rows") or []]
@@ -8571,12 +8853,17 @@ def _doc_rename_key(rel: str) -> str:
     return prefix + stem + p.suffix
 
 
-def collect_documents(sources: list) -> dict:
+def collect_documents(sources: list, gaps: list = None) -> dict:
     """{normalized name: [(relative path, sha256), ...]} for submission docs.
 
     Bookkeeping files are skipped (they are regenerated, not submission
     content) and a path a later source also provides is skipped, so this view
     matches the corpus that corpus_manifest()/build_corpus_dir() materialise.
+
+    `gaps`, when given, receives the `<prefix><relative dir>` of every
+    subdirectory the walk could not list. Without it an unreadable subtree
+    contributed no documents and document_set_check compared the base as if
+    those documents never existed (F118).
     """
     out = {}
     overrides = corpus_source_overrides(sources)
@@ -8584,8 +8871,13 @@ def collect_documents(sources: list) -> dict:
         if not src.is_dir():
             continue
         entries = []
-        for p in _iter_tree_files(src):
-            if _is_aux_doc(p.name):
+        src_gaps = []
+        for p in _iter_tree_files(src, gaps=src_gaps):
+            if is_non_document_name(p.name):
+                # Auxiliary/Word-owner/OS-junk: never submission content. A
+                # `~$mainText.docx` was a "submission document" here while the
+                # stage strip removes it and backfill is forbidden to restore
+                # it -- a permanent false MISSING row (F124).
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded_corpus_component(rel, excluded):
@@ -8615,6 +8907,9 @@ def collect_documents(sources: list) -> dict:
         for p, digest in zip(entries, digs):
             rel = p.relative_to(src).as_posix()
             out.setdefault(_doc_key(prefix + rel), []).append((prefix + rel, digest))
+        if gaps is not None:
+            for gap_dir in sorted(set(src_gaps)):
+                gaps.append(prefix + gap_dir)
     return out
 
 
@@ -8641,8 +8936,22 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
     dropped derived output stays dropped), and only a human can tell a
     legitimate scaffold from invented content in the added direction.
     """
-    base, cand = collect_documents(base_sources), collect_documents(cand_sources)
-    cand_pool = [(key, rel, dig) for key, entries in cand.items() for rel, dig in entries]
+    base_gaps, cand_gaps = [], []
+    base = collect_documents(base_sources, gaps=base_gaps)
+    cand = collect_documents(cand_sources, gaps=cand_gaps)
+    # The `<unreadable>` sentinel is a STATUS, not a content identity: as a
+    # shared digest it made any two different unreadable files a rename pair,
+    # erasing both the loss and the invented file (F119). Suffix it with the
+    # only path it describes, so it can never equal another file's sentinel.
+    def _unique_unreadable(dig: str, rel: str) -> str:
+        return f"<unreadable:{rel}>" if dig == "<unreadable>" else dig
+
+    base = {k: [(rel, _unique_unreadable(dig, rel)) for rel, dig in v]
+            for k, v in base.items()}
+    cand = {k: [(rel, _unique_unreadable(dig, rel)) for rel, dig in v]
+            for k, v in cand.items()}
+    cand_pool = [(key, rel, dig) for key, entries in cand.items()
+                 for rel, dig in entries]
     used = set()
 
     def take(match) -> bool:
@@ -8663,10 +8972,7 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
                 continue                        # version-token rename, bytes unchanged
             if take(lambda k, r, d, key=key, rel=rel: k == key and r == rel):
                 continue                        # survived under the same name, edited
-            if take(lambda k, r, d, dig=dig: d == dig):
-                content_only.append(rel)         # moved/renamed, bytes preserved
-                continue
-            unmatched.append((key, rel))
+            unmatched.append((key, rel, dig))
     # A version-stripped key can stand in for a document name ONLY after every
     # exact-name pairing is done AND only when the two names are the same
     # document under the documented token grammar. The folded key alone is not
@@ -8674,11 +8980,22 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
     # the folded match accepted that case-only change silently. The legacy
     # `-a`/`-b` arm letters ARE version tokens (DOC_TOKEN_RE), so those still
     # pair; the case-sensitive rename key is what tightened the comparison.
-    for key, rel in unmatched:
+    #
+    # This pass runs BEFORE the content-only pass. The old order let a
+    # byte-identical SIBLING's candidate be consumed as a "moved" copy, so a
+    # renamed+edited twin came back as a false missing + false added pair
+    # (F129). Exact name, then rename key, then content is the correct order.
+    rest = []
+    for key, rel, dig in unmatched:
         rkey = _doc_rename_key(rel)
         if take(lambda k, r, d, key=key, rkey=rkey:
                 k == key and _doc_rename_key(r) == rkey):
             continue                            # rename family (...-v2 -> ...-v3)
+        rest.append((key, rel, dig))
+    for key, rel, dig in rest:
+        if take(lambda k, r, d, dig=dig: d == dig):
+            content_only.append(rel)             # moved/renamed, bytes preserved
+            continue
         missing.append(rel)
     duplicates = {}
     base_names = {key: {r for r, _d in entries} for key, entries in base.items()}
@@ -8701,8 +9018,10 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
     # Compare by CONTENT before calling a non-editable file invented: a pure
     # rename (`fig1.png` -> `fig1-renamed.png`, bytes identical) is preserved,
     # not added. A same-path file is never "added" (it may be edited).
-    base_ne = _non_editable_entries(base_sources)
-    cand_ne = _non_editable_entries(cand_sources)
+    base_ne = {rel: _unique_unreadable(dig, rel)
+               for rel, dig in _non_editable_entries(base_sources).items()}
+    cand_ne = {rel: _unique_unreadable(dig, rel)
+               for rel, dig in _non_editable_entries(cand_sources).items()}
     base_remaining = Counter(base_ne.values())
     added_non_editable = []
     for rel, dig in sorted(cand_ne.items()):
@@ -8712,12 +9031,18 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
             base_remaining[dig] -= 1      # moved/renamed, bytes preserved
             continue
         added_non_editable.append(rel)
-    return {"missing": missing, "content_preserved_under_other_name": content_only,
-            "added": added,
-            "added_non_editable": added_non_editable,
-            "duplicates": duplicates,
-            "base_count": sum(len(v) for v in base.values()),
-            "candidate_count": sum(len(v) for v in cand.values())}
+    out = {"missing": missing, "content_preserved_under_other_name": content_only,
+           "added": added,
+           "added_non_editable": added_non_editable,
+           "duplicates": duplicates,
+           "base_count": sum(len(v) for v in base.values()),
+           "candidate_count": sum(len(v) for v in cand.values())}
+    unreadable_dirs = sorted(set(base_gaps) | set(cand_gaps))
+    if unreadable_dirs:
+        # The comparison over this subtree is INCOMPLETE: without the key the
+        # caller could not tell "nothing lost" from "nothing seen" (F118).
+        out["unreadable_dirs"] = unreadable_dirs
+    return out
 
 
 def judge_target_token(r: int, vid: str) -> str:
@@ -8919,7 +9244,16 @@ def readme_internal_note_rows(p: Path, limit: int = 12) -> list:
     rows = []
     for i, line in enumerate(text.splitlines(), 1):
         for _label, pattern in INTERNAL_ARTIFACT_RES:
-            if not pattern.search(line):
+            m = pattern.search(line)
+            if not m:
+                continue
+            if str(m.group(0)).strip().lower() == "changelog.md":
+                # A bare cross-reference to a sibling `CHANGELOG.md` is ordinary
+                # documentation ("See CHANGELOG.md for the version history"),
+                # not evidence that this README is the pipeline's own note. The
+                # stage report's OTHER identifiers still hold the file back;
+                # moving it on this match alone deleted a real author README
+                # from the corpus (F125).
                 continue
             rows.append({"line": i, "evidence": line.strip()[:180]})
             break
@@ -9223,589 +9557,3 @@ def is_non_manuscript_rel(rel: str) -> bool:
     return is_journal_feedback_name(base)
 
 
-def make_writable(path: Path, *, directory: bool = None) -> bool:
-    """Give one entry its owner write bit back; True when the mode changed."""
-    if directory is None:
-        try:
-            directory = path.is_dir() and not path.is_symlink()
-        except OSError:
-            directory = False
-    bits = 0o700 if directory else 0o600
-    try:
-        mode = path.lstat().st_mode
-    except OSError:
-        return False
-    if mode & bits == bits:
-        return False
-    try:
-        os.chmod(path, mode | bits)
-    except OSError:
-        return False
-    return True
-
-
-def make_tree_writable(root: Path, skip_top=()) -> list:
-    """Give the pipeline's own copy of a tree back the write bits it needs.
-
-    Returns `[(path, mode_before), ...]` for every entry whose mode changed, so
-    a caller that must leave the tree exactly as it found it (restoring raw_data
-    from the pristine copy) can put the modes back with `restore_modes`.
-    `skip_top` names top-level entries whose modes must not be touched at all:
-    the read-only raw-data directory is the reason this helper exists, so callers
-    that may write anywhere BUT raw_data pass `skip_top=RAW_DATA_DIRNAMES`.
-    """
-    if Path(root).is_symlink():
-        # chmod() follows links, and iterdir() would list the target's entries:
-        # descending through a symlinked root would hand write bits to the
-        # SHARED read-only evidence store. A link is never the pipeline's own
-        # copy to make writable.
-        return []
-    plan: list = []
-    skipped = set(skip_top or ())
-
-    def bump(p: Path, bits: int) -> None:
-        if p.is_symlink():
-            # chmod() follows symlinks, so bumping one would change the SHARED
-            # canonical target's modes (the read-only evidence store). Links are
-            # never the thing that needs write bits.
-            return
-        try:
-            mode = p.lstat().st_mode
-        except OSError:
-            return
-        if mode & bits == bits:
-            return
-        try:
-            os.chmod(p, mode | bits)
-        except OSError:
-            return
-        plan.append((p, stat.S_IMODE(mode)))
-
-    def visit(p: Path, is_root: bool) -> None:
-        bump(p, 0o700)                  # directories: rwx (list, descend, unlink)
-        try:
-            entries = sorted(p.iterdir())
-        except OSError:
-            return
-        for entry in entries:
-            if is_root and entry.name in skipped:
-                continue
-            try:
-                is_dir = entry.is_dir() and not entry.is_symlink()
-            except OSError:
-                is_dir = False
-            if is_dir:
-                visit(entry, False)
-            else:
-                bump(entry, 0o600)      # files: rw (rewrite, unlink, replace)
-
-    visit(Path(root), True)
-    return plan
-
-
-def restore_modes(plan) -> None:
-    """Put back the modes recorded by `make_tree_writable` (deepest first)."""
-    for path, mode in reversed(list(plan or [])):
-        try:
-            os.chmod(path, mode)
-        except OSError:
-            continue
-
-
-def _rmtree_retry(func, path, _exc=None) -> None:
-    """shutil.rmtree error hook: clear the blocking mode and retry the call."""
-    if os.path.islink(path):
-        # Never chmod THROUGH a link: the shared evidence store must keep its
-        # modes. On Python 3.12 shutil.rmtree raises for a link and calls this
-        # hook with func=os.path.islink; calling that func again is a no-op and
-        # suppresses the error, so the link used to survive while rmtree
-        # reported success. Unlink it for real.
-        with contextlib.suppress(OSError):
-            os.unlink(path)
-        return
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o700)
-    with contextlib.suppress(OSError):
-        func(path)
-
-
-def rmtree_force(path: Path, ignore_errors: bool = False) -> bool:
-    """Delete a tree the pipeline owns, even when it carries read-only entries.
-
-    `shutil.rmtree` cannot descend into or unlink from a directory without the
-    execute/write bits -- exactly how a copy of a read-only `raw_data/` behaves
-    inside a scratch tree. The ordinary delete is the fast path; only when it
-    fails do we hand the write bits back (to the whole tree, since shutil may
-    stop at the first refusal) and retry. Returns True when the tree is gone.
-    """
-    p = Path(path)
-    if not p.exists() and not p.is_symlink():
-        return True
-    if p.is_symlink():
-        # rmtree never descends a link; remove the LINK itself (the target is
-        # not ours to delete and must survive).
-        try:
-            p.unlink()
-            return True
-        except OSError:
-            if ignore_errors:
-                return False
-            raise
-    try:
-        shutil.rmtree(p)
-        return True
-    except OSError:
-        pass
-    make_tree_writable(p)
-    retry_kwargs = ({"onexc": _rmtree_retry} if sys.version_info >= (3, 12)
-                    else {"onerror": _rmtree_retry})
-    try:
-        shutil.rmtree(p, **retry_kwargs)
-        return True
-    except OSError:
-        if ignore_errors:
-            return not p.exists()
-        raise
-
-
-# ---- read-only evidence areas: ONE copy per root, symlinked into sandboxes ----
-# raw_data/ and human_review_feedback/ are INPUTS: nothing may write them, and
-# every stage sandbox needs them. Copying them into every sandbox (each round
-# materializes ~10 stage sandboxes) duplicated gigabytes for nothing, so the
-# sandbox's copy is a SYMLINK to the root's canonical pristine copy
-# (<root>/non_revised/<area>), which is chmod-protected read-only. If the
-# platform cannot create symlinks the copy path is used unchanged.
-def _try_symlink_dir(target: Path, link: Path) -> bool:
-    """Create `link` -> `target` as a RELATIVE directory symlink; False on failure."""
-    try:
-        rel = os.path.relpath(str(target), str(link.parent))
-        os.symlink(rel, str(link), target_is_directory=True)
-        return True
-    except (OSError, NotImplementedError, AttributeError):
-        return False
-
-
-def make_tree_readonly(root: Path, skip_top=()) -> int:
-    """Clear the write bits of a tree (never following symlinks); count entries.
-
-    The write bits are cleared on FILES first and on DIRECTORIES last, so the
-    caller can still traverse while working. A symlink is left alone (chmod
-    would follow it).
-    """
-    changed = 0
-    root = Path(root)
-    if root.is_symlink():
-        # `is_dir()` follows the link, and `rglob` then walks the TARGET; the
-        # docstring promises no symlink is followed, but chmod cleared the write
-        # bits on a foreign raw-data tree when the evidence root was a link.
-        return 0
-    if not root.is_dir():
-        return 0
-    dirs = []
-    for p in [root, *sorted(root.rglob("*"))]:
-        if p.is_symlink():
-            continue
-        try:
-            if p.relative_to(root).parts[:1] and p.relative_to(root).parts[0] in skip_top:
-                continue
-        except (ValueError, IndexError):
-            pass
-        try:
-            if p.is_dir():
-                dirs.append(p)
-                continue
-            mode = stat.S_IMODE(p.lstat().st_mode)
-            if mode & 0o222:
-                os.chmod(p, mode & ~0o222)
-                changed += 1
-        except OSError:
-            continue
-    for d in sorted(dirs, key=lambda x: len(x.parts), reverse=True):
-        try:
-            mode = stat.S_IMODE(d.lstat().st_mode)
-            if mode & 0o222:
-                os.chmod(d, mode & ~0o222)
-                changed += 1
-        except OSError:
-            continue
-    return changed
-
-
-def evidence_areas_of(dirp: Path) -> list:
-    """The top-level ENABLED evidence area names present in one corpus directory.
-
-    A `<area>.disabled` / `<area>.off` directory is INERT (README): it is never
-    read as feedback or evidence, never part of the submission and never shown
-    to a judge. It is therefore not an evidence area, and listing it here made
-    every sandbox symlink it (F35).
-    """
-    out = []
-    for name in EVIDENCE_DIRNAMES:
-        p = Path(dirp) / name
-        if p.is_dir() or p.is_symlink():
-            out.append(name)
-    return out
-
-
-def inert_evidence_names(dirp: Path) -> list:
-    """The top-level `<area>.disabled`/`.off` names under one corpus directory."""
-    out = []
-    try:
-        for child in sorted(Path(dirp).iterdir()):
-            if is_disabled_evidence_name(child.name):
-                out.append(child.name)
-    except OSError:
-        pass
-    return out
-
-
-def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
-    """Materialize a sandbox's pristine input with SYMLINKED evidence areas.
-
-    Everything else is copied (the manuscript sources are edited/copied by the
-    stages); the evidence areas (raw_data/, human_review_feedback/,
-    llm_review_feedback/)
-    become RELATIVE symlinks to the root's canonical pristine copy -- one
-    physical copy per root, no per-sandbox duplication. The canonical areas are
-    chmod-protected read-only, so a write through a link fails at the filesystem
-    level instead of corrupting every sandbox. Falls back to real copies when
-    the platform refuses symlinks. Returns a small record for the run/print:
-    {"rebuilt", "linked": [...], "copied": [...], "fallback_reason"}.
-    """
-    areas = evidence_areas_of(ctx.pristine)
-    # An inert `<area>.disabled/` is neither linked nor copied into a sandbox
-    # (copy_into skips it unconditionally); exclude it from the manifests too,
-    # or every rebuild would see a permanently mismatching expected tree.
-    inert = inert_evidence_names(ctx.pristine)
-    excluded = set(areas) | set(inert)
-    want = {name: ctx.pristine / name for name in areas}
-    info = {"rebuilt": False, "linked": [], "copied": [], "fallback_reason": None}
-    for name in areas:
-        # The canonical copy is read-only: a write through a sandbox's link
-        # fails instead of corrupting every sandbox's evidence.
-        make_tree_readonly(want[name])
-    ok = dst.is_dir()
-    if ok:
-        # The non-evidence part must match the pristine corpus exactly, and every
-        # evidence area must be a link to the canonical copy.
-        if (hash_manifest(ctx.pristine, exclude_top_only=excluded).get("files")
-                != hash_manifest(dst, follow_dir_links=True,
-                                 exclude_top_only=excluded).get("files")):
-            ok = False
-        for name in areas:
-            link = dst / name
-            if link.is_symlink():
-                if link.resolve() != want[name].resolve():
-                    ok = False
-                    break
-            elif link.is_dir():
-                # Symlinks are unavailable: the fallback copied the area as a
-                # REAL directory. Accepting it when it byte-matches the
-                # canonical area makes the second call converge instead of
-                # deleting and re-copying the whole input every time (F87).
-                if (hash_manifest(link, follow_dir_links=True).get("files")
-                        != hash_manifest(want[name]).get("files")):
-                    ok = False
-                    break
-            else:
-                ok = False
-                break
-    if ok:
-        return info
-    if dst.exists():
-        rmtree_force(dst, ignore_errors=True)
-    dst.mkdir(parents=True, exist_ok=True)
-    copy_into(ctx.pristine, dst, exclude_top_only=set(areas), root=ctx.root)
-    for name in areas:
-        link = dst / name
-        if _try_symlink_dir(want[name], link):
-            info["linked"].append(name)
-        else:
-            copy_into(want[name], link, root=ctx.root)
-            info["copied"].append(name)
-            if info["fallback_reason"] is None:
-                info["fallback_reason"] = ("symlinks are unavailable on this filesystem; the "
-                                           "evidence areas were copied (no space saving)")
-    info["rebuilt"] = True
-    return info
-
-
-def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
-              strip_bookkeeping: bool = False, normalize_mtime: bool = False,
-              root: Path = None, exclude_top_only=()) -> None:
-    """Copy the CONTENTS of src into dst (idempotent; overwrites files).
-
-    root: the pipeline root that owns `src`. A top-level evidence link is
-    followed only when it resolves to THIS root's canonical
-    `<root>/non_revised/<area>` store (see `is_canonical_evidence_link`); a
-    caller that omits it follows no evidence link at all.
-
-    exclude_top: SCRATCH names to skip (used to keep a candidate's process
-    scratch, e.g. revised/work/, out of its submission corpus). A name in this
-    list is excluded as a DIRECTORY at ANY depth: a nested `supp/work/` is the
-    same stage scratch as a top-level `work/`, and the revision token already
-    excludes it at every depth.
-    exclude_top_only: entry names to skip ONLY as the first path component. This
-    is the distinct meaning `ensure_pristine_input` needs for the evidence-area
-    names (`raw_data/` ...): a nested `supp/raw_data/` is ordinary submission
-    content, not the root's evidence area (`evidence_area_of` recognises only a
-    top-level name), so the any-depth rule above must not drop it (R02).
-    skip_aux: leave out the difference-tracking auxiliaries
-    ("*.tracking-<token>.<ext>" and their "*.logging-<token>.<ext>" fallbacks)
-    -- set by every call that
-    materializes a VERSION CORPUS (base, judge target, pin, published winner), so
-    the corpus the judges score is exactly the corpus that is pinned. A raw
-    sandbox copy (a read-only input) keeps every file.
-    strip_bookkeeping: additionally leave out the pipeline's own mandated
-    reports (CHANGELOG.md, MANUAL_STEPS.md, REVISION_REPORT.md,
-    revision_report.json, DIFF_LEDGER.md, VISUAL_CHECK.md). Set by the same
-    VERSION CORPUS callers: those files are written by the agent that wrote the
-    version, so handing them to a judge would leak provenance and let
-    self-written claims influence a relative score. The sandbox keeps them for
-    the postchecks, the manual-item count and the decision report.
-
-    An `is_non_shippable_name` file (the WSL/Windows `figS3.png:Zone.Identifier`
-    stub, a `*.pyc`, a Word `~$` owner file) is carried through a CORPUS copy
-    unchanged, junk included: a corpus materialized here is exactly the corpus
-    the judges scored. The stage postcheck removes these files BEFORE the
-    corpus digest is taken; `publish_final_clean` reports any that a package
-    built by an older orchestrator still carries rather than changing judged
-    bytes after the pin.
-    normalize_mtime: give every copied file and directory ONE timestamp. Set by
-    the VIEW builders: shutil.copy2 preserves the source mtimes, so content
-    written later would otherwise carry newer timestamps than content written
-    earlier -- an ordering signal the blind protocol must not hand over. Content
-    hashes are unaffected.
-
-    Symlinks are NEVER followed: a link inside a submission may point at a local
-    secret outside the package, and copying its target leaked that file into the
-    pristine root, sandboxes, judge views and the published package. The one
-    exception is a TOP-LEVEL link to the root's CANONICAL evidence store
-    (`<root>/non_revised/<area>`): a version corpus legitimately carries that
-    link, and materializing it is what keeps the corpus digest equal to the
-    recorded input manifest. A top-level entry merely NAMED `raw_data` does not
-    qualify (`is_canonical_evidence_link`) -- its target may be any local
-    directory or file. Nested links inside the area are still skipped.
-    Every skipped link is named in a warning so the loss is visible instead of
-    silent.
-    """
-    dst = Path(dst)
-    # A planted destination ROOT symlink (`dst -> outside`) received every
-    # copied file: `_refuse_symlinked_parent` checks the parent chain, never the
-    # final component (F43). Refuse the link itself before the mkdir, and
-    # re-check after it against a race.
-    if dst.is_symlink():
-        raise OSError(f"refusing to copy into a symlinked destination directory {dst}")
-    _refuse_symlinked_parent(dst)
-    dst.mkdir(parents=True, exist_ok=True)
-    if dst.is_symlink():
-        raise OSError(f"refusing to copy into a symlinked destination directory {dst}")
-    skipped = []
-    # A symlinked SOURCE ROOT was followed even though every entry inside it is
-    # checked individually: `src.iterdir()` traversed the link and copied the
-    # target tree (agent-writable run output is passed as `src`). Refuse it
-    # unless it is this root's canonical evidence store.
-    if src.is_symlink() and not (root is not None and is_canonical_evidence_link(src, root)):
-        print(f"warning: skipped symlinked source directory {src} while copying -> {dst} "
-              f"(a link is not package content; its target may be outside the package)",
-              file=sys.stderr)
-        return
-
-    def _ignore(dirpath, names):
-        out = set(_corpus_ignore(skip_aux, strip_bookkeeping)(dirpath, names) or ())
-        rel = os.path.relpath(dirpath, src)
-        for name in names:
-            # A symlink planted at the DESTINATION was followed by copy2 (the
-            # source link checks below never looked at it): refuse to write
-            # through it, which would overwrite an arbitrary outside file.
-            dest = dst if rel == "." else dst / rel
-            if (dest / name).is_symlink():
-                raise OSError(f"refusing to copy onto a symlinked destination entry {dest / name}")
-            full = os.path.join(dirpath, name)
-            if name in exclude_top and os.path.isdir(full) and not os.path.islink(full):
-                # A NAMED DIRECTORY at ANY depth is process scratch, not corpus
-                # content: `supp/work/scratch.md` used to be copied into the
-                # judged corpus (and pin/published package) while the revision
-                # token excluded `work/` at every depth -- the two identity
-                # rules disagreed about the same file.
-                out.add(name)
-                continue
-            if os.path.islink(full):
-                skipped.append(full)
-                out.add(name)
-        return sorted(out)
-
-    for entry in sorted(src.iterdir()):
-        if entry.name in exclude_top or entry.name in exclude_top_only:
-            continue
-        if is_disabled_evidence_rel(entry.name):
-            # `<evidence area>.disabled/` is inert: never carried into a
-            # version corpus, a sandbox copy or a published package.
-            continue
-        if entry.is_symlink() and not (
-                is_evidence_rel(entry.name) and is_canonical_evidence_link(entry, root)):
-            # A top-level link is followed ONLY when it is the canonical
-            # `<root>/non_revised/<area>` store; the NAME alone never authorizes
-            # copying an arbitrary target into a corpus, sandbox or judge view.
-            skipped.append(str(entry))
-            continue
-        if skip_aux and _is_aux_doc(entry.name):
-            continue
-        if strip_bookkeeping and entry.is_file() \
-                and is_bookkeeping_name(entry.name):
-            continue
-        target = dst / entry.name
-        if target.is_symlink():
-            raise OSError(f"refusing to copy onto a symlinked destination entry {target}")
-        if entry.is_dir():
-            shutil.copytree(entry, target, dirs_exist_ok=True, ignore=_ignore)
-        elif entry.is_file():
-            shutil.copy2(entry, target)
-    if skipped:
-        print(f"warning: skipped {len(skipped)} symlink(s) while copying {src} -> {dst} "
-              f"(a link is not package content; its target may be outside the package): "
-              + ", ".join(sorted(str(s) for s in skipped)[:5])
-              + (" ..." if len(skipped) > 5 else ""), file=sys.stderr)
-    if normalize_mtime:
-        # One timestamp for the whole view (the copy just completed, so any
-        # moment is honest); an mtime a judge can read is a provenance leak.
-        stamp = time.time()
-        for p in [dst, *sorted(dst.rglob("*"))]:
-            try:
-                os.utime(p, (stamp, stamp))
-            except OSError:
-                continue
-
-
-def dir_matches(dst: Path, expected_files: dict) -> bool:
-    """True when `dst` is a directory whose files hash exactly like expected_files."""
-    if not dst.is_dir():
-        return False
-    return dict(hash_manifest(dst, follow_dir_links=True).get("files") or {}) \
-        == dict(expected_files or {})
-
-
-def ensure_copy(src: Path, dst: Path, **kw) -> bool:
-    """Copy src -> dst, REBUILDING dst when it is missing or does not match src.
-
-    Materialization has to be idempotent and self-healing: a sandbox killed in
-    the middle of a copy leaves a PARTIAL input directory behind, and a plain
-    "copy only when the directory does not exist" rule then froze that
-    truncation in place -- the agent worked from a corpus that had silently lost
-    files, the truncated state was recorded as the run's frozen input manifest,
-    and no later check could see the loss (the candidate was compared against
-    the truncated base). Returns True when dst had to be rebuilt.
-    """
-    # The destination was built WITH the caller's copy options, so the expected
-    # manifest must use them too: comparing a full source manifest against a
-    # copy that deliberately left `work/` (or an auxiliary/bookkeeping file)
-    # out made the mismatch permanent and rebuilt the whole directory on every
-    # re-entry.
-    want = hash_manifest(
-        src, exclude_top=tuple(kw.get("exclude_top") or ()),
-        exclude_top_only=tuple(kw.get("exclude_top_only") or ())).get("files") or {}
-    # An inert `<area>.disabled/` is never copied (copy_into skips it
-    # unconditionally), so it must not make the expected manifest mismatch.
-    want = {rel: dig for rel, dig in want.items()
-            if not is_disabled_evidence_rel(rel)}
-    if kw.get("skip_aux"):
-        want = {rel: dig for rel, dig in want.items()
-                if not _is_aux_doc(Path(rel).name)}
-    if kw.get("strip_bookkeeping"):
-        # copy_into's ignore-callback strips a bookkeeping NAME at any depth,
-        # so the expected manifest must do the same or a nested report makes
-        # the copy rebuild forever.
-        want = {rel: dig for rel, dig in want.items()
-                if not is_bookkeeping_name(Path(rel).name)}
-    if dir_matches(dst, want):
-        return False
-    if dst.exists():
-        rmtree_force(dst, ignore_errors=True)
-    copy_into(src, dst, **kw)
-    return True
-
-
-def ensure_corpus_dir(ctx: "Ctx", r: int, vid: str, dst: Path) -> bool:
-    """build_corpus_dir() with the same partial-copy repair (see ensure_copy)."""
-    want = corpus_manifest(ctx, r, vid).get("files") or {}
-    if dir_matches(dst, want):
-        return False
-    if dst.exists():
-        rmtree_force(dst, ignore_errors=True)
-    build_corpus_dir(ctx, r, vid, dst)
-    return True
-
-
-def stamp_tree(root: Path, stamp: float) -> None:
-    """Give every entry under (and including) `root` one and the same mtime."""
-    for p in [root, *sorted(root.rglob("*"))]:
-        try:
-            os.utime(p, (stamp, stamp))
-        except OSError:
-            continue
-
-
-def unique_path(base: Path) -> Path:
-    """`base`, or base-2/base-3/... when that name is already taken.
-
-    Archive names carry a UTC timestamp with SECOND resolution (the superseded
-    pin/winner copies, displaced `final/` packages, stashed agent logs). Two
-    operations inside the same second -- a `decide --package-winner` right after
-    a `run`, or two retries of the same run -- produced the same name, and
-    shutil.move() then moved the fresh archive INSIDE the existing directory
-    instead of replacing it, silently nesting one archive inside another.
-    """
-    if not base.exists():
-        return base
-    for i in range(2, 1000):
-        cand = base.with_name(f"{base.name}-{i}")
-        if not cand.exists():
-            return cand
-    return base.with_name(f"{base.name}-{os.getpid()}")
-
-
-def _same_file_bytes(a: Path, b: Path) -> bool:
-    """True when two files carry identical bytes (size first, then a hash).
-
-    Used where a MOVE would otherwise create a second copy of the same file
-    `unique_path`-style (`publish_final_clean` holding a package's internal-note
-    README outside it: a repeat decision over an unchanged package must not
-    accumulate `README.md-2`). Compares content, never mtime: the two copies are
-    written by different steps and their timestamps say nothing.
-    """
-    try:
-        if a.stat().st_size != b.stat().st_size:
-            return False
-        return sha256_file(a) == sha256_file(b)
-    except OSError:
-        return False
-
-
-def pid_alive(pid: int) -> bool:
-    """Is a process with this pid running (best effort, POSIX + Windows)?
-
-    Used only to decide whether a lock file is STALE: a permission error means
-    the process exists but belongs to another user, which still counts as alive.
-    """
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return False
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        # On Windows os.kill(pid, 0) raises OSError for an existing process in
-        # some shells; fall back to "assume alive" so a live lock is never stolen.
-        return os.name == "nt"
-    return True
-
-
-def die(msg: str, code: int = 1):
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(code)

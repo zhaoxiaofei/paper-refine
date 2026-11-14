@@ -89,9 +89,9 @@ def _table_package(tmp: Path):
 def _fill_dispositions(markdown: str) -> str:
     """What an auditor does: keep every row, write only its last cell."""
     out = []
-    for line in markdown.splitlines():
+    for i, line in enumerate(markdown.splitlines()):
         if line.startswith("| ") and line.endswith(" |  |"):
-            line = line[:-4] + " | OK — every fact survives in revised/paper.md |"
+            line = line[:-4] + f" | OK — row {i}: the facts survive in revised/paper.md |"
         out.append(line)
     return "\n".join(out) + "\n"
 
@@ -102,16 +102,17 @@ def test_a1_deletion_seed_roundtrip():
     tmp = scratch("evala1_")
     base, revised = _table_package(tmp)
     rows = pp.deletion_audit_rows(base, revised)
-    check("the table paragraph is one seeded row", len(rows) >= 2, rows)
+    check("the table's data rows are seeded rows", len(rows) >= 30, rows)
     seed = pp.deletion_audit_markdown(rows)
     # The identity form of the table paragraph must be reachable from the seed
     # row: this is the exact comparison the post-check performs.
     table_row = None
     for line in seed.splitlines():
-        if line.startswith("| ") and "Stand" in line:
+        if line.startswith("| ") and "S00" in line:
             table_row = line
-    check("the table paragraph's seed row exists", table_row is not None)
-    seeded_identity = pp._deletion_audit_identity(rows[0]["paragraph"])
+    check("the table data row's seed row exists", table_row is not None)
+    _table_seed = next(r for r in rows if "S00" in str(r.get("paragraph") or ""))
+    seeded_identity = pp._deletion_audit_identity(_table_seed["paragraph"])
     check("the seed row's cell is the identity form (truncate BEFORE escape)",
           seeded_identity.replace("|", "\\|") in (table_row or ""),
           (seeded_identity[:60], (table_row or "")[:80]))
@@ -121,7 +122,7 @@ def test_a1_deletion_seed_roundtrip():
     seed_path = _write(tmp, "audit_seed_only", seed) / "DELETED_PARAGRAPHS.md"
     seeded_rows = list(pp.parse_markdown_blocks(seed_path))[0]["rows"]
     table_cell = next(str(r.get("paragraph") or "") for r in seeded_rows
-                      if "Stand" in str(r.get("paragraph") or ""))
+                      if "S00" in str(r.get("paragraph") or ""))
     check("the seeded cell decodes to the full identity form",
           pp._deletion_audit_identity(table_cell) == seeded_identity,
           (len(pp._deletion_audit_identity(table_cell)), len(seeded_identity)))
@@ -153,13 +154,13 @@ def test_a1_deletion_seed_roundtrip():
 
     # ...and the identity check still catches a short re-summary of the cell.
     lines = []
-    for line in seed.splitlines():
-        if line.startswith("| ") and "Stand" in line:
+    for i, line in enumerate(seed.splitlines()):
+        if line.startswith("| ") and "S00" in line:
             prefix = line.split("|", 4)
             line = "|".join(prefix[:4]) + "| shortened summary of the table |" + \
-                " OK — facts survive in revised/paper.md |"
+                f" OK — row {i}: facts survive in revised/paper.md |"
         elif line.startswith("| ") and line.endswith(" |  |"):
-            line = line[:-4] + " | OK — facts survive in revised/paper.md |"
+            line = line[:-4] + f" | OK — row {i}: facts survive in revised/paper.md |"
         lines.append(line)
     (audit / "revision_audit" / "DELETED_PARAGRAPHS.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8")

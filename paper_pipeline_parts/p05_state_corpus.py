@@ -438,15 +438,58 @@ def load_state_file(path: Path) -> tuple:
     writable, so this reader refuses anything but a regular, single-link file:
     a FIFO/device at the path used to block every command forever (size 0,
     then a blocking open) and a symlink redirected the read outside the root.
+    ONE companion link is allowed: the canonical `state.json.prev` sibling with
+    the same inode, which is what a save that dies between its link and its
+    atomic replace leaves behind (F133).
     """
     try:
         st = path.lstat()
     except OSError as e:                                          # noqa: BLE001
         return None, f"could not be read ({type(e).__name__}: {e})"
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+    link_ok = True
+    if st.st_nlink != 1:
+        link_ok = False
+        if st.st_nlink == 2 and stat.S_ISREG(st.st_mode):
+            # The rolling save links the live registry to its `state.json.prev`
+            # backup for the instant between the link and the atomic replace
+            # (save_state). A crash/ENOSPC in that window must not turn a valid
+            # registry into one every later command refuses: accept exactly that
+            # one companion link, and only when it is this path's canonical
+            # `.prev` sibling carrying the SAME inode (F133).
+            prevp = state_prev_path(path)
+            try:
+                pst = prevp.lstat()
+                link_ok = (not stat.S_ISLNK(pst.st_mode) and stat.S_ISREG(pst.st_mode)
+                           and pst.st_ino == st.st_ino and pst.st_dev == st.st_dev)
+            except OSError:
+                link_ok = False
+            if not link_ok:
+                # A death between `os.link(state.json, tmp_prev)` and
+                # `os.replace(tmp_prev, .prev)` leaves the companion at
+                # save_state()'s unique temporary name. It is still exactly one
+                # pipeline-generated sibling in the same directory carrying this
+                # file's inode.
+                tmp_re = re.compile(r"^\." + re.escape(prevp.name)
+                                    + r"\.\d+\.[0-9a-f]+\.(?:tmp|repair)$")
+                try:
+                    for sib in path.parent.iterdir():
+                        if sib.name == path.name or not tmp_re.match(sib.name):
+                            continue
+                        try:
+                            sst = sib.lstat()
+                        except OSError:
+                            continue
+                        if (stat.S_ISREG(sst.st_mode) and sst.st_ino == st.st_ino
+                                and sst.st_dev == st.st_dev):
+                            link_ok = True
+                            break
+                except OSError:
+                    link_ok = False
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or not link_ok:
         return None, ("is not a regular file (a symlink, FIFO, device or hard-linked "
-                      "registry path is refused; state.json must be single-linked and "
-                      "written by this pipeline)")
+                      "registry path is refused; state.json must be single-linked -- or "
+                      "linked only to its state.json.prev backup -- and written by this "
+                      "pipeline)")
     size = st.st_size
     if size > MAX_STATE_BYTES:
         def _mib(n):
@@ -872,7 +915,34 @@ class Ctx:
                 tmp_prev.unlink()
             except OSError:
                 pass
-        write_json_atomic(self.state_path, self.state)
+        try:
+            write_json_atomic(self.state_path, self.state)
+        except BaseException:
+            # A failed/crashed write must not leave the LIVE registry hard-linked
+            # to `.prev`: load_state_file() refuses a multiply-linked path, so an
+            # ENOSPC/EIO here turned a readable registry into one every later
+            # command rejected. Re-point `.prev` at a fresh copy of the same
+            # bytes, which makes state.json single-linked again, then propagate
+            # the original failure (F133).
+            try:
+                st = self.state_path.lstat()
+                pst = prev.lstat()
+                if (not stat.S_ISLNK(st.st_mode) and stat.S_ISREG(st.st_mode)
+                        and stat.S_ISREG(pst.st_mode)
+                        and st.st_ino == pst.st_ino and st.st_dev == pst.st_dev):
+                    tmp_repair = prev.with_name(
+                        f".{prev.name}.{os.getpid()}.{os.urandom(6).hex()}.repair")
+                    try:
+                        shutil.copy2(self.state_path, tmp_repair)
+                        os.replace(tmp_repair, prev)
+                    finally:
+                        try:
+                            tmp_repair.unlink()
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+            raise
         try:
             size = self.state_path.stat().st_size
         except OSError:
@@ -1271,6 +1341,21 @@ def input_mismatches(ctx: Ctx, rec: dict) -> list:
 # once" falls out of content hashing instead of label bookkeeping.
 # =====================================================================
 
+def _symlinked_source_root_refused(src: Path, owner_root: Path = None) -> bool:
+    """True for a source ROOT that copy_into()/build_corpus_dir() will refuse.
+
+    A package DIRECTORY that is a symlink is not package content: build_corpus_dir()
+    -> copy_into() already refuses it (only the canonical
+    `<root>/non_revised/<area>` evidence store may be a link). The digest and
+    judge-view walkers used to descend through the link anyway, so the recorded
+    corpus identity and the blinded view named outside files the pin could never
+    contain and pin_champion then died on "internal inconsistency" (F134).
+    """
+    if not src.is_symlink():
+        return False
+    return not (owner_root is not None and is_canonical_evidence_link(src, owner_root))
+
+
 def corpus_sources(ctx: Ctx, r: int, vid: str) -> list:
     """Ordered [(source_dir, prefix_in_corpus, excluded_top_level_names)].
 
@@ -1289,8 +1374,9 @@ def corpus_sources(ctx: Ctx, r: int, vid: str) -> list:
         if vid == A1_ID:
             return [(sb / "base", "", ())]
         srcs = []
-        if (sb / CODE_DIR).is_dir():
-            srcs.append((sb / CODE_DIR, "code/", ()))
+        code_dir = sb / CODE_DIR
+        if code_dir.is_dir() and not _symlinked_source_root_refused(code_dir, ctx.root):
+            srcs.append((code_dir, "code/", ()))
         srcs.append((sb / output_dir_for_vid(vid), "", CORPUS_EXCLUDE_TOP))
         return srcs
     pin = find_pin(ctx, vid)
@@ -1334,7 +1420,7 @@ def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
     """
     entries = []
     for src, prefix, excluded in sources:
-        if not src.is_dir():
+        if not src.is_dir() or _symlinked_source_root_refused(src, owner_root):
             continue
         # follow_dir_links: a sandbox package may carry an evidence area
         # (raw_data/, human_review_feedback/) as a symlink to the
@@ -1392,7 +1478,7 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
     paths = []
     names = []
     for i, (src, prefix, excluded) in enumerate(sources):
-        if not src.is_dir():
+        if not src.is_dir() or _symlinked_source_root_refused(src, owner_root):
             continue
         for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root):
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
@@ -1747,6 +1833,8 @@ def corpus_dir_view_files(dirp: Path, owner_root: Path = None) -> list:
     `.../non_revised/raw_data` was followed into the judge view (F27).
     """
     out = []
+    if _symlinked_source_root_refused(dirp, owner_root):
+        return out
     entries = _iter_tree_files(dirp, follow_dir_links=True, owner_root=owner_root)
     siblings = {}
     for p in entries:
@@ -1787,11 +1875,17 @@ def judge_view_digest(judge_view: Path) -> list:
     relative path is part of the identity.
     """
     out = []
-    if not judge_view.is_dir():
+    if not judge_view.is_dir() or judge_view.is_symlink():
         return out
     for p in sorted(judge_view.rglob("*")):
-        if p.is_file():
-            out.append((p.relative_to(judge_view).as_posix(), sha256_file(p)))
+        # A derived view is disposable: a planted file symlink or a chmod-000
+        # entry must make the view compare UNEQUAL (so ensure_judge_view rebuilds
+        # it), never raise out of run/decide/retry (F140). The sentinel is
+        # impossible as a real hex digest, so a damaged entry can never match.
+        if p.is_symlink() or not p.is_file():
+            continue
+        out.append((p.relative_to(judge_view).as_posix(),
+                    sha256_files([p], on_error="<unreadable>")[0]))
     return sorted(out)
 
 
@@ -1838,6 +1932,12 @@ VIEW_PDF_EXTS = (".pdf",)
 # anonymity gap, never a silent clean file (F-002).
 VIEW_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif",
                    ".webp", ".emf", ".wmf", ".heic", ".avif")
+# RTF is a recognised editable manuscript source (VIEW_DERIVED_SOURCE_EXTS), so
+# its `{\info ...}` author/company/title block must be neutralized too; a legacy
+# binary `.doc` cannot be sanitized here and is a RECORDED anonymity gap instead
+# of being copied silently (F135).
+VIEW_RTF_EXTS = (".rtf",)
+VIEW_LEGACY_DOC_EXTS = (".doc",)
 VIEW_LATEX_TARGET_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".svg")
 # LaTeX source files are addressed WITHOUT their extension by \input,
 # \include, \bibliography, \addbibresource and \subfile. Their stems must be
@@ -2656,13 +2756,15 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 payload = _blank_xml_elements(payload, (b"dc:title", b"dc:subject",
                                                         b"dc:description", b"cp:keywords",
                                                         b"cp:category", b"cp:contentStatus"))
-                payload = _blank_xml_elements(payload, (b"dcterms:created", b"dcterms:modified"),
+                payload = _blank_xml_elements(payload, (b"dcterms:created", b"dcterms:modified",
+                                                        b"cp:lastPrinted"),
                                               fixed_date)
                 payload = _blank_xml_elements(payload, (b"cp:revision",), b"1")
                 stripped += 1
             elif low == "docprops/app.xml":
                 payload = _blank_xml_elements(payload, (b"Company", b"Manager", b"Application",
-                                                        b"AppVersion", b"Template"))
+                                                        b"AppVersion", b"Template",
+                                                        b"HyperlinkBase", b"TitlesOfParts"))
                 payload = _blank_xml_elements(payload, (b"TotalTime", b"LastPrinted"), b"0")
                 # Word's cached statistics go stale the moment a script rewrites
                 # the document -- a judge could read "this was edited after the
@@ -2694,6 +2796,13 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                              rb'\1=\2author\2', payload)
                 new = re.sub(rb"((?:w|w15|w16):date)=([\"\'])[^\"\']*\2",
                              rb"\1=\2" + fixed_date + rb"\2", new)
+                # Presence info carries the author's account id/provider even
+                # when every w:author attribute is neutralized; remove it and
+                # its identity attributes (F136).
+                new = re.sub(rb"<w15:presenceInfo\b[^>]*/>", b"", new)
+                new = re.sub(
+                    rb"\s((?:w15|w16):(?:userId|providerId|principalId|mainAuthorName|"
+                    rb"authorName))=([\"\'])[^\"\']*\2", b"", new)
                 if new != payload:
                     stripped += 1
                 payload = new
@@ -2831,6 +2940,50 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
     return data, notes
 
 
+_RTF_IDENTITY_RE = re.compile(
+    rb"\{\\(?:author|company|title|operator|manager|subject|keywords|doccomm|"
+    rb"category|hlinkbase)(?=[^A-Za-z])")
+
+
+def _sanitize_rtf_bytes(data: bytes) -> tuple:
+    """(bytes, notes): blank the identity fields of an RTF `{\\info ...}` block.
+
+    RTF is a plain-text format whose `{\\info {\\author ...}{\\company ...}}`
+    block carries the same provenance an OOXML core/app part does. The view used
+    to copy it byte-for-byte, so the blind judge could read the author and the
+    company straight out of the submitted manuscript (F135). Values are blanked
+    IN PLACE (same length), so the document stays valid RTF.
+    """
+    if not data.lstrip()[:5].lower().startswith(b"{\\rtf"):
+        return data, ["not a readable RTF document; metadata left as is"]
+    pos = 0
+    while True:
+        m = _RTF_IDENTITY_RE.search(data, pos)
+        if m is None:
+            break
+        start = m.end()
+        # Find the closing brace of THIS group, honoring \{ \} escapes and
+        # nested groups (an RTF value may contain formatting runs).
+        depth, j = 1, start
+        while j < len(data) and depth:
+            ch = data[j:j + 1]
+            if ch == b"\\":
+                j += 2
+                continue
+            if ch == b"{":
+                depth += 1
+            elif ch == b"}":
+                depth -= 1
+            j += 1
+        if depth:
+            return data, ["unbalanced RTF group; metadata left as is"]
+        close = j - 1
+        if data[start:close].strip(b" \t\r\n"):
+            data = data[:start] + b" " * (close - start) + data[close:]
+        pos = close + 1
+    return data, []
+
+
 def _transform_view_file(old_rel: str, src: Path, file_map: dict):
     """(transformed bytes | None, notes) for one view file (None = copy as is)."""
     ext = src.suffix.lower()
@@ -2853,6 +3006,11 @@ def _transform_view_file(old_rel: str, src: Path, file_map: dict):
         # "revised by the pipeline"; the payload the author fills in stays.
         text = text.replace(PLACEHOLDER_TOKEN, "[TO BE COMPLETED")
         return text.encode("utf-8", "surrogateescape"), []
+    if ext in VIEW_RTF_EXTS:
+        raw, _bad = _read()
+        if raw is None:
+            return None, _bad
+        return _sanitize_rtf_bytes(raw)
     if ext in VIEW_OOXML_EXTS or ext in VIEW_PDF_EXTS:
         raw, _bad = _read()
         if raw is None:
@@ -2997,10 +3155,17 @@ def build_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
             continue
         if data is None:
             shutil.copyfile(src, out)                 # content only: no metadata
-            if Path(rel).suffix.lower() in VIEW_IMAGE_EXTS:
+            _suffix = Path(rel).suffix.lower()
+            if _suffix in VIEW_IMAGE_EXTS:
                 _transform_warnings.append(
                     f"{file_map[rel]}: image copied byte-for-byte; embedded "
                     f"metadata (EXIF/IPTC/XMP) was not stripped"[:400])
+            elif _suffix in VIEW_LEGACY_DOC_EXTS:
+                # A legacy binary .doc cannot be sanitized here; it is a NAMED
+                # anonymity gap, not a silently clean file (F135).
+                _transform_warnings.append(
+                    f"{file_map[rel]}: legacy .doc copied byte-for-byte; "
+                    f"author/company metadata was not stripped"[:400])
         else:
             out.write_bytes(data)
         try:
@@ -3791,8 +3956,8 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     if (sb / "concerns").is_dir():
         inputs["concerns"] = hash_manifest(sb / "concerns")
     if prior is not None:
-        want_prior = {name: sha256_file(prior / name) for name in PRIOR_ROUND_FILES
-                      if (prior / name).is_file()}
+        prior_files = prior_round_file_sources(prior)
+        want_prior = {name: sha256_file(src) for name, src in prior_files.items()}
         if want_prior and not dir_matches(sb / "prior_round", want_prior):
             # A partial carry-over copy is rebuilt, not trusted: the review must
             # reconcile EVERY prior finding, and a silently truncated
@@ -3800,8 +3965,8 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
             if (sb / "prior_round").exists():
                 rmtree_force(sb / "prior_round", ignore_errors=True)
             (sb / "prior_round").mkdir(parents=True, exist_ok=True)
-            for name in want_prior:
-                shutil.copy2(prior / name, sb / "prior_round" / name)
+            for name, src in prior_files.items():
+                shutil.copy2(src, sb / "prior_round" / name)
     if (sb / "prior_round").is_dir():
         inputs["prior_round"] = hash_manifest(sb / "prior_round")
     # The previous round's auditor leaves unresolved observations for the next
@@ -4630,9 +4795,16 @@ def cold_start_findings_rows(ctx: Ctx, r: int) -> list:
         live = ctx.sandbox_of(rec) / COLD_START_FINDINGS_REL
         if live.is_file():
             doc = read_json(live, revive=False, lenient=True)
-            found = doc.get("findings") if isinstance(doc, dict) else []
-            return [f for f in (found or ()) if isinstance(f, dict)
-                    and str(f.get("id") or "").strip()]
+            found = doc.get("findings") if isinstance(doc, dict) else None
+            if isinstance(found, list):
+                return [f for f in (found or ()) if isinstance(f, dict)
+                        and str(f.get("id") or "").strip()]
+            # The live probe file EXISTS but cannot be read as a findings
+            # document (damaged, oversized, symlinked or corrupt). That is not
+            # the same as a genuinely empty list: fall through to the archive and
+            # SAY SO, instead of silently dropping every X-9xx row (F142).
+            print(f"[warn] {live} is unreadable; reading the archived cold-start "
+                  f"findings for round {r}", file=sys.stderr)
         # The sandbox was pruned: a DONE record must read the archive, not
         # silently return an empty discovery list.
     # The ARCHIVED round keeps the probe findings MERGED into its
@@ -5556,6 +5728,31 @@ PRIOR_ROUND_FILES = ("findings.json", "findings.md", "findings_extra.json",
                      "findings_extra.md", "new_sweeps.md", "round2_summary.md")
 
 
+def prior_round_file_sources(prior: Path) -> dict:
+    """{flat prior_round/ name: actual source path} for one prior review dir.
+
+    The ARCHIVED layout is flat, but `prior_review_dir()` falls back to the LIVE
+    review sandbox, whose layout is `guided_review/<name>` with the discovery
+    deliverables under `guided_review/round2/`. The carry-over used to look only
+    at the top level, so `prior_round/findings_extra.json` -- the file the review
+    prompt and its postcheck name -- was silently absent on the fallback path
+    (F145). Resolve each of the six names against both layouts and hand the
+    caller one flat name, exactly as the prompt states.
+    """
+    out = {}
+    if prior is None:
+        return out
+    for name in PRIOR_ROUND_FILES:
+        for cand in (prior / name,
+                     prior / "round2" / name,
+                     prior / GUIDED_REVIEW_DIR / name,
+                     prior / GUIDED_REVIEW_DIR / "round2" / name):
+            if cand.is_file() and not cand.is_symlink():
+                out[name] = cand
+                break
+    return out
+
+
 def _synthesized_review_problems(ctx: Ctx, r: int, sb: Path) -> list:
     """Drift of a `--no-guided-review` sandbox's SYNTHESIZED frozen view.
 
@@ -5642,6 +5839,35 @@ def _journal_staged_freshness_problems(ctx: Ctx, r: int, sb: Path) -> list:
     return probs
 
 
+def _discovery_seed_problems(ctx: Ctx, r: int, rec: dict, sb: Path) -> list:
+    """Drift of an integration sandbox's frozen discovery seed (F138).
+
+    materialize_integrate() records `frozen_discovery/` in inputs_manifest and
+    the integrator's ledger must reconcile every X-* id in it. Rebuild the seed
+    the CURRENT producers would write (in a throwaway directory) and compare it
+    with the sandbox copy, so a retried review/cold-start/audit cannot leave a
+    done integrator reconciling a superseded id set.
+    """
+    seed_sb = sb / DISCOVERY_SEED_DIR
+    recorded = (rec.get("inputs_manifest") or {}).get(DISCOVERY_SEED_DIR)
+    tmp = Path(tempfile.mkdtemp(prefix="pr-discovery-seed-check-"))
+    try:
+        want = seed_discovery_findings(ctx, r, tmp)
+        if want.get("dir") is None:
+            if recorded is not None or seed_sb.exists():
+                return [f"{DISCOVERY_SEED_DIR}/ no longer has an X-* row to reconcile "
+                        f"(the round's discovery list changed)"]
+            return []
+        expected = hash_manifest(tmp / DISCOVERY_SEED_DIR)
+        if not seed_sb.is_dir():
+            return [f"{DISCOVERY_SEED_DIR}/ is missing (the round's discovery list grew)"]
+        if not manifests_equal(hash_manifest(seed_sb), expected):
+            return [f"{DISCOVERY_SEED_DIR}/ no longer matches the round's discovery list"]
+        return []
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
     """Input-area drift for ONE run, measured against its CURRENT upstream."""
     kind, r = rec["kind"], int(rec["round"])
@@ -5677,8 +5903,8 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
         prior = prior_review_dir(ctx, r)
         if prior is not None and (sb / "prior_round").is_dir():
-            expected = {name: sha256_file(prior / name) for name in PRIOR_ROUND_FILES
-                        if (prior / name).is_file()}
+            expected = {name: sha256_file(src)
+                        for name, src in prior_round_file_sources(prior).items()}
             if expected and hash_manifest(sb / "prior_round").get("files") != expected:
                 probs.append("prior_round/ no longer matches the archived prior review")
         # The SAME predicate the materializer copies with (one source of truth).
@@ -5736,6 +5962,18 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             else:
                 probs.append(_review_copy_mismatch(ctx, r, sb,
                                                    ctx.sandbox_of(rev_rec) / GUIDED_REVIEW_DIR))
+        # materialize_revise records the AUDITOR'S audit/ copy as an input. A
+        # retried auditor rebuilds that directory, so a done reviser must be
+        # revalidated against the CURRENT dispositions -- otherwise it keeps
+        # implementing the superseded drops/adds while the round records the new
+        # audit (F137).
+        if (rec.get("inputs_manifest") or {}).get("audit") is not None:
+            aud_rec = ctx.run(rid_audit(r))
+            if aud_rec is None or aud_rec.get("status") != "done":
+                probs.append("upstream audit run is not done")
+            else:
+                probs.append(mismatch("audit",
+                                      hash_manifest(ctx.sandbox_of(aud_rec) / "audit")))
     elif kind == "cold_start_review":
         # The probe reads the round base and the pristine original, like every
         # other round-family session; its own provenance record is written by
@@ -5807,6 +6045,7 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
                     expected[f"{vid}/{rel}"] = dig
             if hash_manifest(others_dir).get("files") != expected:
                 probs.append("others/ no longer matches the current pool corpora")
+        probs.extend(_discovery_seed_problems(ctx, r, rec, sb))
     elif kind == "judge":
         # A judge view is ANONYMIZED (build_judge_view), so it cannot be
         # compared by path: the invariant is the CONTENT multiset of each view
@@ -5877,14 +6116,18 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # panel scores the whole field), and every pool member feeds every
     # integration run that takes it as a donor.
     dependents = {rid_a1(r): rewrite_ids + ([rid_guided_review(r)] if n else []) + cold_start_ids,
-                  rid_guided_review(r): list(audit_ids) + list(revise_ids)}
+                  rid_guided_review(r): list(audit_ids) + list(revise_ids)
+                  + list(integrate_ids)}
     for _pid in cold_start_ids:
         # The auditor and every reviser consume the merged review copy, so a
         # reset probe must reach them (their frozen list is derived from it).
-        dependents[_pid] = list(audit_ids) + list(revise_ids)
+        # The integration runs consume the same X-* rows through their
+        # `frozen_discovery/` seed (F138).
+        dependents[_pid] = list(audit_ids) + list(revise_ids) + list(integrate_ids)
     for _aid in audit_ids:
-        # The revisers' sandboxes carry the auditor's `audit/` copy.
-        dependents[_aid] = list(revise_ids)
+        # The revisers' sandboxes carry the auditor's `audit/` copy, and an
+        # auditor DROP changes the integration seed's `dropped` rows.
+        dependents[_aid] = list(revise_ids) + list(integrate_ids)
     if j_feedback:
         dependents.setdefault(rid_a1(r), []).append(j_feedback)
         dependents[j_feedback] = (list(rewrite_ids) + ([rid_guided_review(r)] if n else []))
@@ -5908,13 +6151,17 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     if n and review_split_of(ctx) != "off":
         # B's frozen input is A's guided_review/ output, so resetting A resets B too.
         dependents[rid_guided_review(r)] = [rid_guided_review_b(r)] + dependents[rid_guided_review(r)]
-        dependents[rid_guided_review_b(r)] = list(audit_ids) + list(revise_ids)
+        dependents[rid_guided_review_b(r)] = (list(audit_ids) + list(revise_ids)
+                                              + list(integrate_ids))
     for k_idx, vid in enumerate(pool):
         if vid == A1_ID:
             continue
         rid = rid_for_fresh(r, vid)
-        consumers = [rid_for_fresh(r, integrate_vid(j + 1))
-                     for j, src in enumerate(pool) if src != vid]
+        # EVERY integration run consumes this member: the one whose self/ IS this
+        # member, and every run that takes it as a donor. The old `src != vid`
+        # filter omitted the self consumer, so a rebuilt pool member left its own
+        # integration base on the superseded corpus (F139).
+        consumers = [rid_for_fresh(r, integrate_vid(j + 1)) for j in range(len(pool))]
         # APPEND, never overwrite: the resubmit-mode branch above already
         # declared the response letter a dependent of every pool member (it
         # describes the final package), and a plain assignment would discard it

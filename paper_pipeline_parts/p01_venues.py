@@ -893,6 +893,16 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
                     problems.append("style_limits.sentence_words must be an object")
                 else:
                     for kind, value in bars_raw.items():
+                        if str(kind).strip().lower() not in (
+                                "front", "abstract", "body", "methods", "legend",
+                                "refs", "heading"):
+                            # A typo silently disabled the declared bar: the
+                            # scanner looks the key up by its own section kind.
+                            problems.append(
+                                f"style_limits.sentence_words.{kind} is not a scanner "
+                                f"section kind (front/abstract/body/methods/legend/"
+                                f"refs/heading)")
+                            continue
                         try:
                             words = int(value)
                         except (TypeError, ValueError):
@@ -903,7 +913,10 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
                             problems.append(
                                 f"style_limits.sentence_words.{kind} must be > 0")
                             continue
-                        clean_bars[str(kind)] = words
+                        # Store the scanner's own (lowercase) spelling: the
+                        # lookup is by section kind, so "Body" must not pass
+                        # validation while never applying.
+                        clean_bars[str(kind).strip().lower()] = words
             cap_raw = style_limits_raw.get("paragraph_words")
             cap = 0
             if cap_raw is not None:
@@ -1501,9 +1514,26 @@ def _is_guidance_title(title) -> bool:
     return not low or low in VENUE_GUIDANCE_SECTIONS
 
 
+def _validated_artifact_venue_id(venue_id, what: str) -> str:
+    """A validated venue id for a path join (`<id>.official` etc.), or raise.
+
+    `load_venue_profile` rejects an id with a leading '.' or a path separator, but
+    the pack/exemplar helpers interpolated the caller's RAW id into
+    `Path(d) / f"{vid}<suffix>"` (F78), so `../x` could resolve -- and
+    `build-venue-templates` could WRITE -- outside the profile store. The same
+    check now guards every path-building use of the id.
+    """
+    vid = str(venue_id or "").strip().lower()
+    if not vid or not VENUE_ID_RE.match(vid):
+        raise VenueProfileError(
+            f"invalid venue id {venue_id!r} for {what}: letters, digits, '.', '_', "
+            f"'+', '-' only", unknown=True)
+    return vid
+
+
 def venue_exemplar_dirs(venue_id, root=None) -> list:
     """Existing `<venue-id>.manuscripts/` dirs, precedence order (root first)."""
-    vid = str(venue_id or "").strip().lower()
+    vid = _validated_artifact_venue_id(venue_id, "the exemplar corpus")
     out = []
     for d in venue_profile_search_dirs(root):
         p = Path(d) / f"{vid}{VENUE_EXEMPLAR_SUFFIX}"
@@ -1514,7 +1544,7 @@ def venue_exemplar_dirs(venue_id, root=None) -> list:
 
 def venue_pack_dir(venue_id, root=None):
     """The venue's generated template pack dir, or None when it does not exist."""
-    vid = str(venue_id or "").strip().lower()
+    vid = _validated_artifact_venue_id(venue_id, "the template pack")
     for d in venue_profile_search_dirs(root):
         p = Path(d) / f"{vid}{VENUE_TEMPLATE_SUFFIX}"
         if (p / VENUE_NORM_FILE).is_file():
@@ -1524,7 +1554,7 @@ def venue_pack_dir(venue_id, root=None):
 
 def venue_official_dirs(venue_id, root=None, profiles_dir=None) -> list:
     """Existing `<venue-id>.official/` dirs (explicit profiles_dir first)."""
-    vid = str(venue_id or "").strip().lower()
+    vid = _validated_artifact_venue_id(venue_id, "the official template corpus")
     out = []
     if profiles_dir:
         p = Path(profiles_dir) / f"{vid}{VENUE_OFFICIAL_SUFFIX}"
@@ -1636,6 +1666,7 @@ def docx_document_role(name, manuscript_names=()) -> str:
     # sample). The prefix test covers every `supplement*` compound; `support`
     # does not start with `supplement` and stays `main` (see the role tests).
     if "supp" in tokens or "suppl" in tokens \
+            or ("supporting" in tokens and "information" in tokens) \
             or any(re.fullmatch(
                 r"supp(?:l(?:ement(?:s|al|ary|arymaterial|almaterial)?)?)?\d*", t)
                 for t in tokens):
@@ -1659,7 +1690,7 @@ def docx_document_role(name, manuscript_names=()) -> str:
 
 def _profile_for_template_names(venue_id, root=None, profiles_dir=None):
     """The venue profile used to derive template-role names, or None."""
-    vid = str(venue_id or "").strip().lower()
+    vid = _validated_artifact_venue_id(venue_id, "the template-role profile")
     if profiles_dir:
         p = Path(profiles_dir) / f"{vid}{VENUE_PROFILE_SUFFIX}"
         if p.is_file():
@@ -1889,16 +1920,31 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
             continue
         seen_st.add(word_key)
         statement_sections.append(title)
-    # Mandatory sections are computed over the samples that carry a BODY at all:
-    # a supplementary-material template in the same pack must not veto a body
-    # section the main samples all share.
-    body_samples = 0
+    # Mandatory sections are computed over the MAIN samples that carry a BODY at
+    # all: a supplementary-material template in the same pack must not veto a body
+    # section the main samples all share (F67). A sample's role comes from its
+    # file name (`docx_document_role`); a record built by a caller that carries no
+    # role is a main sample (the pre-F67 shape).
+    main_counts, body_samples = {}, 0
     for rec in records:
-        if any(int(s.get("level") or 0) == 1 and not _is_guidance_title(s.get("title"))
-               and not _section_is_statement(s.get("title")) for s in (rec.get("sections") or [])):
-            body_samples += 1
+        if str(rec.get("role") or "main") != "main":
+            continue
+        body_keys = set()
+        for sec in (rec.get("sections") or []):
+            if int(sec.get("level") or 0) != 1:
+                continue
+            title = sec.get("title")
+            if _is_guidance_title(title) or _section_is_statement(title):
+                continue
+            body_keys.add(str(title or "").strip().lower())
+        if not body_keys:
+            continue
+        body_samples += 1
+        for key in body_keys:
+            main_counts[key] = main_counts.get(key, 0) + 1
     mandatory = [s["title"] for s in sections
-                 if body_samples and s["present"] >= body_samples]
+                 if body_samples
+                 and main_counts.get(s["title"].strip().lower(), 0) >= body_samples]
     # The operator's pinned sections must survive the body-samples recompute:
     # requirements.json is authoritative about what this venue ALWAYS requires,
     # even when the sampled official templates do not all carry the section.
@@ -1912,6 +1958,77 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
             "statement_sections": statement_sections,
             "files": [{"file": r["file"], "format": r.get("format"), "sha256": r["sha256"]}
                       for r in records]}
+
+
+def _validated_official_requirements(official: dict, struct_path) -> dict:
+    """Shape-check the pack's `official` block before it becomes requirements (F70).
+
+    `official_template_requirements` only required an object. A string
+    `mandatory_sections` was then iterated one CHARACTER at a time into bogus
+    requirements, and a string `statements` entry crashed the whole conformance
+    scan (which p04 records only as an opaque `official_template: {error}`,
+    dropping the class). A broken/hand-edited pack is reported, naming the field.
+    """
+    def bad(field, want, got):
+        raise VenueProfileError(
+            f"{struct_path}: the venue template pack's official {field!r} must be {want} "
+            f"(got {got}); regenerate it with `build-venue-templates`")
+
+    sections = official.get("sections")
+    if sections is not None:
+        if not isinstance(sections, list):
+            bad("sections", "a list of objects with a string title", type(sections).__name__)
+        for sec in sections:
+            if not isinstance(sec, dict) or not isinstance(sec.get("title"), str):
+                bad("sections", "a list of objects with a string title", repr(sec))
+    pinned = official.get("mandatory_sections")
+    if pinned is not None:
+        if isinstance(pinned, str) or not isinstance(pinned, list):
+            bad("mandatory_sections", "a list of non-empty strings",
+                type(pinned).__name__)
+        for item in pinned:
+            if not isinstance(item, str) or not item.strip():
+                bad("mandatory_sections", "a list of non-empty strings", repr(item))
+    statements = official.get("statements")
+    if statements is not None:
+        if not isinstance(statements, list):
+            bad("statements", "a list of objects with a string label",
+                type(statements).__name__)
+        for stmt in statements:
+            if not isinstance(stmt, dict) or not isinstance(stmt.get("label"), str):
+                bad("statements", "a list of objects with a string label", repr(stmt))
+    return official
+
+
+def _validated_explicit_requirements(data, where: str) -> dict:
+    """The operator's pinned requirements, SHAPE-checked before use (F69).
+
+    A syntactically valid `requirements.json` of the wrong shape used to crash the
+    build (a list has no `.get`) or, worse, install one mandatory section per
+    CHARACTER of a string. Fail the build instead, naming the file and the field
+    (the same way an unreadable pin is failed by F197).
+    """
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        die(f"{where}: the operator's pinned official requirements must be a JSON object "
+            f"such as {{\"mandatory_sections\": [\"Data availability\"]}}, not "
+            f"{type(data).__name__}; fix or remove that file")
+    out = dict(data)
+    pinned = out.get("mandatory_sections")
+    if pinned is not None:
+        if isinstance(pinned, str) or not isinstance(pinned, list):
+            die(f"{where}: 'mandatory_sections' must be a JSON LIST of section titles "
+                f"(got a {type(pinned).__name__}); a bare string would be read one "
+                f"character at a time. Fix or remove that file")
+        cleaned = []
+        for item in pinned:
+            if not isinstance(item, str) or not item.strip():
+                die(f"{where}: every 'mandatory_sections' entry must be a non-empty string "
+                    f"(got {item!r}); fix or remove that file")
+            cleaned.append(item.strip())
+        out["mandatory_sections"] = cleaned
+    return out
 
 
 def official_template_requirements(venue_id, root=None) -> dict:
@@ -1941,6 +2058,7 @@ def official_template_requirements(venue_id, root=None) -> dict:
         raise VenueProfileError(
             f"{struct_path}: the venue template pack carries no 'official' object; "
             f"regenerate it with `build-venue-templates`")
+    official = _validated_official_requirements(official, struct_path)
     if not official.get("sections") and not official.get("mandatory_sections"):
         return {}
     norm = (data or {}).get("norm") or {}
@@ -1953,7 +2071,14 @@ def official_template_requirements(venue_id, root=None) -> dict:
 
 
 _TEMPLATE_HEADING_KEY_RE = re.compile(r"[^a-z0-9]+")
-_TEMPLATE_CAPTION_RE = re.compile(r"^\s*(Figure|Fig\.?|Table)\s*(\d{1,3})[A-Za-z]?\b", re.I)
+# A CAPTION, not prose: the label and number must be followed by the caption's
+# delimiter (|, :, an en/em dash, - or .) and then whitespace/end-of-line. The
+# formatter's caption grammar states the same rule ("Table 3 shows ..." is a
+# body sentence, not a caption); the earlier template pattern accepted that prose
+# as a caption and fed it to the numbering check (F72).
+_TEMPLATE_CAPTION_RE = re.compile(
+    r"^\s*(Figure|Fig\.?|Table)\s*(\d{1,3})[A-Za-z]?\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)",
+    re.I)
 
 
 def _heading_key(text) -> str:
@@ -1997,6 +2122,12 @@ def scan_template_conformance(sources: list, requirements: dict,
     official_titles = [str(s.get("title") or "") for s in (req.get("sections") or [])
                        if isinstance(s, dict) and str(s.get("title") or "").strip()]
     advisory = [str(t) for t in (req.get("advisory_sections") or []) if str(t).strip()]
+
+    def _section_key(value) -> str:
+        """A heading label without its section number ("2.1 Results" -> results)."""
+        return _heading_key(re.sub(r"^\s*\d+(?:\.\d+)*\s*[.)]?\s+", "",
+                                   str(value or "")))
+
     # The official pack can yield a single parsable section (Frontiers). Then the
     # recent-practice order is the only usable architecture order; the rows say
     # which basis they used.
@@ -2004,9 +2135,11 @@ def scan_template_conformance(sources: list, requirements: dict,
     order_titles = official_titles
     if len(order_titles) < 2 and len(advisory) >= 2:
         order_titles, order_basis = advisory, "recent practice (advisory)"
+    # The lookup key drops BOTH the section number and the punctuation, so a
+    # numbered heading ("2. Methods") matches the template's "Methods" (F71).
     order_index = {}
     for i, t in enumerate(order_titles):
-        order_index.setdefault(_heading_key(t), i)
+        order_index.setdefault(_section_key(t), i)
 
     have_class, texts, docs = "", [], set()
     tex_classes = {}            # doc -> documentclass declared in that file
@@ -2015,11 +2148,6 @@ def scan_template_conformance(sources: list, requirements: dict,
     caption_rows = []           # (doc, is_table, number)
     docx_paths = {}             # doc -> Path
     seen_section_keys = set()   # every heading label met anywhere in the corpus
-
-    def _section_key(value) -> str:
-        """A heading label without its section number ("2.1 Results" -> results)."""
-        return _heading_key(re.sub(r"^\s*\d+(?:\.\d+)*\s*[.)]?\s+", "",
-                                   str(value or "")))
 
     for src, prefix, excluded in sources:
         if not src.is_dir():
@@ -2035,13 +2163,25 @@ def scan_template_conformance(sources: list, requirements: dict,
                 continue
             doc = prefix + rel
             ext = p.suffix.lower()
+            # A COVER LETTER is not a manuscript: a heading or a declaration
+            # sentence in the letter must not satisfy the manuscript's mandatory
+            # section, required statement or architecture order (F73). It stays
+            # in `docx_paths` so the style block can measure it against the
+            # venue's COVER template (and only that one).
+            role = docx_document_role(p.name, manuscript_names)
             if ext in LENGTH_DOCX_EXTS:
                 pairs = _docx_paragraphs_with_styles(p)
                 if pairs is None:
+                    # An unreadable DOCX is a REPORTED gap, not a silently
+                    # compliant document (F74): the TeX/Markdown branches below
+                    # already name the source they could not read.
+                    unparsed.append(doc)
+                    continue
+                docx_paths[doc] = p
+                if role == "cover":
                     continue
                 texts.append("\n".join(text for text, _style in pairs))
                 docs.add(doc)
-                docx_paths[doc] = p
                 seen = set()
                 for para, style in pairs:
                     line = para.strip()
@@ -2051,12 +2191,12 @@ def scan_template_conformance(sources: list, requirements: dict,
                     # (the codebase's `Heading*` convention); the MD/TEX
                     # branches use their own heading regexes further down.
                     if style and style.startswith("Heading"):
-                        key = _heading_key(line)
-                        if key:
-                            seen_section_keys.add(_section_key(line))
-                        if key in order_index and key not in seen:
-                            seen.add(key)
-                            doc_headings.append((doc, order_titles[order_index[key]]))
+                        skey = _section_key(line)
+                        if skey:
+                            seen_section_keys.add(skey)
+                        if skey in order_index and skey not in seen:
+                            seen.add(skey)
+                            doc_headings.append((doc, order_titles[order_index[skey]]))
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
@@ -2066,14 +2206,16 @@ def scan_template_conformance(sources: list, requirements: dict,
                 if text is None:
                     unparsed.append(doc)
                     continue
+                if role == "cover":
+                    continue
                 texts.append(text)
                 docs.add(doc)
                 for m in TEX_SECTION_RE.finditer(text):
-                    key = _heading_key(m.group(2))
-                    if key:
-                        seen_section_keys.add(_section_key(m.group(2)))
-                    if key in order_index:
-                        doc_headings.append((doc, order_titles[order_index[key]]))
+                    skey = _section_key(m.group(2))
+                    if skey:
+                        seen_section_keys.add(skey)
+                    if skey in order_index:
+                        doc_headings.append((doc, order_titles[order_index[skey]]))
                 for line in text.splitlines():
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
@@ -2087,14 +2229,16 @@ def scan_template_conformance(sources: list, requirements: dict,
                 if text is None:
                     unparsed.append(doc)
                     continue
+                if role == "cover":
+                    continue
                 texts.append(text)
                 docs.add(doc)
                 for m in MD_HEADING_RE.finditer(text):
-                    key = _heading_key(m.group(2))
-                    if key:
-                        seen_section_keys.add(_section_key(m.group(2)))
-                    if key in order_index:
-                        doc_headings.append((doc, order_titles[order_index[key]]))
+                    skey = _section_key(m.group(2))
+                    if skey:
+                        seen_section_keys.add(skey)
+                    if skey in order_index:
+                        doc_headings.append((doc, order_titles[order_index[skey]]))
                 for line in text.splitlines():
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
@@ -2139,30 +2283,43 @@ def scan_template_conformance(sources: list, requirements: dict,
     for doc, seq in sorted(by_doc.items()):
         for i in range(len(seq)):
             inversion = next((j for j in range(i + 1, len(seq))
-                              if order_index.get(_heading_key(seq[j]), -1)
-                              < order_index.get(_heading_key(seq[i]), -1)), None)
+                              if order_index.get(_section_key(seq[j]), -1)
+                              < order_index.get(_section_key(seq[i]), -1)), None)
             if inversion is not None:
                 order_rows.append(
                     f"{doc}: section {seq[inversion]!r} appears after {seq[i]!r} "
                     f"(order basis: {order_basis}: {' > '.join(order_titles)})")
                 break
-    # Figure/table labels: first occurrences must be ascending and gap-free.
+    # Figure/table labels: first occurrences must be ascending and gap-free PER
+    # SEQUENCE. Figures are numbered per submission unit: the main manuscript and
+    # each supplementary file carry their own numbering, so a supplement's
+    # "Figure 1" after the main text's "Figure 2" is not a main-text defect (F75).
+    # The main-role documents form ONE sequence (a manuscript may be split across
+    # files); every other role/document is its own sequence.
     label_rows = []
-    for is_table, label in ((False, "Figure"), (True, "Table")):
-        nums = [n for _doc, table, n in caption_rows if table is is_table]
+    caption_groups = {}
+    for doc, is_table, number in caption_rows:
+        role = docx_document_role(Path(doc).name, manuscript_names)
+        group = "main" if role == "main" else doc
+        caption_groups.setdefault((group, is_table), []).append(number)
+    for (group, is_table), nums in sorted(caption_groups.items()):
+        label = "Table" if is_table else "Figure"
+        where = "" if group == "main" else f" in {group}"
         first = []
         for n in nums:
             if n not in first:
                 first.append(n)
         if first and first != sorted(first):
-            label_rows.append(f"{label} captions are out of order: first occurrences {first}")
+            label_rows.append(
+                f"{label} captions are out of order{where}: first occurrences {first}")
         if first:
             gaps = sorted(set(range(1, max(first) + 1)) - set(first))
             if gaps:
-                label_rows.append(f"{label} numbering has gaps: {gaps}")
+                label_rows.append(f"{label} numbering has gaps{where}: {gaps}")
     # Word template styles: every corpus .docx must carry the ids of the
     # template that governs ITS role (main / supplementary / cover letter).
     word_styles_missing = []
+    word_template_rows = []
     front_rows = []
     if word_template is not None or word_template_supplementary is not None \
             or word_template_cover is not None:
@@ -2171,6 +2328,21 @@ def scan_template_conformance(sources: list, requirements: dict,
                     if word_template_supplementary is not None else set())
         cover_ids = (set(_docx_style_ids(Path(word_template_cover)))
                      if word_template_cover is not None else set())
+        # A template that cannot be read (or declares no style ids at all) leaves
+        # its style/front-matter requirement UNANSWERED; the old gate on
+        # `main_ids or supp_ids or cover_ids` silently skipped the whole block and
+        # reported word_template_ok (F74). Only when the formatter module is
+        # absent is the check impossible for every role, and then no row is
+        # invented for one template alone.
+        if _format_module() is not None:
+            for _role, _tpl, _ids in (("main", word_template, main_ids),
+                                      ("supplementary", word_template_supplementary, supp_ids),
+                                      ("cover letter", word_template_cover, cover_ids)):
+                if _tpl is not None and not _ids:
+                    word_template_rows.append(
+                        f"word template unreadable or declaring no styles ({_role}): "
+                        f"{Path(_tpl).name}; its style and front-matter requirements could "
+                        f"not be checked")
         if main_ids or supp_ids or cover_ids:
             for doc, path in sorted(docx_paths.items()):
                 role = docx_document_role(doc, manuscript_names)
@@ -2195,7 +2367,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                     front_rows.append(f"{doc}: {row}")
     conforms = (bool(req) and not missing_sections and not missing_statements and class_ok
                 and not order_rows and not label_rows and not word_styles_missing
-                and not front_rows)
+                and not word_template_rows and not front_rows and not unparsed)
     return {"official": bool(req), "required": {"documentclass": want_class,
                                                 "mandatory_sections": mandatory,
                                                 "statements": statements},
@@ -2205,7 +2377,8 @@ def scan_template_conformance(sources: list, requirements: dict,
             "class_ok": class_ok, "order_basis": order_basis,
             "order_rows": order_rows, "label_rows": label_rows,
             "word_styles_missing": word_styles_missing,
-            "word_template_ok": not word_styles_missing,
+            "word_template_ok": not word_styles_missing and not word_template_rows,
+            "word_template_rows": word_template_rows,
             "front_matter_rows": front_rows,
             "conforms": conforms,
             "note": ("advisory, code-side: a row names a requirement the official template "
@@ -2237,8 +2410,11 @@ def _sections_from_text(text: str, suffix: str) -> list:
     if suffix == ".tex":
         return [(_TEX_LEVELS.get(kind, 1), title.strip())
                 for kind, title in TEX_SECTION_RE.findall(text) if title.strip()]
-    if suffix in (".md", ".markdown"):
-        # Markdown levels are normalized to the LaTeX convention: the first
+    if suffix in (".md", ".markdown", ".txt"):
+        # Markdown levels are normalized to the LaTeX convention: the first.
+        # '.txt' is a declared exemplar suffix and the same heading grammar is
+        # the only structured form a plain-text transcript carries; treating it
+        # as unsupported made the pack derive from an empty structure.
         # `#` heading is the TITLE (dropped below), `##` is a top-level section
         # (level 1), `###` a subsection (level 2), ...
         raw = [(len(hashes), title.strip())
@@ -2293,6 +2469,10 @@ def extract_manuscript_structure(path: Path) -> dict:
         except OSError:
             return {"skipped": "unreadable"}
         sections = _sections_from_text(text, suffix)
+        if not sections:
+            # An exemplar that yields no sections is not a structure record: it
+            # would raise n_exemplars while contributing nothing to the norm.
+            return {"skipped": "no section headings could be parsed"}
         abstract = bool(TEX_ABSTRACT_RE.search(text) if suffix == ".tex"
                         else MD_ABSTRACT_RE.search(text))
     elif suffix in VENUE_EXEMPLAR_DOCX_SUFFIXES:
@@ -2321,6 +2501,12 @@ def structure_norm(records: list) -> dict:
     n = len(records)
     positions, spellings, counts = {}, {}, {}
     for rec in records:
+        # A section is present in an EXEMPLAR at most once, at its FIRST
+        # position: counting every repeated heading made one exemplar that repeats
+        # "Results" report present=2 with n_exemplars=1 and shifted the mean
+        # position, which could invert the advisory order (F76). This is the same
+        # per-record de-duplication official_skeleton applies (F40).
+        seen_in_record = set()
         for i, sec in enumerate(rec.get("sections") or []):
             if int(sec.get("level") or 0) != 1:
                 # The modal order is the TOP-LEVEL order; subsections belong to
@@ -2333,6 +2519,9 @@ def structure_norm(records: list) -> dict:
                 # Statement sections are reported under "Statement placement",
                 # not in the body-section order.
                 continue
+            if key in seen_in_record:
+                continue
+            seen_in_record.add(key)
             counts[key] = counts.get(key, 0) + 1
             positions.setdefault(key, []).append(i)
             spellings.setdefault(key, {})
@@ -2422,42 +2611,63 @@ def render_architecture_summary(venue_id: str, norm: dict, official: dict = None
 
 def _skeleton_titles(norm: dict, official: dict = None) -> list:
     """The skeleton order: the OFFICIAL sections as the backbone, completed by
-    the advisory norm's sections (inserted at their modal positions)."""
+    the advisory norm's sections (inserted at their modal positions).
+
+    With no official section evidence the skeleton carries the advisory titles
+    and, when the venue carries none either, NO body-section order at all: the
+    venue stated none, so inventing an IMRAD order would be a rule the venue did
+    not state (F66). An operator-pinned mandatory section is always a skeleton
+    title, even when no sampled template shows it (F68).
+    """
     off = list((official or {}).get("sections") or [])
     adv = list(norm.get("sections") or [])
-    if not off:
-        return [s["title"] for s in adv] or ["Abstract", "Introduction", "Methods", "Results",
-                                             "Discussion"]
 
     def key(title):
         words = re.findall(r"[a-z0-9]+", str(title).lower())
         return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words)
 
-    merged = [s["title"] for s in off]
-    # The insert position must be found in the list that GROWS, never in `off`:
-    # once one advisory section was inserted, index `i` of `off` no longer names
-    # the same slot of `merged`, so a later advisory section landed BEFORE its
-    # predecessor (Ethics 0.5, Data availability 0.6 -> the 0.6 section came
-    # first). `merged_pos` carries each merged slot's mean_position in parallel.
-    merged_pos = [float(o.get("mean_position", 99)) for o in off]
-    seen = {key(t) for t in merged}
-    word_sets = [set(key(t).split()) for t in merged]
-    for a in adv:
-        title = a["title"]
+    pinned = [str(m).strip() for m in ((official or {}).get("mandatory_sections") or [])
+              if str(m).strip()]
+    if not off:
+        merged = [s["title"] for s in adv]
+        seen = {key(t) for t in merged}
+        word_sets = [set(key(t).split()) for t in merged]
+    else:
+        merged = [s["title"] for s in off]
+        # The insert position must be found in the list that GROWS, never in `off`:
+        # once one advisory section was inserted, index `i` of `off` no longer names
+        # the same slot of `merged`, so a later advisory section landed BEFORE its
+        # predecessor (Ethics 0.5, Data availability 0.6 -> the 0.6 section came
+        # first). `merged_pos` carries each merged slot's mean_position in parallel.
+        merged_pos = [float(o.get("mean_position", 99)) for o in off]
+        seen = {key(t) for t in merged}
+        word_sets = [set(key(t).split()) for t in merged]
+        for a in adv:
+            title = a["title"]
+            k = key(title)
+            if k in seen:
+                continue
+            if len(k.split()) == 1 and any(k in ws for ws in word_sets):
+                # A one-word variant ("Methods", "Conclusion") is folded into the
+                # fuller heading already present.
+                continue
+            idx = len(merged)
+            for i, pos in enumerate(merged_pos):
+                if float(a.get("mean_position", 99)) <= pos:
+                    idx = i
+                    break
+            merged.insert(idx, title)
+            merged_pos.insert(idx, float(a.get("mean_position", 99)))
+            seen.add(k)
+            word_sets.append(set(k.split()))
+    # A pinned mandatory section is a REQUIREMENT: it is appended verbatim (only
+    # an exact same-key title already present suppresses it) so the emitted
+    # skeleton carries the section the pack's conformance scan will demand.
+    for title in pinned:
         k = key(title)
-        if k in seen:
+        if not k or k in seen:
             continue
-        if len(k.split()) == 1 and any(k in ws for ws in word_sets):
-            # A one-word variant ("Methods", "Conclusion") is folded into the
-            # fuller heading already present.
-            continue
-        idx = len(merged)
-        for i, pos in enumerate(merged_pos):
-            if float(a.get("mean_position", 99)) <= pos:
-                idx = i
-                break
-        merged.insert(idx, title)
-        merged_pos.insert(idx, float(a.get("mean_position", 99)))
+        merged.append(title)
         seen.add(k)
         word_sets.append(set(k.split()))
     return merged
@@ -2485,9 +2695,17 @@ def render_word_template(venue_id: str, norm: dict, official: dict = None) -> st
          f"outline."
          + (" The sections marked [MANDATORY] come from the journal's OWN template: they must "
             "exist. Use the styles the journal's .dotx/.docx template provides."
-            if off.get("sections") else "")
+            if off.get("sections") or off.get("mandatory_sections") else "")
          + " -->", "",
          "# <Manuscript title>", ""]
+    if not titles:
+        # F66: no official and no advisory section evidence. The venue stated no
+        # section order, so the skeleton asserts none instead of inventing an
+        # IMRAD architecture the venue never required.
+        L += ["<!-- No section evidence: neither the venue's official template nor its "
+              "exemplar manuscripts carries a usable section heading, so this skeleton "
+              "asserts NO body-section order. Follow the venue's author guidelines for "
+              "the section set; never invent one. -->", ""]
     statement_labels = _skeleton_statements(norm, off)
     for title in titles:
         mark = " [MANDATORY]" if title.strip().lower() in mandatory else ""
@@ -2498,9 +2716,27 @@ def render_word_template(venue_id: str, norm: dict, official: dict = None) -> st
     for label in statement_labels:
         L += [f"## {label}", "", f"<{label} statement.>", ""]
     L += ["<!-- End of template. The section list follows the journal's OWN template when one "
-          "is present (otherwise the venue's modal order); adjust only where the manuscript's "
-          "content or the venue's guidelines require it. -->"]
+          "is present, otherwise the venue's recent-practice order; when neither tier carries "
+          "section evidence this skeleton asserts no body-section order. Adjust only where the "
+          "manuscript's content or the venue's guidelines require it. -->"]
     return "\n".join(L)
+
+
+_TEX_TITLE_ESCAPES = {
+    "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$",
+    "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}",
+    "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
+}
+
+
+def _tex_title_escape(text) -> str:
+    r"""Escape a section TITLE for `\section{...}`.
+
+    A venue heading such as "Results & Discussion" made pdflatex reject the
+    generated skeleton (a misplaced alignment tab), and a '%' commented out the
+    closing brace. The skeleton is generated code, so it must quote its data.
+    """
+    return "".join(_TEX_TITLE_ESCAPES.get(ch, ch) for ch in str(text or ""))
 
 
 def render_latex_template(venue_id: str, norm: dict, official: dict = None) -> str:
@@ -2529,15 +2765,22 @@ def render_latex_template(venue_id: str, norm: dict, official: dict = None) -> s
           "\\begin{document}",
           "\\maketitle",
           ""]
+    if not titles:
+        # F66: no section evidence -> assert none, never invent an IMRAD order.
+        L += ["% No section evidence: neither the venue's official template nor its exemplar "
+              "manuscripts carries a usable section heading, so no body-section order is "
+              "asserted here. Follow the venue's author guidelines for the section set.", ""]
     for title in titles:
         low = title.strip().lower()
         if low == "abstract":
             L += ["\\begin{abstract}", "<Abstract: one paragraph, no citations.>", "\\end{abstract}",
                   ""]
             continue
-        L += [f"\\section{{{title}}}", f"% <{title} text.>", ""]
+        safe_title = _tex_title_escape(title)
+        L += [f"\\section{{{safe_title}}}", f"% <{safe_title} text.>", ""]
     for label in statement_labels:
-        L += [f"\\section*{{{label}}}", f"% <{label} statement.>", ""]
+        safe_label = _tex_title_escape(label)
+        L += [f"\\section*{{{safe_label}}}", f"% <{safe_label} statement.>", ""]
     L += ["\\end{document}"]
     return "\n".join(L)
 
@@ -2556,6 +2799,12 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
     vid = str(venue_id or "").strip().lower()
     if not vid:
         die("build-venue-templates needs a venue id")
+    if not VENUE_ID_RE.match(vid):
+        # The id is joined into the pack path below; a path separator would write
+        # outside the profile store (F78). Refuse it exactly as the profile
+        # loader refuses it.
+        die(f"build-venue-templates: invalid venue id {venue_id!r}: letters, digits, "
+            f"'.', '_', '+', '-' only")
     src_dirs = []
     if exemplar_dir:
         src_dirs = [Path(exemplar_dir)]
@@ -2607,13 +2856,19 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
         if rec.get("skipped"):
             off_skipped.append({"file": p.name, "why": rec["skipped"]})
         else:
+            # The sample's ROLE travels with its structure: a supplementary
+            # template's headings must not veto the main samples' mandatory
+            # sections (F67). The same name rule the rest of the pipeline uses
+            # classifies it; cover templates were already skipped above.
+            rec["role"] = docx_document_role(p.name, _tmpl_names)
             off_records.append(rec)
     explicit = None
     for d in off_dirs:
         p = d / VENUE_OFFICIAL_REQUIREMENTS
         if p.is_file():
             try:
-                explicit = json.loads(p.read_text(encoding="utf-8"))
+                explicit = _validated_explicit_requirements(
+                    json.loads(p.read_text(encoding="utf-8")), str(p))
             except (OSError, ValueError) as e:
                 # requirements.json is AUTHORITATIVE about the sections this
                 # venue ALWAYS requires. Treating an unreadable pin as "no pin"
@@ -2757,7 +3012,8 @@ and statement placement; no prose was copied). Two tiers, with different authori
     "Resource availability", "Materials availability", "Method details", or a bare "Key
     resources" heading) are not part of this venue's structure: fold their content into the
     template's own sections (Methods subsections, Statements, or the tables/figures area) and
-    place each table caption immediately before its table.
+    place each table caption on the side the venue profile's `tables.caption` policy states
+    (before, after or any); when the profile declares no rule, the template decides.
 @@TRANSFER@@
 
 @@NORM@@

@@ -136,7 +136,10 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
             p = sb / "guided_review" / rel
             if not p.is_file():
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text("| row | disposition |\n|---|---|\n", encoding="utf-8")
+                p.write_text(
+                    "| row | disposition |\n|---|---|\n"
+                    "| fixture row | OK — fixture row is inside its bar |\n",
+                    encoding="utf-8")
     np.write_json_atomic(sb / np.MARKER_FILE, {"stage": "guided_review", "run_id": "r1_a2_review",
                                                "round": 1, "status": "complete"})
     return sb

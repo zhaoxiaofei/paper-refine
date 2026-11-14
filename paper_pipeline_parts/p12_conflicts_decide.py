@@ -2037,10 +2037,22 @@ def declared_submission_set(root: Path) -> dict:
             # lead-in ("... will be submitted to the venue/journal:"). Allow a
             # bounded lead-in before the first glob, then stop at the first prose
             # line AFTER a glob (an unrelated example must not widen the set).
-            seen_glob = bool(found)
+            # Per-HINT state: a glob found by an EARLIER declaration must not
+            # make this hint start as if it already had one, or its following
+            # lines are absorbed until an unrelated example glob (F223).
+            sent_globs = globs_in(first[sent_start:sent_end])
+            seen_glob = bool(sent_globs)
             lead = 0
             for raw in lines[1:]:
                 line = raw.strip()
+                if not seen_glob:
+                    # A prose sentence carrying an inline example glob
+                    # ("Unrelated examples: `fig-*.png`") is not a pattern block
+                    # of this declaration: stop before absorbing it (F223).
+                    _prose_only = re.sub(r"`[^`]*`", "", line).strip()
+                    if _prose_only and not line.endswith(":") \
+                            and re.search(r"[A-Za-z]{3,}", _prose_only):
+                        break
                 globs = globs_in(line)
                 if globs:
                     seen_glob = True
@@ -2262,6 +2274,11 @@ PLACEHOLDER_DECL_LINE_RE = re.compile(
 PLACEHOLDER_BULLET_RE = re.compile(r"(?im)^[ \t]*(?:[-*+]|\d+\.)[ \t]+(.+)$")
 BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]{2,300})`")
 PLACEHOLDER_MAX_HASH_BYTES = 20 * 1024 * 1024
+# Decompressed-media budgets for the PKG-10 embedded-figure digest: a 65 KB
+# DOCX can carry a highly compressible multi-gigabyte media blob, so each part
+# and the whole document are capped (F234).
+MEDIA_PART_MAX_BYTES = 32 * 1024 * 1024
+MEDIA_TOTAL_MAX_BYTES = 128 * 1024 * 1024
 
 
 def _placeholder_globs_from_ctx(ctx=None) -> list:
@@ -2294,6 +2311,11 @@ def declared_placeholder_paths(root: Path, extra=()) -> dict:
     except OSError:
         candidates = []
     for p in candidates:
+        if not _declaration_readme_from_author(root, p):
+            # The package README is agent-writable. A placeholder declaration
+            # is honoured only from the AUTHOR's copy, exactly as the
+            # submission declaration is (F230).
+            continue
         text = read_text_bounded(p)
         if text is None:
             continue
@@ -2474,7 +2496,8 @@ def _pkg3_prose_document(rel: str) -> bool:
     """True when `rel` is a manuscript prose surface PKG-3 reports (see above)."""
     name = str(rel or "")
     base = name.rsplit("/", 1)[-1]
-    if not name.lower().endswith((".docx", ".tex", ".ltx", ".pdf")):
+    if not name.lower().endswith((".docx", ".tex", ".ltx", ".pdf",
+                                   ".md", ".markdown", ".txt")):
         return False
     role = docx_document_role(base)
     if role in ("main", "cover"):
@@ -2674,14 +2697,36 @@ def embedded_media_digests(root: Path, rel_files) -> dict:
         p = Path(root) / rel
         if p.suffix.lower() not in (".docx", ".docm", ".dotx", ".pptx", ".xlsx"):
             continue
+        total = 0
         try:
             with zipfile.ZipFile(p) as z:
                 for name in z.namelist():
                     if name.endswith("/") or not name.startswith(
                             ("word/media/", "ppt/media/", "xl/media/")):
                         continue
-                    out.setdefault(hashlib.sha256(z.read(name)).hexdigest(), []).append(
-                        f"{rel}::{name}")
+                    try:
+                        size = int(z.getinfo(name).file_size)
+                    except KeyError:
+                        continue
+                    # A small archive can inflate to gigabytes of media: cap the
+                    # per-part and total decompressed bytes and hash in chunks
+                    # instead of z.read() (F234).
+                    if size > MEDIA_PART_MAX_BYTES \
+                            or total + size > MEDIA_TOTAL_MAX_BYTES:
+                        continue
+                    h = hashlib.sha256()
+                    try:
+                        with z.open(name) as fh:
+                            while True:
+                                chunk = fh.read(1 << 20)
+                                if not chunk:
+                                    break
+                                h.update(chunk)
+                    except (OSError, RuntimeError, zipfile.BadZipFile,
+                            NotImplementedError):
+                        continue
+                    out.setdefault(h.hexdigest(), []).append(f"{rel}::{name}")
+                    total += size
         except (OSError, zipfile.BadZipFile, RuntimeError):
             continue
     return out
@@ -2702,10 +2747,13 @@ def pkg10_reference_exempt(root: Path, target: str, exc: dict) -> tuple:
     for cand in cands:
         p = Path(root) / cand.replace("\\", "/")
         try:
+            # A written `..` must not reach outside the package: resolve the
+            # candidate and require containment before reading/hashing it (F232).
+            p.resolve().relative_to(Path(root).resolve())
             if not p.is_file():
                 continue
             digest = _cached_sha256(p)
-        except OSError:
+        except (OSError, ValueError):
             continue
         where = ((exc or {}).get("media") or {}).get(digest)
         if where:
@@ -4191,8 +4239,16 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
         # directory's pooled MCB source when the same-stem file is absent.
         if not any(c.is_file() for c in caption_files):
             # The generated .tex may sit one level up (the copy that ships the
-            # table) as well as beside the table.
+            # table) as well as beside the table -- but only INSIDE the package
+            # root: p.parent.parent of a root-level table is the run directory,
+            # and an unrelated .tex there must never become this table's caption
+            # (F229).
+            _root_r = root.resolve()
             for d in (p.parent, p.parent.parent):
+                try:
+                    d.resolve().relative_to(_root_r)
+                except (OSError, ValueError):
+                    continue
                 caption_files = [q for q in sorted(d.glob("*.tex"))
                                  if "mcb" in q.name.lower() and "pooled" in q.name.lower()][:1]
                 if caption_files:
@@ -4266,7 +4322,9 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
             if not p.is_file() or p.suffix.lower() not in (".txt", ".md", ".html", ".json"):
                 continue
             try:
-                text = p.read_text("utf-8", "replace")
+                text = read_text_bounded(p)
+                if text is None:
+                    continue
             except OSError:
                 continue
             seen_decision_ids = set()
@@ -4311,10 +4369,11 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
                 gaps.append(f"{rel}: PDF text extraction failed ({failure})")
                 continue
         else:
-            try:
-                text = p.read_text("utf-8", "replace")
-            except OSError:
-                gaps.append(f"{rel}: unreadable")
+            # A feedback/letter file is untrusted and can be huge: the read must
+            # be byte-bounded like the rest of p12 (F233).
+            text = read_text_bounded(p)
+            if text is None:
+                gaps.append(f"{rel}: unreadable or over the byte budget")
                 continue
         if not PRIOR_SUBMISSION_CLAIM_RE.search(text):
             continue
@@ -4445,10 +4504,26 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     # "treated as if it were in the parent" (a parent-directory file, a file the
     # parent's .tex files input, or a display item whose bytes the submission
     # itself carries). Built once per scan.
+    def _submitted_for_pkg10(rootp: Path, pp: Path, is_sub, areaset) -> bool:
+        """`is_submitted`, minus the areas the submission does not carry.
+
+        Without a README declaration `is_submitted` is true for every carried
+        file; passing raw_data/ and code/ document files to the PKG-10
+        exception set then let an image embedded in an EVIDENCE document exempt
+        a pointer at evidence, hiding the dangling reference (F225).
+        """
+        rel = pp.relative_to(rootp).as_posix()
+        if not is_sub(rel):
+            return False
+        if rel.split("/", 1)[0].lower() in (areaset or ()) or is_evidence_rel(rel):
+            return False
+        return True
+
     try:
         submitted_now = [pp.relative_to(root).as_posix()
                          for pp in _iter_tree_files(root, follow_dir_links=True)
-                         if pp.is_file() and is_submitted(pp.relative_to(root).as_posix())]
+                         if pp.is_file() and _submitted_for_pkg10(
+                             root, pp, is_submitted, area_set)]
     except Exception:                                                 # noqa: BLE001
         submitted_now = []
     try:
@@ -4921,50 +4996,91 @@ def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
         line_start = text.rfind("\n", 0, s) + 1
         (structural if is_structural_reference_line(text[line_start:s])
          else prose).append((s, e))
-    windows = []
-    for a, b in (mod.sentence_windows(text, prose, eat_whitespace=False)
-                 if mod is not None else ()):
-        # The window may OPEN on a heading line or on a LaTeX command line the
-        # reference does not sit on (`\includegraphics{...}\nWe ran code/a.py`):
-        # neither is part of the sentence under them.
-        while True:
-            line_end = text.find("\n", a)
-            if line_end < 0 or line_end >= b:
-                break
-            if any(a <= s and s < line_end for s, _e in prose):
-                break
-            if not (is_heading_line(text[a:line_end])
-                    or text[a:line_end].lstrip().startswith("\\")):
-                break
-            a = line_end + 1
-        # ... and it may CLOSE on one: `We ran code/a.py\n\includegraphics{...}`
-        # has no sentence break between them, and deleting the include would
-        # change what the document renders.
-        while b > a:
-            line_start = text.rfind("\n", 0, b) + 1
-            if line_start <= a:
-                break
-            line = text[line_start:b]
-            if any(line_start <= s < b for s, _e in prose):
-                break
-            if not (line.lstrip().startswith("\\")
-                    or any(line_start <= s < b for s, _e in structural)):
-                break
-            b = line_start - 1 if text[line_start - 1:line_start] == "\n" else line_start
-        # A mid-line removal must not leave the space that used to separate the
-        # sentence from its neighbour ("... the benchmark. The command is in
-        # code/x.py." -> "... the benchmark." and not "... the benchmark. ").
-        while a > 0 and text[a - 1] in " \t":
-            a -= 1
-        if b > a:
-            if sentence_carries_scientific_fact(text[a:b]):
+    windows, protected = [], []
+    # An include the raw-area rule exempts is not in `spans` at all (the reader
+    # can reach its target), so the structural list above cannot protect it.
+    # Detect the commands/links themselves in the text: a sentence that carries
+    # one of them is never deleted as a whole (F227).
+    protected_spans = list(structural)
+    for _rx in (re.compile(
+                    r"\\(?:includegraphics|includepdf|input|include|bibliography|"
+                    r"bibliographystyle|graphicspath)\*?(?:\[[^\]]*\])*\{[^{}]*\}"),
+                re.compile(r"!\[[^\]]*\]\([^)]*\)"),
+                re.compile(r"(?m)^[ \t]*\[[^\]]+\]:[ \t]*\S+[^\n]*$")):
+        protected_spans.extend(m.span() for m in _rx.finditer(text))
+    # One window per reference: a merged window would let a sentence in one
+    # paragraph swallow an unpunctuated paragraph before it (F228).  A blank
+    # line is a paragraph boundary the [.!?] splitter cannot see, so the
+    # window is clamped to the paragraph that carries its reference.
+    for s, e in prose:
+        if mod is None:
+            break
+        para_start = 0
+        for m in re.finditer(r"\n[ \t]*\n", text[:s]):
+            para_start = m.end()
+        m_end = re.search(r"\n[ \t]*\n", text[s:])
+        para_end = len(text) if m_end is None else s + m_end.start()
+        for a, b in mod.sentence_windows(text, [(s, e)], eat_whitespace=False):
+            a, b = max(a, para_start), min(b, para_end)
+            # The window may OPEN on a heading line or on a LaTeX command line the
+            # reference does not sit on (`\includegraphics{...}\nWe ran code/a.py`):
+            # neither is part of the sentence under them.
+            while True:
+                line_end = text.find("\n", a)
+                if line_end < 0 or line_end >= b:
+                    break
+                if any(a <= s2 and s2 < line_end for s2, _e in prose):
+                    break
+                if not (is_heading_line(text[a:line_end])
+                        or text[a:line_end].lstrip().startswith("\\")):
+                    break
+                a = line_end + 1
+            # ... and it may CLOSE on one: `We ran code/a.py\n\includegraphics{...}`
+            # has no sentence break between them, and deleting the include would
+            # change what the document renders.
+            while b > a:
+                line_start = text.rfind("\n", 0, b) + 1
+                if line_start <= a:
+                    break
+                line = text[line_start:b]
+                if any(line_start <= s2 < b for s2, _e in prose):
+                    break
+                if not (line.lstrip().startswith("\\")
+                        or any(line_start <= s2 < b for s2, _e2 in protected_spans)):
+                    break
+                b = line_start - 1 if text[line_start - 1:line_start] == "\n" else line_start
+            # A mid-line removal must not leave the space that used to separate the
+            # sentence from its neighbour ("... the benchmark. The command is in
+            # code/x.py." -> "... the benchmark." and not "... the benchmark. ").
+            while a > 0 and text[a - 1] in " \t":
+                a -= 1
+            if b <= a:
+                continue
+            # A structural include INSIDE the window (a `\includegraphics{...}`
+            # sharing its sentence with a prose pointer) must never be deleted:
+            # deleting the window would delete the command that renders the
+            # figure.  Refuse the whole window and report it instead.
+            if any(a < se and ss < b for ss, se in protected_spans):
+                protected.append((a, b))
+            elif sentence_carries_scientific_fact(text[a:b]):
                 # Keep the fact and report the pointer; a mechanical deletion
                 # must not turn a data statement into a clean-looking package.
                 held.append((a, b))
             else:
                 windows.append((a, b))
+    # Adjacent references in ONE sentence yield the same window; merge so the
+    # rewrite never emits two overlapping cuts.
+    merged = []
+    for a, b in sorted(windows):
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    windows = merged
     if not windows:
-        return (text, [], [text[s:e] for s, e in structural],
+        return (text, [],
+                [text[s:e] for s, e in structural]
+                + [text[a:b] for a, b in protected],
                 [text[s:e] for s, e in held])
     out, removed, pos = [], [], 0
     for a, b in windows:
@@ -4972,7 +5088,9 @@ def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
         removed.append(text[a:b].strip())
         pos = b
     out.append(text[pos:])
-    return ("".join(out), removed, [text[s:e] for s, e in structural],
+    return ("".join(out), removed,
+            [text[s:e] for s, e in structural]
+            + [text[a:b] for a, b in protected],
             [text[s:e] for s, e in held])
 
 
@@ -5022,6 +5140,7 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
             [q.relative_to(dirp).as_posix() for q in _iter_tree_files(dirp)
              if q.is_file() and _is_sub(q.relative_to(dirp).as_posix())])
     except Exception:                                                 # noqa: BLE001
+        _is_sub = lambda _rel: True                                   # noqa: E731
         pkg10_exc = {"closure": set(), "tex_sources": [], "media": {}}
 
     def _exempt_ref(ref: str) -> bool:
@@ -5037,6 +5156,11 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
             continue
         rel = p.relative_to(dirp).as_posix()
         if rel.split("/", 1)[0].lower() in area_set or is_evidence_rel(rel):
+            continue
+        if not _is_sub(rel):
+            # The package's own honoured README declares this file NOT
+            # submitted: editing it would rewrite a file the submission never
+            # carries, while the re-scan ignores it and reports clean (F226).
             continue
         if rel.split("/", 1)[0].lower() in CORPUS_EXCLUDE_TOP:
             # `work/` is the stage's own process scratch (the same exclusion
@@ -5180,6 +5304,21 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
     _scan = non_submitted_reference_rows(dirp, report["areas"])
     report["remaining"] = [r for r in _scan if (r.get("rule") or "PKG-2") == "PKG-2"]
     report["advisory"] = [r for r in _scan if (r.get("rule") or "PKG-2") != "PKG-2"]
+    # A submitted file that could not be READ for repair (too large, a
+    # non-UTF-8 decode, unreadable) was silently absent from both the repair and
+    # the re-scan, so the report said ok=True while its pointers were never
+    # checked. Surface it as a named author-action row (F243).
+    for _f in report["files"]:
+        for _why in _f.get("skipped") or []:
+            if not any(tag in _why for tag in ("too large", "UnicodeDecodeError",
+                                               "byte budget", "unreadable",
+                                               "PermissionError", "IsADirectoryError")):
+                continue
+            report["remaining"].append({
+                "rule": "PKG-2", "file": _f.get("file"), "line": 0, "reference": "",
+                "detail": (f"the file could not be read/repaired ({_why}); its dangling "
+                           f"references were NOT checked -- repair the file (or shrink/convert "
+                           f"it) and re-run")})
     report["ok"] = not report["remaining"]
     if warns is not None:
         if report["removed"]:
@@ -5282,11 +5421,12 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel):
             continue
-        if is_author_to_complete_readme_name(p.name):
-            # The deliberate hand-off checklist of `author_to_complete: readme`.
-            # It is the author's surface, not a leaked stage note: scanning it
-            # for the pipeline's vocabulary would flag the very file the mode
-            # exists to produce (and it never ships anyway -- README*.md).
+        if is_author_to_complete_readme_name(p.name) \
+                or is_non_submitted_readme_name(p.name):
+            # Every author README*.md/.txt is never submitted, not only the
+            # pipeline's own checklist: the README reads as ordinary package
+            # documentation, and PKG-1 must not gate a file no reviewer gets
+            # (F237).
             continue
         if p.suffix.lower() not in PACKAGE_TEXT_EXTS:
             continue
@@ -5319,7 +5459,8 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
     return rows
 
 
-def package_front_matter_glue_rows(root: Path, limit: int = 20) -> list:
+def package_front_matter_glue_rows(root: Path, limit: int = 20,
+                                   areas=None) -> list:
     """FMT-X2 rows that SURVIVED the published copy's own repair.
 
     The mechanical half of FMT-X2 inserts the space a fused front matter lost
@@ -5337,14 +5478,15 @@ def package_front_matter_glue_rows(root: Path, limit: int = 20) -> list:
     if mod is None or not hasattr(mod, "correspondence_glue_rows") or not root.is_dir():
         return rows
     _decl, _decl_is_submitted = declared_submission_filter(root)
-    for p in sorted(root.rglob("*.docx")):
+    for p in _docx_files_under(root):
         # A FILE symlink is not package content (see docx_files_under /
         # copy_into): following it read an outside document into this report.
         if not p.is_file() or p.is_symlink() \
                 or is_non_document_name(p.name) or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
-        if is_evidence_rel(rel) or not _decl_is_submitted(rel):
+        if is_evidence_rel(rel) or not _decl_is_submitted(rel) \
+                or _in_not_carried_areas(rel, areas):
             continue
         paras = _docx_paragraphs(p)
         if paras is None:
@@ -5659,7 +5801,13 @@ def unit_of_analysis_rows(texts, limit: int = 6) -> list:
                              " ".join(text[max(0, m.start() - 20):m.end() + 20].split())))
         for m in STATS_UNIT_PAIRED_RE.finditer(text):
             window = text[max(0, m.start() - 160):m.end() + 40]
-            if not STATS_UNIT_N_RE.search(window):
+            # A bare number/range immediately before the unit is a sample-size
+            # claim too: the rule's own motivating caption says "used 606-1,989
+            # paired cells", with no "n =" (F248).
+            _before = text[max(0, m.start() - 60):m.start()]
+            if not STATS_UNIT_N_RE.search(window) \
+                    and not re.search(r"\d[\d,]*(?:\s*[-\u2013]\s*\d[\d,]*)?",
+                                      m.group(0)):
                 continue                      # a caption with no sample-size claim
             claimed.append((rel, m.group(1).lower(), " ".join(window.split())))
     rows = []
@@ -5808,14 +5956,16 @@ def affinity_definition_rows(root: Path, limit: int = 8) -> list:
     # defines the column -- the first cut of this rule reported nothing on the
     # very package it was written for.
     prose_parts = []
-    for _rel, text in package_document_texts(root):
+    _doc_texts = package_document_texts(root)
+    _read_rels = {str(_rel) for _rel, _text in _doc_texts}
+    for _rel, text in _doc_texts:
         if _rel.lower().endswith(".docx"):
             prose_parts.append(_docx_prose_text(Path(root) / _rel))
         else:
             prose_parts.append(text)
     prose = "\n".join(p for p in prose_parts if p)
     rows = []
-    for p in sorted(root.rglob("*.docx")):
+    for p in _docx_files_under(root):
         # A FILE symlink is not package content (see docx_files_under /
         # copy_into): following it read an outside document into this report.
         if not p.is_file() or p.is_symlink() \
@@ -5823,6 +5973,11 @@ def affinity_definition_rows(root: Path, limit: int = 8) -> list:
             continue
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel):
+            continue
+        if rel not in _read_rels:
+            # package_document_texts() stops at its file cap; scanning a table
+            # whose prose was never read judged it "unsupported" by construction
+            # (F236). Both sides must cover the same documents.
             continue
         table_rows = _docx_table_rows(p)
         # (tool, the row that names it) for every row that pairs a tool with an
@@ -6009,7 +6164,8 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
         return rows
     cited = {}
     for p in sorted(root.rglob("*")):
-        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+        if not p.is_file() or p.is_symlink() \
+                or is_non_document_name(p.name) or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
         if rel.split("/", 1)[0].lower() in areas or is_evidence_rel(rel):
@@ -6083,8 +6239,9 @@ def front_matter_gap_rows(ctx: Ctx, root: Path, limit: int = 8) -> list:
     if not label:
         return rows
     _decl, _decl_is_submitted = declared_submission_filter(root)
+    _areas = submission_not_carried_areas(ctx)
     gaps = []
-    for p in sorted(root.rglob("*.docx")):
+    for p in _docx_files_under(root):
         # A FILE symlink is not package content (see docx_files_under /
         # copy_into): following it read an outside document into this report.
         if not p.is_file() or p.is_symlink() \
@@ -6092,6 +6249,7 @@ def front_matter_gap_rows(ctx: Ctx, root: Path, limit: int = 8) -> list:
             continue
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel) or not _decl_is_submitted(rel) \
+                or _in_not_carried_areas(rel, _areas) \
                 or docx_document_role(p.name) != "main":
             continue
         paras = _docx_paragraphs(p)
@@ -6234,6 +6392,22 @@ def display_provenance_rows(root: Path, areas=None, limit: int = 20) -> list:
         else:
             continue
         if lines:
+            if p.suffix.lower() == ".docx":
+                # A resources/software table row is a Word TABLE row, and
+                # _docx_paragraphs() returns one string per CELL: the tool and
+                # the "Figures 2, 4 and S2" cell arrive as unrelated lines and
+                # PKG5_TOOL_ROW_RE never matches (F235). Re-join each row's
+                # cells into the documented `tool (items)` shape.
+                for _row in _docx_table_rows(p):
+                    _cells = [c.strip() for c in _row.split(" | ") if c.strip()]
+                    if len(_cells) < 2:
+                        continue
+                    _items = next((c for c in _cells
+                                   if PKG5_ITEM_LIST_RE.search(c)), "")
+                    if not _items:
+                        continue
+                    _tools = ", ".join(c for c in _cells if c is not _items)
+                    lines.append(f"{_tools} ({_items})")
             docs.append((rel, list(lines)))
     for rel, lines in docs:
         for i, line in enumerate(lines):
@@ -6313,7 +6487,18 @@ def submission_not_carried_areas_plain() -> list:
     return [str(n) for n in EVIDENCE_DIRNAMES] + [CODE_DIR]
 
 
-def package_pdf_rows(root: Path, limit: int = 40) -> list:
+def _in_not_carried_areas(rel: str, areas) -> bool:
+    """True when `rel` sits in an area the submission does not carry.
+
+    The published corpus still carries `code/` (and any evidence area), but the
+    submission drops them. A PDF/DOCX there is not a submission artifact and must
+    not produce a blocking readiness row (F238).
+    """
+    top = str(rel or "").split("/", 1)[0].lower()
+    return bool(top) and top in {str(a).strip().lower() for a in (areas or ()) if str(a).strip()}
+
+
+def package_pdf_rows(root: Path, limit: int = 40, areas=None) -> list:
     """FMT-PDF1..3 over every PDF the published package ships."""
     rows = []
     root = Path(root)
@@ -6321,13 +6506,14 @@ def package_pdf_rows(root: Path, limit: int = 40) -> list:
     if mod is None or not root.is_dir():
         return rows
     _decl, _decl_is_submitted = declared_submission_filter(root)
-    for p in sorted(root.rglob("*.pdf")):
+    for p in _files_under_ci(root, (".pdf",)):
         # Same containment rule as the DOCX loops above: a file symlink is not
         # package content and its target may be outside the package.
         if not p.is_file() or p.is_symlink() or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
-        if is_evidence_rel(rel) or not _decl_is_submitted(rel):
+        if is_evidence_rel(rel) or not _decl_is_submitted(rel) \
+                or _in_not_carried_areas(rel, areas):
             continue
         try:
             # FMT-PDF3 (an empty export: no extractable text, no embedded
@@ -6560,7 +6746,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     _fmt_z = _format_module()
     zot_before = {}
     if _fmt_z is not None and hasattr(_fmt_z, "zotero_report_for_docx"):
-        for q in sorted(tmp.rglob("*.docx")):
+        for q in _docx_files_under(tmp):
             try:
                 _zrep = _fmt_z.zotero_report_for_docx(q)
             except Exception:                                      # noqa: BLE001
@@ -6579,7 +6765,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                                       if flatten_zotero else None)}
     hygiene["zotero_live_fields"] = []
     if _fmt_z is not None and hasattr(_fmt_z, "zotero_report_for_docx"):
-        for q in sorted(tmp.rglob("*.docx")):
+        for q in _docx_files_under(tmp):
             try:
                 _zrep = _fmt_z.zotero_report_for_docx(q)
             except Exception:                                      # noqa: BLE001
@@ -6608,7 +6794,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     except Exception as e:                                            # noqa: BLE001
         hygiene["duplicate_roles"] = []
         hygiene["duplicate_roles_error"] = f"{type(e).__name__}: {e}"
-    hygiene["pdf_artifacts"] = package_pdf_rows(tmp)
+    hygiene["pdf_artifacts"] = package_pdf_rows(
+        tmp, areas=submission_not_carried_areas(ctx))
     # PKG-6/7/8/9 (2026-10-15): statements the package makes about ITSELF that
     # contradict each other (an AI-use denial beside the AI workflow it denies,
     # one identifier at two lengths, one comparison described with two units).
@@ -6650,7 +6837,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         hygiene["package_consistency"] = {"error": f"{type(e).__name__}: {e}"}
     # Front-matter GLUE that the mechanical repair cannot resolve (the fused
     # `<name><address>` token): reported, never re-spaced by guesswork.
-    hygiene["front_matter_glue"] = package_front_matter_glue_rows(tmp)
+    hygiene["front_matter_glue"] = package_front_matter_glue_rows(
+        tmp, areas=submission_not_carried_areas(ctx))
     # PKG-4: a figure the documents cite (and legend) that the package carries
     # nowhere. Computed on the PUBLISHED copy, whose names and bytes are the
     # judged ones, so the row names the file the author will actually hand over.
@@ -7077,7 +7265,17 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"numbering/bibliography, reference-entry facts, formatting); the remaining "
                  f"items are listed here and in `reports/decision.json` "
                  f"(`readiness.findings`). `decide --require-ready` turns them into blockers.")
-    elif cert.get("submission_ready") is False and not _blocking:
+    if _blocking:
+        # The NOT READY sentence above says the items are "listed here"; print
+        # them in EVERY certification state, not only when certified (F241).
+        L.append("")
+        L.append(f"{len(_blocking)} BLOCKING package-level item(s) (the readiness verdict):")
+        for _f in _blocking[:14]:
+            L.append(f"  - `{_f.get('document') or '(package)'}` [{_f.get('rule')}]: "
+                     f"{str(_f.get('detail'))[:260]}")
+        if len(_blocking) > 14:
+            L.append(f"  - … and {len(_blocking) - 14} more (see `readiness.findings`)")
+    elif cert.get("submission_ready") is False:
         L.append("")
         L.append("**Submission readiness: see `reports/decision.json` `readiness` block.**")
     if _advisory:
@@ -7322,7 +7520,12 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
             # The sibling count must agree with the pipeline's own
             # count_manual_steps(): a plain bullet is one hand-off item,
             # not zero.
-            info["manual_steps_items"] = int(count_manual_steps(steps) or 0)
+            _n = count_manual_steps(steps)
+            if _n is None or _n < 0:
+                info["manual_steps_unreadable"] = True
+                info["manual_steps_items"] = 0
+            else:
+                info["manual_steps_items"] = int(_n)
     csvp = outdir / MANUAL_TODO_CSV_NAME
     if csvp.is_file():
         try:
@@ -7390,7 +7593,7 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
                     csv_rows = []
         except (OSError, csv.Error):
             csv_rows = []
-    body_rows, _problems = manual_todo_rows_from_text(body)
+    body_rows, body_problems = manual_todo_rows_from_text(body)
     # Union: the package CSV may carry the hand-off README rows while the
     # carried text carries MANUAL_STEPS.md; on a shared id the markdown wins.
     body_dicts = manual_todo_row_dicts(body_rows) if body_rows else []
@@ -7438,7 +7641,15 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
             f"Classified TODO row(s): {len(csv_rows)}"
             + (f"; {n_items - len(csv_rows)} open item(s) have no classified TODO row -- add "
                f"them to the table/MANUAL_TODO.csv" if n_items > len(csv_rows) else ""),
-            "",
+            ]
+    if body_problems:
+        # A malformed classified row was dropped from the CSV index; the header
+        # used to claim the count without naming the row (F246).
+        head.append(f"Parser warning(s) -- {len(body_problems)} classified row(s) could not "
+                    f"be carried into the CSV index:")
+        head.extend(f"  - {p}" for p in list(body_problems)[:6])
+        head.append("")
+    head += [
             "This file is a SIBLING of the published directory on purpose: the directory must "
             "stay byte-clean manuscript corpus.",
             ""]
@@ -7458,7 +7669,8 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
         if c.is_file():
             c.unlink()
         todo_csv = None
-    return {"path": str(p), "items": n_items, "todo_csv": todo_csv}
+    return {"path": str(p), "items": n_items, "todo_csv": todo_csv,
+            "problems": list(body_problems)}
 
 
 def _handoff_readme_items(final_clean: dict) -> dict:
@@ -7474,8 +7686,8 @@ def _handoff_readme_items(final_clean: dict) -> dict:
         if not p.is_file() or not is_author_to_complete_readme_name(p.name):
             continue
         n = count_manual_steps(p)
-        if n is None:
-            continue
+        if n is None or n < 0:
+            continue          # absent, or an unreadable checklist whose count is unknown
         out[p.relative_to(base).as_posix()] = n
     return out
 
@@ -7563,7 +7775,8 @@ def package_readiness(final_clean: dict, residuals: dict = None,
             findings.append({
                 "rule": "AUTH-2", "document": _handoff_path.name,
                 "detail": (f"the package's author-to-complete checklist is the SIBLING "
-                           f"`{_handoff_path.name}` with {_rows if _rows is not None else '?'} "
+                           f"`{_handoff_path.name}` with "
+                           f"{_rows if _rows is not None and _rows >= 0 else '?'} "
                            f"item(s). It is outside the judged directory so publication can "
                            f"preserve the champion digest; supply each item and delete the "
                            f"checklist when it is empty")})
@@ -7714,7 +7927,7 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                 "recovered_structure_claims", "sd_estimator_ambiguity",
                 "definition_overreach", "cited_note_negations",
                 "single_cell_citation_mismatch", "caption_definition_gaps",
-                "form_failure_claims"):
+                "form_failure_claims", "document_read_gaps"):
         for r in pc.get(key) or []:
             findings.append({"rule": r.get("rule") or "PKG-11",
                              "document": r.get("file"),
@@ -7745,6 +7958,15 @@ def package_readiness(final_clean: dict, residuals: dict = None,
     # artwork defect and a data/manuscript contradiction. `readiness.findings`
     # is the one list the readme, decision.json and `--require-ready` all read.
     oi = (final_clean or {}).get("open_items") or {}
+    if oi.get("error"):
+        # The champion's open work is UNKNOWN when its ledger cannot be read:
+        # reporting a clean readiness verdict here hid every author item (F240).
+        findings.append({
+            "rule": "REV-0", "document": "",
+            "detail": ("the champion's revision ledger could not be read "
+                       f"({oi.get('error')}); the open author items it records are UNKNOWN, "
+                       "so this package cannot be treated as submission-ready until the "
+                       "ledger is readable again")})
     for it in (oi.get("items") or []):
         findings.append({
             "rule": "REV-1", "document": it.get("location") or it.get("id"),
@@ -8414,10 +8636,10 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              "it would reward under-reporting.")
     L.append("")
     L.append("**Pinning.** The champion is copied to `pinned/<r>_<champion_id>/documents/` and "
-             "registered with its SHA-256 corpus digest. It joins the field of every later round, "
-             "deduplicated by content digest (so a champion identical to the original, or to an "
-             "existing pin, appears exactly once — the pinned set can legitimately be smaller "
-             "than the number of rounds).")
+             "registered with its SHA-256 corpus digest. One pin record is kept per round; each "
+             "pin joins the field of every later round, where candidates are deduplicated by "
+             "content digest, so a champion identical to the original or to another field "
+             "member is judged once even though its pin record remains in the chain.")
     L.append("")
     L.append("**Winner publication.** Each round's champion is also published, atomically, as "
              "`round<R>_winner/` directly under the pipeline root (documents at its top level) so "
@@ -8884,354 +9106,6 @@ TREND_ROUND_FIELDS = ("run", "round", "champion", "median", "mean", "n", "vs_inp
 TREND_RUN_FIELDS = ("run", "rounds", "champion", "format_rows", "format_high",
                     "format_medium", "format_low", "over_length", "placeholders",
                     "generated", "certified")
-
-
-def trend_read_decision(root: Path) -> dict:
-    """One root's reports/decision.json, or None when absent/unreadable."""
-    p = Path(root) / "reports" / "decision.json"
-    if not p.is_file():
-        return None
-    try:
-        dj = read_json(p, revive=False, lenient=True)
-    except Exception:                                            # noqa: BLE001
-        return None
-    return dj if isinstance(dj, dict) else None
-
-
-def trend_order(roots: list) -> list:
-    """Order roots into the chain each one's recorded `source` implies.
-
-    A root whose `config.source` lies inside another root's tree consumed that
-    root (usually its final_clean_version), so it comes AFTER it. Roots that
-    cannot be linked keep the order they were given; a cycle is reported rather
-    than guessed at.
-    """
-    items = [(str(Path(r).resolve()), Path(r), trend_read_decision(Path(r))) for r in roots]
-    known = {rp: (r, dj) for rp, r, dj in items}
-    pending = [rp for rp, _r, _dj in items]
-    order, guard = [], 0
-    while pending and guard <= len(pending) ** 2 + 1:
-        progressed = False
-        for rp in list(pending):
-            _r, dj = known[rp]
-            src = str(((dj or {}).get("config") or {}).get("source") or "")
-            parents = [op for op in pending
-                       if op != rp and src
-                       and (src == op or src.startswith(op.rstrip("/") + "/"))]
-            if not parents:
-                order.append(rp)
-                pending.remove(rp)
-                progressed = True
-        if not progressed:
-            # A cycle (or several unlinked roots): report it, keep the given order.
-            order.extend(pending)
-            break
-        guard += 1
-    return [known[rp][0] for rp in order]
-
-
-def _trend_cell(value):
-    if value is None:
-        return "-"
-    if isinstance(value, float):
-        return f"{value:g}"
-    return str(value)
-
-
-def trend_rows(roots: list) -> tuple:
-    """(per-round rows, per-run rows) for the trend tables, in chain order."""
-    round_rows, run_rows = [], []
-    for root in trend_order([str(r) for r in roots]):
-        dj = trend_read_decision(root)
-        if not dj:
-            run_rows.append({"run": root.name, "rounds": 0, "champion": None,
-                             "format_rows": None, "format_high": None, "format_medium": None,
-                             "format_low": None, "over_length": None, "placeholders": None,
-                             "generated": None,
-                             # None = the decision predates the certification block.
-                             "certified": None})
-            continue
-        src = (dj.get("config") or {}).get("source")
-        rounds = dj.get("rounds") or []
-        for r in rounds:
-            sel = r.get("selection") or {}
-            rep = sel.get("champion_rep") or sel.get("champion") or r.get("stored_champion")
-            st = (r.get("stats") or {}).get(rep) or {}
-            census = ((r.get("issue_census") or {}).get(rep) or {})
-            tiers = census.get("tiers") or {}
-            sevs = census.get("severities") or {}
-            row = {"run": root.name, "round": r.get("round"),
-                   "champion": sel.get("champion") or r.get("stored_champion"),
-                   "median": st.get("median"), "mean": st.get("mean"), "n": st.get("n"),
-                   # `vs_input` is the champion against the version THIS RUN
-                   # started from: the root's pristine original (`vs_original`).
-                   # `vs_incumbent` is the round's base (`vs_base`). The two are
-                   # distinct from round 2 on and are deliberately NOT collapsed:
-                   # the first is the run-level input margin, the second the
-                   # previous champion's.
-                   "vs_input": st.get("vs_original"), "vs_incumbent": st.get("vs_base")}
-            for tier in BASIS_TIERS:
-                row[tier] = (tiers.get(tier) or {}).get("total")
-            for sev in SEVERITIES:
-                row[sev] = (sevs.get(sev) or {}).get("total")
-            round_rows.append(row)
-        fin = dj.get("final") or {}
-        fmt = fin.get("format") or {}
-        lengths = fin.get("lengths") or {}
-        last = rounds[-1] if rounds else {}
-        last_rep = ((last.get("selection") or {}).get("champion_rep")
-                    or (last.get("selection") or {}).get("champion")
-                    or last.get("stored_champion"))
-        last_stat = ((last.get("stats") or {}).get(last_rep) or {})
-        run_rows.append({
-            "run": root.name, "rounds": len(rounds),
-            "champion": fin.get("champion") or last.get("stored_champion"),
-            "format_rows": (len(fmt.get("rows") or []) if fmt else None),
-            "format_high": fmt.get("high"), "format_medium": fmt.get("medium"),
-            "format_low": fmt.get("low"),
-            "over_length": (len(lengths.get("over_limit") or []) if lengths else None),
-            "placeholders": last_stat.get("author_placeholders"),
-            "generated": dj.get("generated"),
-            # `-` for decisions written before the certification block existed:
-            # the old files carry no explicit verdict, so do not imply one.
-            "certified": ((dj.get("certification") or {}).get("certified")
-                          if isinstance(dj.get("certification"), dict) else None)})
-    return round_rows, run_rows
-
-
-def format_trend(round_rows: list, run_rows: list) -> str:
-    """The markdown trend report (both tables plus the reading rules)."""
-    L = ["# Cross-run trend (read-only)", ""]
-    L.append("One row per decided round, in the chain order the recorded `source` implies "
-             "(`vs_input` = the champion against the version THAT run started from; "
-             "`vs_incumbent` = the champion against the previous round's champion). The two "
-             "margins come from different panels, so read them as PER-STEP statements: the run "
-             "that wins each step is improving on its own input, which is exactly what the "
-             "reference-moving design measures. The tier/severity columns are the champion's "
-             "ISSUE CENSUS (issues the panel attributed to it, from the judges' own ledger rows) "
-             "-- the absolute \"what is left\" number, comparable across runs, and `-` for rounds "
-             "decided before the census existed. A shrinking census with a stable margin is "
-             "progress; a stable census with a stable margin is noise-limited repetition.")
-    L.append("")
-    L.append(_tbl([[_trend_cell(r.get(k)) for k in TREND_ROUND_FIELDS] for r in round_rows],
-                  list(TREND_ROUND_FIELDS)))
-    L.append("")
-    L.append("Per-run deterministic counters (code-side, no panel; `-` when the run predates "
-             "them): the OOXML formatting rows, the over-cap section count and the champion's "
-             "hand-off placeholder count at the end of the run. `certified` is the run's own "
-             "decision.json verdict (`true`/`false`; `-` when the decision predates the "
-             "certification block) -- a `false` row is a recorded, refused decision, not a "
-             "certified answer.")
-    L.append("")
-    L.append(_tbl([[_trend_cell(r.get(k)) for k in TREND_RUN_FIELDS] for r in run_rows],
-                  list(TREND_RUN_FIELDS)))
-    L.append("")
-    return "\n".join(L)
-
-
-def cmd_trend(args) -> None:
-    """`trend`: read several roots' decision.json files and print the chain."""
-    roots = list(getattr(args, "roots", None) or [])
-    if not roots:
-        roots = [getattr(args, "root", None) or DEFAULTS["root"]]
-    roots = [str(Path(r).expanduser().resolve()) for r in roots]
-    missing = [r for r in roots if trend_read_decision(Path(r)) is None]
-    for r in missing:
-        print(f"[trend] note: {r} has no readable reports/decision.json "
-              f"(undecided, pruned or not a pipeline root) -- it is reported as an empty run")
-    round_rows, run_rows = trend_rows(roots)
-    text = format_trend(round_rows, run_rows)
-    print(text)
-    out = getattr(args, "out", None)
-    if out:
-        write_text_atomic(Path(out), text)
-        print(f"[trend] written: {Path(out)}")
-    csvp = getattr(args, "csv", None)
-    if csvp:
-        p = write_csv_atomic(
-            Path(csvp), TREND_ROUND_FIELDS,
-            [{k: r.get(k) for k in TREND_ROUND_FIELDS} for r in round_rows])
-        print(f"[trend] written: {p}")
-
-
-def agent_session_plan(ctx: Ctx, only=None) -> list:
-    """Every AGENT session each round plans, without touching the corpus.
-
-    Producing sessions come straight from `round_run_plan()`: the rewrite
-    sessions the round's `--rewrites` count gives, its review (A, and B with
-    `--review-split`), its auditor and its revise arms, plus the integration arms
-    the round's `--integrators` mask selected. Judge session ids are the salted
-    per-version tokens of `judge_token_for()` -- a few sha256 calls over
-    (round, version id), never a document hash, so the whole listing costs
-    milliseconds on any root.
-
-    The judge FIELD, though, is the one thing that cannot be known before the
-    arms exist: it is deduplicated by CONTENT (a member whose documents are
-    content-identical to another member's is dropped), so a pending round lists
-    the candidate judge sessions and says `field_exact: false`.
-
-    `--champion-select revise`/`integrate` runs NO judge panel (see
-    round_champion_select), so those rounds list no judge session -- the same
-    rule drive_round applies at run time.
-    """
-    rows = []
-    for r in range(1, ctx.rounds_count() + 1):
-        rec = ctx.round_rec(r)
-        if only is not None and (not only.covers_round(r) or not only.selects_round(ctx, r)):
-            continue
-        producing = []
-        # The round's base copy (a1) is not an agent session -- it is the
-        # orchestrator's copy of the previous round's pin -- but the run table
-        # carries it, so list it first and label it.
-        base = {"id": rid_a1(r), "vid": A1_ID, "stage": "base", "deps": [],
-                "label": "base copy (no agent session)"}
-        for e in [base] + round_run_plan(ctx, r):
-            if only is not None and not only.entry_selected(r, e):
-                continue
-            run_rec = ctx.run(e["id"]) or {}
-            producing.append({
-                "id": e["id"],
-                "session": session_id_of_entry(e),
-                "stage": plan_stage_of(e),
-                "label": str(e.get("stage") or ""),
-                "agent": e["id"] != rid_a1(r),     # a1 is the orchestrator's copy
-                "status": run_rec.get("status") or "planned",
-                "deps": [str(d) for d in (e.get("deps") or [])],
-            })
-        field = [str(v) for v in (rec.get("field") or [])]
-        # A pending round's candidates are the judgeable ids (see judgeable_ids):
-        # the original, the earlier rounds' pins and the fresh arms.
-        candidates = field or judgeable_ids(ctx, r)
-        csel = round_champion_select(ctx, r)
-        judge_selected = (only is None or only.stage_selected(r, "judge")) \
-            and csel == "judge"
-        # WHICH judge sessions of the round run: the selector the `--only` items
-        # give (a preview of `run --only`), else the panel recorded by an earlier
-        # invocation on the pending round (see judges_enabled_spec).
-        spec = (only.judge_spec_for(r) if (only is not None and judge_selected) else "") \
-            or judges_enabled_spec(ctx, r)
-        enabled = set()
-        if spec:
-            try:
-                triples = parse_judges_enabled(spec, config_rounds(ctx),
-                                               lambda rr: judgeable_ids(ctx, rr),
-                                               lambda rr: round_judges(ctx, rr))
-                enabled = {(str(v), int(k)) for rr, v, k in triples if int(rr) == int(r)}
-            except ValueError:              # a hand-edited state/config: list the full panel
-                enabled = set()
-        judges = []
-        if judge_selected:
-            for vid in candidates:
-                token = judge_token_for(ctx, r, vid)
-                for j in range(1, round_judges(ctx, r) + 1):
-                    if enabled and (str(vid), int(j)) not in enabled:
-                        continue
-                    rid = rid_judge(r, token, j)
-                    judges.append({
-                        "id": rid,
-                        "target": str(vid),
-                        "judge_index": int(j),
-                        "status": (ctx.run(rid) or {}).get("status") or "planned",
-                    })
-        rows.append({
-            "round": int(r),
-            "status": rec.get("status") or "pending",
-            "champion": rec.get("champion"),
-            "champion_select": csel,
-            "judge_panel": csel == "judge",
-            "judges_per_version": int(round_judges(ctx, r)),
-            "judges_enabled": spec or JUDGES_ENABLED_ALL,
-            "integrators": f"0x{round_integrators(ctx, r):X}",
-            "field": field,
-            "field_exact": bool(field),
-            "judges_selected": bool(judge_selected),
-            "producing": producing,
-            "judge": judges,
-        })
-    return rows
-
-
-def cmd_agents(args) -> None:
-    """`agents`: list the agent-session names every round plans.
-
-    A DRY plan: no sandbox is materialized, no agent is launched, no document is
-    hashed (see agent_session_plan). `--only` previews exactly the sessions the
-    equivalent `run --only` invocation would drive.
-    """
-    ctx = Ctx(Path(args.root).resolve(),
-              strict_venue=bool(getattr(args, "strict_venue", False)))
-    # `--json` must stay parseable: keep everything `load()` prints (the
-    # pipeline-identity note) out of the JSON body and hand it back as a field.
-    captured = io.StringIO()
-    with contextlib.redirect_stdout(captured):
-        ctx.load()
-    notes = [ln for ln in captured.getvalue().splitlines() if ln.strip()]
-    only = parse_only_spec(getattr(args, "only", None))
-    if only is not None and only.is_everything():
-        only = None
-    if only is not None:
-        resolve_judge_run_ids(ctx, only, label="[agents]", sink=notes)
-        only.validate(ctx.rounds_count())
-        validate_only_selectors(ctx, only)
-    rows = agent_session_plan(ctx, only)
-    if getattr(args, "pending", False):
-        for row in rows:
-            row["producing"] = [s for s in row["producing"] if s["status"] != "done"]
-            row["judge"] = [s for s in row["judge"] if s["status"] != "done"]
-    if getattr(args, "json", False):
-        print_raw(json.dumps({"root": str(ctx.root),
-                              "only": (only.label() if only is not None else None),
-                              "notes": notes,
-                              "rounds": rows}, indent=2))
-        return
-    for note in notes:
-        print(note)
-    np_ = sum(len(x["producing"]) for x in rows)
-    nj = sum(len(x["judge"]) for x in rows)
-    what = (f"--only {only.label()}" if only is not None else
-            "every planned session")
-    print(f"[agents] root: {ctx.root}")
-    print(f"[agents] {what}: {np_} producing + {nj} judge session(s) over "
-          f"{len(rows)} of {ctx.rounds_count()} round(s)"
-          + ("  [--pending: finished sessions hidden]" if getattr(args, "pending", False) else ""))
-    candidates = []
-    for row in rows:
-        print()
-        print(f"round {row['round']}/{ctx.rounds_count()}  status={row['status']}  "
-              f"champion={row['champion'] or '-'}  integrators={row['integrators']}")
-        for s in row["producing"]:
-            note = "" if s["agent"] else "   (no agent: the round's base copy)"
-            print(f"  {s['id']:<26} {s['label'] or s['stage']:<22} {s['status']}{note}")
-        if row["judge"]:
-            head = (f"judge sessions ({row['judges_per_version']} per version; --only judge "
-                    f"sessions: {row['judges_enabled']}):")
-            print(f"  {head:<64} {len(row['judge'])}")
-            for s in row["judge"]:
-                label = f"-> {s['target']}  (judge {s['judge_index']}/{row['judges_per_version']})"
-                print(f"  {s['id']:<26} {label:<22} {s['status']}")
-            if not row["field_exact"]:
-                candidates.append(row["round"])
-        elif not row.get("judge_panel", True):
-            print(f"  judge sessions: none -- --champion-select {row.get('champion_select')} "
-                  f"runs NO judge panel (the decision is PROVISIONAL)")
-        elif not row["judges_selected"]:
-            print("  judge sessions: NOT selected by this invocation's --only")
-    if candidates:
-        print()
-        print(f"[agents] round(s) {', '.join(str(r) for r in candidates)}: the judge ids above "
-              f"are the CANDIDATES. The judge "
-              f"field keeps one member per distinct document set, so a candidate whose package is "
-              f"content-identical to another member's is dropped before judging and its sessions "
-              f"never start (`run` prints the dropped members). Everything else is exact: no "
-              f"document was hashed to produce this listing.")
-    else:
-        print()
-        print("[agents] every id above is exact: the rounds' fields are already deduplicated, so "
-              "no session here is a candidate whose membership can still change.")
-    print("[agents] every id above can be fed back to `run --only` as printed: the producing ids "
-          "(`--only r1_a2_revise`, `--only r1_w1`) and the judge ids (`--only "
-          "judge_t497f106d_j1`, or `--only judge_1` for judge 1 of every version). The base copy's "
-          "`a1` line is the only exception: it is not an agent session.")
 
 
 def cmd_decide(args) -> None:

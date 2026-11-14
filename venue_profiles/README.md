@@ -402,7 +402,11 @@ deterministically. Two tiers, with different authority:
 
 The `word-template.md` and `latex-template.tex` skeletons follow the official
 skeleton (and the official `\documentclass`) when one exists, otherwise the
-modal order. The review and rewrite sessions receive `venue_architecture.md`
+recent-practice (advisory) order. When neither tier carries a usable section
+heading the skeleton asserts **no** body-section order and says so — a section
+set the venue never stated is never invented. A section the operator pins as
+mandatory in `requirements.json` always appears in the skeleton, marked
+`[MANDATORY]`. The review and rewrite sessions receive `venue_architecture.md`
 through their prompts; the code-side conformance rows
 (`work/OFFICIAL_TEMPLATE.md`) name a missing mandatory section, a missing
 statement block or a wrong class file. A template requirement the manuscript

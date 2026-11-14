@@ -295,7 +295,7 @@ def test_retry_runs_selection():
           out[-200:])
     p = retry_runs(root, "--runs", "r1_w1")
     check("a session this round's plan does not have is refused (same message as --only)",
-          p.returncode == 1 and "plans no session" in (p.stdout + p.stderr),
+          p.returncode == 2 and "plans no session" in (p.stdout + p.stderr),
           (p.stdout + p.stderr)[-200:])
     # The whole JUDGE wave, then ONE judge session by its version+index.
     p = retry_runs(root, "--runs", "1:judge")
@@ -325,8 +325,8 @@ def test_retry_runs_selection():
     # Error handling: the grammars fail the same way, and the selectors are
     # mutually exclusive.
     both = retry_runs(root, "--run", "r1_guided_review", "--runs", "1:review")
-    check("--run and --runs together are refused (exit 1)",
-          both.returncode == 1 and "specify ONE of" in (both.stdout + both.stderr),
+    check("--run and --runs together are refused (exit 2)",
+          both.returncode == 2 and "not allowed with argument" in (both.stdout + both.stderr),
           (both.stdout + both.stderr)[-200:])
     bad = retry_runs(root, "--runs", "1:bogus")
     check("an unknown stage fails with the same message as `run --only`",

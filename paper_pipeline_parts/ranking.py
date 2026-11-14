@@ -272,8 +272,14 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
                      "demonstrable, non-regressing progress). If the cause was an incomplete "
                      "panel, re-run the judge stage (`retry --run <judge id>`) before trusting "
                      "this fallback -- an incomplete panel is not evidence of no progress.")
+        # Return the same tie-break block the ranked path returns. Without it
+        # finalize_round fell back to the CURRENT config floor while claiming to
+        # freeze the floor the ranking used, and the member table rendered '-'
+        # for every defects@K cell (F212).
         return {"champion": A1_ID, "champion_rep": base_rep, "eligible": [], "ranking": [],
-                "trace": trace}
+                "trace": trace,
+                "tiebreak": {"floor": floor, "cells_used": 0, "cell_order": [],
+                             "cells_total": len(tiebreak_cell_names())}}
     rows = []
     for cid in eligible:
         row_id = base_rep if cid == A1_ID and base_rep else cid

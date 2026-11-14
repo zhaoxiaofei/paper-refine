@@ -317,10 +317,10 @@ def test_defect_audit() -> None:
 
     check("F-080 a bare final status is not a re-verification record",
           any("re-verification" in e for e in errs(
-              [{"id": "F-001", "final_status": "fixed", "rationale": "done"}])))
+              [{"id": "F-001", "final_status": "fixed", "rationale": "done", "evidence": "e"}])))
     check("F-080 verdict + final status passes",
           errs([{"id": "F-001", "verdict": "confirmed",
-                 "final_status": "fixed", "rationale": "done"}]) == [])
+                 "final_status": "fixed", "rationale": "done", "evidence": "e"}]) == [])
     check("F-093 two rows for one id are rejected",
           any("more than one authoritative row" in e for e in errs(
               [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed"},
@@ -556,7 +556,8 @@ def test_ledger_dropped_by_audit() -> None:
     d = scratch("fb2_ledger_drop_")
     row = {"id": "F-001", "verdict": "dropped-by-audit",
            "final_status": "discarded",
-           "rationale": "auditor dropped: the cited sentence is absent from base/"}
+           "rationale": "auditor dropped: the cited sentence is absent from base/",
+           "evidence": "the sentence is absent from base/"}
     (d / "revision_report.json").write_text(json.dumps([row]), encoding="utf-8")
     errs, _w = pp.revision_ledger_problems(d, ["F-001"], 1)
     check("F-080 a dropped row with the verdict and final status passes",

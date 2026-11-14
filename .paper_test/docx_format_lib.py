@@ -553,8 +553,12 @@ def test_deliverable_validation():
     fragment = tmp / "fragment.tex"
     fragment.write_text("\\section{Results}\nSee \\cite{doe}.\n", encoding="utf-8")
     rep = fmt.validate_paths([fragment])
-    check("a \\input fragment is SKIPped, not failed",
-          rep["ok"] and rep["results"][0]["ok"] is None, json.dumps(rep["results"])[:160])
+    check("a \\input fragment is SKIPped, not compiled",
+          rep["results"][0]["ok"] is None, json.dumps(rep["results"])[:160])
+    # A SKIP is not a PASS: a run in which NOTHING was compiled/validated is
+    # reported as not-checked with exit 2 (F56), never as "0 failure(s)".
+    check("a fragment-only run is not reported as success",
+          not rep["ok"] and rep.get("passed") == 0, json.dumps(rep)[:200])
     if fmt.latex_engine() is None:
         print("[skip] no TeX engine on PATH: compile checks not exercised")
         return

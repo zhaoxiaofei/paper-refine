@@ -151,9 +151,15 @@ def test_cover_letter_total_cap_follows_profile():
 def test_m19_cover_tail_article():
     frontiers = nb.load_venue_profile("frontiers-in-immunology")
     flat = " ".join(nb.m19_blocks(frontiers)["revise"].split())
-    check("the M19 revise mandate uses the venue-appropriate indefinite article",
-          "not a Front Immunol requirement" in flat and "not an Front Immunol" not in flat,
-          flat[flat.find("not a"):flat.find("not a") + 60] if "not a" in flat else "missing")
+    # F85 (wave 2): a bound the PROFILE records from a venue guideline is now
+    # named as the venue's own limit, not relabeled as a user preference.
+    check("the M19 revise mandate names a venue-sourced limit as the venue's",
+          "the venue profile's own recorded cover-letter limit" in flat
+          and "not an Front Immunol" not in flat,
+          flat[flat.find("recorded cover-letter"):flat.find("recorded cover-letter") + 80])
+    check("the indefinite-article helper handles the venue short names",
+          nb._indefinite("Front Immunol") == "a Front Immunol"
+          and nb._indefinite("NBT") == "an NBT")
     nbt = nb.load_venue_profile("nature-biotechnology")
     flat_nbt = " ".join(nb.m19_blocks(nbt)["revise"].split())
     check("Nature Biotechnology keeps its 'not an NBT requirement'",

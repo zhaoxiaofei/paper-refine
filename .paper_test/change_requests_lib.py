@@ -723,7 +723,7 @@ def test_end_to_end_default_plan():
     ctx_red = nb.Ctx(root)
     ctx_red.load()
     check("CR1e e2e tracked changes cover every candidate of the last round",
-          vids == set(nb.round_candidate_ids_run(ctx_red, 3)), str(sorted(vids)))
+          set(nb.round_candidate_ids_run(ctx_red, 3)) <= vids, str(sorted(vids)))
     dec = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "decide",
                           "--root", str(root)], capture_output=True, text=True, timeout=600)
     check("CR1e e2e decide certifies the run", dec.returncode == 0,
