@@ -68,16 +68,9 @@ _NON_MANUSCRIPT_RE = re.compile(
 _REPLY_RE = re.compile(
     r"(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)",
     re.I)
-# A scientific compound that merely ENDS in a role word is not a reply: these
-# were silently dropped from every manuscript sweep (M1/M2/M4/M19).
-_SCIENCE_ROLE_COMPOUND_RE = re.compile(
-    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
-    r"pharmacodynamic|treatment|clinical|therapeutic|behaviou?ral|survey)"
-    r"[-_ ]?responses?"
-    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable|"
-    r"inhibition|amplitude|strength|bias)"
-    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
-    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
+# The science-compound carve-out is the SHARED default in evidence_names.py:
+# a local copy here made treatment_response.md prose for M2/M8 but evidence for
+# M1/M4/M26 on the same corpus.
 # The supplement role is a WORD too: the old `"supp" in f` swept `support.docx`
 # and `suppress.md` as supplementary text, exactly the files the pipeline keeps
 # as main text. `supp`, `suppl`, `supplement*` and `supplementary` still match.
@@ -92,8 +85,7 @@ REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 
 
 def is_non_manuscript(name: str) -> bool:
-    return _is_evidence(name, _NON_MANUSCRIPT_RE, _REPLY_RE,
-                         science_compounds=_SCIENCE_ROLE_COMPOUND_RE)
+    return _is_evidence(name, _NON_MANUSCRIPT_RE, _REPLY_RE)
 
 
 # The OOXML marker parser accepts an en/em dash as a range separator; an em

@@ -77,20 +77,6 @@ usage() {
 }
 
 note() { printf '[install] %s\n' "$*"; }
-
-# Write stdin to $1 through a sibling created with mktemp (O_EXCL), then
-# rename(2) into place. A plain `> "$dest"` follows a symlink planted at the
-# destination and writes the generated file outside the checkout (F117).
-safe_write_file() {
-    local dest="$1" tmp
-    tmp="$(mktemp -- "${dest}.tmp.XXXXXXXX")" || return 1
-    if ! cat > "$tmp"; then
-        rm -f -- "$tmp"
-        return 1
-    fi
-    chmod 0644 "$tmp" 2>/dev/null || true
-    mv -f -- "$tmp" "$dest"
-}
 warn() { printf '[install] warning: %s\n' "$*" >&2; }
 step() { printf '\n[install] == %s ==\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -271,50 +257,10 @@ else
     note "agent-common/ is present"
 fi
 
-# ---- required agent-common submodule --------------------------------------
-# `agent-common/` is a git submodule the pipeline imports before any stage can
-# start, and a plain `git clone` leaves it empty. Initialize it here so the
-# documented quick start works; when this checkout is not a git clone, name the
-# command instead of failing later with the loader's missing-bundle diagnostic.
-step "agent-common runtime submodule"
-_agent_common_files=(
-    agent-common/agent_common/model_runtime.py
-    agent-common/agent_common/llm_retry.py
-    agent-common/agent_common/llm_policy.json
-    agent-common/agent_common/model_catalog.json
-)
-_agent_common_missing=0
-for _f in "${_agent_common_files[@]}"; do
-    [ -f "$REPO_ROOT/$_f" ] || _agent_common_missing=1
-done
-if [ "$_agent_common_missing" = 1 ]; then
-    if [ -e "$REPO_ROOT/.git" ] && have git; then
-        run git -C "$REPO_ROOT" submodule update --init --recursive || \
-            fail_step "git submodule update --init --recursive failed; agent-common/ is required"
-        if [ "$DRY_RUN" = 1 ]; then
-            note "agent-common/ is empty; would be initialized by the submodule update"
-        else
-            for _f in "${_agent_common_files[@]}"; do
-                [ -f "$REPO_ROOT/$_f" ] || _agent_common_missing=2
-            done
-            if [ "$_agent_common_missing" = 2 ]; then
-                fail_step "agent-common/ is still empty after the submodule update"
-            fi
-        fi
-    elif [ "$DRY_RUN" = 1 ]; then
-        note "agent-common/ is empty and this checkout is not a git clone;"
-        note "  would need: git submodule update --init --recursive"
-    else
-        fail_step "agent-common/ is missing and this checkout has no .git; run \`git submodule update --init --recursive\`"
-    fi
-else
-    note "agent-common/ is present"
-fi
-
 # The optional tools are reported, never installed: some need administrator
 # rights and all are probed at run time by the pipeline.
 OPTIONAL_TOOLS=(
-    codex dsh claude conda node npm
+    codex dsh conda node npm
     soffice libreoffice pandoc pdftotext pdftoppm gs latexmk pdflatex
     powershell.exe montage magick
 )
@@ -331,13 +277,7 @@ done
 if [ "$DO_CONDA" = 1 ]; then
     step "conda environment: $ENV_NAME"
     if ! have conda; then
-        if [ "$DRY_RUN" = 1 ]; then
-            # --dry-run prints the plan and changes nothing; a missing conda is
-            # a NOTE about what a real run would need, not a failure (F147).
-            note "plan: conda is not on PATH; a real run would fail here (install conda or pass --no-conda)"
-        else
-            fail_step "conda is not on PATH; cannot create $ENV_NAME"
-        fi
+        fail_step "conda is not on PATH; cannot create $ENV_NAME"
     else
         env_args=()
         [ "$RECREATE" = 1 ] && env_args+=(--recreate)
@@ -349,7 +289,7 @@ if [ "$DO_CONDA" = 1 ]; then
                 && test_env_run python -c 'import sys' >/dev/null 2>&1; then
             note "installing the optional pyzotero-cli (`zot`) command"
             if ! run test_env_run python -m pip install \
-                    --disable-pip-version-check pyzotero-cli==1.0.0; then
+                    --disable-pip-version-check pyzotero-cli; then
                 warn "pyzotero-cli could not be installed; the Zotero MCP/skill routes still work"
             fi
         fi
@@ -362,16 +302,7 @@ fi
 if [ "$DO_NODE" = 1 ]; then
     step "Node dependencies for the shipped MCP servers"
     if ! have npm; then
-        if [ "$DRY_RUN" = 1 ]; then
-            # --dry-run prints the plan and changes nothing; a missing npm is a
-            # NOTE about what a real run would need, not a failure -- the same
-            # rule the conda branch already follows for a missing conda
-            # (F147/F041). A plan-only run on a machine that has not installed
-            # Node yet used to exit 1.
-            note "plan: npm is not on PATH; a real run would fail here (install Node or pass --no-node)"
-        else
-            fail_step "npm is not on PATH; cannot install the MCP server dependencies"
-        fi
+        fail_step "npm is not on PATH; cannot install the MCP server dependencies"
     else
         for server in mcp-docx-compare mcp-docx-converter; do
             if [ ! -f "$REPO_ROOT/$server/package.json" ]; then
@@ -394,25 +325,13 @@ fi
 # machine image.
 install_repo() {
     local name=$1 url=$2 dest=$3 ref=$4
-    local commit="" _status="" _status_rc=0
+    local commit=""
     if [ -d "$dest/.git" ]; then
-        _status=$(git -C "$dest" status --porcelain 2>/dev/null); _status_rc=$?
-        if [ "$OFFLINE" = 0 ] && [ "$_status_rc" -ne 0 ]; then
-            # `|| true` used to turn an unreadable index / dubious ownership /
-            # broken worktree into "clean" and refreshed it anyway (F087).
-            warn "cannot read the git status of $name ($dest): git exit $_status_rc; " \
-                 "not refreshing it"
-        elif [ "$OFFLINE" = 0 ] && [ -z "$_status" ]; then
+        if [ "$OFFLINE" = 0 ] && [ -z "$(git -C "$dest" status --porcelain 2>/dev/null || true)" ]; then
             note "refreshing $name"
             if run git -C "$dest" fetch --depth 1 origin "$ref" >/dev/null 2>&1; then
-                if ! run git -C "$dest" checkout --detach FETCH_HEAD >/dev/null 2>&1; then
-                    # `--strict-external` promises to fail when the external
-                    # checkout cannot be brought to the requested ref, not only
-                    # when the fetch itself fails (F026).
-                    [ "$STRICT_EXTERNAL" = 1 ] && \
-                        fail_step "could not check out external ref: $name/$ref"
+                run git -C "$dest" checkout --detach FETCH_HEAD >/dev/null 2>&1 || \
                     warn "could not check out $name/$ref; keeping the existing checkout"
-                fi
             else
                 warn "could not fetch $name/$ref; keeping the existing checkout"
                 # `--strict-external` promises to fail "when an external repo
@@ -496,23 +415,17 @@ if [ "$DO_AGENT" = 1 ]; then
     step "agent skills and MCP servers"
     if ! have node; then
         fail_step "node is not on PATH; cannot register the MCP servers"
-    elif ! have codex && ! have dsh && ! have dshx && ! have claude; then
-        warn "no codex/dsh/claude CLI detected; keeping the local skills and servers only"
+    elif ! have codex && ! have dsh && ! have dshx; then
+        warn "no codex/dsh CLI detected; keeping the local skills and servers only"
     else
         # install_agent_tooling.sh owns the harness configuration, including the
         # `zotero` row: it is given the same MCP tools/bridge directories this
         # script installed into, and `--no-zotero-mcp` travels as
         # INSTALL_ZOTERO_MCP=0 (the tooling script's default is `auto`, so it
         # also leaves the rows alone when no bridge is installed).
-        agent_env=(INSTALL_CODEX=auto INSTALL_DSH=auto INSTALL_CLAUDE=auto
+        agent_env=(INSTALL_CODEX=auto INSTALL_DSH=auto
                    MCP_TOOLS_DIR="$MCP_TOOLS_DIR"
                    ZOTERO_BRIDGE_DIR="$ZOTERO_BRIDGE_DIR")
-        # The tooling script's `auto` needs the Claude Code config directory;
-        # this script owns the CLI probe, so a fresh claude-code-only machine
-        # (CLI on PATH, ~/.claude not yet created) is wired here.
-        if have claude; then
-            agent_env+=(INSTALL_CLAUDE=1)
-        fi
         if [ "$REGISTER_ZOTERO_MCP" = 0 ]; then
             agent_env+=(INSTALL_ZOTERO_MCP=0)
         fi
@@ -598,9 +511,9 @@ if [ "$DRY_RUN" = 0 ]; then
         else
             printf '# ZOTERO_BRIDGE_ROOT not installed (%s)\n' "$ZOTERO_BRIDGE_DIR"
         fi
-    } | safe_write_file "$REPO_ROOT/deps.env"
+    } > "$REPO_ROOT/deps.env"
 
-    cat <<'EOF' | safe_write_file "$REPO_ROOT/activate-deps.sh"
+    cat > "$REPO_ROOT/activate-deps.sh" <<'EOF'
 #!/usr/bin/env bash
 # Source this file to export this checkout's dependency paths for the current shell.
 # The values in deps.env are relative to this directory (absolute for a
@@ -642,12 +555,12 @@ EOF
                 printf '    "%s": {"commit": "%s"}' "$name" "$commit"
             done
             printf '\n  }\n}\n'
-        } | safe_write_file "$DEPS_DIR/INSTALLED.json"
+        } > "$DEPS_DIR/INSTALLED.json"
     fi
     note "wrote deps.env and activate-deps.sh (checkout-relative paths; absolute for the Zotero bridge)"
 
     if [ "$DO_EXTERNAL" = 1 ]; then
-    cat <<'EOF' | safe_write_file "$DEPS_DIR/README.md"
+    cat > "$DEPS_DIR/README.md" <<'EOF'
 # External dependencies
 
 Installed by `./install_dependencies.sh` when the checkout was reachable, and

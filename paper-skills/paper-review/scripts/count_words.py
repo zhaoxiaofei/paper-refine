@@ -687,6 +687,14 @@ def is_cover_letter(text: str, name: str = "", type_names=()) -> bool:
         return False
     if _COVER_WORD_RE.search(name or ""):
         return True
+    # The pipeline's `_is_cover_letter_lines()` accepts the role TOKEN "letter"
+    # as well (`letter_to_editor.md`): without it the script counted the whole
+    # file as main text while the pipeline measured the persuading part. The
+    # tokenizer matches the pipeline's `_document_role_tokens` (camelCase split
+    # + non-alphanumeric separator).
+    stem = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", Path(base).stem).lower()
+    if "letter" in set(re.findall(r"[a-z0-9]+", stem)):
+        return True
     for line in (text or "").splitlines()[:12]:
         if COVER_SALUTATION.match(line.strip()):
             return True

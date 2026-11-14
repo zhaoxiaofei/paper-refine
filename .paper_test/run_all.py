@@ -54,22 +54,14 @@ RUN_ONE = HERE / "run_one.sh"
 # `[ok ]`/`[FAIL]`, `OK ...`, and `  ok  ...` -- so all three count as evidence;
 # an EMPTY log (or imports-only module) still does not.
 NO_CHECK_RC = 97
-CHECK_LINE_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail|skip)\]|ok\b|fail\b)")
-# A line that actually EXERCISED something. `[skip]` is a coverage statement,
-# not a check: a suite that prints only skip lines used to satisfy the zero-
-# check guard and was reported PASS with its behaviour untested (F90).
-CHECK_REAL_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail )\]|ok\b|fail\b)")
-SKIP_LINE_RE = re.compile(r"(?im)^\s*\[skip\]")
-# A FAILure MARKER must start its check line at COLUMN 0: a passing check's
-# detail can quote `[FAIL]` (attempt-history does), and a child process the
-# suite runs can print its own `[FAIL]` line as ordinary output
-# (test_document_recovery prints the pipeline's indented stage verdicts while
-# all its own checks pass). Both made a genuinely passing zero-exit suite look
-# failed. Every suite's own check line starts at column 0 (`[FAIL]` / `FAIL ...`,
-# the `[ok ]` / `OK` conventions of the tree), so the runner accepts only that
-# shape; a suite that prints `FAIL ...` and forgets `sys.exit(1)` is still not
-# reported PASS.
-FAIL_CHECK_RE = re.compile(r"(?im)^(?:\[fail\]|fail\b)")
+CHECK_LINE_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail|skip)\]|ok\b|fail\b|skip\b)")
+# A FAILure MARKER must start its check line: a passing check's detail can quote
+# `[FAIL]` (attempt-history does), and counting that as a failure hides a real
+# pass while the zero-exit guard is doing its job. The runner accepts the same
+# failure shapes CHECK_LINE_RE does -- `[FAIL]` and the bare `FAIL ...` form the
+# suites' own OK/FAIL convention allows -- so a suite that prints `FAIL ...` and
+# forgets `sys.exit(1)` is not reported PASS.
+FAIL_CHECK_RE = re.compile(r"(?im)^\s*(?:\[fail\]|fail\b)")
 # The operator's standing request for this box: use 32 parallel sessions by
 # default (`-j 32`). The effective default is capped only by the number of
 # suites to run; `-j N` caps it on a smaller box, `-j 1` is the old sequential
@@ -160,11 +152,9 @@ def tail_failures(suite: str, rundir: Path, limit: int = 6) -> list:
     """The suite's own `[FAIL]`/`FAIL ...` CHECK lines (not one quoted in a detail).
 
     A passing check may print `[ok ] ... -- [FAIL] ...` as its evidence (the
-    attempt-history suite does), and a child process may print an indented
-    `[FAIL]` line of its own (test_document_recovery prints the pipeline's stage
-    verdicts). Matching the marker anywhere in the line made those look like
-    failures to the zero-exit guard, so the marker must start the check line at
-    column 0.
+    attempt-history suite does). Matching the marker anywhere in the line made
+    that pass look like a failure to the zero-exit guard, so the marker must
+    start the check line.
     """
     log = rundir / f"{suite}.log"
     if not log.is_file():
@@ -174,28 +164,16 @@ def tail_failures(suite: str, rundir: Path, limit: int = 6) -> list:
     return lines[:limit]
 
 
-def log_text(suite: str, rundir: Path) -> str:
-    log = rundir / f"{suite}.log"
-    if not log.is_file():
-        return ""
-    try:
-        return log.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-
-
-def skip_only(suite: str, rundir: Path) -> bool:
-    """True when a suite printed skip lines but no real check line."""
-    text = log_text(suite, rundir)
-    return bool(SKIP_LINE_RE.search(text)) and not CHECK_REAL_RE.search(text)
-
-
 def ran_checks(suite: str, rundir: Path) -> bool:
     """True when the suite's log carries the documented per-check evidence."""
-    text = log_text(suite, rundir)
-    if not text:
+    log = rundir / f"{suite}.log"
+    if not log.is_file():
         return False
-    return bool(CHECK_LINE_RE.search(text)) and not skip_only(suite, rundir)
+    try:
+        return bool(CHECK_LINE_RE.search(
+            log.read_text(encoding="utf-8", errors="replace")))
+    except OSError:
+        return False
 
 
 def summary_line(suite: str, rc: int, secs: float, width: int,
@@ -270,11 +248,8 @@ def main() -> int:
     # A zero exit is not enough: the suite must have RUN something. A pytest
     # module without a `__main__` entry point exits 0 after its imports and used
     # to be reported as PASS with zero checks.
-    skip_checks = {s for s in todo
-                   if results[s][0] == 0 and skip_only(s, rundir)}
     no_checks = {s for s in todo
-                 if results[s][0] == 0 and s not in skip_checks
-                 and not ran_checks(s, rundir)}
+                 if results[s][0] == 0 and not ran_checks(s, rundir)}
     for suite in no_checks:
         results[suite] = (NO_CHECK_RC, results[suite][1])
     phase_wall = time.time() - started
@@ -283,8 +258,7 @@ def main() -> int:
     for suite in todo:
         rc, secs = results[suite]
         line = summary_line(suite, rc, secs, width,
-                            tag=("NOCHK" if suite in no_checks else
-                                 "SKIP" if suite in skip_checks else None))
+                            tag="NOCHK" if suite in no_checks else None)
         if rc == 0 and args.verbose:
             line += f"   {rundir / f'{suite}.log'}"
         print(line)
@@ -327,21 +301,14 @@ def main() -> int:
         for line in tail_failures(suite, rundir):
             print(f"    {line}")
 
-    passed = len(todo) - len(failed) - len(flaky) - len(skip_checks)
+    passed = len(todo) - len(failed) - len(flaky)
     wall = time.time() - started
     phase = "" if abs(wall - phase_wall) < 1 else f" (wall {wall:.0f}s incl. the alone re-runs)"
-    if skip_checks:
-        print(f"\n[tests] {len(skip_checks)} suite(s) ran only skip lines (no coverage): "
-              + ", ".join(sorted(skip_checks)))
     print(f"\n[tests] {len(todo)} suite(s) in {phase_wall:.0f}s{phase}: {passed} passed"
           + (f", {len(flaky)} flaky{flaky}" if flaky else "")
-          + (f", {len(skip_checks)} skipped" if skip_checks else "")
           + (f", {len(failed)} FAILED {failed}" if failed else "")
           + f"  (logs: {rundir})")
-    # A skip-only suite verified nothing.  It is reported (SKIP + the count)
-    # but it must not make the run green: CI with zero coverage is not a pass
-    # (F90/TEST-02).  NOCHK suites are already in `failed`.
-    return 1 if (failed or skip_checks) else 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

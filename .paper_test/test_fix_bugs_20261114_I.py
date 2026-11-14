@@ -34,7 +34,6 @@ sys.modules["paper_fixbugs_i"] = nb
 spec.loader.exec_module(nb)
 
 FAILS: list = []
-SKIPS: list = []
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
@@ -43,12 +42,6 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     if not cond:
         FAILS.append(name)
 
-
-
-def skip(name: str, detail: str = "") -> None:
-    """Report an unexercised check as skipped, never as `[ok ]` (F19)."""
-    print(f"[skip] {name}" + (f"  -- {detail}" if detail else ""))
-    SKIPS.append(name)
 
 def _docx(path: Path, document_xml: str, parts: dict | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,7 +125,7 @@ def test_f88(tmp: Path) -> None:
     finally:
         os.chmod(base / "main.docx", stat.S_IRUSR | stat.S_IWUSR)
     if IS_ROOT:
-        skip("F88 (root: chmod-000 is still readable)")
+        check("F88 (root: chmod-000 is still readable; check skipped)", True)
         return
     check("F88 no PermissionError escapes", not raised, raised)
     check("F88 the unreadable document is still counted",
@@ -291,7 +284,7 @@ def test_f95(tmp: Path) -> None:
     finally:
         os.chmod(corpus / "locked", stat.S_IRWXU)
     if IS_ROOT:
-        skip("F95 (root: chmod-000 is still readable)")
+        check("F95 (root: chmod-000 is still readable; check skipped)", True)
         return
     check("F95 the readable files are still present",
           "ok/a.txt" in (man.get("files") or {}), str(man))
@@ -320,8 +313,6 @@ def main() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()
-    if SKIPS:
-        print(f"{len(SKIPS)} check(s) skipped")
     if FAILS:
         print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))
         return 1

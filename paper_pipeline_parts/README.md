@@ -35,6 +35,18 @@ it executes is a real Python file (each carries
 | `p18_helpers.py` | the `--only`/`--runs` ROUND/STAGE/SESSION selection grammar (`OnlySpec` and its parsers), shared bounded-subprocess/aux-root/text helpers, and the lenient JSON recovery (`_json_from_text`) -- split out to keep `p04_utils.py` under 10,000 lines |
 | `p19_profiles.py` | the EXECUTION PROFILE (`high` / `medium`: `medium` pages the elaborative rule blocks out of every stage prompt into `INSTRUCTIONS/PROFILE_RULES.md`) and the GUIDED-REVIEW switch (`--no-guided-review`: the cold-start review alone, with the guided classes recorded as a named gap) |
 | `p20_write_quality.py` | mandatory independent audits, bounded repairs and exact-byte acceptance for response, conformity and venue-profile authors; final revision verification |
+
+`ranking.py` and `decision_report.py` are **not** executed parts: the loader
+imports them on demand with `_load_pipeline_module` (`p02_journal_modes.py`
+loads `ranking.py`; `p12_conflicts_decide.py` loads `decision_report.py`), so
+they never run in the loader's globals and need no
+`from __future__ import annotations`. They are listed separately here because
+`setup`/`sync-code` freeze the whole directory.
+
+| import-on-demand module | responsibility |
+|---|---|
+| `ranking.py` | pure ranking and defect census from the recorded round inputs |
+| `decision_report.py` | Markdown heading and integrity summary from prepared decision data |
 | `ranking.py` | pure ranking and defect census from the recorded round inputs |
 | `decision_report.py` | Markdown heading and integrity summary from prepared decision data |
 

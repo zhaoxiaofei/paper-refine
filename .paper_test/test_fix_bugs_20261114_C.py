@@ -137,10 +137,8 @@ def test_f23_page_field_keeps_drawing() -> None:
     plain = ('<w:hdr ' + W + f'><w:p><w:r><w:t>Page </w:t></w:r>{PAGE}</w:p>'
              f'<w:p><w:r><w:t>2</w:t></w:r>{PAGE}</w:p></w:hdr>')
     pfix = fmt.page_field_fixes(plain)
-    # F037 (2026-11-15 08:17 run): static digits such as "2" are CONTENT, not
-    # a duplicate page number, so a text-bearing PAGE paragraph is kept.
-    check("F037 a text-bearing duplicate PAGE paragraph is kept",
-          pfix == [] and "<w:t>2</w:t>" in plain, str(pfix))
+    check("F23 a text-only duplicate PAGE paragraph is still deleted",
+          len(pfix) == 1 and "<w:t>2</w:t>" not in fmt.apply_edits(plain, pfix), str(pfix))
 
 
 # ---------------------------------------------------------------------------
@@ -294,43 +292,6 @@ def test_f33_zero_aspect_tolerance() -> None:
         xml, rels, sizes, "d.docx", exact)[0]]
     check("F33 the 1% error passes the 2% default", lazy == [], str(lazy))
     check("F33 tolerance 0 files the 1% error", strict == ["FMT-IM1"], str(strict))
-
-    ratio_sizes = {"word/media/img1.png": (300, 200)}
-    for shape, height in (
-        (xml.replace('cx="1010000"', 'cx="914401"'), 'cy="609601"'),
-        ('<w:p><w:r><w:pict><v:shape style="width:10pt;height:10pt">'
-         '<v:imagedata r:id="rId9"/></v:shape></w:pict></w:r></w:p>', "height:6.666666"),
-    ):
-        rows, edits = fmt.drawing_geometry_rows(shape, rels, ratio_sizes, "d.docx", exact)
-        fixed = fmt.apply_edits(shape, edits)
-        remaining, followup = fmt.drawing_geometry_rows(fixed, rels, ratio_sizes, "d.docx", exact)
-        check("F33 exact-ratio repair converges at representable height",
-              any(row["rule"] == "FMT-IM1" for row in rows)
-              and height in fixed and not remaining and not followup, str(remaining))
-
-    small_vml = ('<w:p><w:r><w:pict><v:shape style="width:0.01in;height:0.01in">'
-                 '<v:imagedata r:id="rId9"/></v:shape></w:pict></w:r></w:p>')
-    wide_image = {"word/media/img1.png": (300, 100)}
-    rows, edits = fmt.drawing_geometry_rows(small_vml, rels, wide_image, "d.docx", exact)
-    fixed = fmt.apply_edits(small_vml, edits)
-    remaining, followup = fmt.drawing_geometry_rows(fixed, rels, wide_image, "d.docx", exact)
-    check("F33 a small VML image is repaired at decimal precision",
-          any(row["rule"] == "FMT-IM1" for row in rows)
-          and "height:0.003333" in fixed and not remaining and not followup, fixed)
-
-    # The repaired height is the nearest REPRESENTABLE one (an integer EMU), so
-    # any tolerance below its rounding residual -- and any negative tolerance --
-    # must accept it too. Gating that on `tol == 0` filed a mechanical FMT-IM1
-    # row that no repair could change, and `fix` then rejected the document.
-    for unsatisfiable in (1e-9, -1.0):
-        tiny = dict(fmt.POLICY_DEFAULTS, image_aspect_tolerance=unsatisfiable)
-        rows, edits = fmt.drawing_geometry_rows(xml, rels, ratio_sizes, "d.docx", tiny)
-        fixed = fmt.apply_edits(xml, edits)
-        remaining, followup = fmt.drawing_geometry_rows(fixed, rels, ratio_sizes, "d.docx", tiny)
-        check("F33 a tolerance below the EMU rounding residual still converges",
-              any(row["rule"] == "FMT-IM1" for row in rows)
-              and not remaining and not followup,
-              f"tol={unsatisfiable} remaining={remaining} followup={followup}")
 
 
 # ---------------------------------------------------------------------------

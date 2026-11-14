@@ -679,6 +679,7 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # measured against another type's caps. A profile written in the older,
     # single-type shape (top-level `article_type`/`length_limits`/`captions`)
     # is read as a one-entry table, so it keeps exactly its old behaviour.
+    explicit_article_types = out.get("article_types") is not None
     types_raw = out.get("article_types")
     if types_raw is None:
         types_raw = [{"id": _slugify_article_type(article_type), "label": article_type,
@@ -729,12 +730,29 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # The top-level fields stay the DEFAULT type's data: a reader that only knows
     # the pre-article-type shape (an older tool, a hand-written config) sees
     # exactly what it saw before, and `set-article-type` re-points the accessors.
-    clean_limits = (copy.deepcopy(default_entry["length_limits"])
-                    if default_entry["length_limits"] is not None
-                    else copy.deepcopy(EMPTY_LENGTH_LIMITS))
-    clean_captions = (copy.deepcopy(default_entry["captions"])
-                      if default_entry["captions"] is not None
-                      else copy.deepcopy(EMPTY_CAPTIONS))
+    # A venue-level `captions`/`length_limits.cover_letter` block written NEXT TO
+    # an article_types table is the venue-wide fallback: a default type that
+    # states neither block inherits it (the README calls the legend policy and
+    # the cover-letter preference "per venue"), instead of silently dropping it.
+    top_captions = _clean_captions(out.get("captions"), "captions", problems) \
+        if explicit_article_types else None
+    top_limits = _clean_length_limits(out.get("length_limits"), "length_limits",
+                                      problems) if explicit_article_types else None
+    if default_entry["captions"] is not None:
+        clean_captions = copy.deepcopy(default_entry["captions"])
+    elif top_captions is not None:
+        clean_captions = copy.deepcopy(top_captions)
+    else:
+        clean_captions = copy.deepcopy(EMPTY_CAPTIONS)
+    if default_entry["length_limits"] is not None:
+        clean_limits = copy.deepcopy(default_entry["length_limits"])
+        if ("cover_letter" not in clean_limits and top_limits is not None
+                and "cover_letter" in top_limits):
+            clean_limits["cover_letter"] = copy.deepcopy(top_limits["cover_letter"])
+    else:
+        clean_limits = copy.deepcopy(EMPTY_LENGTH_LIMITS)
+        if top_limits is not None and "cover_letter" in top_limits:
+            clean_limits["cover_letter"] = copy.deepcopy(top_limits["cover_letter"])
 
     journals = _profile_str_list(out.get("journals"), "journals", problems)
     aliases = _profile_str_list(out.get("journal_aliases"), "journal_aliases", problems)
@@ -744,12 +762,16 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
             re.compile(pat)
         except re.error as e:
             problems.append(f"journal_patterns entry {pat!r} is not a regular expression: {e}")
-    prompt = out.get("prompt") or {}
-    if not isinstance(prompt, dict):
+    prompt = out.get("prompt")
+    if prompt is None:
+        prompt = {}
+    elif not isinstance(prompt, dict):
         problems.append("'prompt' must be an object")
         prompt = {}
-    submission = out.get("submission") or {}
-    if not isinstance(submission, dict):
+    submission = out.get("submission")
+    if submission is None:
+        submission = {}
+    elif not isinstance(submission, dict):
         problems.append("'submission' must be an object")
         submission = {}
     pdf_accepted = submission.get("pdf_accepted")
@@ -813,12 +835,12 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
 
     # The venue's own raster-resolution floor (FMT-IM4). Like figure_text, it is
     # a measured rule with a source, and a profile that states none gets no gate.
-    image_dpi_raw = out.get("image_dpi") or {}
+    image_dpi_raw = out.get("image_dpi")
     clean_image_dpi = {}
-    if image_dpi_raw:
+    if image_dpi_raw is not None:
         if not isinstance(image_dpi_raw, dict):
             problems.append("'image_dpi' must be an object")
-        else:
+        elif image_dpi_raw:
             try:
                 min_dpi = float(image_dpi_raw.get("min_dpi") or 0)
             except (TypeError, ValueError):
@@ -833,12 +855,12 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # The venue's own figure-type minimum (FMT-IM6). It is a measured rule with
     # a source, not a pipeline default: a profile that does not state it gets no
     # gate. Validate it here so a typo cannot silently disable the rule.
-    figure_text_raw = out.get("figure_text") or {}
+    figure_text_raw = out.get("figure_text")
     clean_figure_text = {}
-    if figure_text_raw:
+    if figure_text_raw is not None:
         if not isinstance(figure_text_raw, dict):
             problems.append("'figure_text' must be an object")
-        else:
+        elif figure_text_raw:
             try:
                 min_pt = float(figure_text_raw.get("min_pt") or 0)
             except (TypeError, ValueError):
@@ -858,12 +880,12 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # none gets an advisory policy gap, never an invented finding. Validate the
     # block here so a typo cannot silently switch a declared bar off, and keep
     # the shape `_venue_style_limits` reads.
-    style_limits_raw = out.get("style_limits") or {}
+    style_limits_raw = out.get("style_limits")
     clean_style_limits = {}
-    if style_limits_raw:
+    if style_limits_raw is not None:
         if not isinstance(style_limits_raw, dict):
             problems.append("'style_limits' must be an object")
-        else:
+        elif style_limits_raw:
             bars_raw = style_limits_raw.get("sentence_words")
             clean_bars = {}
             if bars_raw is not None:
@@ -1072,7 +1094,7 @@ class VenueProfile:
         if entry.get("captions") is not None:
             return entry["captions"]
         default = self._default_type_entry()
-        return default.get("captions") or EMPTY_CAPTIONS
+        return default.get("captions") or self.data.get("captions") or EMPTY_CAPTIONS
 
     @property
     def caption_default(self) -> int:
@@ -1164,7 +1186,10 @@ class VenueProfile:
         cover = raw.get("cover_letter")
         if cover is None:
             cover = ((self._default_type_entry().get("length_limits") or {})
-                     .get("cover_letter") or {})
+                     .get("cover_letter"))
+        if cover is None:
+            cover = (self.data.get("length_limits") or {}).get("cover_letter")
+        cover = cover or {}
         return {"abstract": spec("abstract"),
                 "main text": spec("main_text"),
                 "cover letter": {"min": cover.get("min"), "max": cover.get("max"),
@@ -1900,13 +1925,23 @@ def official_template_requirements(venue_id, root=None) -> dict:
     pack = venue_pack_dir(venue_id, root)
     if pack is None:
         return {}
+    struct_path = pack / VENUE_STRUCTURE_FILE
     try:
-        data = json.loads((pack / VENUE_STRUCTURE_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    official = (data or {}).get("official") or {}
-    if not isinstance(official, dict) or not official.get("sections") \
-            and not official.get("mandatory_sections"):
+        data = json.loads(struct_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        # The pack EXISTS (venue_pack_dir found its summary), so an unreadable
+        # structure.json is a BROKEN pack, not a venue that ships none: returning
+        # {} here let the caller skip every official-template requirement (F198).
+        raise VenueProfileError(
+            f"{struct_path}: the venue template pack's {VENUE_STRUCTURE_FILE} cannot be "
+            f"read ({e}); the pack exists, so its official requirements are unknown -- "
+            f"regenerate it with `build-venue-templates` or remove the pack")
+    official = data.get("official") if isinstance(data, dict) else None
+    if not isinstance(official, dict):
+        raise VenueProfileError(
+            f"{struct_path}: the venue template pack carries no 'official' object; "
+            f"regenerate it with `build-venue-templates`")
+    if not official.get("sections") and not official.get("mandatory_sections"):
         return {}
     norm = (data or {}).get("norm") or {}
     advisory = [str(s.get("title") or "") for s in (norm.get("sections") or [])
@@ -2001,21 +2036,27 @@ def scan_template_conformance(sources: list, requirements: dict,
             doc = prefix + rel
             ext = p.suffix.lower()
             if ext in LENGTH_DOCX_EXTS:
-                paras = _docx_paragraphs(p)
-                if paras is None:
+                pairs = _docx_paragraphs_with_styles(p)
+                if pairs is None:
                     continue
-                texts.append("\n".join(paras))
+                texts.append("\n".join(text for text, _style in pairs))
                 docs.add(doc)
                 docx_paths[doc] = p
                 seen = set()
-                for para in paras:
+                for para, style in pairs:
                     line = para.strip()
-                    key = _heading_key(line)
-                    if key:
-                        seen_section_keys.add(_section_key(line))
-                    if key in order_index and key not in seen:
-                        seen.add(key)
-                        doc_headings.append((doc, order_titles[order_index[key]]))
+                    # A required section must be a SECTION: a plain body
+                    # paragraph whose whole text is "Results" is prose, not a
+                    # heading. Word marks a heading with its paragraph style
+                    # (the codebase's `Heading*` convention); the MD/TEX
+                    # branches use their own heading regexes further down.
+                    if style and style.startswith("Heading"):
+                        key = _heading_key(line)
+                        if key:
+                            seen_section_keys.add(_section_key(line))
+                        if key in order_index and key not in seen:
+                            seen.add(key)
+                            doc_headings.append((doc, order_titles[order_index[key]]))
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
@@ -2573,8 +2614,14 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
         if p.is_file():
             try:
                 explicit = json.loads(p.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                explicit = None
+            except (OSError, ValueError) as e:
+                # requirements.json is AUTHORITATIVE about the sections this
+                # venue ALWAYS requires. Treating an unreadable pin as "no pin"
+                # silently dropped those sections from the pack (F197): fail the
+                # build instead, naming the file.
+                die(f"{p}: the operator's pinned official requirements cannot be read "
+                    f"({e}); fix or remove that file (an unreadable pin must not "
+                    f"silently drop the mandatory sections it records)")
             break
     if not records and not off_records:
         looked = [str(d) for d in src_dirs + off_dirs]
@@ -2876,18 +2923,35 @@ def venue_id_of(ctx=None) -> str:
 # in the MIDDLE of one command is therefore not picked up by an already-cached
 # lookup -- re-run the command, as with every other recorded-rule change.
 _DISPLAY_RULE_INHERIT_CACHE: dict = {}
+# The VenueProfileError (as a message) that stopped an inheritance lookup, kept
+# beside the cached result so a caller can REPORT it instead of silently running
+# with fewer rules than the recorded profile states (F195).
+_DISPLAY_RULE_INHERIT_ERRORS: dict = {}
 
 
-def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
-    """The shipped profile's display rules a pre-schema snapshot may inherit."""
+def _inherited_display_rules(venue_id: str, root, missing: tuple,
+                             problems: list = None) -> dict:
+    """The shipped profile's display rules a pre-schema snapshot may inherit.
+
+    `problems`, when given, receives the reason a lookup failed: the snapshot
+    then keeps running rule-free, but the caller can name the cause (F195).
+    """
     key = (str(root), venue_id, missing)
     if key in _DISPLAY_RULE_INHERIT_CACHE:
+        err = _DISPLAY_RULE_INHERIT_ERRORS.get(key)
+        if err and problems is not None:
+            problems.append(err)
         return _DISPLAY_RULE_INHERIT_CACHE[key]
     inherited: dict = {}
+    inherit_error = None
     try:
         fresh = load_venue_profile(venue_id, root=root)
-    except VenueProfileError:
+    except VenueProfileError as e:
         fresh = None          # no readable file: the snapshot keeps running rule-free
+        inherit_error = (
+            f"the venue profile file for {venue_id!r} could not be read, so the recorded "
+            f"snapshot's display/measured rules were NOT inherited: {e}; fix that file or "
+            f"re-record the snapshot with `set-venue {venue_id}`")
     if fresh is not None:
         if "tables" in missing and fresh.declares_table_rule:
             inherited["tables"] = copy.deepcopy(fresh.tables)
@@ -2912,6 +2976,11 @@ def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
             inherited["figure_text"] = copy.deepcopy(fresh.data["figure_text"])
         if "image_dpi" in missing and (fresh.data.get("image_dpi") or {}):
             inherited["image_dpi"] = copy.deepcopy(fresh.data["image_dpi"])
+        # The venue's own sentence/paragraph length bars: a snapshot recorded
+        # before the field existed must inherit them, or a declared FMT-T9c/
+        # FMT-T9i limit becomes an advisory gap forever (F191).
+        if "style_limits" in missing and (fresh.data.get("style_limits") or {}):
+            inherited["style_limits"] = copy.deepcopy(fresh.data["style_limits"])
         # The page budget is the same kind of venue rule: a snapshot recorded
         # before F14 carries no key, so without this a budget later added to the
         # profile file would be ignored until `set-venue` re-recorded the root.
@@ -2940,11 +3009,15 @@ def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
                          if isinstance(t, dict) and t.get("counting")}
         if type_counting:
             inherited["_type_counting"] = type_counting
+    if inherit_error is not None:
+        _DISPLAY_RULE_INHERIT_ERRORS[key] = inherit_error
+        if problems is not None:
+            problems.append(inherit_error)
     _DISPLAY_RULE_INHERIT_CACHE[key] = inherited
     return inherited
 
 
-def _snapshot_profile(cfg: dict, venue_id: str, root=None):
+def _snapshot_profile(cfg: dict, venue_id: str, root=None, problems: list = None):
     """The profile snapshot recorded in the config, when it matches the id.
 
     A snapshot recorded BEFORE the `tables`/`figures` schema existed carries no
@@ -2962,12 +3035,12 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None):
         return None
     missing = tuple(k for k in ("tables", "figures", "references", "numbering",
                                 "leftover_phrases", "counting", "figure_text",
-                                "image_dpi", "foreign_container_headings",
-                                "page_budget")
+                                "image_dpi", "style_limits",
+                                "foreign_container_headings", "page_budget")
                     if k not in snapshot)
     # The lookup runs even when no venue-level key is missing: a per-type
     # counting block is inherited independently of the venue-level one.
-    inherited = _inherited_display_rules(venue_id, root, missing)
+    inherited = _inherited_display_rules(venue_id, root, missing, problems=problems)
     if inherited:
         inherited = dict(inherited)
         type_counting = inherited.pop("_type_counting", None)
@@ -2982,7 +3055,14 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None):
                 for entry in snapshot["article_types"]]
     try:
         prof = VenueProfile(snapshot, origin="recorded snapshot")
-    except VenueProfileError:
+    except VenueProfileError as e:
+        # A snapshot that is PRESENT but cannot be normalized is a broken
+        # recorded rule set, not "no snapshot": the caller must not silently
+        # adopt whatever the profile file now says (F190).
+        if problems is not None:
+            problems.append(
+                f"the recorded venue profile snapshot in pipeline_config.json cannot be "
+                f"used: {e}; re-record it with `set-venue {venue_id}`")
         return None
     return prof if prof.id == venue_id else None
 
@@ -2998,9 +3078,19 @@ def venue_profile_base(ctx=None):
     cfg = _ctx_cfg(ctx)
     venue_id = venue_id_of(ctx)
     root = getattr(ctx, "root", None)
-    prof = _snapshot_profile(cfg, venue_id, root=root)
+    snapshot_problems: list = []
+    prof = _snapshot_profile(cfg, venue_id, root=root, problems=snapshot_problems)
     if prof is not None:
+        if snapshot_problems:
+            # The snapshot itself is usable; inheritance could not read the
+            # profile file, so name that instead of running rule-free silently.
+            prof.snapshot_problems = list(snapshot_problems)
         return prof, None
+    if snapshot_problems:
+        # A recorded snapshot that cannot be normalized must not be replaced
+        # by the current profile file: that would silently change the root's
+        # rule set (F190). Report it, and let `venue_profile_of` refuse.
+        return None, VenueProfileError("; ".join(snapshot_problems))
     try:
         return load_venue_profile(venue_id, root=root), None
     except VenueProfileError as e:
@@ -3197,6 +3287,7 @@ def venue_config_findings(ctx) -> tuple:
             problems.append(unknown_venue_message(recorded or DEFAULT_VENUE,
                                                   getattr(ctx, "root", None)))
         return notes, problems
+    problems.extend(getattr(prof, "snapshot_problems", []) or [])
     # Apply the recorded article type only when it is VALID. An unknown type is
     # not a broken venue: the article-type block below names the
     # `set-article-type` remedy, while a profile that does not need that type

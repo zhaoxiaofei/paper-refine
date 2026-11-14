@@ -205,8 +205,13 @@ def _issue_file_agg(ctx: Ctx, r: int, agg: dict = None) -> tuple:
     """(round, aggregation) for the census/matrix/cumulative writers."""
     r = int(r)
     if agg is None:
-        field = [str(v) for v in (ctx.round_rec(r).get("field") or [])]
-        agg = aggregate_round(ctx, r, field) if field else {"issue_census": {}, "field": []}
+        rec = ctx.round_rec(r)
+        field = [str(v) for v in (rec.get("field") or [])]
+        # Re-aggregate with the mode the round was DECIDED with, not today's
+        # config: a `--dedup-mode location` round back-filled here must produce
+        # the same census/dedup audit its decision read (F166).
+        agg = (aggregate_round(ctx, r, field, dedup=rec.get("dedup_mode"))
+               if field else {"issue_census": {}, "field": []})
     return r, agg
 
 
@@ -269,10 +274,12 @@ def defect_list_rows(ctx: Ctx, r: int, agg: dict) -> list:
 
 def _defect_rows_by_reaggregation(ctx: Ctx, r: int) -> list:
     """Re-derive one round's defect rows from its judge sheets (never invents)."""
-    field = [str(v) for v in (ctx.round_rec(int(r)).get("field") or [])]
+    rec = ctx.round_rec(int(r))
+    field = [str(v) for v in (rec.get("field") or [])]
     if not field:
         return []
-    return list(aggregate_round(ctx, int(r), field).get("issue_rows") or [])
+    return list(aggregate_round(ctx, int(r), field,
+                                dedup=rec.get("dedup_mode")).get("issue_rows") or [])
 
 
 def write_round_defects(ctx: Ctx, r: int, agg: dict = None, name: str = None) -> Path:

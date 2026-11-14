@@ -363,7 +363,7 @@ def claude_env(cfg: dict) -> dict:
     root = cfg["base_url"]
     if root.endswith("/v1"):
         root = root[:-3]
-    return dict(
+    env = dict(
         os.environ,
         ANTHROPIC_BASE_URL=root,
         ANTHROPIC_AUTH_TOKEN=cfg["api_key"] or "dummy",
@@ -374,6 +374,13 @@ def claude_env(cfg: dict) -> dict:
         ANTHROPIC_DEFAULT_HAIKU_MODEL=cfg["model"],
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
     )
+    # Claude Code ignores a level outside its own vocabulary; ``_claude_code_effort``
+    # translates the adapter's level (``off`` has no Claude Code spelling) and
+    # returns "" when there is nothing to set.
+    effort = rt._claude_code_effort(cfg.get("effort"))
+    if effort:
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
+    return env
 
 
 def ensure_dsh_home() -> tuple:
@@ -414,7 +421,7 @@ def dsh_argv(cfg: dict) -> tuple:
     compaction_key = cfg.get("compaction_api_key") or key
     env = dict(os.environ, DSH_HOME=home, DOTS_API_KEY=key,
                PAPER_DOTS_API_KEY=key, DOTS_API_KEY_1474=compaction_key)
-    return (_build_dsh_argv(patch_path=patch), env, "")
+    return (_build_dsh_argv(patch_path=patch, extra_args=("-",)), env, "")
 
 
 def _chat_output_budget(cfg: dict, prompt: str, system: str = "") -> int:
@@ -539,8 +546,7 @@ def main(argv=None) -> int:
     p.add_argument("--model", default=None)
     p.add_argument("--base-url", default=None)
     p.add_argument("--api-key", default=None)
-    p.add_argument("--reasoning-effort",
-                   choices=("minimal", "low", "medium", "high", "xhigh", "max"),
+    p.add_argument("--reasoning-effort", choices=rt.REASONING_EFFORT_LEVELS,
                    default=None)
     p.add_argument("--codex-extra-args", default=None,
                    help="JSON list of extra `codex exec` argv values (MCP approvals)")

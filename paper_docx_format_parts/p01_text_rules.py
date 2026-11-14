@@ -44,13 +44,6 @@ def spelling_nonprose_mask(text: str) -> str:
     # a minority spelling inside `doi.org/10.1000/colour-map`.
     out = re.sub(r"\b(?:dx\.)?doi\.org/[^\s<>\"']+|\b10\.\d{4,9}/[^\s<>\"']+",
                  lambda m: " " * len(m.group(0)), out)
-    # A scheme-less HOST/PATH target (`github.com/lab/colour-tool`) is a URL
-    # too. URL_RE needs an `http(s)://`/`www.`/`doi:` prefix, so a bare
-    # repository path was prose to this mask: its minority spelling joined the
-    # count (it could even decide the majority direction) and the fixer
-    # rewrote the path, leaving a link to a different/nonexistent repository.
-    out = re.sub(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}/[^\s<>\"'`]*",
-                 lambda m: " " * len(m.group(0)), out)
     # A LaTeX verbatim span is code, not prose: `.tex`/`.ltx` sources reach the
     # same style rules, and a spelling variant inside `\code{catalogue}` /
     # `\verb|colour|` must not produce an FMT-T8d row (or decide the minority
@@ -137,8 +130,7 @@ def hyphen_attributive_re(split: str):
     followers = "|".join(re.escape(w) for w in
                          tuple(HYPHEN_NOUN_FOLLOWERS) + tuple(sorted(HYPHEN_VERB_FOLLOWERS)))
     return re.compile(
-        rf"\b{re.escape(split)}(?=\s+(?!(?:(?:{followers})\b|[A-Za-z]+ed\b))[A-Za-z])",
-        re.IGNORECASE)
+        rf"\b{re.escape(split)}(?=\s+(?!(?:(?:{followers})\b|[A-Za-z]+ed\b))[A-Za-z])")
 
 
 # Words that make a repeated phrase part of the document scaffolding rather than
@@ -157,9 +149,7 @@ CONFUSABLE_PAIRS = (
     ("validate", "verify"), ("validation", "verification"),
     ("correlation", "corroboration"), ("correlate", "corroborate"),
     ("quantitative", "qualitative"),
-    # `rank\w*` already matches "ranking"; keeping both pairs reported one
-    # ranking/score concept twice.
-    ("ranking", "score"),
+    ("ranking", "score"), ("rank", "score"),
     ("effective", "efficient"), ("comprise", "compose"),
     ("incidence", "prevalence"), ("mortality", "morbidity"),
     ("detection", "quantification"), ("limit of detection", "limit of quantification"),
@@ -188,13 +178,8 @@ NUMBER_RE = re.compile(
     # sign, so `10-20` is 10 then 20, while ` -80`/`(-80)` keep the minus.
     # The decimal alternative allows a glued unit (`7.5mg`) and does NOT let
     # the engine backtrack the fraction away to record the integer 7.
-    r"(?<![\w.])(?<![A-Za-z]-)((?:[-\u2212]?\d[\d,\u2009\u202f\u00a0]*\.\d+"
+    r"(?<![\w.])((?:[-\u2212]?\d[\d,\u2009\u202f\u00a0]*\.\d+"
     r"(?:[eE][+\-\u2212]?\d+)?)(?![\d]|\.\d)"
-    # A SPACE-grouped quantity (`12 000`, NBSP/thin-space too) is ONE number.
-    # The old integer branch split it into 12 and 000, inventing a bogus value
-    # and losing the real one (F160). The group must be exactly three digits.
-    r"|(?:[-\u2212]?\d{1,3}(?:[ \u2009\u202f\u00a0]\d{3})+"
-    r"(?:\.\d+)?(?:[eE][+\-\u2212]?\d+)?)(?![\w]|\.\d)"
     r"|(?:[-\u2212]?\d[\d\u2009\u202f\u00a0]*(?:,\d{3})*"
     r"(?:[eE][+\-\u2212]?\d+)?)(?![\w]|\.\d))")
 
@@ -427,12 +412,6 @@ FINDING_TIER_RULES = {
     "FMT-S1",    # break-only paragraph / blank page
     "FMT-S3",    # running head on the title page
     "FMT-S4",    # tracked changes in a final package
-    # M20 lists these as findings: a heading without keepNext/keepLines
-    # (T3a/T3b), italics on the title/correspondence block, "et al." or a
-    # journal title (T6a/T6b/T6f/T6g), a mixed URL/email treatment (T7a/T7b),
-    # and proofing markers in the final package (S5).
-    "FMT-T3a", "FMT-T3b", "FMT-T6a", "FMT-T6b", "FMT-T6f", "FMT-T6g",
-    "FMT-T7a", "FMT-T7b", "FMT-S5",
     "FMT-T1",    # mixed quotation marks
     # The M20 sweep's dash/quote family: sweeps.md lists "mixed straight/curly
     # quotation marks, a spaced hyphen used as a dash, or em-dash density above
@@ -565,12 +544,7 @@ STRICT_KINDS = ("front", "abstract", "legend")
 # ethics statement, an availability note), never a narrative paragraph; and a
 # paragraph of one of these SHAPES is a statement wherever it sits.
 SINGLE_SENTENCE_SKIP_SECTION_RE = re.compile(
-    # `acknowledg\b` never matched the section's own name: the word continues
-    # with "e"/"m" after "acknowledg", so no word boundary exists -- an
-    # "Acknowledgements" heading (the commonest spelling of this section) was
-    # therefore not an end-matter section at all (F62).
-    r"^(?:acknowledg(?:e?ments?)?|funding|author contributions?|contributions?|"
-    r"competing interests?|"
+    r"^(?:acknowledg|funding|author contributions?|contributions?|competing interests?|"
     r"conflict of interest|ethics|data availability|code availability|"
     r"materials? availability|resource availability|supplementary|abbreviations?|"
     r"references|graphical abstract|highlights?|lead contact)\b", re.I)
@@ -592,46 +566,9 @@ def _table_row_like(text: str) -> bool:
     t = (text or "").strip()
     if t.startswith("|") and t.endswith("|") and t.count("|") >= 3:
         return True
-    # GFM permits tables without outer pipes (`A | B`, `--- | ---`, `1 | 2`).
-    # The old test required both outer pipes, so those rows were prose and the
-    # one-sentence/mega-paragraph rules could fire on table content (F28).
-    # A prose sentence with an inline pipe is not a table row (R05): an
-    # unoutered row must not end like a sentence and must be made of short
-    # cells. A multi-word row is accepted only beside a delimiter row, which
-    # the caller checks because it has the neighbouring lines.
-    if "|" in t and re.search(r"\S\s*\|\s*\S", t) \
-            and not re.search(r"[.!?][\"'\u2019\u201d)\]]?$", t):
-        cells = [c.strip() for c in t.strip("|").split("|")]
-        if cells and all(c and len(c.split()) <= 1 for c in cells):
-            return True
-    if re.fullmatch(r"\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*", t):
-        return True
     if t.count("&") >= 2 and ("\\\\" in t or t.endswith("\\")):
         return True
     return t.count("\t") >= 2
-
-
-def _table_row_context(paras: list, i: int) -> bool:
-    """True when paragraph `i` is a row of the GFM table it belongs to.
-
-    `_table_row_like()` reads one line's shape. A multi-word unoutered row is a
-    table row only when a delimiter row is adjacent; otherwise a pipe is
-    ordinary prose and the FMT-T9k one-sentence rule stays eligible (R05).
-    """
-    if i < 0 or i >= len(paras):
-        return False
-    t = str(paras[i] or "").strip()
-    if "|" not in t:
-        return False
-    if _table_row_like(t):
-        return True
-    for j in (i - 1, i + 1):
-        if 0 <= j < len(paras) and re.fullmatch(
-                r"\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*",
-                str(paras[j] or "").strip()):
-            return True
-    return False
-
 
 ABSTRACT_HEAD_RE = re.compile(r"^\s*(?:abstract|summary)\s*:?\s*$", re.I)
 # End-anchored to the label's own punctuation: a prose sentence that happens to
@@ -639,68 +576,12 @@ ABSTRACT_HEAD_RE = re.compile(r"^\s*(?:abstract|summary)\s*:?\s*$", re.I)
 # rest of the document to body mode).
 KEYWORDS_HEAD_RE = re.compile(r"^\s*(?:key\s?words?|keywords)\s*(?::|$)", re.I)
 METHODS_HEAD_RE = re.compile(
-    r"^\s*(?:\d+[.)]?\s*)?(?:materials\s*(?:&|and)\s*methods|online methods|"
-    r"experimental procedures|patients and methods|subjects and methods|"
-    r"star\s*methods|methods)"
+    r"^\s*(?:\d+[.)]?\s*)?(?:materials\s*(?:&|and)\s*methods|online methods|methods)"
     r"\s*$", re.I)
 BODY_HEAD_RE = re.compile(
     r"^\s*(?:\d+[.)]?\s*)?(?:introduction|results|discussion|conclusions?|background|"
     r"related work|results\s*(?:&|and)\s*discussion|"
     r"discussion\s*(?:&|and)\s*conclusions?)\s*:?\s*$", re.I)
-
-# A reference-list heading is a section boundary, not prose: without this
-# `section_kinds` never emitted its documented `refs` label and a `.md` source's
-# `## References` label left the reference text under the front-matter sentence
-# bar (F11, 2026-11-23).
-REFS_HEAD_RE = re.compile(
-    r"^\s*(?:\d+[.)]?\s*)?(?:references?|reference\s+list|bibliography|"
-    r"literature\s+cited|works\s+cited)\s*:?\s*$", re.I)
-
-
-def _md_heading_text(text: str) -> str:
-    """`text` without its Markdown heading furniture ("## Acknowledgements")."""
-    return re.sub(r"^\s*(?:#{1,6}\s*|>\s*)+", "", (text or "")).strip()
-
-
-def caption_label_text(text: str) -> str:
-    """The caption-LABEL probe: `text` without Markdown heading/emphasis furniture.
-
-    A `.md` source writes a bold caption as "**Figure 1.** ..."; `LEGEND_RE`,
-    `caption_label_kind` and the caption regexes all require the label at the
-    start of the text, so the emphasis markers hid every bold caption and the
-    caption was counted as prose (F72). Only the probe drops the markers -- the
-    stored paragraph text is never edited.
-    """
-    t = _md_heading_text(text)
-    t = re.sub(r"^\s*[-+]\s+", "", t)
-    return re.sub(r"[*_]+", "", t)
-
-
-def _looks_like_heading(text: str) -> bool:
-    """A TEXT source's own heading line, for the section context of FMT-T9k.
-
-    A DOCX carries container styles, and the pipeline passes its `is_heading`
-    flags; a `.md`/`.tex`/`.txt` source has neither, and its caller passes no
-    headings -- so `section_of` stayed "" for every paragraph and the documented
-    end-matter exemption (an acknowledgements/funding/availability paragraph is
-    a statement list, not narrative) could never fire (F62). The line's own
-    shape is the test: a known section label, or a short capitalised line that
-    does not end like a sentence.
-    """
-    t = _md_heading_text(text)
-    if not t:
-        return False
-    if METHODS_HEAD_RE.match(t) or BODY_HEAD_RE.match(t) \
-            or ABSTRACT_HEAD_RE.match(t) or KEYWORDS_HEAD_RE.match(t):
-        return True
-    if re.search(r"[.!?;:,]$", t):
-        return False
-    words = t.split()
-    if len(words) > 8:
-        return False
-    if len(words) <= 5 and SINGLE_SENTENCE_SKIP_SECTION_RE.match(t):
-        return True
-    return t[:1].isupper() and " " in t
 
 
 def section_kinds(paras: list, headings: list = None) -> list:
@@ -713,11 +594,9 @@ def section_kinds(paras: list, headings: list = None) -> list:
     """
     kinds, mode = [], "front"
     for i, text in enumerate(paras):
-        # A Markdown heading's furniture (`## References`) is not prose: test
-        # the heading text so the documented section labels actually apply.
-        t = _md_heading_text(text).strip()
+        t = (text or "").strip()
         head = bool(headings[i]) if headings and i < len(headings) else False
-        if LEGEND_RE.match(t) or LEGEND_RE.match(caption_label_text(t)):
+        if LEGEND_RE.match(t):
             kinds.append("legend")
             continue
         if ABSTRACT_HEAD_RE.match(t) and (
@@ -733,18 +612,11 @@ def section_kinds(paras: list, headings: list = None) -> list:
         if METHODS_HEAD_RE.match(t):
             mode, kinds = "methods", kinds + ["heading"]
             continue
-        if REFS_HEAD_RE.match(t):
-            mode, kinds = "refs", kinds + ["heading"]
-            continue
         if BODY_HEAD_RE.match(t):
             mode, kinds = "body", kinds + ["heading"]
             continue
         if head or (t and len(t.split()) <= 8 and not re.search(r"[.;:,]$", t)
                     and t[:1].isupper() and " " in t):
-            # A refs mode ends at the next section heading; without this, an
-            # unrecognised heading left every following paragraph as refs.
-            if mode == "refs":
-                mode = "body"
             kinds.append("heading")
             continue
         kinds.append(mode)
@@ -806,102 +678,6 @@ GLOSS_TERM_LEAD_STOPWORDS = {"with", "for", "and", "or", "of", "in", "on", "at",
                              "to", "from", "as", "than", "between", "the", "a", "an"}
 
 
-# Abbreviations whose period is NOT a sentence end. Without this list a plain
-# `re.split(r"(?<=[.!?])\s+")` cut "Smith et al." in two, so a 52-word sentence
-# containing the citation became 12+40 words: neither fragment reached the
-# profile's 46-word bar and FMT-T9c reported the document clean (F85). The same
-# split corrupted the number ledger and the outline's first/last sentence.
-# A single letter before the period ("J. Smith") is covered separately.
-_SENTENCE_ABBREV_RE = re.compile(
-    r"^(?:et\s+al|e\.g|i\.e|al|fig|figs|eq|eqs|vs|cf|ca|approx|ref|refs|tab|"
-    r"dr|mr|mrs|ms|prof|suppl|supp|sect|sects|vol|vols|pp|p|ed|eds|rev|ver|"
-    r"resp|corr|dept|univ|inc|ltd|co|jr|sr)$", re.I)
-# These abbreviations never end a sentence, whatever follows: `e.g. Python`
-# and `Dr. Smith` are not two sentences. Every other abbreviation's period is
-# non-terminal only when a lower-case token (or a numeral, as in `Fig. 3`)
-# continues the sentence; `Smith et al. The trial ...` is two sentences (R02).
-_SENTENCE_NONFINAL_ABBREV_RE = re.compile(
-    r"^(?:e\.g|i\.e|vs|cf|dr|mr|mrs|ms|prof|inc|ltd|co|jr|sr|dept|univ|"
-    r"resp|corr|ver)$", re.I)
-
-
-def _abbrev_ends_sentence(text: str, end: int, word: str) -> bool:
-    """Whether an abbreviation period at `end` is a real sentence boundary.
-
-    ``et al. The trial`` ends a sentence; ``et al. reported``, ``Fig. 3`` and
-    ``e.g. Python`` do not. A following lower-case token or a numeral is a
-    continuation, and `_SENTENCE_NONFINAL_ABBREV_RE` names the forms that can
-    never end a sentence.
-    """
-    if _SENTENCE_NONFINAL_ABBREV_RE.match(word):
-        return False
-    after = text[end:].lstrip()
-    return bool(re.match(r"[A-Z]", after[:1]))
-
-
-# A sentence-final terminator may be followed by closing punctuation (a quote,
-# parenthesis or bracket) before the space. The old `[.!?](?=\s)` missed those
-# boundaries and merged quoted/parenthetical sentences (F25, 2026-11-23).
-_SENTENCE_BOUNDARY_RE = re.compile(r"""([.!?])(["'\u2019\u201d)\]}]*)(?=\s)""")
-# A one-letter word is an initial only in an initial-like context: at the start
-# of the sentence, or after a function word/a citation verb ("J. Smith",
-# "by J. Smith", "Smith cited J. Smith"). After an ordinary content word
-# ("vitamin C. The cells") it is a symbol whose period ends the sentence.
-_SINGLE_LETTER_INITIAL_PRECEDERS = frozenset(" ".join((
-    "a an the this these those our your their his her its my",
-    "by and or for from of to in on at as with without via per than vs versus",
-    "see cite cited cites said says wrote written report reports reported",
-    "author authors editor editors dr prof mr mrs ms",
-)).split())
-
-
-def _single_letter_ends_sentence(text: str, start: int, period: int,
-                                 closers: str) -> bool:
-    """Whether a one-letter word before `period` ends a real sentence."""
-    after = text[period + 1 + len(closers):].lstrip()
-    if not after or not re.match(r"[A-Z]", after[:1]):
-        return False                       # a continuation ("p. 3", "e. coli")
-    # The token immediately before the period is the one-letter word itself;
-    # the INITIAL-like context is decided by the token before THAT one.
-    before = text[start:period]
-    tokens = re.findall(r"\S+", before)
-    prev = tokens[-2].strip("\"'([{") if len(tokens) >= 2 else ""
-    if not prev:
-        return False                       # sentence-initial "J. Smith"
-    return prev.lower() not in _SINGLE_LETTER_INITIAL_PRECEDERS
-
-
-def split_sentences(text: str) -> list:
-    """Split prose into sentences, keeping an abbreviation's period intact.
-
-    Every sentence pass in this part used `re.split(r"(?<=[.!?])\\s+")`; that
-    treats `et al.`, `e.g.`, `i.e.`, `Fig.` and a personal initial as a sentence
-    end, which hides exactly the long sentences the bar exists to find (the
-    fragments are each short) and truncates the sentence recorded by the number
-    ledger and the outline. The split consumes the same whitespace the naive
-    regex consumed, so `number_ledger()`'s offset reconstruction still works.
-    """
-    text = text or ""
-    pieces, start = [], 0
-    for m in _SENTENCE_BOUNDARY_RE.finditer(text):
-        end = m.end()
-        if m.group(1) == ".":
-            tail = re.search(r"(\S+)$", text[start:m.start()])
-            word = tail.group(1) if tail else ""
-            if re.fullmatch(r"[A-Za-z]", word):
-                if not _single_letter_ends_sentence(
-                        text, start, m.start(), m.group(2)):
-                    continue
-            elif _SENTENCE_ABBREV_RE.match(word):
-                if not _abbrev_ends_sentence(text, end, word):
-                    continue
-        pieces.append(text[start:end])
-        start = end
-        while start < len(text) and text[start].isspace():
-            start += 1
-    pieces.append(text[start:])
-    return pieces
-
 
 def number_ledger(paras: list) -> list:
     """Every numeric literal with the sentence it sits in (the M4 artifact).
@@ -913,7 +689,7 @@ def number_ledger(paras: list) -> list:
     """
     rows = []
     for i, text in enumerate(paras):
-        sentences = split_sentences(text)
+        sentences = re.split(r"(?<=[.!?])\s+", text)
         bounds, pos = [], 0
         for sentence in sentences:
             bounds.append((pos, pos + len(sentence)))
@@ -1017,7 +793,7 @@ CLAIM_KINDS = ("front", "abstract", "body", "legend")
 
 def _first_marker_sentence(text: str, pattern) -> str:
     """The sentence carrying the first match of `pattern` (trimmed for a cell)."""
-    sentences = [s.strip() for s in split_sentences(text or "") if s.strip()]
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text or "") if s.strip()]
     for s in sentences:
         if pattern.search(s):
             return s[:200]
@@ -1060,26 +836,14 @@ def claim_strength_rows(paras: list, is_ref: list = None, kinds: list = None) ->
     return rows
 
 
-DOI_IN_TEXT_RE = re.compile(
-    r"\bdoi\s*:\s*10\.\d{4,9}/\S+|\b10\.\d{4,9}/[^\s,;)\]]+", re.I)
-
-
 def number_format_rows(paras: list) -> list:
     """FMT-T9h: a document mixes 4+-digit numbers with and without separators."""
     rows = []
     nums = []
     for text in paras:
-        # A DOI/URL is a citation, not a quantity: `doi:10.1000/xyz123` used to
-        # contribute "10.1000", which then "mixed separators" with a real
-        # "1,000" and asked the reviser to change a DOI's digits (F154). Mask
-        # the citation before collecting candidates. URL_RE covers an e-mail and
-        # `doi:` without a space; DOI_IN_TEXT_RE covers the spaced form and a
-        # bare `10.1000/...` path.
-        masked = URL_RE.sub(" ", text or "")
-        masked = DOI_IN_TEXT_RE.sub(" ", masked)
         # NUMBER_RE has two alternatives (decimal / integer); `findall` would
         # return a tuple of their group captures, so take group(1) explicitly.
-        nums += [m.group(1) for m in NUMBER_RE.finditer(masked)]
+        nums += [m.group(1) for m in NUMBER_RE.finditer(text)]
     # 4-digit years and list-position numbers are not quantities: only numbers
     # with 5+ digits (or a 4+-digit number that already carries a separator)
     # take part in the convention check.
@@ -1089,13 +853,6 @@ def number_format_rows(paras: list) -> list:
         # NUMBER_RE it was read as `1` and `4` and never reached this check).
         # Only the NEW shape is excluded: a plain decimal (`1,234.5`) stays a
         # separator case exactly as it was before the exponent was accepted.
-        # NUMBER_RE also captures thin/NBSP/space separators and a leading
-        # sign; both are part of the quantity, so normalise them here.
-        n = str(n or "").strip()
-        if n[:1] in ("-", "+", "\u2212"):
-            n = n[1:]
-        n = (n.replace("\u2009", "").replace("\u202f", "")
-             .replace("\u00a0", "").replace(" ", ""))
         if not re.fullmatch(r"\d[\d,]*(?:\.\d+)?", n):
             return False
         # A comma is a THOUSANDS separator only when it groups three digits:
@@ -1104,28 +861,15 @@ def number_format_rows(paras: list) -> list:
             return False
         digits = n.replace(",", "")
         # The 4-digit year test must run BEFORE the <=4 return, which otherwise
-        # made it unreachable ("2,019" was read as a separated quantity). It
-        # must NOT run on a comma-grouped value: "1,999 cells" is a quantity,
-        # not the year 1999.
-        if "," not in n and len(digits) == 4 and digits[:2] in ("19", "20"):
+        # made it unreachable ("2,019" was read as a separated quantity).
+        if len(digits) == 4 and digits[:2] in ("19", "20"):
             return False
-        # The rule is about 4+-DIGIT numbers. An ordinary count (`3`, `42`,
-        # `100`) is not a thousands-separator quantity: counting it reported
-        # `1,000 samples and 3 replicates` as a mixed convention.
-        if len(digits) < 4:
-            return False
-        # A plain 4-digit quantity participates exactly like a separated one:
-        # `1,000 samples and 2500 cells` is the mixed convention this rule
-        # exists to report (F036). Years were already excluded above.
+        if len(digits) <= 4:
+            return "," in n
         return True
     big = [n for n in nums if _is_quantity(n)]
-
-    def _is_separated(x: str) -> bool:
-        body = str(x or "").lstrip("-+\u2212")
-        return bool(re.search(r"[,\u2009\u202f\u00a0 ]", body))
-
-    sep = [n for n in big if _is_separated(n)]
-    plain = [n for n in big if not _is_separated(n)]
+    sep = [n for n in big if "," in n]
+    plain = [n for n in big if "," not in n]
     if sep and plain:
         rows.append({"rule": "FMT-T9h", "severity": "low",
                      "evidence": f"4+-digit numbers mix thousands separators "
@@ -1278,19 +1022,13 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
     # narrative paragraph, whatever the paragraph looks like in isolation).
     section_of = [""] * len(paras)
     if heads:
-        flags = [(heads[i][1] if isinstance(heads[i], tuple) else heads[i])
-                 if i < len(heads) else False for i in range(len(paras))]
-    else:
-        # A text source (.md/.tex/.txt) carries no container styles and its
-        # caller passes no headings; without this the section context was ""
-        # for every paragraph and the end-matter exemption below could never
-        # fire (F62).
-        flags = [_looks_like_heading(t) for t in paras]
-    current = ""
-    for i in range(len(paras)):
-        if flags[i]:
-            current = _md_heading_text(paras[i]) or str(paras[i] or "").strip()
-        section_of[i] = current
+        current = ""
+        for i in range(len(paras)):
+            if i < len(heads):
+                flag = heads[i][1] if isinstance(heads[i], tuple) else heads[i]
+                if flag:
+                    current = str(paras[i] or "").strip()
+            section_of[i] = current
     for i, text in enumerate(paras):
         if i < len(is_ref) and is_ref[i]:
             continue
@@ -1311,7 +1049,7 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
                 bar = None
             if bar is not None and bar <= 0:
                 bar = None
-        for s in split_sentences(text):
+        for s in re.split(r"(?<=[.!?])\s+", text):
             n = len(s.split())
             if bar is None:
                 # No profile rule for this section: count the text only so the
@@ -1319,22 +1057,12 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
                 if n >= LONG_SENTENCE_BARS.get(kind, 46):
                     gap_sentence_kinds.add(kind)
                 continue
-            # The profile's `sentence_words` is a CAP: a sentence exactly at
-            # the declared bar is legal, `bar + 1` is the first violation (the
-            # paragraph cap already uses a strict `>`). The old `n < bar`
-            # flagged a sentence of exactly the declared limit (F60).
-            if n <= bar:
+            if n < bar:
                 continue
             strict = kind in STRICT_KINDS
             rows.append({"rule": "FMT-T9c",
                          "severity": "medium" if strict else "low",
-                         # The profile DECLARED this section's bar, so it is a
-                         # venue rule here whatever the section kind: the
-                         # docstring's contract is that only a declared bar can
-                         # make a row finding-tier, not that Methods bars are
-                         # advisory (R07/F080; README "FMT-T9c ... finding-tier
-                         # when the profile states the bar").
-                         "tier": "finding",
+                         "tier": "finding" if kind != "methods" else "advisory",
                          "evidence": f"long sentence ({n} words; {kind} profile bar {bar}) in "
                                      f"para {i}: {s.strip()[:80]!r}...",
                          "detail": "split it (one idea per sentence) or move the "
@@ -1352,23 +1080,16 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
                                    "paragraph at a natural boundary; keep the treatment of "
                                    "the items identical",
                          "protected": False})
-        elif (kind not in ("methods", "legend", "table", "references", "front",
-                           "abstract")
+        elif (kind not in ("methods", "legend", "table", "references", "front")
               and not (container and i < len(container) and container[i])
-              and not caption_label_kind(caption_label_text(text))
               and words > (paragraph_cap or EDITORIAL_PARAGRAPH_WORDS)):
             # A legend is ONE paragraph by the caption rule (FMT-T2c): telling a
             # caption to "split at the natural boundary" contradicts it, and a
             # long legend's length is the venue's M18/word-budget question, not
-            # a paragraph-shape defect. The same caption rule binds a TABLE
-            # caption (FMT-T2c), which `section_kinds` cannot label "legend"
-            # (its legend test is the figure label), so the caption-label test
-            # is repeated here. A table cell / markdown table row, a
-            # reference-list block, the abstract (FMT-T9i is the body narrative;
-            # the abstract's own budget is the venue's abstract limit) and front
-            # matter are not prose paragraphs either: a 300-word table block is
-            # a table, not a mega-paragraph, and the review must never ask the
-            # reviser to split it.
+            # a paragraph-shape defect. A table cell / markdown table row, a
+            # reference-list block and front matter are not prose paragraphs:
+            # a 300-word table block is a table, not a mega-paragraph, and the
+            # review must never ask the reviser to split it.
             if not paragraph_cap:
                 gap_mega += 1
             else:
@@ -1390,17 +1111,16 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
         # than five words.
         if kind in ("body", "abstract") and 5 <= words <= 45:
             stripped = (text or "").strip()
-            sentences = [s for s in split_sentences(stripped) if s.strip()]
-            caption_probe = caption_label_text(stripped)
+            sentences = [s for s in re.split(r"(?<=[.!?])\s+", stripped) if s.strip()]
             if (len(sentences) == 1
                     and re.search(r"[.!?][\"\u2019\u201d)\]]?$", stripped)
                     and not (container and i < len(container) and container[i])
                     and not (area and i < len(area) and area[i])
                     and not SINGLE_SENTENCE_SKIP_TEXT_RE.match(stripped)
                     and not SINGLE_SENTENCE_SKIP_SECTION_RE.match(section_of[i])
-                    and not _table_row_context(paras, i)
-                    and not caption_label_kind(caption_probe)
-                    and not LEGEND_RE.match(caption_probe)):
+                    and not _table_row_like(stripped)
+                    and not caption_label_kind(stripped)
+                    and not LEGEND_RE.match(stripped)):
                 rows.append({
                     "rule": "FMT-T9k", "severity": "low", "tier": "finding",
                     "evidence": (f"paragraph {i} is ONE {words}-word sentence "
@@ -1554,19 +1274,8 @@ def emphasis_consistency(styles: dict, doc_paras: list) -> tuple:
     titles are left to FMT-T6). The fix is applied only to LABEL-like phrases
     (<=5 words, starts upper-case, no digits): the majority treatment wins, and
     an exact tie resolves to roman, because a parenthesis label is not emphasis.
-
-    The unit compared is the OCCURRENCE, never the run: one italic label split
-    over two runs used to be recorded as "italic in 2 place(s) (p0, p0)" and so
-    outvote one roman occurrence 2:1 although the occurrences tie 1:1 (F59).
-    An occurrence whose own runs disagree is recorded on BOTH sides (it is
-    genuinely mixed) -- that is still one place per side, never one per run.
     """
     seen = {}
-
-    def _rec(phrase: str, label: bool) -> dict:
-        return {"phrase": phrase, "label": label,
-                "ital": [], "roman": [], "places_ital": [], "places_roman": []}
-
     for idx, (p0, p1, para) in enumerate(doc_paras):
         style = para_style(para)
         runs_info, text = [], ""
@@ -1587,24 +1296,15 @@ def emphasis_consistency(styles: dict, doc_paras: list) -> tuple:
                 continue
             overlap = [ri for ri in runs_info
                        if ri[0] < end and ri[1] > start and ri[5].strip()]
-            rec = seen.setdefault(key, _rec(inner[:60], True))
-            ital_chars = roman_chars = 0
+            rec = seen.setdefault(key, {"phrase": inner[:60], "label": True,
+                                        "ital": [], "roman": []})
             for ri in overlap:
                 state = "ital" if run_is_italic(styles, style, ri[4]) else "roman"
                 # Only the part of the run that lies INSIDE the parenthetical
                 # label is the fix span. Recording the whole run restyled text
                 # the row never reported ("… label; zhenxie@host) and tail").
                 local = (max(start, ri[0]) - ri[0], min(end, ri[1]) - ri[0])
-                if state == "ital":
-                    ital_chars += max(0, local[1] - local[0])
-                else:
-                    roman_chars += max(0, local[1] - local[0])
                 rec[state].append((idx, ri[2], ri[3], local))
-            if ital_chars or roman_chars:
-                sides = (("ital", "roman") if ital_chars and roman_chars
-                         else (("ital",) if ital_chars else ("roman",)))
-                for side in sides:
-                    rec["places_" + side].append((idx, start))
         for r0, r1, run in runs(para):
             rtext = text_of(run)
             if len(rtext.strip()) < 4:
@@ -1615,18 +1315,17 @@ def emphasis_consistency(styles: dict, doc_paras: list) -> tuple:
                     rtext):
                 if journal_matches(m.group(0)):
                     continue
-                rec = seen.setdefault(m.group(0).lower(), _rec(m.group(0), False))
+                rec = seen.setdefault(m.group(0).lower(),
+                                      {"phrase": m.group(0), "label": False,
+                                       "ital": [], "roman": []})
                 rec["ital" if ital else "roman"].append((idx, r0, r1, None))
-                rec["places_" + ("ital" if ital else "roman")].append((idx, r0))
     rows, fixes = [], []
     for key, rec in sorted(seen.items()):
-        if not (rec["places_ital"] and rec["places_roman"]):
+        if not (rec["ital"] and rec["roman"]):
             continue
-        n_i, n_r = len(rec["places_ital"]), len(rec["places_roman"])
-        where_i = ", ".join(dict.fromkeys(f"p{idx}"
-                                          for idx, _s in rec["places_ital"][:3]))
-        where_r = ", ".join(dict.fromkeys(f"p{idx}"
-                                          for idx, _s in rec["places_roman"][:3]))
+        n_i, n_r = len(rec["ital"]), len(rec["roman"])
+        where_i = ", ".join(f"p{idx}" for idx, _r0, _r1, _loc in rec["ital"][:3])
+        where_r = ", ".join(f"p{idx}" for idx, _r0, _r1, _loc in rec["roman"][:3])
         rows.append({"rule": "FMT-T9a", "severity": "medium",
                      "evidence": f"{rec['phrase']!r} is italic in {n_i} place(s) "
                                  f"({where_i}) and roman in {n_r} ({where_r})",
@@ -1894,14 +1593,6 @@ REFERENCE_BIBITEM_RE = re.compile(
     r"(?m)^[ \t]*\\bibitem[ \t]*(?:\[[^\]]*\])?[ \t]*\{([^}]*)\}")
 REFERENCE_BIBENTRY_RE = re.compile(r"(?m)^[ \t]*@\w+[ \t]*\{[ \t]*([^,\s]+)[ \t]*,")
 REFERENCE_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
-# A paragraph-per-entry reference list joins ONE ENTRY PER LINE with a single
-# "\n" (the DOCX corpus view does exactly that), and a Vancouver-style list has
-# no parenthetical year -- so the blank-line splitter returned the whole list as
-# ONE entry. A line that carries its OWN year or DOI is a complete entry.
-REFERENCE_ENTRY_DATE_RE = re.compile(r"\b(?:19|20)\d{2}\b|\b10\.\d{4,9}/\S+")
-# A line that OPENS a numbered entry (`1.`, `12)`, `[3]`): in a numbered list
-# the marker is the entry boundary even when the previous entry wrapped.
-REFERENCE_NUMBERED_LINE_RE = re.compile(r"^\s*(?:\[\d{1,3}\]|\d{1,3}[.)])\s+")
 # The entry SAYS it carries a DOI (`doi`, `DOI:`, `https://doi.org/`): only then
 # is a DOI-shaped token the syntax rejects worth a row.
 REFERENCE_DOI_CLAIM_RE = re.compile(r"(?i)(?:\bdoi\b[ \t]*[:\s]|https?://(?:dx\.)?doi\.org/)")
@@ -2002,8 +1693,7 @@ def _numbered_marker_run(spans: list) -> list:
     return best
 
 
-def _split_reference_entries(text: str, allow_paragraphs: bool,
-                             per_paragraph: bool = False) -> list:
+def _split_reference_entries(text: str, allow_paragraphs: bool) -> list:
     """[(label, entry_text)] for one reference-list region.
 
     Markers first (`\\bibitem{key}` / `@type{key,` carry their own labels, then a
@@ -2015,10 +1705,6 @@ def _split_reference_entries(text: str, allow_paragraphs: bool,
     happens to sit in a file is never read that way -- not even when it numbers
     its own sentences ("Test 1. ... Test 2. ... Test 3. ..."), which is the same
     shape and used to seed a row for a DOI the body merely mentioned.
-    `per_paragraph` says the region was joined from ONE ROW PER PARAGRAPH (the
-    DOCX corpus view): a single-newline break is then an entry boundary, and a
-    line carrying its own year/DOI is a complete entry even without a blank line
-    between two of them.
     """
     shapes = [(REFERENCE_BIBITEM_RE, True, 1), (REFERENCE_BIBENTRY_RE, True, 1)]
     if allow_paragraphs:
@@ -2062,24 +1748,6 @@ def _split_reference_entries(text: str, allow_paragraphs: bool,
         ends = starts[1:] + [len(text)]
         return [("", _fold_space(text[a:b])) for a, b in zip(starts, ends)]
     blocks = [b for b in re.split(r"\n[ \t]*\n", text or "") if b.strip()]
-    if per_paragraph and len(blocks) == 1:
-        # One row per paragraph arrives joined by a SINGLE "\n": the line break
-        # IS the entry boundary. A numbered marker always starts a new entry; an
-        # unnumbered line starts one only when BOTH it and the line before it
-        # carry their own year/DOI -- a hard-wrapped entry's continuation line
-        # carries no year of its own, so it stays inside its entry.
-        lines = [l for l in blocks[0].splitlines() if l.strip()]
-        starts = [0] if lines else []
-        for i in range(1, len(lines)):
-            numbered = bool(REFERENCE_NUMBERED_LINE_RE.match(lines[i]))
-            dated = bool(REFERENCE_ENTRY_DATE_RE.search(lines[i])
-                         and REFERENCE_ENTRY_DATE_RE.search(lines[i - 1]))
-            if numbered or dated:
-                starts.append(i)
-        if len(starts) > 1:
-            ends = starts[1:] + [len(lines)]
-            return [("", _fold_space("\n".join(lines[a:b])))
-                    for a, b in zip(starts, ends)]
     return [("", _fold_space(b)) for b in blocks]
 
 
@@ -2109,10 +1777,6 @@ def reference_entries(docs) -> list:
                          for r in rows)
         lines = text.splitlines()
         start = next((i for i, l in enumerate(lines) if _is_reference_heading(l)), None)
-        # One row per paragraph (the DOCX/text corpus views): a single-newline
-        # break is then an entry boundary, not a soft wrap.
-        per_paragraph = (len(rows) > 1
-                         and all(isinstance(r, (list, tuple)) for r in rows))
         if start is not None:
             # The region ends at the next section heading: a "Supplementary" or
             # "Acknowledgements" section after the list is not more entries.
@@ -2121,9 +1785,7 @@ def reference_entries(docs) -> list:
             region = "\n".join(lines[start + 1:end])
         else:
             region = text
-        for label, body in _split_reference_entries(
-                region, allow_paragraphs=start is not None,
-                per_paragraph=per_paragraph):
+        for label, body in _split_reference_entries(region, allow_paragraphs=start is not None):
             if body:
                 out.append((name, label, body))
     return out
@@ -2788,12 +2450,8 @@ def _simple_table(text: str):
     if len(lines) < 3:
         return None, None
     head = lines[0]
-    # A pipe table with no leading/trailing pipes has n-1 separators, so a
-    # legal TWO-column `sample | yield` header has only ONE pipe. Requiring two
-    # silently dropped every two-column pipe table from the value/statistics
-    # index.
     delim = ("\t" if "\t" in head else
-             ("|" if head.count("|") >= 1 else
+             ("|" if head.count("|") >= 2 else
               ("," if head.count(",") >= 1 else None)))
     if delim is None:
         return None, None
@@ -2862,8 +2520,6 @@ def _cell_number(cell: str):
 
 def _fmt_number(value: float) -> str:
     """A human number: thousands separators, no trailing zeros."""
-    if value == 0:
-        value = 0.0                          # never print IEEE negative zero as "-0"
     if value and abs(value) < 5e-7:
         # Six decimals rounded every real p-value below 5e-7 to "0" (and a
         # negative one to "-0"): keep the magnitude in scientific notation.
@@ -2872,25 +2528,17 @@ def _fmt_number(value: float) -> str:
     return out or "0"
 
 
-def table_column_stats(tables: list, coverage: dict = None) -> list:
+def table_column_stats(tables: list) -> list:
     """One row per (shipped table, column): its size and numeric shape.
 
     This is the producer-side half of an M30 row: `n rows` is what a
     cohort-size claim must reconcile against, and min/max/mean/sum are what a
     rounded or aggregated written value can be checked against. `values` stays
     on the row for the seed's own exactness test (the artifact table prints the
-    other columns), and it carries EVERY numeric cell of the column: a silent
-    `values[:200]` made a written value at data row 250 read as "no exact match
-    in column" although `reconcile_number_rows` proved it from the same table.
-
-    The 40-file cap is a budget, never a silent coverage cut (AGENTS rule 8):
-    when `coverage` (a caller's dict) is passed, it receives `total`,
-    `examined` and `omitted`, so `hierarchy_seed_rows` can record the INCOMPLETE
-    row instead of reporting "no shipped table column matches".
+    other columns).
     """
     stats = []
-    all_tables = list(tables or [])
-    for name, text in all_tables[:TABLE_STATS_FILE_LIMIT]:
+    for name, text in (tables or [])[:TABLE_STATS_FILE_LIMIT]:
         header, body = _simple_table(text)
         if header is None:
             continue
@@ -2913,11 +2561,7 @@ def table_column_stats(tables: list, coverage: dict = None) -> list:
                           "mean": _fmt_number(sum(values) / len(values)) if values else "",
                           "sum": _fmt_number(sum(values)) if values else "",
                           "examples": ", ".join(examples),
-                          "values": values})
-    if coverage is not None:
-        coverage["total"] = len(all_tables)
-        coverage["examined"] = min(len(all_tables), TABLE_STATS_FILE_LIMIT)
-        coverage["omitted"] = max(0, len(all_tables) - TABLE_STATS_FILE_LIMIT)
+                          "values": values[:200]})
     return stats
 
 
@@ -2941,8 +2585,7 @@ def code_literal_rows(sources: list, limit: int = 200, skip_name=None) -> list:
         if not src.is_dir():
             continue
         for p in sorted(src.rglob("*")):
-            if p.is_symlink() or not p.is_file() \
-                    or p.suffix.lower() not in CODE_SOURCE_EXTS:
+            if not p.is_file() or p.suffix.lower() not in CODE_SOURCE_EXTS:
                 continue
             try:
                 if p.stat().st_size > CODE_FILE_BYTES_LIMIT:
@@ -3120,50 +2763,32 @@ def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
                           f"max_tokens cap and were NOT compared with the written "
                           f"negative claims; this table is INCOMPLETE -- raise the cap "
                           f"or record the gap")}
-    # The ROW cap must say so too (hierarchy_seed_rows and the number seed both
-    # append an INCOMPLETE row at theirs): a bare `return` made the M30-NC seed
-    # look complete while the manuscript's later claims were never compared.
-    row_gap = None
 
     def _done(rows: list) -> list:
-        return rows + [g for g in (gap, row_gap) if g]
+        return rows + [gap] if gap else rows
 
     if not tokens:
         return _done([])
-    total_claims = sum(len(NEGATIVE_CLAIM_RE.findall(
-        re.sub(r"\s+", " ", str(t or "")))) for t in (texts or []))
-    rows, seen, claims_seen = [], set(), 0
+    rows, seen = [], set()
     for text in texts or []:
         s = re.sub(r"\s+", " ", str(text or "")).strip()
         if not s:
             continue
         for m in NEGATIVE_CLAIM_RE.finditer(s):
-            claims_seen += 1
-            window_start = max(0, m.start() - 200)
-            sentence = s[window_start:m.end() + 200]
+            sentence = s[max(0, m.start() - 200):m.end() + 200]
             lowered = sentence.lower()
             # The claim's SUBJECT, inferred from word order: only a token that
             # PRECEDES the negative phrase can be what the sentence says was
             # "not run" ("SCYN could not be run"). A token that merely follows
             # it ("... were excluded before the SCYN caller was applied") is
             # not the subject, and pairing it reported the opposite of the text.
-            claim_at = m.start() - window_start
-            # The ±200-character window is NOT a sentence: a token from the
-            # PRECEDING sentence inside it was accepted as the subject of this
-            # one, so "We applied CHISEL. SCYN could not be run." filed a
-            # contradiction against CHISEL. The subject must sit in the same
-            # sentence as the negative phrase: start the token search after the
-            # last sentence boundary before the claim.
-            sent_start = 0
-            for boundary in re.finditer(r"[.!?][\"'\u201d\u2019)\]]*\s+", sentence[:claim_at]):
-                sent_start = boundary.end()
-            subject = lowered[sent_start:]
+            claim_at = m.start() - max(0, m.start() - 200)
             method_only = NEGATIVE_SUBJECT_METHOD_ONLY_RE.search(m.group(0)) is not None
             hits = []
             for token, entries in tokens.items():
                 tm = re.search(r"(?<![A-Za-z0-9])" + re.escape(token)
-                               + r"(?![A-Za-z0-9])", subject)
-                if tm is None or sent_start + tm.start() >= claim_at:
+                               + r"(?![A-Za-z0-9])", lowered)
+                if tm is None or tm.start() >= claim_at:
                     continue
                 for tool_like, where, ctx in entries:
                     if method_only and not tool_like:
@@ -3199,14 +2824,6 @@ def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
                                f"stale and must be removed, or the written claim is wrong"),
                 })
                 if len(rows) >= limit:
-                    omitted = max(0, total_claims - claims_seen)
-                    row_gap = {
-                        "rule": "M30-NC", "severity": "low", "claim": "",
-                        "token": "(truncated)", "producer": "",
-                        "detail": (f"{omitted} further written negative claim(s) were "
-                                   f"omitted by the {limit}-row M30-NC seed cap and were "
-                                   f"NOT compared with any table value; this seed is "
-                                   f"INCOMPLETE -- raise the cap or record the gap")}
                     return _done(rows)
                 if sum(per_token.values()) >= 4:
                     break
@@ -3253,8 +2870,7 @@ def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> li
     verdict column is left empty: the session reconciles, or records that the
     producer is not in the corpus.
     """
-    coverage = {}
-    stats = table_column_stats(tables, coverage=coverage)
+    stats = table_column_stats(tables)
     rows, seen = [], set()
     for r in number_rows or []:
         if str(r.get("source") or "").strip():
@@ -3354,23 +2970,6 @@ def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> li
                      "producer summary": "",
                      "seed check": ("the omitted written values were not compared against "
                                     "any producer; raise the cap or add the rows manually")})
-    if coverage.get("omitted"):
-        # The table-file cap hid every table after the 40th, so a value whose
-        # producer sits there was reported as "no shipped table column matches
-        # this sentence" (a producer-not-in-corpus hand-off) instead of being
-        # compared. Record the omission, like the row cap above.
-        rows.append({"document": "", "paragraph": None, "kind": "gap", "number": "",
-                     "unit": "",
-                     "sentence": (f"{coverage['omitted']} shipped table file(s) of "
-                                  f"{coverage['total']} were omitted by the "
-                                  f"{TABLE_STATS_FILE_LIMIT}-file M30 statistics cap and were "
-                                  f"NOT compared with any written value; this seed is "
-                                  f"INCOMPLETE -- raise the cap or record the gap"),
-                     "candidate producer": "(truncated — table-file cap reached)",
-                     "producer summary": "",
-                     "seed check": ("the omitted tables' columns were never examined; a value "
-                                    "whose producer sits there reads as absent from the "
-                                    "corpus -- record the gap or raise the cap")})
     return rows
 
 
@@ -3400,12 +2999,6 @@ def _context_stem(token: str) -> str:
 def _context_tokens(text) -> set:
     out = set()
     for tok in _m30_header_tokens(text):
-        # The RAW token is tested against the stopwords BEFORE the plural
-        # stemmer: `_context_stem("values")` is "valu", "tables" -> "tabl",
-        # "files" -> "fil", none of which is in the (unstemmed) stopword set,
-        # so the generic-plural guard the comment above promises never fired.
-        if str(tok).lower() in _CONTEXT_STOPWORDS:
-            continue
         stem = _context_stem(tok)
         if len(stem) >= 3 and stem not in _CONTEXT_STOPWORDS and not stem.isdigit():
             out.add(stem)
@@ -3476,21 +3069,6 @@ def _number_proof_context_ok(row: dict, hit: dict) -> bool:
         _conflict = ("mean", "average", "median", "rate", "proportion",
                      "percentage", "ratio", "fraction", "share")
         if any(re.search(r"\b" + re.escape(w) + r"\b", _low) for w in _conflict):
-            return False
-        # F31 (wave 1): a column SUM cannot prove an extreme-value claim
-        # ("the maximum was 9" was proved by sum(2,3,4)=9). The check is scoped
-        # to the CLAUSE carrying the number, so the documented sum proof
-        # "yielded 45,365 cells; the largest had 2,055 cells" keeps its source
-        # (the word "largest" is in a different clause).
-        _clause = _low
-        if num and num in sentence:
-            _parts = re.split(r"(?<=[;.])\s+", sentence)
-            _clause = next((q.lower() for q in _parts if num in q), _low)
-        _extreme = {"sum": ("maximum", "minimum", "highest", "lowest", "peak",
-                            "largest", "smallest"),
-                    "max": ("minimum", "lowest", "smallest"),
-                    "min": ("maximum", "highest", "largest", "peak")}.get(kind, ())
-        if any(re.search(r"\b" + re.escape(w) + r"\b", _clause) for w in _extreme):
             return False
     if kind == "cell":
         hit_row = str(hit.get("row") or "").strip()
@@ -3660,10 +3238,10 @@ def term_repetition_rows(paras: list, is_ref: list) -> list:
             continue
         masked = URL_RE.sub(lambda m: " " * len(m.group(0)), text)
         words = re.findall(r"[A-Za-z][A-Za-z\-']+", masked)
-        if len(words) > 300:
+        if len(words) > 300 or len(words) < 40:
             continue                          # not a short passage
         low = [w.lower() for w in words]
-        hits, spans = {}, {}
+        hits = {}
         for n in (2, 3):
             for j in range(len(low) - n + 1):
                 if not all(w[:1].isupper() for w in words[j:j + n]):
@@ -3672,47 +3250,13 @@ def term_repetition_rows(paras: list, is_ref: list) -> list:
                 if any(w in REPETITION_STOPWORDS for w in gram.split()):
                     continue
                 hits[gram] = hits.get(gram, 0) + 1
-                spans.setdefault(gram, []).append((j, j + n))
-        # The 40-word floor belongs to the single-content-word branch only: a
-        # proper name three times in one paragraph AND four times in the
-        # document is the documented cover-letter defect at ANY paragraph
-        # length, and the floor hid a 17-word paragraph naming the journal four
-        # times (F153). A short paragraph repeating one long word five times is
-        # ordinary writing, so that branch keeps the floor.
-        if len(words) >= 40:
-            for w in sorted(set(low)):
-                if len(w) >= 8 and w not in REPETITION_STOPWORDS:
-                    hits[w] = low.count(w)
-
-        def _qualifies(term: str, count: int) -> bool:
+        for w in sorted(set(low)):
+            if len(w) >= 8 and w not in REPETITION_STOPWORDS:
+                hits[w] = low.count(w)
+        for term, count in sorted(hits.items(), key=lambda kv: (-kv[1], -len(kv[0])))[:3]:
             if len(term.split()) >= 2:
-                return (count >= 3
-                        and len(re.findall(rf"\b{re.escape(term)}", blob)) >= 4)
-            return count >= 5
-
-        # A repeated proper name was counted once per overlapping n-gram:
-        # four repetitions of "The New York Times" emitted "new york times",
-        # "the new york" AND "york times" -- three descriptions of ONE repeated
-        # span, consuming the top-3 slots and hiding any other repeated term.
-        # Keep the maximal n-grams: a term every occurrence of which lies inside
-        # a LONGER qualifying term's occurrences describes the same repetition.
-        claimed, maximal = set(), set()
-        for term, count in sorted(
-                ((t, c) for t, c in hits.items()
-                 if len(t.split()) >= 2 and _qualifies(t, c)),
-                key=lambda kv: (-len(kv[0].split()), -kv[1], -len(kv[0]))):
-            occ = spans.get(term) or []
-            if occ and all(any(a < e and s < b for a, b in claimed) for s, e in occ):
-                continue                      # every occurrence is inside a longer one
-            maximal.add(term)
-            claimed.update(occ)
-        ordered = [(t, c) for t, c in sorted(hits.items(),
-                                             key=lambda kv: (-kv[1], -len(kv[0])))
-                   if len(t.split()) < 2 or t in maximal]
-        for term, count in ordered[:3]:
-            if len(term.split()) >= 2:
-                if not _qualifies(term, count):
-                    continue
+                if count < 3 or len(re.findall(rf"\b{re.escape(term)}", blob)) < 4:
+                    continue                  # a one-off list of names, not redundancy
             elif count < 5:
                 continue
             rows.append({"rule": "FMT-T8c", "severity": "medium",
@@ -3862,16 +3406,13 @@ def outline_rows(paras: list, headings: list = None, doc: str = "") -> list:
     for i, text in enumerate(paras):
         if i < len(headings) and headings[i]:
             current = text.strip()[:120]
-        sentences = [s.strip() for s in split_sentences(text) if s.strip()]
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
         rows.append({"heading": current or "(front matter)", "paragraph": i,
                      "words": len(text.split()),
                      "list_markers": ",".join(re.findall(r"\((\d)\)", text)) or "",
-                     # The SUPPLEMENTARY alternative comes first: matching the
-                     # inner "Figure 1" of "Supplementary Figure 1" reported a
-                     # main-text figure the paragraph never cited (F193).
                      "refs": ",".join(sorted(set(re.findall(
-                         r"(?:Supplementary\s+(?:Fig(?:ure)?s?\.?|Table|Note)"
-                         r"|Fig\.|Figure|Table)\s*[A-Z]?\d+[a-z]?", text)))[:6]),
+                         r"(?:Fig\.|Figure|Table|Supplementary (?:Fig\.|Table|Note))"
+                         r"\s*[A-Z]?\d+[a-z]?", text)))[:6]),
                      "first_sentence": (sentences[0][:120] if sentences else ""),
                      "last_sentence": (sentences[-1][:120] if sentences else ""),
                      "summary": ""})

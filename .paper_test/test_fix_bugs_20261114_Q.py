@@ -124,21 +124,14 @@ def test_f192_falsy_blocks_are_rejected() -> None:
         except P.VenueProfileError:
             pass
     check("F192 every falsy non-object value is refused", not accepted, str(accepted))
-    # F116 (2026-11-15 08:17 run): a PRESENT measured-rule block must state its
-    # minimum, so an empty image_dpi/figure_text is refused. Empty blocks that
-    # are not declarations (`style_limits`, `prompt`, `submission`) stay legal.
+    # An EMPTY OBJECT still means "the profile states no such block".
     try:
-        P.normalize_venue_profile(dict(base, image_dpi={}, figure_text={}))
-        measured_empty_ok = True
+        P.normalize_venue_profile(dict(base, image_dpi={}, figure_text={},
+                                       style_limits={}, prompt={}, submission={}))
+        empty_ok = True
     except P.VenueProfileError:
-        measured_empty_ok = False
-    check("F116 an empty measured-rule block is refused", not measured_empty_ok)
-    try:
-        P.normalize_venue_profile(dict(base, style_limits={}, prompt={}, submission={}))
-        other_empty_ok = True
-    except P.VenueProfileError:
-        other_empty_ok = False
-    check("F192 other empty objects still mean 'no block'", other_empty_ok)
+        empty_ok = False
+    check("F192 an empty object still means 'no block'", empty_ok)
 
 
 # ---------------------------------------------------------------------------

@@ -751,8 +751,17 @@ def analyse_package(path: Path, policy: dict) -> dict:
                 # gigabytes of text, and capture_output allocated all of it.
                 _rc, txt, _err = _run_text_tool(
                     ["pdftotext", "-layout", str(pdf), "-"], 60)
-                pages, src = (blank_pages_in_text(txt)["pages"],
-                              "the rendered PDF beside it")
+                if _rc == 0 and txt.strip():
+                    pages, src = (blank_pages_in_text(txt)["pages"],
+                                  "the rendered PDF beside it")
+                else:
+                    # A non-zero exit (or an empty extraction) is an UNREADABLE
+                    # pdf: `check_pdf` treats the same status as "the PDF could
+                    # not be read". Assigning 0 pages here made `pages` non-None,
+                    # so the cached-value fallback and the budget row never ran
+                    # and a corrupt render silently skipped FMT-T8h.
+                    print(f"warning: pdftotext could not read {pdf.name} "
+                          f"(exit {_rc}); using the cached page count", file=sys.stderr)
             except (OSError, subprocess.SubprocessError) as e:
                 # A wedged or erroring pdftotext must degrade to the cached value,
                 # never abort the whole corpus scan (the sibling helpers catch
@@ -765,6 +774,18 @@ def analyse_package(path: Path, policy: dict) -> dict:
         _max = _pb.get("cover_letter_max_pages") if isinstance(_pb, dict) else None
         if pages and isinstance(_max, int) and pages > _max:
             res["rows"].append(cover_letter_page_row(path, pages, src, _max))
+        elif pages is None and _max is not None and pdf.is_file():
+            # Neither the rendered PDF nor the cached page count could state the
+            # length: record the unexamined class rather than let the budget look
+            # enforced (a skipped check is reported as skipped).
+            res["rows"].append({
+                "rule": "FMT-T8h", "severity": "low", "document": path.name,
+                "location": "document",
+                "evidence": "the cover letter's page count could not be read",
+                "detail": ("the cover-letter page budget was NOT checked: the rendered "
+                           "PDF could not be parsed and the DOCX carries no cached page "
+                           "count; render the letter or open it and confirm the budget"),
+                "fix": "manual", "protected": False})
     # The cover letter formatted in the MANUSCRIPT template (FMT-CL1): the venue
     # policy carries the manuscript template's own front-matter style ids and
     # header/footer part hashes, so a stamped letter is a deterministic row --
@@ -4827,6 +4848,16 @@ def page_field_fixes(part_xml: str) -> list:
     edits = []
     for s, e in spans[1:]:
         para = part_xml[s:e]
+        # A drawing, picture, object or bookmark in the paragraph is CONTENT
+        # that the text test below cannot see: the whole paragraph span is
+        # spliced out, taking the artwork with it, and `fix_package`'s own
+        # verification (text + part names, never paragraph children) then
+        # certified the loss as a text-identical success. Refuse this shape --
+        # the scan leaves it to the author like the text-box case above.
+        if re.search(r"<w:(?:drawing|pict|object|bookmarkStart|bookmarkEnd|"
+                     r"fldData|footnoteReference|endnoteReference|commentReference|"
+                     r"txbxContent|sym)(?=[\s/>])", para):
+            continue
         # Only a paragraph whose VISIBLE text is the page number (the field's
         # cached result) may be removed; a page number sharing a paragraph with
         # other furniture needs the author.
@@ -5830,10 +5861,21 @@ def cmd_scan(args) -> int:
     out = {"policy": policy, **info}
     if args.json:
         write_json(args.json, out)
-    print(format_note(out))
+    # `_missing_paths` refuses a path that does not exist; an EXISTING path that
+    # yields no document is the same "read nothing, report clean" failure: an
+    # empty directory (or one holding only figures/PDFs) printed "OOXML
+    # formatting: clean" and exited 0, certifying a scan it never ran.
+    checked = bool(out.get("files"))
+    if checked:
+        print(format_note(out))
+    else:
+        print("OOXML formatting: not checked -- no .docx under "
+              + ", ".join(str(p) for p in args.paths))
     for r in out["rows"]:
         flag = " (field-protected)" if r.get("protected") else ""
         print(f"  [{r['severity']:6s}] {r['rule']:9s} {r['location']:>12s}  {r['evidence'][:100]}{flag}")
+    if not checked:
+        return 2
     return 1 if (args.strict and out["rows"]) else 0
 
 
@@ -5872,6 +5914,17 @@ def cmd_fix(args) -> int:
         # rejected artifact to remove here.
     for c in rep["changes"]:
         print(f"  - {c}")
+    # Step 0's contract is that a refused Zotero refresh "is reported"; it was
+    # only stored in the report's `zotero_refresh` sub-dict, so `fix` printed a
+    # clean "fixed" summary and exited 0 while (for example) the citation fields
+    # in word/header1.xml were never renumbered. Report it in the human summary
+    # too, with the reason, so the success line is not read as a full refresh.
+    _zr = rep.get("zotero_refresh") or {}
+    _skip = str(_zr.get("skip") or "")
+    if (_skip and not _zr.get("nothing_to_do") and not _zr.get("changed")
+            and _skip != "no live citation fields"):
+        print(f"  [gap] the local Zotero refresh was REFUSED, so this copy keeps the "
+              f"authored numbering: {_skip}")
     if args.json:
         write_json(args.json, rep)
     return 0 if rep["ok"] else 1
@@ -5988,7 +6041,18 @@ def cmd_zotero_check(args) -> int:
                 ET.fromstring(text)
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError,
             ET.ParseError) as e:
-        print(f"[FAIL] {path}: unreadable DOCX ({type(e).__name__}: {e})")
+        error = f"unreadable DOCX ({type(e).__name__}: {e})"
+        print(f"[FAIL] {path}: {error}")
+        # `--json` is the recorded artifact: a consumer must be able to tell an
+        # unreadable input from "the check did not run", so the failure is
+        # written here too instead of returning before the report block below
+        # (an old file at that path stayed stale). `cmd_zotero_refresh` writes
+        # its own failure report the same way.
+        if args.json:
+            write_json(args.json, {"file": str(path), "rows": [],
+                                   "style_ids": {}, "counts": {},
+                                   "field_integrity_faults": [error],
+                                   "ok": False, "error": error})
         return 1
     xml = next(x for n, x in parts if n == "word/document.xml")
     paras = [text_of(p[2]) for p in paragraphs(xml)]
@@ -6115,8 +6179,37 @@ def cmd_zotero_refresh(args) -> int:
     return 0
 
 
+def _pdf_read_problem(path: Path) -> str:
+    """Why `_read_pdf_bounded` would return None, or "" when the file is readable.
+
+    A missing, symlinked, oversized or permission-denied PDF is an INPUT error;
+    it must not reach a caller as the same `None` an empty XFA form produces.
+    """
+    p = Path(path)
+    try:
+        if p.is_symlink():
+            return "it is a symlink, not a package file"
+        if not p.is_file():
+            return "no such file"
+        if p.stat().st_size > MAX_PDF_BYTES:
+            return f"it is larger than the {MAX_PDF_BYTES}-byte reading budget"
+        with p.open("rb") as f:
+            f.read(1)
+    except OSError as e:
+        return f"{type(e).__name__}: {e}"
+    return ""
+
+
 def cmd_xfa_export(args) -> int:
     """`xfa-export`: readable rendering of a filled XFA form PDF."""
+    # `_read_pdf_bounded` returns None for a missing, symlinked, oversized or
+    # unreadable file and for a readable one that simply carries no answers;
+    # mapping both to "no XFA dataset answers found" told the operator the form
+    # was empty when the path itself was wrong.
+    problem = _pdf_read_problem(Path(args.file))
+    if problem:
+        print(f"error: cannot read {args.file}: {problem}", file=sys.stderr)
+        return 2
     text = xfa_export_text(Path(args.file))
     if not text:
         print(f"{args.file}: no XFA dataset answers found (nothing to export)")
@@ -6141,6 +6234,13 @@ def cmd_validate(args) -> int:
         if r["ok"] is False and r.get("errors"):
             detail = r["errors"][0]
         print(f"{mark} {r['kind']:4s} {r['file']}  {str(detail)[:140]}")
+    if not report["files"]:
+        # An existing path that yields no .docx/.tex validated NOTHING; "0
+        # file(s), 0 failure(s)" read as a pass for a deliverable gate that is
+        # supposed to prove a document compiles. Say what happened, exit 2.
+        print(f"validation: not checked -- no .docx/.tex under "
+              + ", ".join(str(p) for p in args.paths))
+        return 2
     print(f"validation: {report['files']} file(s), {report['failed']} failure(s)"
           + ("" if report["ok"] else " -- fix and re-run"))
     return 0 if report["ok"] else 1

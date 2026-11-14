@@ -163,7 +163,11 @@ def champion_sort_key(row: dict) -> tuple:
     """
     census = row.get("defect_prefix_census")
     if census is None:
-        census = (int(row.get("defect_prefix_total") or 0),)
+        total = row.get("defect_prefix_total")
+        # A missing census/total is MISSING EVIDENCE, never zero defects: a
+        # legacy/trimmed row with no recorded census must not outrank a row that
+        # really carries one defect (Rule 6's "missing value is worst").
+        census = (int(total),) if total is not None else (10 ** 9,)
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
     return (tuple(int(x) for x in census)
             + (-(med if med is not None else -99.0),)
@@ -206,7 +210,13 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     # A candidate that deduplicated away is still represented in the field by
     # the member it merged into; that member's row is already a contender of its
     # own, so nothing is silently lost from the ranking.
-    if base_rep:
+    if base_rep and base_rep not in stats:
+        # The round's base member has no panel row (a trimmed/legacy state): it
+        # cannot compete, and subscripting it would abort the whole decision.
+        trace.append(f"the round's base is content-identical to field member {base_rep!r}, "
+                     f"but that member has NO stats row in this field; the base cannot compete "
+                     f"and the selection falls back to the fresh arms only")
+    elif base_rep:
         contenders.append((A1_ID, base_rep, True))
         trace.append(f"the round's base A1_{round_no} is content-identical to field member "
                      f"{base_rep!r}; that member's row is the base's row and competes, so the "
@@ -227,7 +237,9 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
                          f"directed scores collected) -> ineligible: a partial panel must not "
                          f"decide a round")
             continue
-        if not is_base and st.get("vs_original_complete") is False:
+        if not is_base and not st.get("vs_original_complete"):
+            # An ABSENT/None flag is not a complete anti-regression panel: only
+            # a recorded pass (True) may clear the gate (Rule 6).
             trace.append(f"{label}: ANTI-REGRESSION PANEL INCOMPLETE "
                          f"({st.get('vs_original_n')} of {st.get('vs_original_expected')} scores "
                          f"against the original) -> ineligible")
@@ -235,6 +247,15 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
         if not is_base and not st.get("anti_regression_ok"):
             trace.append(f"{label}: anti-regression gate FAILED (vs_original median "
                          f"{st.get('vs_original')!r} < {VS_ORIGINAL_TOLERANCE:g}) -> ineligible")
+            continue
+        if not str(st.get("digest") or "").strip():
+            # Rule 5: a candidate's identity is its content digest. A row with
+            # no recorded digest cannot be told from another except by its arm's
+            # name/input order, so it is ineligible rather than silently ranked
+            # by that order.
+            trace.append(f"{label}: no content digest recorded -> ineligible: identity is "
+                         f"the content digest (Rule 5), and an undigested row would be "
+                         f"ordered by its name/position")
             continue
         if st.get("caption_gate_ok") is False:
             # Advisory only: reported, never a gate. This is the master prompt's

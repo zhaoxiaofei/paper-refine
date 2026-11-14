@@ -714,7 +714,7 @@ class OnlySpec:
         unknown = sorted(r for r in self.rounds if r > R or r < 1)
         if unknown:
             die(f"{flag}: round(s) {', '.join(str(r) for r in unknown)} do not exist: this "
-                f"pipeline is configured with --rounds {R} (rounds are 1-based)")
+                f"pipeline is configured with --rounds {R} (rounds are 1-based)", code=2)
         return self
 
     def covers_round(self, r: int) -> bool:

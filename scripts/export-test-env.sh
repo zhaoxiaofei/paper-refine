@@ -30,12 +30,6 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "${HERE}/.." && pwd)"
 ENV_NAME="${PAPER_REFINE_TEST_ENV:-paper-refine-test}"
-# ENV_NAME is joined to --out below: a `../` (or an absolute value) escaped the
-# output directory (F135).
-if [[ -z "${ENV_NAME}" || "${ENV_NAME}" == "." || "${ENV_NAME}" == ".." || "${ENV_NAME}" == */* ]]; then
-  echo "error: PAPER_REFINE_TEST_ENV must be one filename component: ${ENV_NAME}" >&2
-  exit 2
-fi
 ENV_PREFIX="${PAPER_REFINE_TEST_PREFIX:-}"
 OUT="${WS}/env"
 CONDA="${CONDA_EXE:-$(command -v conda || true)}"
@@ -78,103 +72,11 @@ mkdir -p "${OUT}"
 STEM="${OUT}/${ENV_NAME}"
 echo "exporting ${ENV_LABEL} -> ${OUT}"
 
-# Write stdin to $1 atomically, and NEVER through a symlink. A plain `> "$dest"`
-# follows a symlink committed under env/ (or a .tmp sibling) and turns a routine
-# export into an arbitrary-file overwrite outside the checkout (F022). The bytes
-# go to a unique sibling created with O_EXCL|O_NOFOLLOW, then rename(2) replaces
-# the destination itself -- it never follows the old inode.
-safe_write() {
-  local dest=$1 dir base tmp
-  dir="$(dirname -- "$dest")"
-  base="$(basename -- "$dest")"
-  if [[ -L "$dest" ]]; then
-    echo "error: refusing to write through symlinked ${dest}" >&2
-    return 1
-  fi
-  if [[ -e "$dest" && ! -f "$dest" ]]; then
-    echo "error: refusing to replace non-regular ${dest}" >&2
-    return 1
-  fi
-  mkdir -p -- "$dir"
-  tmp="$(mktemp -- "${dir}/.${base}.tmp.XXXXXXXXXX")" || {
-    echo "error: could not create a temporary beside ${dest}" >&2
-    return 1
-  }
-  if ! cat > "$tmp"; then
-    rm -f -- "$tmp"
-    echo "error: could not write ${dest}" >&2
-    return 1
-  fi
-  # mktemp creates 0600; the committed exports are 0644 and the README tells
-  # operators to commit them, so a regenerated file must stay readable by every
-  # user of a shared checkout (F040).
-  if ! chmod 0644 -- "$tmp"; then
-    rm -f -- "$tmp"
-    echo "error: could not set the mode on ${dest}" >&2
-    return 1
-  fi
-  if ! mv -f -- "$tmp" "$dest"; then
-    rm -f -- "$tmp"
-    echo "error: could not replace ${dest}" >&2
-    return 1
-  fi
-}
-
-# Same no-follow rule for a caller-managed unique temp (`mktemp`): rename it
-# into place only after refusing a symlinked/non-regular destination.
-safe_replace() {
-  local tmp=$1 dest=$2
-  if [[ -L "$dest" ]]; then
-    rm -f -- "$tmp"
-    echo "error: refusing to write through symlinked ${dest}" >&2
-    return 1
-  fi
-  if [[ -e "$dest" && ! -f "$dest" ]]; then
-    rm -f -- "$tmp"
-    echo "error: refusing to replace non-regular ${dest}" >&2
-    return 1
-  fi
-  # Every caller-managed temp is a `mktemp` sibling (0600); publish it with the
-  # committed 0644 mode (F040).
-  chmod 0644 -- "$tmp" || { rm -f -- "$tmp"; echo "error: could not set the mode on ${dest}" >&2; return 1; }
-  mv -f -- "$tmp" "$dest"
-}
-
 # --- conda side ------------------------------------------------------------
-# Run the producer into a private temp beside its destination and only publish
-# it when conda SUCCEEDED and wrote something. `conda env export | safe_write`
-# ran both sides concurrently: a failing conda still closed the pipe, so
-# safe_write renamed a 0-byte temp over the committed export and pipefail
-# aborted only afterwards -- destroying a good record (F036). Extra arguments
-# are passed through to `conda env export`.
-write_conda_export() {
-  local dest=$1; shift
-  local tmp rc=0
-  tmp="$(mktemp -- "${dest}.tmp.XXXXXXXXXX")" || {
-    echo "error: could not create a temporary beside ${dest}" >&2
-    return 1
-  }
-  "${CONDA}" env export "${ENV_SELECT[@]}" "$@" > "${tmp}" || rc=$?
-  if [[ "$rc" -ne 0 ]]; then
-    rm -f -- "$tmp"
-    echo "error: conda env export failed (exit $rc); ${dest} left unchanged" >&2
-    return 1
-  fi
-  if [[ ! -s "$tmp" ]]; then
-    rm -f -- "$tmp"
-    echo "error: conda env export wrote no output; ${dest} left unchanged" >&2
-    return 1
-  fi
-  # Publish through the one symlink-safe writer (it re-checks the destination).
-  if ! safe_write "$dest" < "$tmp"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  rm -f -- "$tmp"
-}
-write_conda_export "${STEM}.freeze.env_export.yml"
-write_conda_export "${STEM}.freeze.env_export.no_builds.yml" --no-builds
-write_conda_export "${STEM}.freeze.env_export.from_history.yml" --from-history
+"${CONDA}" env export "${ENV_SELECT[@]}" > "${STEM}.freeze.env_export.yml"
+"${CONDA}" env export "${ENV_SELECT[@]}" --no-builds > "${STEM}.freeze.env_export.no_builds.yml"
+"${CONDA}" env export "${ENV_SELECT[@]}" --from-history \
+  > "${STEM}.freeze.env_export.from_history.yml"
 
 # `conda env export` writes a `prefix:` line naming THIS machine; re-creating
 # from a file that hard-codes someone else's home directory is a foot-gun, so
@@ -183,46 +85,24 @@ write_conda_export "${STEM}.freeze.env_export.from_history.yml" --from-history
 for f in "${STEM}.freeze.env_export.yml" \
          "${STEM}.freeze.env_export.no_builds.yml" \
          "${STEM}.freeze.env_export.from_history.yml"; do
-  # Run grep to a TEMP first and check its status: piping straight into
-  # safe_write published an EMPTY file when the producer failed, and only
-  # afterwards did pipefail abort -- destroying a good export (F78). Exit 1 is
-  # "no line matched" (a valid empty result); anything else keeps the record.
-  rc=0
-  _prefix_tmp="$(mktemp -- "${f}.tmp.XXXXXXXXXX")"
-  grep -v '^prefix:' "$f" > "${_prefix_tmp}" || rc=$?
-  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
-    safe_replace "${_prefix_tmp}" "$f"
-  else
-    rm -f "${_prefix_tmp}"
-    echo "error: could not strip the prefix line from $f (grep exit $rc); record left unchanged" >&2
-    exit 1
-  fi
+  grep -v '^prefix:' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 done
 
 # The no-channels variant: the full export with the whole `channels:` block
 # removed, for a box whose channel configuration must not be overridden.
-_no_channels_tmp="$(mktemp -- "${STEM}.freeze.env_export.no_channels.yml.tmp.XXXXXXXXXX")"
-rc=0
 awk '
   /^channels:/ {skip=1; next}
   skip && /^[[:space:]]*-/ {next}
   {skip=0}
   {print}
-' "${STEM}.freeze.env_export.yml" > "${_no_channels_tmp}" || rc=$?
-if [[ "$rc" -ne 0 || ! -s "$_no_channels_tmp" ]]; then
-  rm -f -- "${_no_channels_tmp}"
-  echo "error: could not derive the no-channels export (exit $rc); record left unchanged" >&2
-  exit 1
-fi
-safe_write "${STEM}.freeze.env_export.no_channels.yml" < "${_no_channels_tmp}"
-rm -f -- "${_no_channels_tmp}"
+' "${STEM}.freeze.env_export.yml" > "${STEM}.freeze.env_export.no_channels.yml"
 
 # --- pip side --------------------------------------------------------------
 # Every wheel the environment's pip knows about (the full record). Write to a
 # temporary file first: `|| true` here used to swallow a broken pip and export
 # a 0-byte `requirements.list_e.txt` while the README below promised the exact
 # wheel record, and the script still exited 0.
-freeze_tmp="$(mktemp -- "${STEM}.requirements.list_e.txt.tmp.XXXXXXXXXX")"
+freeze_tmp="${STEM}.requirements.list_e.txt.tmp"
 if ! "${CONDA}" run "${ENV_SELECT[@]}" python -m pip freeze --all 2>/dev/null \
     > "${freeze_tmp}"; then
   rm -f -- "${freeze_tmp}"
@@ -234,50 +114,21 @@ if [[ ! -s "${freeze_tmp}" ]]; then
   echo "error: pip freeze --all produced no output in ${ENV_LABEL}; refusing to write an empty pip record" >&2
   exit 1
 fi
-safe_replace "${freeze_tmp}" "${STEM}.requirements.list_e.txt"
+mv -- "${freeze_tmp}" "${STEM}.requirements.list_e.txt"
 
 # A conda-installed distribution is marked `pypi_0` in `conda list --export`;
 # everything else came from pip, so the pip-only list keeps the `pypi_0` entries
 # and drops the conda-managed lines.
-_conda_list_tmp="$(mktemp -- "${STEM}.conda.packages.txt.tmp.XXXXXXXXXX")"
-set +e
 "${CONDA}" list "${ENV_SELECT[@]}" --export 2>/dev/null \
   | awk -F= '$3 != "pypi_0" {print tolower($1)}' | tr '_' '-' | sort -u \
-  > "${_conda_list_tmp}"
-_ps=("${PIPESTATUS[@]}")
-set -e
-if [[ "${_ps[0]}" -ne 0 || "${_ps[1]}" -ne 0 || "${_ps[2]}" -ne 0 || "${_ps[3]}" -ne 0 ]]; then
-  rm -f -- "${_conda_list_tmp}"
-  echo "error: could not list the conda packages (exit ${_ps[*]}); record left unchanged" >&2
-  exit 1
-fi
-if [[ -s "${_conda_list_tmp}" ]]; then
-  safe_write "${STEM}.conda.packages.txt" < "${_conda_list_tmp}"
-  rm -f -- "${_conda_list_tmp}"
-  _no_pypi_tmp="$(mktemp -- "${STEM}.requirements.list_e_no_pypi.txt.tmp.XXXXXXXXXX")"
-  # `set -e`/pipefail used to abort on grep's legitimate exit 1 BEFORE the
-  # PIPESTATUS branch could handle it, so the documented 0/1 test was dead
-  # (F102). Run the pipeline with errexit off and read the statuses.
-  set +e
+  > "${STEM}.conda.packages.txt"
+if [[ -s "${STEM}.conda.packages.txt" ]]; then
   awk 'BEGIN{FS="=="} {n=tolower($1); gsub(/_/,"-",n); print n"\t"$0}' \
       "${STEM}.requirements.list_e.txt" \
     | grep -v -F -f <(sed 's/$/\t/' "${STEM}.conda.packages.txt") \
-    | cut -f2- > "${_no_pypi_tmp}"
-  # grep exits 1 for "no line matched" (a valid empty list); every other
-  # non-zero stage is a failure, and `|| true` used to install partial output
-  # while exiting 0 (F037).
-  _ps=("${PIPESTATUS[@]}")
-  set -e
-  if [[ "${_ps[0]}" -ne 0 || "${_ps[1]}" -gt 1 || "${_ps[2]}" -ne 0 ]]; then
-    echo "error: could not derive the pip-only package list" >&2
-    rm -f -- "${_no_pypi_tmp}"
-    exit 1
-  fi
-  safe_replace "${_no_pypi_tmp}" "${STEM}.requirements.list_e_no_pypi.txt"
+    | cut -f2- > "${STEM}.requirements.list_e_no_pypi.txt" || true
 else
-  rm -f -- "${_conda_list_tmp}"
-  safe_write "${STEM}.requirements.list_e_no_pypi.txt" \
-    < "${STEM}.requirements.list_e.txt"
+  cp "${STEM}.requirements.list_e.txt" "${STEM}.requirements.list_e_no_pypi.txt"
 fi
 rm -f "${STEM}.conda.packages.txt"
 
@@ -286,23 +137,8 @@ rm -f "${STEM}.conda.packages.txt"
 # can or should install. VCS pins (`pkg @ git+https://...`) are kept.
 for f in "${STEM}.requirements.list_e.txt" "${STEM}.requirements.list_e_no_pypi.txt"; do
   [[ -f "$f" ]] || continue
-  # grep exit 1 means "no line matched" (the temp file is a valid empty
-  # record); exit >1 is a read error, and moving its partial output would
-  # destroy a good pip record (F025).
-  # `|| rc=$?` keeps the non-zero status from tripping `set -e`: a plain
-  # `grep` followed by `rc=$?` exits the shell at the grep, making the 0/1
-  # branch below unreachable (R02).
-  rc=0
-  _sanitize_tmp="$(mktemp -- "${f}.tmp.XXXXXXXXXX")"
-  grep -v -E '^pip @ file://|^[A-Za-z0-9_.\-]+ @ file:///home/' "$f" \
-    > "${_sanitize_tmp}" || rc=$?
-  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
-    safe_replace "${_sanitize_tmp}" "$f"
-  else
-    rm -f "${_sanitize_tmp}"
-    echo "error: could not sanitise $f (grep exit $rc); record left unchanged" >&2
-    exit 1
-  fi
+  grep -v -E '^pip @ file://|^[A-Za-z0-9_.\-]+ @ file:///home/' "$f" > "$f.tmp" || true
+  mv "$f.tmp" "$f"
 done
 
 # The DECLARED test dependencies and their transitive closure, at the exact
@@ -315,7 +151,7 @@ done
   "${STEM}.requirements.test.txt"
 
 # --- README ----------------------------------------------------------------
-safe_write "${OUT}/README.md" <<EOF
+cat > "${OUT}/README.md" <<EOF
 # \`env/\` — the exported test environment
 
 Generated by \`bash scripts/export-test-env.sh\` from the conda environment

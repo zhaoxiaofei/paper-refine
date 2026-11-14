@@ -48,9 +48,7 @@ files); 1 on a verify mismatch, or when payload files exist but none could be
 read or hashed; 2 on a symlinked package root (a link is not package content).
 An unreadable or over-budget payload file is SKIPPED and reported in `notes`
 (the readable remainder is still hashed, exactly like the pipeline's
-`revision_token_for_dir`); an unreadable SUBDIRECTORY is skipped the same way
-and named in `notes`, so a chmod-000 directory no longer crashes the tool. A
-partial skip does not change the exit status.
+`revision_token_for_dir`); a partial skip does not change the exit status.
 """
 from __future__ import annotations
 
@@ -65,10 +63,6 @@ from pathlib import Path
 # The pipeline twin (paper_pipeline.MAX_PAYLOAD_BYTES) refuses a payload file
 # larger than this: hashing a multi-gigabyte data file whole is unbounded (F10).
 MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
-# Keep in step with paper_pipeline.MAX_TREE_DEPTH: the pipeline twin records a
-# gap and stops at this depth, so an uncapped walk here assigned a real token to
-# a package the twin tokenised as '' (F123).
-MAX_TREE_DEPTH = 200
 
 REPORTS = {"changelog.md", "manual_steps.md", "manual_todo.csv", "revision_report.md",
            "revision_report.json", "diff_ledger.md", "rewrite_report.md",
@@ -121,12 +115,7 @@ AUX_NAME_RE = re.compile(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi]
 EVIDENCE_DIRS = {"raw_data", "human_review_feedback", "llm_review_feedback"}
 
 # "-a" / "_v2" / "_V2" / "-4f3a9c1" at the very end of a stem (the version slot).
-# The legacy single-letter alternative is LOWERCASE only: the legacy increments
-# were "-a"/"-b"-style arm letters, while an uppercase trailing letter is an
-# IDENTITY label (`Appendix_A.docx`, `Figure_B.pdf`, `sample-A.txt`) and must
-# not be renamed to `Appendix_<token>.docx` nor stripped from the hashed bytes
-# (F171).
-TOKEN_RE = re.compile(r"^(?P<base>.*?)[-_](?P<tok>[0-9a-f]{7}|[a-z]|[vV]\d+)$")
+TOKEN_RE = re.compile(r"^(?P<base>.*?)[-_](?P<tok>[0-9a-f]{7}|[A-Za-z]|[vV]\d+)$")
 HEX7_RE = re.compile(r"[0-9a-f]{7}")
 
 
@@ -143,7 +132,7 @@ def is_payload(p: Path, root: Path) -> bool:
     return True
 
 
-def tree_files(root: Path, gaps: list = None) -> list:
+def tree_files(root: Path) -> list:
     """Every file under `root`, descending into symlinked DIRECTORIES.
 
     Keep in step with paper_pipeline._iter_tree_files(follow_dir_links=True): a
@@ -151,11 +140,6 @@ def tree_files(root: Path, gaps: list = None) -> list:
     human_review_feedback/) as symlinks to the root's canonical copy (see
     ensure_pristine_input), and the payload must see the same files whether the
     area is linked or copied. An ancestor-inode set keeps a link cycle finite.
-
-    `gaps`, when given, receives the package-relative path of every directory
-    whose entries could not be listed. The pipeline twin records the same gap;
-    letting `iterdir()` raise killed this tool with an opaque PermissionError
-    while the twin hashed the readable remainder (F18).
     """
     if not root.is_dir() or root.is_symlink():
         # A package ROOT that is a link is not package content: walking it
@@ -194,44 +178,20 @@ def tree_files(root: Path, gaps: list = None) -> list:
         return (target.is_dir() and target.name == p.name
                 and target.parent.name == "non_revised")
 
-    def walk(d: Path, ancestors: frozenset, depth: int = 0) -> None:
-        if depth > MAX_TREE_DEPTH:
-            if gaps is not None:
-                try:
-                    gaps.append(d.relative_to(root).as_posix())
-                except ValueError:
-                    gaps.append(str(d))
-            print(f"warning: directory tree under {d} exceeds the "
-                  f"{MAX_TREE_DEPTH}-level depth cap; its deeper files are not in the "
-                  f"token", file=sys.stderr)
-            return
-        try:
-            entries = sorted(d.iterdir())
-        except OSError as e:
-            # An unreadable DIRECTORY is the same class as an unreadable file:
-            # skip it, keep hashing the readable remainder, and let the caller
-            # report the gap instead of dying with a traceback (F18).
-            if gaps is not None:
-                try:
-                    gaps.append(d.relative_to(root).as_posix())
-                except ValueError:
-                    gaps.append(str(d))
-            print(f"warning: cannot read directory {d}: {e}; its files are not in the token",
-                  file=sys.stderr)
-            return
-        for p in entries:
+    def walk(d: Path, ancestors: frozenset) -> None:
+        for p in sorted(d.iterdir()):
             if p.is_symlink() and p.is_dir():
                 if not followable_evidence_dir(p, d == root):
                     continue
                 key = dir_key(p)
                 if key is None or key in ancestors:
                     continue
-                walk(p, ancestors | {key}, depth + 1)
+                walk(p, ancestors | {key})
             elif p.is_dir():
                 key = dir_key(p)
                 if key is None or key in ancestors:
                     continue
-                walk(p, ancestors | {key}, depth + 1)
+                walk(p, ancestors | {key})
             elif p.is_file() and not p.is_symlink():
                 # A FILE symlink is not package content (the pipeline twin's
                 # _iter_tree_files refuses it for the same reason): hashing its
@@ -248,10 +208,10 @@ def tree_files(root: Path, gaps: list = None) -> list:
     return out
 
 
-def payload_files(root: Path, gaps: list = None) -> list:
+def payload_files(root: Path) -> list:
     if not root.is_dir():
         return []
-    return sorted(p for p in tree_files(root, gaps=gaps) if p.is_file() and is_payload(p, root))
+    return sorted(p for p in tree_files(root) if p.is_file() and is_payload(p, root))
 
 
 def filename_token(name: str):
@@ -326,8 +286,7 @@ def revision_token(root: Path) -> dict:
     """{'token','files','tokens_seen','consistent','notes'} for one package."""
     if not root.is_dir():
         raise SystemExit(f"error: not a directory: {root}")
-    dir_gaps = []
-    files = payload_files(root, gaps=dir_gaps)
+    files = payload_files(root)
     named = [(p.relative_to(root).as_posix(), filename_token(p.name)) for p in files]
     tokens = [t for _rel, t in named if t]
     digs = []
@@ -359,10 +318,6 @@ def revision_token(root: Path) -> dict:
                          "so no payload file was hashed (pass the target directory)")
         else:
             notes.append("no payload file found")
-        if dir_gaps:
-            notes.append("unreadable director"
-                         + ("y" if len(dir_gaps) == 1 else "ies")
-                         + " skipped: " + "; ".join(dir_gaps[:3]))
         return {"token": "", "files": len(files), "tokens_seen": [],
                 "consistent": False, "notes": notes}
     token = hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()[:7]
@@ -375,10 +330,6 @@ def revision_token(root: Path) -> dict:
     notes = []
     if skipped:
         notes.append("unreadable payload file(s) skipped: " + "; ".join(skipped[:3]))
-    if dir_gaps:
-        notes.append("unreadable director"
-                     + ("y" if len(dir_gaps) == 1 else "ies")
-                     + " skipped: " + "; ".join(dir_gaps[:3]))
     if not hex_tokens:
         notes.append("no 7-hex token in any payload filename (legacy letter tokens, or none "
                      "applied yet)")
@@ -406,14 +357,6 @@ def main(argv=None) -> int:
         return 2
     info = revision_token(root)
     if args.verify is not None:
-        # The empty-token rule outranks the comparison: an empty COMPUTED
-        # token (every payload unreadable/over budget) must never equal a
-        # supplied token, or `--verify ""` from an unset shell variable
-        # certifies a package that was never hashed.
-        if not info["token"] and info.get("files"):
-            print("error: no payload file could be read or hashed; the token is empty",
-                  file=sys.stderr)
-            return 1
         ok = info["token"] == args.verify
         print(f"{'OK' if ok else 'MISMATCH'}: content token {info['token']} vs --verify "
               f"{args.verify}")
