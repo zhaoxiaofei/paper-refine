@@ -5,7 +5,14 @@
 # the single-file source.
 from __future__ import annotations
 
-_RUN_PROPERTIES_RE = re.compile(r"<w:r(?=[\s/>])[^>]*(?<!/)>\s*(?=<w:rPr(?=[\s/>]))")
+_XML_INTER_ELEMENT = rf"(?:\s|{_XML_MISC})*"
+_PARAGRAPH_OPEN_RE = re.compile(rf"<w:p(?=[\s/>]){_XML_ATTRIBUTES}>")
+_PARAGRAPH_PROPERTIES_OPEN_RE = re.compile(rf"<w:pPr(?=[\s/>]){_XML_ATTRIBUTES}>")
+_RUN_PROPERTIES_RE = re.compile(
+    rf"<w:r(?=[\s/>]){_XML_ATTRIBUTES}(?<!/)>{_XML_INTER_ELEMENT}(?=<w:rPr(?=[\s/>]))")
+_PARAGRAPH_PROPERTIES_RE = re.compile(
+    rf"<w:p(?=[\s/>]){_XML_ATTRIBUTES}(?<!/)>{_XML_INTER_ELEMENT}(?=<w:pPr(?=[\s/>]))")
+_PAGE_BREAK_DISABLED_RE = re.compile(r"""\sw:val\s*=\s*(?:"(?:0|false|off)"|'(?:0|false|off)')""")
 
 
 def _break_only_paragraph(para: str) -> bool:
@@ -268,7 +275,8 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             if not URL_RE.search(rtext):
                 continue
             in_link = any(a <= r0 < b for a, b in link_spans)
-            rpr = rpr_of(run) if _RUN_PROPERTIES_RE.match(run) else None
+            opening = _RUN_PROPERTIES_RE.match(run)
+            rpr = rpr_of(run[opening.end():]) if opening else None
             t = ("link" if in_link else "plain",
                  elem_val(rpr, "rStyle") or "-",
                  elem_val(rpr, "color") or "-",
@@ -940,16 +948,13 @@ PPR_SPACING_AFTER = ("pStyle", "keepNext", "keepLines", "pageBreakBefore", "fram
                      "snapToGrid")
 
 
-def _own_ppr(para: str) -> str | None:
-    # A host can lack a pPr even when its text box has one.
-    opening = re.match(r"<w:p(?=[\s/>])[^>]*(?<!/)>\s*(?=<w:pPr(?=[\s/>]))", para)
-    return ppr_of(para[opening.end():]) if opening else None
-
-
 def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepLines")) -> str:
-    ppr = _own_ppr(para)
+    # A host can lack a pPr even when its text box has one.
+    opening = _PARAGRAPH_PROPERTIES_RE.match(para)
+    ppr = ppr_of(para[opening.end():]) if opening else None
     if ppr is None:
-        tag_end = para.find(">") + 1
+        paragraph_tag = _PARAGRAPH_OPEN_RE.match(para)
+        tag_end = paragraph_tag.end() if paragraph_tag else para.find(">") + 1
         head, tail = para[:tag_end], para[tag_end:]
         if head.rstrip().endswith("/>"):
             # A self-closing paragraph (`<w:p w:rsidR="..."/>`, what python-docx
@@ -963,20 +968,22 @@ def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepL
     for tag in after:
         # Only a DIRECT child may anchor the insert: a pStyle inside
         # w:pPrChange is revision history, not live formatting.
-        el = child_elem(ppr, tag)
-        if el:
-            pos = max(pos, ppr.find(el) + len(el))
+        span = _child_element_span(ppr, tag)
+        if span:
+            pos = max(pos, span[1])
     if pos == 0:
         # Anchor at the END of the `w:pPr` open tag, not at a fixed offset: Word
         # writes attributes on it (`<w:pPr w:rsidR="...">`), and splicing a child
         # in after a fixed `len("<w:pPr>")` corrupts the tag. A self-closing
         # `w:pPr` has to be expanded before the child can go inside it.
-        m = re.match(r"<w:pPr(?=[\s/>])[^>]*>", ppr)
+        m = _PARAGRAPH_PROPERTIES_OPEN_RE.match(ppr)
         if m and m.group(0).rstrip().endswith("/>"):
             head = m.group(0).rstrip()[:-2].rstrip() + ">"
-            return para.replace(ppr, head + element + "</w:pPr>", 1)
+            at = opening.end()
+            return para[:at] + head + element + "</w:pPr>" + para[at + len(ppr):]
         pos = m.end() if m else len("<w:pPr>")
-    return para.replace(ppr, ppr[:pos] + element + ppr[pos:], 1)
+    at = opening.end() + pos
+    return para[:at] + element + para[at:]
 
 
 def _unlink_fields(xml: str) -> tuple:
@@ -1128,14 +1135,21 @@ def fix_document(xml: str, styles: dict, policy: dict,
         nxt = next((j for j in range(idx + 1, len(plist)) if j not in excluded), None)
         if nxt is not None:
             np0, np1, npara = plist[nxt]
-            if child_elem(_own_ppr(npara), "pageBreakBefore"):
+            opening = _PARAGRAPH_PROPERTIES_RE.match(npara)
+            ppr = ppr_of(npara[opening.end():]) if opening else None
+            existing = _child_element_span(ppr, "pageBreakBefore")
+            if existing is None:
+                edits.append((np0, np1, insert_into_ppr(npara, "<w:pageBreakBefore/>")))
+                changes.append(f"moved the page break onto the following paragraph (was the empty p{idx})")
+            elif _PAGE_BREAK_DISABLED_RE.search(ppr[existing[0]:existing[1]]):
+                start = np0 + opening.end()
+                edits.append((start + existing[0], start + existing[1], "<w:pageBreakBefore/>"))
+                changes.append(f"enabled pageBreakBefore on the following paragraph (was the empty p{idx})")
+            else:
                 # The target already carries the property: a second
                 # <w:pageBreakBefore/> is schema-invalid.
                 changes.append(f"removed the empty page-break paragraph p{idx} "
                                f"(the following paragraph already has pageBreakBefore)")
-            else:
-                edits.append((np0, np1, insert_into_ppr(npara, "<w:pageBreakBefore/>")))
-                changes.append(f"moved the page break onto the following paragraph (was the empty p{idx})")
         else:
             changes.append(f"removed the trailing break-only paragraph p{idx}")
         xml = apply_edits(xml, edits)
@@ -1538,7 +1552,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 opening = _RUN_PROPERTIES_RE.match(run)
                 if opening is None:
                     continue
-                rpr = rpr_of(run)
+                rpr = rpr_of(run[opening.end():])
                 if rpr is None:
                     continue
                 # Strip only the LIVE segments: rPrChange is the tracked

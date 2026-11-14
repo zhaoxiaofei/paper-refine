@@ -2980,7 +2980,9 @@ def _nearest_image_height(width: float, ratio: float, unit: str) -> float:
     """Height representable by the corresponding OOXML extent."""
     if unit == "EMU":
         return max(1, round(width / ratio))
-    return max(0.01, round(width / ratio, 2))
+    # VML dimensions are decimal lengths and can be much smaller than .01
+    # in their original unit. Keep the precision of the computed height.
+    return width / ratio
 
 
 def _ratio_fixes(block: str, expected: float) -> list:
@@ -3012,10 +3014,13 @@ def _ratio_fixes(block: str, expected: float) -> list:
         if not (width and height) or width.group(2).lower() != height.group(2).lower():
             continue
         want = _nearest_image_height(float(width.group(1)), expected, width.group(2))
-        if want == float(height.group(1)):
+        if not math.isfinite(want) or want <= 0 or want == float(height.group(1)):
             continue
+        # Use a round-trippable decimal without exponent notation so the
+        # scanner reads the same height on the next pass.
+        length = format(Decimal(str(want)), "f")
         new_style = style.group(1)[:height.start()] + \
-            f"height:{want:g}{height.group(2)}" + style.group(1)[height.end():]
+            f"height:{length}{height.group(2)}" + style.group(1)[height.end():]
         fixes.append((m.start(), m.end(), tag.replace(style.group(1), new_style, 1)))
     return fixes
 
@@ -3027,10 +3032,8 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
     `fixes` are (start, end, new) against `part_xml`; the scanner uses the rows
     only, the fixer applies the fixes.
     """
-    # An explicit None check, never `or 0.02`: the tolerance is an INCLUSION
-    # threshold ("differs by more than this"), so a configured 0 means "any
-    # difference is a defect" and must not be replaced by the permissive
-    # default. `0 or 0.02 == 0.02` silently ignored an exact-ratio policy.
+    # Zero tolerance requires the nearest representable height. Only a
+    # missing or invalid tolerance falls back to the permissive default.
     _tol = policy.get("image_aspect_tolerance")
     try:
         tol = 0.02 if _tol is None else float(_tol)
@@ -3110,7 +3113,7 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
                 cxf, cyf = float(cx), float(cy)
             except (TypeError, ValueError):
                 continue
-            if cyf <= 0:
+            if not (0 < cxf < math.inf and 0 < cyf < math.inf and 0 < expected < math.inf):
                 continue
             # FMT-IM4: a raster placed below the policy's effective-resolution
             # floor. Vector art (EMF/WMF/SVG) has no pixel grid and is skipped.

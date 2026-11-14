@@ -157,6 +157,30 @@ def test_textbox_repairs_preserve_paragraph_ownership():
           and body[1].find(f"{{{W_NS}}}pPr/{{{W_NS}}}pageBreakBefore") is None
           and inner in fixed)
 
+    target = ('<w:p><!-- keep <w:pPr/> --><?editor keep?>'
+              '<w:pPr><w:keepNext/></w:pPr>'
+              f'<w:r>{box(inner)}</w:r></w:p>')
+    fixed, _, _ = fmt.fix_document(document(break_only + target + next_body), {}, policy)
+    body = ET.fromstring(fixed).find(f"{{{W_NS}}}body")
+    properties = body[0].findall(f"{{{W_NS}}}pPr")
+    check("comments and processing instructions leave a single host property element",
+          len(properties) == 1
+          and properties[0].find(f"{{{W_NS}}}pageBreakBefore") is not None
+          and properties[0].find(f"{{{W_NS}}}keepNext") is not None
+          and '<!-- keep <w:pPr/> --><?editor keep?>' in fixed)
+
+    for value in ('"0"', "'false'"):
+        disabled_break = f'<w:pageBreakBefore w:val={value}/>'
+        commented_break = f'<!-- {disabled_break} -->'
+        target = (f'<w:p><w:pPr>{commented_break}{disabled_break}</w:pPr>'
+                  f'<w:r>{box(inner)}</w:r></w:p>')
+        fixed, _, _ = fmt.fix_document(document(break_only + target + next_body), {}, policy)
+        body = ET.fromstring(fixed).find(f"{{{W_NS}}}body")
+        breaks = body[0].findall(f"{{{W_NS}}}pPr/{{{W_NS}}}pageBreakBefore")
+        check("a relocated body break enables the host's explicit false value",
+              len(body) == 2 and len(breaks) == 1 and not breaks[0].attrib
+              and commented_break in fixed and inner in fixed, value)
+
     inner_url = ('<w:p><w:r><w:rPr><w:i/></w:rPr>'
                  '<w:t>https://example.org/box</w:t></w:r></w:p>')
     outer_url = ('<w:p><w:r><w:rPr><w:color w:val="FF0000"/></w:rPr>'
@@ -171,6 +195,17 @@ def test_textbox_repairs_preserve_paragraph_ownership():
           "https://example.org/body" in fixed and "https://example.org/box" in fixed
           and root.find(f".//{{{W_NS}}}color") is None
           and root.find(f".//{{{W_NS}}}i") is None)
+
+    leading_xml = '<!-- keep <w:rPr/> --><?editor keep?>'
+    styled_url = (f'<w:p><w:r>{leading_xml}<w:rPr><w:i/></w:rPr>'
+                  '<w:t>https://example.org/styled</w:t></w:r></w:p>')
+    plain_url = '<w:p><w:r><w:t>https://example.org/plain</w:t></w:r></w:p>'
+    xml = document(styled_url + plain_url)
+    report = fmt.analyse_document(xml, {}, policy, "d.docx")
+    fixed, _, _ = fmt.fix_document(xml, {}, policy)
+    check("URL styling is found and repaired after comments and processing instructions",
+          any(row["rule"] == "FMT-T7b" for row in report["rows"])
+          and leading_xml in fixed and '<w:i/>' not in fixed)
 
 
 def test_f16_fld_simple():

@@ -5,6 +5,7 @@ import contextlib
 import csv
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -18,6 +19,7 @@ import zipfile
 from bisect import bisect_right
 import zlib
 from collections import Counter, defaultdict
+from decimal import Decimal
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
@@ -681,18 +683,13 @@ def elem(frag: str | None, tag: str) -> str | None:
     return m.group(0) if m else None
 
 
-_CHILD_TAG_RE = re.compile(r"<(/?)([A-Za-z0-9:_.-]+)(?=[\s/>])([^>]*)>")
+_XML_MISC = r"<!--(?:[^-]|-(?!->))*-->|<\?(?:[^?]|\?(?!>))*\?>"
+_XML_ATTRIBUTES = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
+_CHILD_TAG_RE = re.compile(rf"{_XML_MISC}|<(/?)([A-Za-z0-9:_.-]+)(?=[\s/>])({_XML_ATTRIBUTES})>")
 
 
-def child_elem(frag: str | None, tag: str) -> str | None:
-    """The DIRECT child `<w:tag>` of `frag`, never a descendant.
-
-    `elem()` searches the whole fragment, so `elem(ppr, "spacing")` returned a
-    paragraph MARK's character spacing (`<w:pPr><w:rPr><w:spacing .../>`) as
-    if it were the paragraph's line spacing -- the scanner reported FMT-T2
-    rows that did not exist and the fixer wrote a paragraph-level element
-    inside `w:rPr`, which is invalid OOXML.
-    """
+def _child_element_span(frag: str | None, tag: str) -> tuple[int, int] | None:
+    """Offsets of the direct child named tag."""
     if not frag:
         return None
     depth = 0
@@ -700,21 +697,29 @@ def child_elem(frag: str | None, tag: str) -> str | None:
     start_depth = None
     for m in _CHILD_TAG_RE.finditer(frag):
         closing, name, rest = m.group(1), m.group(2), m.group(3)
+        if name is None:
+            continue
         self_closing = bool(closing == "") and rest.rstrip().endswith("/")
         if closing:
             depth -= 1
             if (start is not None and depth == start_depth
                     and name.split(":")[-1] == tag):
-                return frag[start:m.end()]
+                return start, m.end()
             continue
         if depth == 1 and name.split(":")[-1] == tag:
             if self_closing:
-                return m.group(0)
+                return m.span()
             start = m.start()
             start_depth = depth
         if not self_closing:
             depth += 1
     return None
+
+
+def child_elem(frag: str | None, tag: str) -> str | None:
+    """The direct child of frag, excluding descendant properties."""
+    span = _child_element_span(frag, tag)
+    return frag[span[0]:span[1]] if span is not None else None
 
 
 def ppr_style(ppr: str | None) -> str | None:

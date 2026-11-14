@@ -143,8 +143,12 @@ def test_f13_anchor_paragraph():
     rep = pf.fix_package(src, tmp / "o.docx", dict(pf.POLICY_DEFAULTS))
     with zipfile.ZipFile(tmp / "o.docx") as z:
         dx = z.read("word/document.xml").decode()
-    check("the bookmark survives", "MethodSection" in dx, f"ok={rep.get('ok')}")
-    findings = pf.analyse_document(dx, {}, dict(pf.POLICY_DEFAULTS), "o.docx")["rows"]
+    check("the bookmark and page break stay in the same paragraph",
+          rep.get("ok") and any('w:type="page"' in para and 'w:name="MethodSection"' in para
+                                for _, _, para in pf.paragraphs(dx)))
+    with zipfile.ZipFile(src) as z:
+        original = z.read("word/document.xml").decode()
+    findings = pf.analyse_document(original, {}, dict(pf.POLICY_DEFAULTS), src.name)["rows"]
     check("the scanner has the same anchor guard",
           not any(row["rule"] == "FMT-S1" for row in findings))
 

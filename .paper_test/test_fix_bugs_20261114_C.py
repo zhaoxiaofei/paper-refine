@@ -297,7 +297,7 @@ def test_f33_zero_aspect_tolerance() -> None:
     for shape, height in (
         (xml.replace('cx="1010000"', 'cx="914401"'), 'cy="609601"'),
         ('<w:p><w:r><w:pict><v:shape style="width:10pt;height:10pt">'
-         '<v:imagedata r:id="rId9"/></v:shape></w:pict></w:r></w:p>', "height:6.67pt"),
+         '<v:imagedata r:id="rId9"/></v:shape></w:pict></w:r></w:p>', "height:6.666666"),
     ):
         rows, edits = fmt.drawing_geometry_rows(shape, rels, ratio_sizes, "d.docx", exact)
         fixed = fmt.apply_edits(shape, edits)
@@ -305,6 +305,16 @@ def test_f33_zero_aspect_tolerance() -> None:
         check("F33 exact-ratio repair converges at representable height",
               any(row["rule"] == "FMT-IM1" for row in rows)
               and height in fixed and not remaining and not followup, str(remaining))
+
+    small_vml = ('<w:p><w:r><w:pict><v:shape style="width:0.01in;height:0.01in">'
+                 '<v:imagedata r:id="rId9"/></v:shape></w:pict></w:r></w:p>')
+    wide_image = {"word/media/img1.png": (300, 100)}
+    rows, edits = fmt.drawing_geometry_rows(small_vml, rels, wide_image, "d.docx", exact)
+    fixed = fmt.apply_edits(small_vml, edits)
+    remaining, followup = fmt.drawing_geometry_rows(fixed, rels, wide_image, "d.docx", exact)
+    check("F33 a small VML image is repaired at decimal precision",
+          any(row["rule"] == "FMT-IM1" for row in rows)
+          and "height:0.003333" in fixed and not remaining and not followup, fixed)
 
 
 # ---------------------------------------------------------------------------
