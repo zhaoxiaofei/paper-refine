@@ -941,6 +941,23 @@ function main() {
 
   const keep = opts.merge ? parseExistingEntries(original) : [];
   if (opts.merge) assertMergeable(patchFile, original, keep);
+  // A selection that transforms to zero entries used to emit an empty block:
+  // mergePatch then spliced that emptiness into the existing block's span,
+  // deleting every managed row, and the run still printed "imported 0
+  // server(s)" and exited 0. Only --remove may delete the block on purpose.
+  const blockBegin = original.indexOf(BEGIN);
+  const blockEnd = blockBegin >= 0 ? original.indexOf(END, blockBegin) : -1;
+  const existingRows = blockBegin >= 0 && blockEnd > blockBegin
+    ? (original.slice(blockBegin + BEGIN.length, blockEnd).match(/^\s*-\s+id:/gm) || []).length
+    : 0;
+  if (entries.length === 0 && keep.length === 0 && existingRows > 0) {
+    const skippedText = skipped.length > 0
+      ? `; skipped: ${skipped.map((item) => `${item.name} (${item.reason})`).join(', ')}`
+      : '';
+    die(`the selection imports 0 server(s), which would delete the ${existingRows} managed `
+        + `row(s) in ${patchFile}; refusing to rewrite it (use --remove to delete the block `
+        + `deliberately)${skippedText}`);
+  }
   const block = emitBlock(entries, keep);
   const next = mergePatch(original, block);
 

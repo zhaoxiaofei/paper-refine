@@ -14,8 +14,21 @@ def header_lines(*, generated, root, version, config_line, venue_lines, certific
     if certification:
         _cert = certification
         _verdict = verdict
-        _why = (_cert.get("blockers") or _cert.get("notes")
-                or ["every gate passed"])
+        _why = _cert.get("blockers") or _cert.get("notes")
+        if isinstance(_why, str):
+            # A hand-built/legacy record may carry ONE note as a bare string;
+            # iterating it would join its characters ("n; o; t; e").
+            _why = [_why]
+        if not _why:
+            # "every gate passed" is a CERTIFIED verdict, never a fallback for a
+            # provisional/not-certified one with no recorded reason.
+            if _cert.get("certified"):
+                _why = ["every gate passed"]
+            elif _cert.get("provisional") or _cert.get("auto_promoted"):
+                _why = ["no blockers were recorded, but the answer is provisional, not a "
+                        "certified panel result"]
+            else:
+                _why = ["no blockers were recorded, but the decision is not certified"]
         L.append("")
         L.append(f"**Certification: {_verdict}.** " + "; ".join(str(x) for x in _why))
         _cv = _cert.get("clean_version") or {}

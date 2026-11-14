@@ -201,6 +201,14 @@ def run_defect_audit_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
     answer = sb / "audit.json"
     try:
         if answer.exists():
+            # Keep the PREVIOUS submission before this attempt replaces it: a
+            # partial/failed audit is still evidence of what the agent checked,
+            # and the failure path records its coverage (F169).
+            shutil.copyfile(answer, sb / "audit.previous.json")
+    except OSError:
+        pass
+    try:
+        if answer.exists():
             answer.unlink()
     except OSError:
         pass
@@ -332,7 +340,7 @@ def apply_defect_audit(rows: list, verdicts: dict) -> list:
     return out
 
 
-def census_from_filtered_rows(template: dict, rows: list) -> dict:
+def census_from_filtered_rows(template: dict, rows: list, order_rows: list = None) -> dict:
     """The census shape re-counted over a SUBSET of one round's defect rows.
 
     `template` is the non-audited `agg["issue_census"]`; its session and
@@ -340,14 +348,43 @@ def census_from_filtered_rows(template: dict, rows: list) -> dict:
     count is recomputed from `rows` with the SAME per-(session, version) key
     `build_issue_census` uses.  Rows marked `counted == "no"` (the opt-in
     location-dedup merges) stay excluded, exactly as in the original census.
+
+    `order_rows` is the round's pre-sort `issue_rows` list: the caller's `rows`
+    normally arrive in the DEFECT-LIST order (version, severity, tier, session),
+    which is not the order `build_issue_census` clustered in. Greedy fuzzy
+    matching is not transitive, so re-clustering the sorted list could split a
+    cluster the recorded census merged (F165); walking the original order
+    instead reproduces the recorded clusters.
     """
     rows = [row for row in (rows or []) if isinstance(row, dict)]
+
+    def _identity(row) -> tuple:
+        """The row's cluster-relevant fields (stable across list copies)."""
+        return tuple(str(row.get(k) or "") for k in
+                     ("version", "source", "session", "tier", "severity",
+                      "check", "evidence", "counted"))
+
+    if order_rows:
+        positions = {}
+        for i, row in enumerate(order_rows):
+            if isinstance(row, dict):
+                positions.setdefault(_identity(row), []).append(i)
+
+        def _original_order(row):
+            seq = positions.get(_identity(row))
+            return seq.pop(0) if seq else len(positions) + 1
+
+        rows = sorted(rows, key=_original_order)
     # A location-dedup cluster's representative can be judged FP and removed
     # from the TP-only list while its merged TP duplicate stays -- with
     # `counted=no` and no counted member left. Re-cluster the FILTERED rows
     # instead of trusting the pre-audit flag, so the verified defect is counted
     # once (F-056).
     location_mode = any(str(r.get("dedup_mode") or "") == "location" for r in rows)
+    # The rows BEFORE the re-cluster are the ones the sheets really filed: the
+    # *_raw counts are taken from them, and the rows the re-cluster merges away
+    # are the *_merged counts (F172).
+    eligible_rows = rows
     if location_mode:
         accepted, regrouped = {}, []
         for row in rows:
@@ -367,23 +404,29 @@ def census_from_filtered_rows(template: dict, rows: list) -> dict:
                 entries.append((cls, loc, row.get("session"), sev))
                 regrouped.append(row)
         rows = regrouped
-    counts, seen = {}, set()
-    for row in rows:
-        if (not location_mode
-                and str(row.get("counted") or "yes").strip().lower() == "no"):
-            continue
-        vid = str(row.get("version"))
-        tier, sev = str(row.get("tier")), str(row.get("severity"))
-        if tier not in BASIS_TIERS or sev not in SEVERITIES:
-            continue
-        key = (str(row.get("session")), vid,
-               _issue_row_key(tier, sev, row.get("evidence"), row.get("check")))
-        if key in seen:
-            continue
-        seen.add(key)
-        src = "own" if str(row.get("source")) == "own" else "peer"
-        bucket = counts.setdefault((vid, tier, sev), {"own": 0, "peer": 0})
-        bucket[src] += 1
+
+    def _counts(seq):
+        counts, seen = {}, set()
+        for row in seq:
+            if (not location_mode
+                    and str(row.get("counted") or "yes").strip().lower() == "no"):
+                continue
+            vid = str(row.get("version"))
+            tier, sev = str(row.get("tier")), str(row.get("severity"))
+            if tier not in BASIS_TIERS or sev not in SEVERITIES:
+                continue
+            key = (str(row.get("session")), vid,
+                   _issue_row_key(tier, sev, row.get("evidence"), row.get("check")))
+            if key in seen:
+                continue
+            seen.add(key)
+            src = "own" if str(row.get("source")) == "own" else "peer"
+            bucket = counts.setdefault((vid, tier, sev), {"own": 0, "peer": 0})
+            bucket[src] += 1
+        return counts
+
+    counts = _counts(rows)
+    raw_counts = _counts(eligible_rows)
     census = {}
     for vid, tpl in (template or {}).items():
         if not isinstance(tpl, dict):
@@ -395,25 +438,36 @@ def census_from_filtered_rows(template: dict, rows: list) -> dict:
                           "raw_peer": 0, "merged_own": 0, "merged_peer": 0}
                       for s in SEVERITIES}
         tiers, own_total, peer_total = {}, 0, 0
+        raw_own_total = raw_peer_total = merged_own_total = merged_peer_total = 0
         for tier in BASIS_TIERS:
             per_sev, t_own, t_peer = {}, 0, 0
             for sev in SEVERITIES:
                 bucket = counts.get((vid, tier, sev)) or {"own": 0, "peer": 0}
                 own, peer = int(bucket.get("own") or 0), int(bucket.get("peer") or 0)
+                raw = raw_counts.get((vid, tier, sev)) or {"own": 0, "peer": 0}
+                raw_own, raw_peer = int(raw.get("own") or 0), int(raw.get("peer") or 0)
+                merged_own = max(0, raw_own - own)
+                merged_peer = max(0, raw_peer - peer)
                 n_own_opps = int(tpl.get("own_opps") or 0)
                 n_peer_opps = int(tpl.get("peer_opps") or 0)
                 per_sev[sev] = {
                     "own": own, "peer": peer, "total": own + peer,
-                    "raw_own": own, "raw_peer": peer,
-                    "merged_own": 0, "merged_peer": 0,
+                    "raw_own": raw_own, "raw_peer": raw_peer,
+                    "merged_own": merged_own, "merged_peer": merged_peer,
                     "peer_rate": (round(peer / n_peer_opps, 6) if n_peer_opps else 0.0),
                     "own_rate": (round(own / n_own_opps, 6) if n_own_opps else 0.0),
                 }
                 sev_totals[sev]["own"] += own
                 sev_totals[sev]["peer"] += peer
-                sev_totals[sev]["raw_own"] += own
-                sev_totals[sev]["raw_peer"] += peer
+                sev_totals[sev]["raw_own"] += raw_own
+                sev_totals[sev]["raw_peer"] += raw_peer
+                sev_totals[sev]["merged_own"] += merged_own
+                sev_totals[sev]["merged_peer"] += merged_peer
                 sev_totals[sev]["total"] += own + peer
+                raw_own_total += raw_own
+                raw_peer_total += raw_peer
+                merged_own_total += merged_own
+                merged_peer_total += merged_peer
                 t_own += own
                 t_peer += peer
             for per_sev_row in per_sev.values():
@@ -427,6 +481,7 @@ def census_from_filtered_rows(template: dict, rows: list) -> dict:
             own_total += t_own
             peer_total += t_peer
         total = own_total + peer_total
+        raw_total = raw_own_total + raw_peer_total
         rate = (round(total / n_sessions, 4) if n_sessions else None)
         census[vid] = dict(tpl, **{
             "tiers": tiers,
@@ -434,10 +489,14 @@ def census_from_filtered_rows(template: dict, rows: list) -> dict:
                                                    if n_sessions else None))
                            for s, v in sev_totals.items()},
             "own": own_total, "peer": peer_total, "total": total,
-            "raw_own": own_total, "raw_peer": peer_total, "raw_total": total,
-            "merged_own": 0, "merged_peer": 0, "merged": 0,
+            "raw_own": raw_own_total, "raw_peer": raw_peer_total,
+            "raw_total": raw_total,
+            "merged_own": merged_own_total, "merged_peer": merged_peer_total,
+            "merged": merged_own_total + merged_peer_total,
             "dedup_audit": [],
-            "per_session": rate, "raw_per_session": rate})
+            "per_session": rate,
+            "raw_per_session": (round(raw_total / n_sessions, 4)
+                                if n_sessions else None)})
     return census
 
 
@@ -454,7 +513,8 @@ def audited_defect_agg(ctx: Ctx, r: int, agg: dict, labelled: list) -> dict:
     out = dict(agg or {})
     out["issue_rows"] = rows
     out["issue_census"] = census_from_filtered_rows(
-        (agg or {}).get("issue_census") or {}, rows)
+        (agg or {}).get("issue_census") or {}, rows,
+        order_rows=(agg or {}).get("issue_rows") or [])
     return out
 
 
@@ -556,8 +616,10 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
     """
     r = int(r)
     if agg is None:
-        field = [str(v) for v in (ctx.round_rec(r).get("field") or [])]
-        agg = aggregate_round(ctx, r, field) if field else {"issue_rows": [], "field": []}
+        rec = ctx.round_rec(r)
+        field = [str(v) for v in (rec.get("field") or [])]
+        agg = (aggregate_round(ctx, r, field, dedup=rec.get("dedup_mode"))
+               if field else {"issue_rows": [], "field": []})
     rows = defect_list_rows(ctx, r, agg)
     if not rows:
         return {"used": False, "reason": "no defect rows to audit", "rows": 0}
@@ -630,13 +692,31 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
     if not verdicts or not info.get("ok"):
         # A partial or self-contradictory audit is not a successful audit: it is
         # reported with its coverage and never reaches the TP-only family
-        # (F-028).
+        # (F-028). Record it ON DISK too (ok False), so a later `decide` can tell
+        # "audited and failed" from "never audited" and the submitted verdicts
+        # are not lost when the next attempt clears the sandbox (F169).
+        reason = info.get("error") or "the audit returned no verdict"
+        try:
+            write_json_atomic(meta_path, {
+                "run": ctx.root.name, "round": r, "generated": utcnow(),
+                "input_fingerprint": fingerprint, "ok": False,
+                "partial": bool(verdicts),
+                "rows": len(rows), "tp": len(tp), "fp": len(fp),
+                "unverified": len(unverified), "incomplete": len(incomplete),
+                "agent": info, "coverage": info.get("coverage") or {},
+                "reason": reason,
+                "verdicts": [{"defect_id": x["defect_id"], "label": x["audit_label"],
+                              "reason": x["audit_reason"]}
+                             for x in labelled if x["audit_label"]]})
+        except OSError as e:                                     # noqa: BLE001
+            print(f"[defect-audit] WARNING: could not record the failed audit at "
+                  f"{meta_path}: {e}")
         return {"used": True, "ok": False, "partial": bool(verdicts),
                 "rows": len(rows), "tp": len(tp), "fp": len(fp),
                 "unverified": len(unverified), "incomplete": len(incomplete),
                 "labelled": labelled, "agent": info,
                 "coverage": info.get("coverage") or {},
-                "reason": info.get("error") or "the audit returned no verdict"}
+                "reason": reason}
     audited = audited_defect_agg(ctx, r, agg, labelled)
     files = write_defect_audit_reports(ctx, r, agg, labelled, audited=audited)
     meta = {"run": ctx.root.name, "round": r, "generated": utcnow(),

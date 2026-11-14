@@ -17,7 +17,12 @@ _ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
 
 
 _SEMANTIC_SUFFIX_RE = re.compile(
-    r"\.(?:reply|response|rebuttal|review|notes?|comments?)(?:\.[A-Za-z0-9]+)+$", re.I)
+    # A role word at the START of the stem or after a dot is a feedback DOCUMENT
+    # (`review.md`, `comments.md`, `review.report.md`, `paper.review.md`); a dot
+    # before it is required for `notes?` because a bare `notes.md` is a common
+    # authors' filename and stays prose.
+    r"(?:^|\.)(?:reply|response|rebuttal|review|comments?)(?:\.[A-Za-z0-9]+)+$"
+    r"|\.notes?(?:\.[A-Za-z0-9]+)+$", re.I)
 
 
 _COVER_WORD_RE = re.compile(
@@ -25,10 +30,18 @@ _COVER_WORD_RE = re.compile(
     r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 
 
+# The ONE science-compound carve-out every scanner uses: a scientific compound
+# that merely ENDS in a role word is real manuscript prose, never reviewers'
+# feedback. The extended list (treatment/clinical/therapeutic/behavioural/
+# survey) used to live only in extract_citations.py, so the same corpus gave
+# contradictory artifact sets (M1/M4/M26 skipped treatment_response.md while
+# M2/M8 counted it).
 _SCIENCE_ROLE_COMPOUND_RE = re.compile(
     r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
-    r"pharmacodynamic)[-_ ]?response"
-    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"pharmacodynamic|treatment|clinical|therapeutic|behaviou?ral|survey)"
+    r"[-_ ]?responses?"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable|"
+    r"inhibition|amplitude|strength|bias)"
     r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
     r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
 

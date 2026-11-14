@@ -44,6 +44,14 @@ def spelling_nonprose_mask(text: str) -> str:
     # a minority spelling inside `doi.org/10.1000/colour-map`.
     out = re.sub(r"\b(?:dx\.)?doi\.org/[^\s<>\"']+|\b10\.\d{4,9}/[^\s<>\"']+",
                  lambda m: " " * len(m.group(0)), out)
+    # A LaTeX verbatim span is code, not prose: `.tex`/`.ltx` sources reach the
+    # same style rules, and a spelling variant inside `\code{catalogue}` /
+    # `\verb|colour|` must not produce an FMT-T8d row (or decide the minority
+    # direction for the real prose). LATEX_MASK_PATTERNS masks these spans for
+    # the other LaTeX rules; this mask must agree or the rule contradicts it.
+    out = re.sub(r"\\(?:code|lstinline)\{[^{}]*\}"
+                 r"|\\(?:verb\*?)([^A-Za-z\s])(?:(?!\1).)*\1",
+                 lambda m: " " * len(m.group(0)), out)
     return re.sub(r"`[^`]*`", lambda m: " " * len(m.group(0)), out)
 
 
@@ -2658,12 +2666,19 @@ TABLE_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]{1,24}$")
 
 
 def table_value_tokens(tables: list, max_tokens: int = 400, min_rows: int = 4,
-                       max_producers: int = 6) -> dict:
+                       max_producers: int = 6, stats: dict = None) -> dict:
     """{value token -> [(tool_like, where, context tokens), ...]}.
 
     Two column shapes qualify: a header that names a tool/method/caller field,
     and any column whose values are short, repeated, and few (a categorical
     column). Free-text columns never contribute tokens.
+
+    The `max_tokens` cap is a budget, never a silent coverage cut (AGENTS rule
+    8): `stats` (when the caller passes a dict) receives `total` and `omitted`,
+    and `negative_claim_rows` records the omission as an INCOMPLETE row -- the
+    same way `code_literal_rows`/`hierarchy_seed_rows` mark their own caps. The
+    selection is alphabetical, so a value sorting after the cap could never
+    match a "could not be run" sentence while the seed looked complete.
 
     A token is kept under EVERY table that carries it (up to `max_producers`),
     not just the first one: one caller's name appears in the simulated-data
@@ -2726,14 +2741,34 @@ def table_value_tokens(tables: list, max_tokens: int = 400, min_rows: int = 4,
     out = {}
     for key in sorted(tokens)[:max_tokens]:
         out[key] = tokens[key]
+    if stats is not None:
+        stats["total"] = len(tokens)
+        stats["omitted"] = max(0, len(tokens) - len(out))
     return out
 
 
 def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
     """M30 seed: a "not run / no output" claim a shipped table contradicts."""
-    tokens = table_value_tokens(tables)
+    stats = {}
+    tokens = table_value_tokens(tables, stats=stats)
+    gap = None
+    if stats.get("omitted"):
+        # The token table is INCOMPLETE: a value past the cap was never compared,
+        # so the seed must say how many table values it did not examine instead
+        # of reading as a complete negative-claim pass.
+        gap = {"rule": "M30-NC", "severity": "low", "claim": "", "token": "(truncated)",
+               "producer": "",
+               "detail": (f"{stats['omitted']} further distinct table value(s) of "
+                          f"{stats.get('total', 0)} were omitted by the "
+                          f"max_tokens cap and were NOT compared with the written "
+                          f"negative claims; this table is INCOMPLETE -- raise the cap "
+                          f"or record the gap")}
+
+    def _done(rows: list) -> list:
+        return rows + [gap] if gap else rows
+
     if not tokens:
-        return []
+        return _done([])
     rows, seen = [], set()
     for text in texts or []:
         s = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -2789,10 +2824,10 @@ def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
                                f"stale and must be removed, or the written claim is wrong"),
                 })
                 if len(rows) >= limit:
-                    return rows
+                    return _done(rows)
                 if sum(per_token.values()) >= 4:
                     break
-    return rows
+    return _done(rows)
 
 
 def _cohort_reference_re(number: str):
@@ -3151,15 +3186,21 @@ def balanced_paren_groups(text: str) -> list:
     return out
 
 
-def nested_parentheses_rows(paras: list) -> list:
+def nested_parentheses_rows(paras: list, is_ref: list = None) -> list:
     """One row per OUTERMOST parenthesis group that contains another group.
 
     Mathematical calls are excluded (`T(·,·)` has no letters inside), and only
     the outermost group of a cluster is reported, so a list of six nested
-    references is one row, not six.
+    references is one row, not six. The reference list is not prose: a
+    bibliographic note with a citation inside its parenthetical ("(see (Doe,
+    2019) for the original)") is not a style defect this rule may ask the
+    revision arm to restructure, and every sibling prose rule already skips it.
     """
     rows = []
+    is_ref = list(is_ref or [])
     for i, text in enumerate(paras):
+        if i < len(is_ref) and is_ref[i]:
+            continue
         groups = balanced_paren_groups(text)
         for start, end, _depth, inner in groups:
             children = [g for g in groups if start < g[0] < end]
@@ -3315,7 +3356,7 @@ def text_style_rows(paras: list, is_ref: list = None, headings: list = None,
     cit = citation_format_row(paras, field_spans=field_spans)
     if cit:
         rows.append(cit)
-    rows += nested_parentheses_rows(paras)
+    rows += nested_parentheses_rows(paras, is_ref)
     rows += term_repetition_rows(paras, is_ref)
     rows += variant_rows(paras, is_ref, field_spans=field_spans)
     rows += long_text_rows(

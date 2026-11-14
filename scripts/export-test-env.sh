@@ -98,9 +98,23 @@ awk '
 ' "${STEM}.freeze.env_export.yml" > "${STEM}.freeze.env_export.no_channels.yml"
 
 # --- pip side --------------------------------------------------------------
-# Every wheel the environment's pip knows about (the full record).
-"${CONDA}" run "${ENV_SELECT[@]}" python -m pip freeze --all 2>/dev/null \
-  > "${STEM}.requirements.list_e.txt" || true
+# Every wheel the environment's pip knows about (the full record). Write to a
+# temporary file first: `|| true` here used to swallow a broken pip and export
+# a 0-byte `requirements.list_e.txt` while the README below promised the exact
+# wheel record, and the script still exited 0.
+freeze_tmp="${STEM}.requirements.list_e.txt.tmp"
+if ! "${CONDA}" run "${ENV_SELECT[@]}" python -m pip freeze --all 2>/dev/null \
+    > "${freeze_tmp}"; then
+  rm -f -- "${freeze_tmp}"
+  echo "error: pip freeze --all failed in ${ENV_LABEL}; refusing to write an incomplete export" >&2
+  exit 1
+fi
+if [[ ! -s "${freeze_tmp}" ]]; then
+  rm -f -- "${freeze_tmp}"
+  echo "error: pip freeze --all produced no output in ${ENV_LABEL}; refusing to write an empty pip record" >&2
+  exit 1
+fi
+mv -- "${freeze_tmp}" "${STEM}.requirements.list_e.txt"
 
 # A conda-installed distribution is marked `pypi_0` in `conda list --export`;
 # everything else came from pip, so the pip-only list keeps the `pypi_0` entries

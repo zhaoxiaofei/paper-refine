@@ -183,6 +183,20 @@ if ! command -v npm >/dev/null 2>&1; then
     echo "error: npm was not found on PATH; the shipped MCP servers install with npm ci" >&2
     exit 1
 fi
+# The MCP servers and the importer this script runs need Node >= 20. Checking
+# only that `node` exists let an old interpreter through; the run then switched
+# the live skills/servers in and died with a JavaScript SyntaxError afterwards.
+node_major=$("$node_bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)
+case "$node_major" in
+    ''|*[!0-9]*)
+        echo "error: could not determine the node version from $node_bin; the shipped MCP servers need Node >= 20" >&2
+        exit 1
+        ;;
+esac
+if [ "$node_major" -lt 20 ]; then
+    echo "error: node $("$node_bin" -v 2>/dev/null) is too old ($node_bin); the shipped MCP servers need Node >= 20" >&2
+    exit 1
+fi
 
 # ---- normalize the paths that end up in configs ----------------------------
 codex_home=$(resolve_dir "$codex_home")
@@ -405,14 +419,17 @@ for docx_tool in converter compare; do
     # never vendored (copying it over a Windows mount is slow, and a stale copy
     # fails silently).
     staging="${tool_path}.stage.$$"
+    # Register the staging tree BEFORE populating it: a failing tar/npm ci in
+    # this window used to leave the half-built tree behind, because the EXIT
+    # trap only removes the paths already in stage_tools.
+    stage_tools+=("$staging")
     rm -rf -- "$staging"
     mkdir -p -- "$staging"
     (cd -- "$repo_dir/${tool_name}" && tar cf - --exclude=./node_modules .) | (cd -- "$staging" && tar xf -)
     npm ci --prefix "$staging" --no-audit --no-fund
-    stage_tools+=("$staging")
     companion_stage="${tools_dir}/.${companion}.stage.$$"
-    install -m 0755 -- "$repo_dir/$companion" "$companion_stage"
     stage_companions+=("$companion_stage")
+    install -m 0755 -- "$repo_dir/$companion" "$companion_stage"
     tool_names+=("$tool_name")
     tool_paths+=("$tool_path")
     companions+=("$companion")

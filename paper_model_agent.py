@@ -137,19 +137,13 @@ def _endpoint_base(url: str) -> str:
     `/chat/completions` itself. Query/fragment are dropped, but a `model=` query
     parameter is preserved as the model name by `_endpoint_model`.
     """
-    text = str(url).strip()
     try:
-        parsed = urllib.parse.urlsplit(text)
-        host = parsed.hostname
-        parsed.port          # a non-numeric or out-of-range port is malformed too
-    except ValueError:
+        # The shared parser enforces the port range and strips userinfo, so a
+        # malformed or credential-bearing URL is a usage error here instead of
+        # an uncaught ConfigError later in the run.
+        return rt.endpoint_base(url)
+    except rt.ConfigError:
         return ""
-    if parsed.scheme not in ("http", "https") or not host:
-        return ""
-    path = parsed.path.rstrip("/")
-    if path.endswith("/chat/completions"):
-        path = path[: -len("/chat/completions")]
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _endpoint_query_model(url: str) -> str:
@@ -161,21 +155,18 @@ def _endpoint_query_model(url: str) -> str:
 
 
 def _endpoint_catalog(cfg: dict) -> list:
-    """The endpoint's /models entries ([] when it exposes no listing)."""
+    """The endpoint's /models entries ([] when it exposes no listing).
+
+    A 404/405 means the endpoint serves no listing and returns []; any other
+    probe failure raises `rt._EndpointProbeError`, so a bad key, a 5xx or a
+    redirect is not reported as "the endpoint lists no models". The shared
+    probe also refuses redirects so the Bearer key never reaches the Location
+    host.
+    """
     base = cfg["base_url"]
     if not base:
         return []
-    headers = {"Content-Type": "application/json"}
-    if cfg["api_key"]:
-        headers["Authorization"] = f"Bearer {cfg['api_key']}"
-    req = urllib.request.Request(f"{base}/models", headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=10.0) as resp:
-            body = json.loads(resp.read().decode("utf-8", "replace"))
-    except (urllib.error.URLError, OSError, ValueError, TypeError):
-        return []
-    data = body.get("data") if isinstance(body, dict) else None
-    return [m for m in (data or []) if isinstance(m, dict) and m.get("id")]
+    return rt._endpoint_catalog(base, cfg.get("api_key") or "", timeout=10.0)
 
 
 def _endpoint_context(catalog: list, model: str):
@@ -197,7 +188,12 @@ def _endpoint_context(catalog: list, model: str):
 def resolve_endpoint_model(cfg: dict) -> tuple:
     """(model_name, error) for a custom endpoint; '' on success."""
     if cfg.get("model_name"):
-        catalog = _endpoint_catalog(cfg)
+        try:
+            catalog = _endpoint_catalog(cfg)
+        except rt._EndpointProbeError:
+            # The model is named explicitly, so a failed probe only costs the
+            # optional context window.
+            catalog = []
         context = _endpoint_context(catalog, cfg["model_name"])
         if (context and not os.environ.get("PAPER_AGENT_CONTEXT_WINDOW")
                 and not cfg.get("context_explicit")):
@@ -210,7 +206,10 @@ def resolve_endpoint_model(cfg: dict) -> tuple:
     query_model = _endpoint_query_model(cfg.get("endpoint") or "")
     if query_model:
         return query_model, ""
-    catalog = _endpoint_catalog(cfg)
+    try:
+        catalog = _endpoint_catalog(cfg)
+    except rt._EndpointProbeError as exc:
+        return "", str(exc)
     models = [str(m.get("id")) for m in catalog]
     if len(models) == 1:
         context = _endpoint_context(catalog, models[0])
@@ -363,6 +362,9 @@ def deep_merge(base: dict, override: dict) -> dict:
     return base
 
 
+_PREP_OPENER = urllib.request.build_opener(rt._NoRedirectHandler)
+
+
 class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
     """Forward DSH's OpenAI-compatible requests, merging the prep object."""
 
@@ -379,19 +381,30 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
         return base + path
 
     def _forward(self, method: str, body: bytes = None) -> None:
-        headers = {}
-        for key, value in self.headers.items():
-            if key.lower() in ("host", "content-length", "connection",
-                               "transfer-encoding", "accept-encoding"):
-                continue
-            headers[key] = value
+        headers = rt._forwardable_request_headers(
+            self.headers, extra_skip=("accept-encoding",))
         if body is not None:
             headers["Content-Length"] = str(len(body))
         req = urllib.request.Request(self._target(), data=body,
                                      headers=headers, method=method)
         try:
-            resp = urllib.request.urlopen(req, timeout=600.0)
+            # No redirects: urllib's default handler re-sends the request,
+            # including the client's Authorization header, to the Location
+            # host; a 302 would even turn a POST into a GET.
+            resp = _PREP_OPENER.open(req, timeout=600.0)
         except urllib.error.HTTPError as e:
+            if 300 <= e.code < 400:
+                raw = json.dumps({"error": {"message":
+                                           "custom endpoint proxy refused a redirect "
+                                           f"(HTTP {e.code}); credentials are not "
+                                           "forwarded to another host"}}).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                with contextlib.suppress(OSError):
+                    self.wfile.write(raw)
+                return
             raw = e.read()
             self.send_response(e.code)
             ctype = e.headers.get("Content-Type") if e.headers else None
@@ -416,10 +429,7 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(raw)
             return
         self.send_response(getattr(resp, "status", 200))
-        for key, value in resp.headers.items():
-            if key.lower() in ("transfer-encoding", "connection",
-                               "content-length", "content-encoding"):
-                continue
+        for key, value in rt._forwardable_response_headers(resp.headers.items()):
             self.send_header(key, value)
         self.end_headers()
         try:
@@ -440,11 +450,34 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
         self._forward("GET")
 
     def do_POST(self):
+        if rt._request_is_chunked(self.headers):
+            # Without a Content-Length a chunked body was read as empty and
+            # forwarded with Content-Length: 0, so the provider saw `{}` and
+            # the client got a 200. Reject the unsupported framing instead.
+            raw = json.dumps({"error": {"message":
+                                       "chunked request bodies are not supported by "
+                                       "the custom endpoint proxy"}}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            with contextlib.suppress(OSError):
+                self.wfile.write(raw)
+            return
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except (TypeError, ValueError):
-            length = 0
-        body = self.rfile.read(length) if length else b""
+            body = rt._read_request_body(self.rfile, self.headers) or b""
+        except ValueError:
+            # Never treat an unparsable Content-Length as a zero-length body
+            # and forward a corrupted request as a valid one.
+            raw = json.dumps({"error": {"message":
+                                       "invalid Content-Length header"}}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            with contextlib.suppress(OSError):
+                self.wfile.write(raw)
+            return
         prep = getattr(self.server, "prep", None)
         if prep and body:
             try:
@@ -543,7 +576,7 @@ def dsh_argv(cfg: dict) -> tuple:
         env[cfg["api_key_env"]] = cfg.get("api_key") or "dummy"
     elif cfg["deepseek_key"]:
         env.setdefault("DEEPSEEK_API_KEY", cfg["deepseek_key"])
-    return (_build_dsh_argv(patch_path=patch or None), env, "")
+    return (_build_dsh_argv(patch_path=patch or None, extra_args=("-",)), env, "")
 
 
 def codex_argv(cfg: dict, extra: list = None) -> list:

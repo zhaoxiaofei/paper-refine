@@ -121,7 +121,9 @@ def language_pass_report(pkg: Path) -> dict:
         changed = next((str(row.get(k) or "").strip() for k in row if "row" in k), "")
         note = next((str(row.get(k) or "").strip() for k in row if "note" in k), "")
         if re.fullmatch(r"\d+", changed) and note:
-            steps.add(f"L{m.group(1)}")
+            # Normalise the digits: a naturally zero-padded `L01` is the same
+            # step as `L1`, and the comparison below is exact (F130).
+            steps.add(f"L{int(m.group(1))}")
     seen = sorted(steps, key=lambda s: int(s[1:]))
     return {"file": str(path), "present": True, "rows": len(rows), "steps_seen": seen,
             "missing": [s for s in want if s not in steps]}
@@ -331,8 +333,13 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
     rows = integration_ledger_rows(out / "DIFF_LEDGER.md")
     sizes, missing_artifact, missing_finding, undoes, seen_donors = Counter(), [], [], [], set()
     missing_revalidated, invalid_ports, invalid_revalidated = [], [], []
+    missing_verdict = []
     edit_rows = 0
-    has_revalidated_column = any("revalidated" in r for r in rows)
+    # The presence test and the value reader must use ONE vocabulary: the value
+    # is read from `revalidated` OR the prompt's `re_validation` spelling, so a
+    # compliant `re_validation` header is not misread as a legacy table (F126).
+    has_revalidated_column = any("revalidated" in r or "re_validation" in r for r in rows)
+    has_verdict_column = any("verdict" in r for r in rows)
     for r in rows:
         size = str(r.get("size") or "").strip().lower()
         sizes[size] += 1
@@ -354,6 +361,13 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
         edits = verdict.startswith("port") or verdict.startswith("synth")
         if edits:
             edit_rows += 1
+        # The edit CLASS is derived from the verdict cell, so a ledger that
+        # omits the column or leaves its cells empty makes every row look like
+        # a non-edit: no invalid_ports can fire and the Rule 1B port gate is
+        # silently bypassed (F125). Only a ledger that carries neither the
+        # verdict nor the revalidated column is the tolerated legacy shape.
+        if not verdict and (has_verdict_column or has_revalidated_column):
+            missing_verdict.append(donor or "?")
         if not edits and not reval:
             missing_revalidated.append(donor or "?")
         # The prompt: `revalidated` is mandatory on EVERY row and records the
@@ -372,6 +386,7 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
             "missing_finding": missing_finding, "undoes": undoes, "donors_absent": absent,
             "missing_revalidated": missing_revalidated, "invalid_ports": invalid_ports,
             "invalid_revalidated": invalid_revalidated,
+            "missing_verdict": missing_verdict,
             "legacy_no_revalidated": legacy,
             # A legacy (no `revalidated` column) table is tolerated only when it
             # carries no edit row; a `port`/`synthesize` row there is an outright
@@ -491,6 +506,12 @@ _AUDIT_CANONICAL_TAIL_RE = re.compile(
 _AUDIT_VERB_RE = re.compile(r"(?i)\b" + _AUDIT_REDERIVATION_VERB + r"\b")
 _AUDIT_NEGATED_VERB_COMPILED = re.compile(_AUDIT_NEGATED_VERB_RE, re.I)
 _AUDIT_PROSE_UNABLE_RE = re.compile(r"(?i)\bunable\s+to\s+(.*)$")
+# A re-derivation sentence must NAME what was re-derived or on what basis; a
+# one-word verb (`checked`, `confirmed`) records no object and is filler (F128).
+# A check id, a finding id or a named artifact satisfies that bar on its own.
+_AUDIT_NAMED_BASIS_RE = re.compile(
+    r"(?i)\b(?:[MJ]\d{1,2}|(?:F|X|AU)-\d+)\b"
+    r"|\b[\w-]+\.(?:md|markdown|json|txt|tex|docx|csv|pdf)\b")
 AUDIT_COVERAGE_DISPOSITION_RE = re.compile(
     # A verdict shape anywhere in the cell (the leading `.*?` lets a qualifier
     # precede it).
@@ -524,6 +545,19 @@ def _audit_negated_verb(text: str) -> bool:
     return bool(_AUDIT_NEGATED_VERB_COMPILED.search(probe))
 
 
+def _audit_rederivation_named(text: str) -> bool:
+    """Whether a re-derivation sentence names an object/basis (not a bare verb).
+
+    `checked`, `confirmed`, `verified the` and `re-derived` are one- or two-word
+    labels: they state that a verb was said, not what was re-derived or on what
+    basis, so they are the filler shape the coverage gate must refuse. Three
+    words ("checked all rows") or any check/finding id or named artifact file
+    clears the bar.
+    """
+    stripped = str(text or "").strip()
+    return len(stripped.split()) >= 3 or bool(_AUDIT_NAMED_BASIS_RE.search(stripped))
+
+
 def _audit_disposition_ok(value) -> bool:
     """A real audit coverage disposition (negation- and filler-proof).
 
@@ -551,7 +585,12 @@ def _audit_disposition_ok(value) -> bool:
     if m is not None:
         return _coverage_reason_named(m.group(1))
     if _AUDIT_VERB_RE.search(text) and not _audit_negated_verb(text):
-        return True          # a re-derivation sentence, e.g. "the sweep was re-derived"
+        # a re-derivation sentence, e.g. "the sweep was re-derived". A BARE
+        # verb ("checked", "confirmed", "verified the") records no object and
+        # no basis, so it is the filler shape this gate exists to refuse (F128):
+        # a real disposition names what was re-derived, on what basis, or a
+        # finding/check id (the same bar the other shapes meet).
+        return _audit_rederivation_named(text)
     m = _AUDIT_PROSE_UNABLE_RE.search(text)
     if m is not None:
         # "unable to check artwork/text parity" names what could not be
@@ -1515,24 +1554,42 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
     seen = {str(f.get("id")) for f in a_items}
 
     def _dedup_key(row: dict) -> tuple:
-        """(check, location, evidence prefix): the same defect found by both sessions.
+        """(check, location, evidence prefix, severity, category): one defect.
 
         The check/class label is part of the identity: two distinct defect classes
         can quote the same sentence at the same location, and collapsing them by
         (location, evidence) alone would hand the reviser only one of them.
+
+        The severity and category are part of it too: Rule 8 requires a defect's
+        classification to be the same whichever finding role reported it, and a
+        B row that files the SAME defect as CRITICAL must not be dropped as a
+        duplicate of A's MAJOR row (F129) -- the merge would silently downgrade
+        the frozen list by merge order alone.
         """
         loc = " ".join(str(row.get("location") or "").lower().split())
         ev = " ".join(str(row.get("evidence") or row.get("quote") or "").lower().split())
         check = " ".join(str(row.get("check") or "").lower().split())
-        return check, loc, ev[:80]
+        sev = " ".join(str(row.get("severity") or "").lower().split())
+        cat = " ".join(str(row.get("category") if row.get("category") is not None else "")
+                       .lower().split())
+        return check, loc, ev[:80], sev, cat
+
+    def _identity_key(row: dict) -> tuple:
+        """The defect identity WITHOUT its classification (for the conflict note)."""
+        return _dedup_key(row)[:3]
 
     a_keys = {_dedup_key(f) for f in a_items}
+    a_by_identity = {}
+    for f in a_items:
+        a_by_identity.setdefault(_identity_key(f), []).append(f)
     remap = {}
     deduped = []
+    classified = []
     b_kept = []
     for f in b_items:
-        key = _dedup_key(f)
-        if key != ("", "", "") and key in a_keys:
+        key = _identity_key(f)                    # the defect's identity (3-tuple)
+        full = _dedup_key(f)                      # ... plus its classification
+        if key != ("", "", "") and full in a_keys:
             # Both sessions found the same defect at the same place with the same
             # evidence: keep A's row (ids and coverage ride with it) instead of
             # handing the reviser two rows for one thing.
@@ -1545,6 +1602,17 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
                 new = "B-" + new
             remap[fid] = new
             f["id"] = new
+        if key != ("", "", "") and key in a_by_identity:
+            # Same defect, DIFFERENT classification: the rows are not the same
+            # finding, so both stay and the disagreement is recorded for the
+            # auditor instead of one classification vanishing (F129).
+            for other in a_by_identity[key]:
+                classified.append({
+                    "a": str(other.get("id")), "b": str(f.get("id")),
+                    "a_severity": str(other.get("severity") or ""),
+                    "b_severity": str(f.get("severity") or ""),
+                    "a_category": other.get("category"),
+                    "b_category": f.get("category")})
         seen.add(str(f.get("id")))
         b_kept.append(f)
     coverage, conflicts = [], []
@@ -1584,6 +1652,7 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
                                "sessions": [rid_guided_review(r), rid_guided_review_b(r)],
                                "from_a": len(a_items), "from_b": len(b_kept),
                                "deduped_b": deduped,
+                               "classification_conflicts": classified,
                                "id_remap": remap, "coverage_conflicts": sorted(set(conflicts))}}
     # The discovery round's findings travel with the frozen list too. Each part
     # numbers its own discovery rows from X-001, so a collision has to be
@@ -1785,6 +1854,11 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
         if led["missing_finding"]:
             warns.append(f"integrate: {len(led['missing_finding'])} ledger row(s) do not state "
                          f"their `finding effect` (preserves/undoes <id> or none)")
+        if led["missing_verdict"]:
+            errs.append(f"integrate: {len(led['missing_verdict'])} ledger row(s) carry no "
+                        f"`verdict` (port / keep-self / synthesize / ignore-cosmetic) -- the "
+                        f"verdict is what classifies a row as an edit, so without it Rule 1B's "
+                        f"`revalidated: confirmed` requirement cannot be enforced")
         if led["legacy_ports"]:
             errs.append("integrate: DIFF_LEDGER.md has no `revalidated` column but carries "
                         "port/synthesize row(s) -- Rule 1B forbids editing an unverified item, "
@@ -3097,13 +3171,23 @@ def postcheck_judge(ctx: Ctx, rec: dict):
         # A cover letter formatted in the MANUSCRIPT template (FMT-CL1) is a
         # target defect the judge must catch and consider, whatever the other
         # versions carry; an OK closure needs the journal's own quoted override.
+        # It is computed here but ENFORCED OUTSIDE the try: the cover-letter
+        # gate is a hard `errs` family, and leaving it inside let any exception
+        # in the scan/report write downgrade it to a warning (F137).
         cl_target = [r for r in ((ev.get("format") or {}).get("rows") or [])
                      if str(r.get("rule") or "").upper() in COVER_LETTER_STAMP_RULES]
-        if cl_target:
-            errs.extend(judge_cover_letter_artifact_problems(sb, cl_target))
     except Exception as e:                                            # noqa: BLE001
+        cl_target = []
         warns.append(f"BLIND JUDGE GROUNDING: the code-side scan of the blinded target failed "
                      f"({type(e).__name__}: {e})")
+    if cl_target:
+        try:
+            errs.extend(judge_cover_letter_artifact_problems(sb, cl_target))
+        except Exception as e:                                        # noqa: BLE001
+            # Fail CLOSED: a checker that cannot run is not a pass.
+            errs.append(f"FMT-CL1: the cover-letter artifact check could not be run "
+                        f"({type(e).__name__}: {e}); the judge's cover-letter gate is "
+                        f"unverified")
     sj = scores_json_of(sb, rec["kind"])
     marker = marker_json(sb, rec["kind"])
     errs.extend(structured_output_problems(ctx, rec))
@@ -3756,12 +3840,29 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
         for c in row.get("changes") or ():
             if not isinstance(c, dict):
                 continue
-            if str(c.get("operation") or "edit").strip().lower() != "edit":
+            op = str(c.get("operation") or "edit").strip().lower()
+            if op != "edit" and not str(c.get("location") or "").strip():
+                # Every change entry names WHERE, including a whole-file
+                # `remove`: the letter's `**Changes:**` line is
+                # `<file:location>` and the map schema carries the cell (F138).
+                problems.append(
+                    f"response row {cid!r}: the change to "
+                    f"{str(c.get('file') or '').strip()!r} names no `location`; the "
+                    f"claimed change must be locatable in the document it changes")
+            if op != "edit":
                 continue
             f = str(c.get("file") or "").strip()
             if not f:
                 continue
             before, after = norm(c.get("before")), norm(c.get("after"))
+            if not before and not after:
+                # An `edit` with no pre-image AND no post-image proves only that
+                # the file exists: a side may be omitted only for a pure
+                # insertion/deletion, never both (F134).
+                problems.append(
+                    f"response row {cid!r}: the change to {f!r} quotes neither a `before` "
+                    f"nor an `after` span; an edit must show the revised wording (omit a "
+                    f"side only for a pure insertion or deletion)")
             if not str(c.get("location") or "").strip():
                 problems.append(
                     f"response row {cid!r}: the change to {f!r} names no `location`; the "
@@ -3943,7 +4044,15 @@ def _journal_seed_text(ctx: Ctx, sb: Path) -> str:
                 f"{str(r.get('heading') or '')[:110]}: "
                 f"{str(r.get('excerpt') or '')[:280]}")
 
-    return "\n".join(_line(r) for r in rows[:80])
+    lines = [_line(r) for r in rows[:80]]
+    if len(rows) > 80:
+        # The coverage gate requires a disposition row for EVERY seed id, so the
+        # prompt may not withhold the tail of the list (F131). The excerpts stay
+        # capped above; the ids below the fold are named here.
+        rest = ", ".join(f"[{str(r.get('seed_id') or '')}]" for r in rows[80:])
+        lines.append(f"- (further seeded ids, each owed its own coverage row -- read their "
+                     f"blocks in feedback/CONCERN_SEED.json): {rest}")
+    return "\n".join(lines)
 
 
 def feedback_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
@@ -4628,6 +4737,13 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
         # a source or fail.
         tokens = ([t.strip() for t in re.split(r"\s*;\s*|\s+\+\s+", source) if t.strip()]
                   if source else [])
+        if source and not tokens:
+            # A separator-only cell (`;`) names no file at all, so the quote
+            # cannot be bound to one; the verbatim check below is keyed on a
+            # resolved stream and used to skip SILENTLY (F132).
+            errs.append(f"concern {cid}: the `source` cell {source!r} names no feedback "
+                        f"file (it carries only separators) -- name the file the quote "
+                        f"comes from")
         human_hits, llm_hits = [], []
         for tok in tokens:
             _st, _h, _l = _resolve_source(tok)
@@ -5043,6 +5159,20 @@ def concerns_finding_list_problems(sb: Path, data: dict) -> tuple:
                 errs.append(f"finding {f.get('id')!r} has no evidence (quote the reviewer)")
             if not str(f.get("location") or "").strip():
                 errs.append(f"finding {f.get('id')!r} has no location")
+            # The scoped finding schema the concerns prompt states is
+            # `severity: Critical|Major|Minor` and `category: 0`; unvalidated,
+            # an unclassifiable row entered the frozen list the reviser acts on
+            # (F136). Mirror the audit artifact's own severity/category gate.
+            sev = str(f.get("severity") or "").strip().lower()
+            if sev not in ("critical", "major", "minor"):
+                errs.append(f"finding {f.get('id')!r}: severity {f.get('severity')!r} must be "
+                            f"Critical|Major|Minor")
+            cat = f.get("category")
+            if isinstance(cat, str) and cat.strip().isdigit():
+                cat = int(cat.strip())
+            if not isinstance(cat, int) or cat != 0:
+                errs.append(f"finding {f.get('id')!r}: category {f.get('category')!r} must be "
+                            f"0 (the scoped finding schema's category)")
             status = str(f.get("status") or "").strip()
             want = "unresolvable" if concern in manual else "resolvable"
             if status not in ("resolvable", "unresolvable"):
@@ -5230,9 +5360,17 @@ def deletion_audit_paragraphs(root: Path) -> list:
             if text is None:
                 continue
             for start, para in _text_paragraphs_with_lines(text):
-                prose = _deleted_para_candidate(para)
+                # A TEXT block's first line can be a Markdown `# Methods` or a
+                # LaTeX `\section{Methods}` with its prose on the next line:
+                # the normal section layout, with no blank line between heading
+                # and paragraph. The heading is not prose but the prose after
+                # it is, so strip the marker lines FIRST and test what remains;
+                # skipping the block because of its first line hid the prose
+                # (F133; the same rule `_content_paragraph_rows` already
+                # states for this text path).
+                dropped, body = _strip_nonprose_block(para)
+                prose = _deleted_para_candidate(body)
                 if prose:
-                    dropped, _rest = _strip_nonprose_block(para)
                     rows.append((rel, text[:start].count("\n") + 1 + dropped, prose))
     return rows
 
@@ -5741,7 +5879,14 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
         return []
     base_package, candidate_package = Path(base_package), Path(candidate_package)
     if not base_package.is_dir() or not candidate_package.is_dir():
-        return []
+        # A missing package must not read as a clean pass: the policy's whole
+        # job is to compare delivered content, and returning [] here disabled
+        # it silently (F135). Report it and let the caller's other gates fail
+        # the attempt.
+        missing = [str(p) for p in (base_package, candidate_package) if not p.is_dir()]
+        return [f"{stage or 'content policy'}: the strict content policy cannot be applied -- "
+                f"package director{'y is' if len(missing) == 1 else 'ies are'} missing: "
+                f"{', '.join(missing)}"]
     label = f"{stage}: " if stage else ""
     exempt_text = set()
     exempt_document = set()
@@ -7274,7 +7419,23 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             _derrs, _dwarns = discovery_contract_problems(sb)
             errs.extend(f"discovery round: {d}" for d in _derrs)
             warns.extend(f"discovery round: {d}" for d in _dwarns)
-        report = artifact_quality_report(sb / GUIDED_REVIEW_DIR)
+        # Re-derive the M20 seed from the read-only base/ the review was given,
+        # exactly as the postcheck does: a deleted or emptied
+        # `work/FORMAT_SCAN.json` must not make the preview disagree with the
+        # gate (R02). The scan is code-side, not root state, so the preview can
+        # run it; only a failed scan falls back to the sandbox's own copy.
+        m20_seed_rows = None
+        if (sb / "base").is_dir():
+            try:
+                fpol = read_json(sb / "format_policy.json", revive=False, lenient=True)
+                info = scan_format_in_sources(
+                    [(sb / "base", "", ())],
+                    policy=fpol if isinstance(fpol, dict) else None)
+                m20_seed_rows = [r for r in (info.get("rows") or []) if isinstance(r, dict)]
+            except Exception:                                      # noqa: BLE001 -- preview only
+                m20_seed_rows = None
+        report = artifact_quality_report(sb / GUIDED_REVIEW_DIR,
+                                         m20_seed_rows=m20_seed_rows)
         for rel, problems in sorted(report.items()):
             for p in problems:
                 errs.append(f"decision artifact {rel}: {p}")
@@ -7441,6 +7602,37 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                 errs.append(f"integrate: {len(led['missing_artifact'])} ledger row(s) carry no "
                             f"`artifact` (a before/after pair for a small row, an outline diff "
                             f"for a large row) -- the row cannot be re-checked")
+            # The postcheck's OWN Rule 1B detectors, verbatim: this pre-flight
+            # used to check only the artifact and the parse, so a ledger the
+            # postcheck hard-fails (an unverified port, a missing revalidated
+            # verdict, a blank verdict) previewed as a pass (F127).
+            if led["rows"]:
+                if led["missing_verdict"]:
+                    errs.append(f"integrate: {len(led['missing_verdict'])} ledger row(s) carry "
+                                f"no `verdict` (port / keep-self / synthesize / "
+                                f"ignore-cosmetic) -- without it no row is classified as an "
+                                f"edit, so Rule 1B cannot be enforced")
+                if led["legacy_ports"]:
+                    errs.append("integrate: DIFF_LEDGER.md has no `revalidated` column but "
+                                "carries port/synthesize row(s) -- Rule 1B forbids editing an "
+                                "unverified item; record the column and the confirmed/rejected "
+                                "verdict")
+                elif led["legacy_no_revalidated"]:
+                    warns.append("integrate: legacy DIFF_LEDGER.md has no `revalidated` column; "
+                                 "new runs must record one (this legacy ledger is not treated "
+                                 "as a port)")
+                elif led["missing_revalidated"]:
+                    errs.append(f"integrate: {len(led['missing_revalidated'])} ledger row(s) "
+                                f"carry no `revalidated` verdict (Rule 1B requires "
+                                f"confirmed/rejected per item)")
+                if led["invalid_revalidated"]:
+                    errs.append(f"integrate: {len(led['invalid_revalidated'])} ledger row(s) "
+                                f"carry a `revalidated` value other than confirmed/rejected: "
+                                + "; ".join(led["invalid_revalidated"][:4]))
+                if led["invalid_ports"]:
+                    errs.append(f"integrate: {len(led['invalid_ports'])} port/synthesize row(s) "
+                                f"lack `revalidated: confirmed` -- Rule 1B forbids editing an "
+                                f"unverified item: " + "; ".join(led["invalid_ports"][:4]))
             if not led["rows"]:
                 warns.append(f"{INTEGRATION_LEDGER_REL} could not be parsed as a table (the "
                              f"per-difference artifacts, the size classes and the finding-effect "

@@ -341,6 +341,21 @@ conflict belongs.
 
 """
 
+# The REVIEW, AUDIT and COLD-START prompts receive the package-production hand-off
+# rule verbatim (one shared text, so the modes cannot drift). Those roles are
+# identification-only, so the same prompt carries this override: the bullets that
+# tell a package-producing stage to edit are report-only there. It is a separate
+# token, not text appended to the shared block, so the profile paging still moves
+# the shared block unchanged (AGENTS.md rule 12).
+READ_ONLY_HANDOFF_NOTE = """READ-ONLY STAGE -- THE HAND-OFF BULLETS ABOVE ARE REPORT-ONLY HERE.
+This stage never edits a package: `base/` is read-only and hash-verified after your run, and your
+product is a finding, an observation or a manual item, never a document edit. Dispose a
+`searchable` lookup row whose verdict is `found` or `absent` by REPORTING the value (or the
+verified negative) and its basis in the finding or the manual list; never write it into a
+document. Dispose an existing marker by reporting the underlying gap as a finding; never fill,
+remove or reword the marker. The package-producing stages (revise / rewrite / integrate) apply
+the hand-off, not this one."""
+
 
 def _contract_deliverable(rel: str, author_to_complete: str = None) -> str:
     """The postcheck's own path for one table entry.
@@ -768,6 +783,7 @@ Skill discipline that the orchestrator will check for:
     reports/) but does not apply the proposals itself.
 
 @@PLACEHOLDER_RULE@@
+@@READ_ONLY_HANDOFF@@
 
 @@AUX_FILES_RULE@@
 
@@ -1635,7 +1651,8 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    `searchable` hand-off marker that was carried forward although work/PLACEHOLDER_LOOKUP.md
    answers it (verdict found/absent) or work/IDENTIFIERS.md verifies/refutes the locator; a number
    in the abstract or a legend whose `source` cell is empty in work/NUMBERS_LEDGER.md while the
-   shipped data files prove it; a term family competing for one concept (work/M24_concepts.md).
+   shipped data files prove it; a term family competing for one concept (the reviewer's disposed
+   `guided_review/artifacts/M24_concepts.md`, against this audit's own `work/M24_concepts.md`).
    Each is recorded in `audit/UNRESOLVED.md` as an observation when it is a defect, not a note.
 3g. ATTACK THE DISCOVERY ROUND'S PROBE DISPOSITIONS. When the frozen review carries
    guided_review/round2/probe_results.md, every probe row is a disposition the reviewer wrote and
@@ -1707,7 +1724,8 @@ treated as unfinished).
 @@SELFCHECK@@
 
 === RULES ===
-@@DEFECT_CLASS_RULE@@@@STANDING_EXEMPTIONS@@@@PLACEHOLDER_RULE@@@@AUX_FILES_RULE@@
+@@DEFECT_CLASS_RULE@@@@STANDING_EXEMPTIONS@@@@PLACEHOLDER_RULE@@
+@@READ_ONLY_HANDOFF@@@@AUX_FILES_RULE@@
 @@DERIVED_OUTPUTS_RULE@@@@VALIDATION_RULE@@@@VISUAL_INSPECTION_RULE@@@@DOCX_CLI_RULE@@@@ZOTERO_CLI_RULE@@
 * You never edit the corpus, the review, or a candidate package; you only read them and write your
   records in `audit/` (the completion marker goes in the sandbox ROOT, not in `audit/`). The
@@ -1884,13 +1902,13 @@ revised.
 
 === LEDGER (required) ===
 
-Write integrated/DIFF_LEDGER.md with one row per (a)/(b) item and a row for every difference you
-deliberately did not port, each carrying: diff id, the DONOR it came from, class (a)-(f), file +
-section/location, what the base has, what the donor has, the decision (PORTED / KEPT-BASE /
-IGNORED / LEFT-SHARED), and the hierarchy-based justification (one line). EVERY donor must appear
-in the ledger; a donor that contributed nothing gets an explicit "no ported difference" row, so the
-orchestrator and the author can see it was actually read. Also summarize the ledger inside
-integrated/CHANGELOG.md, because downstream judges and the human gate receive only the package.
+Write integrated/DIFF_LEDGER.md in exactly the schema of the INTEGRATION DIFFERENCE LEDGER above --
+that section defines the required columns, the verdict vocabulary and the mandatory `revalidated`
+cell, and it is the table the postcheck reads. One row per (a)/(b) difference and a row for every
+difference you deliberately did not port. EVERY donor must appear in the ledger; a donor that
+contributed nothing gets an explicit "no ported difference" row, so the orchestrator and the author
+can see it was actually read. Also summarize the ledger inside integrated/CHANGELOG.md, because
+downstream judges and the human gate receive only the package.
 
 === WHAT DOES NOT APPLY IN THIS SANDBOX (explicit carve-outs — read before the excerpts) ===
 
@@ -2499,14 +2517,13 @@ absolute ratings re-compress into noise and the comparison this design exists to
 3. Write scores.json (schema below), verify it parses as JSON, and then write the completion marker.
 
 Matching documents: match documents between target/ and field/* by CONTENT and ROLE, not by filename
-alone. Compliant packages carry ONE content-hash version token in the version slot
-(e.g. "...-4f3a9c1.docx", the same 7-hex token for every document of a package), which identifies
-their package and nothing about how it was produced; a LEGACY package may still carry a
-letter/digit token ("-b", "_v2") or a collision "_revN" suffix. A filename difference is therefore
-NOT missing content and must not be scored as one, as long as the content survives. DO score as
-defects: a file's own TEXT (prose, caption, legend, table cell) still naming an old file name or
-label that the same package no longer carries, duplicate pre/post-rename siblings inside one
-package, and a renamed file whose content was lost or truncated. Score such a stale reference from
+alone. In the source packages a name carries ONE content-hash version token in the version slot, but
+every name you can see here is anonymized -- no digest, no version token, no letter/digit increment
+and no collision suffix is visible. A filename difference is therefore NOT missing content and must
+not be scored as one, as long as the content survives. DO score as defects: a file's own TEXT
+(prose, caption, legend, table cell) still naming an old file name or label that the same package
+no longer carries, duplicate pre/post-rename siblings inside one package, and a renamed file whose
+content was lost or truncated. Score such a stale reference from
 the package's visible text; a path that merely FAILS TO RESOLVE is not evidence (see the next
 paragraph).
 
@@ -2787,8 +2804,9 @@ which one, if any, is a starting version. A positive score means only that the t
 than that opponent; a negative score means it is worse. Judge preservation defects on the two
 packages in front of you, using the shared tier and severity scale.
 
-If two packages are byte-identical, judge that comparison like any other: the score is zero unless
-a real difference in the admitted evidence justifies otherwise.
+If two packages are byte-identical, the comparison is 0 with an empty resolved list and an empty
+introduced list. There is no evidence exception: identical bytes have identical admitted evidence,
+and the pipeline treats content-identical candidates as ONE candidate.
 
 @@PLACEHOLDER_RULE@@
 
@@ -3634,10 +3652,14 @@ the surface, and the revisers may not change a claim here."""
         # F-001; a split reviewer must see its OWN namespace there too, or the
         # same prompt gives it two incompatible primary id examples.
         first_id = "FA-001" if split == "a" else "FB-001"
+        prefix = first_id.split("-")[0]
         text = text.replace('"id": "F-001"', f'"id": "{first_id}"')
         text = text.replace("(F-001, F-002, ...)", f"({ids})")
+        text = text.replace('"detail": "F-003, F-004"',
+                            f'"detail": "{prefix}-003, {prefix}-004"')
     for token, _title, value in blocks:
         text = text.replace(token, value)
+    text = text.replace("@@READ_ONLY_HANDOFF@@", READ_ONLY_HANDOFF_NOTE)
     text = text.replace("@@RUN_ID@@", run_id)
     # Hold the literal, operator-supplied values until every global placeholder
     # pass is complete: a legitimate sandbox name containing `@@ROUND@@`, or a
@@ -3798,12 +3820,13 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     prof = _as_profile(venue)
     text = (AUDIT_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
             .replace("@@ROUND@@", str(int(r)))
-            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
+            .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
+            .replace("@@READ_ONLY_HANDOFF@@", READ_ONLY_HANDOFF_NOTE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", validation_block("audit"))
@@ -3819,6 +3842,10 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r, sandbox, text,
                                       author_to_complete=author_to_complete))
+    # Restore the operator-supplied values only after every @@...@@ pass: a retry
+    # diagnostic that quotes a token must stay verbatim data, not become a rule.
+    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
+    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     text = page_stage_prompt(sandbox, AUDIT_NO_NEW_FINDINGS + text + shared_blocks()
                              + AUDIT_TAIL + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete),
@@ -4042,6 +4069,15 @@ The finding vocabulary below is the one every session uses — classify each fin
 @@DEFECT_CLASS_RULE@@
 @@STANDING_EXEMPTIONS@@
 @@PLACEHOLDER_RULE@@
+@@READ_ONLY_HANDOFF@@
+
+=== COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
+
+@@MARKER_ROOT@@
+Write `_pipeline_done.json` there as the last action, after the pre-flight check below, carrying the
+object the end-of-prompt reminder prints. Your deliverables live in `cold_start_review/`; the
+MARKER does not.
+
 @@SELFCHECK@@
 """
 
@@ -4104,6 +4140,7 @@ def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: 
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
+            .replace("@@READ_ONLY_HANDOFF@@", READ_ONLY_HANDOFF_NOTE)
             .replace("@@SELFCHECK@@", selfcheck_block("cold_start_review", run_id, r, sandbox,
                                              author_to_complete=author_to_complete)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(COLD_START_DIR))
@@ -4140,7 +4177,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     prof = _as_profile(venue)
     text = (INTEGRATE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@SELF_ID@@", self_id)
             .replace("@@OTHER_IDS@@", ", ".join(other_ids))
@@ -4156,7 +4193,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@ZOTERO_CLI_RULE@@",
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_INTEGRATED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
-            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
+            .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
                                      prefer_rewrite)
     text = text.replace("@@DISCOVERY_PARITY@@",
@@ -4178,6 +4215,9 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                                           author_to_complete=author_to_complete))
     text = apply_hierarchy_reconcile(text, "integrate")
     text = apply_evidence_integrity(text, "integrate")
+    # Restore the operator-supplied values only after every @@...@@ pass (F80).
+    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
+    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     # The policy transform must run BEFORE paging: `page_stage_prompt` writes
     # each matched block into INSTRUCTIONS/PROFILE_RULES.md, so a transform
     # applied only to the returned prompt left the authoritative paged block
@@ -4213,7 +4253,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     level = level if level in REWRITE_LEVELS else rewrite_level_of(index, total)
     text = (REWRITE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@REWRITE_INDEX@@", str(int(index)))
             .replace("@@REWRITE_TOTAL@@", str(int(total)))
@@ -4230,7 +4270,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("rewrite", zotero))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
-            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
+            .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
                                      prefer_rewrite)
     text = render_venue_tokens(text, prof)
@@ -4245,6 +4285,9 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                                         author_to_complete=author_to_complete))
     text = apply_hierarchy_reconcile(text, "rewrite")
     text = apply_evidence_integrity(text, "rewrite")
+    # Restore the operator-supplied values only after every @@...@@ pass (F80).
+    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
+    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     text = page_stage_prompt(sandbox, text + shared_blocks() + attached_head(prof) + "\n"
                              + attached_phase1(prof) + "\n" + ATTACHED_PHASE2
                              + REWRITE_TAIL + journal_block + venue_norm,

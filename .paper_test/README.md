@@ -63,8 +63,11 @@ python3 .paper_test/run_all.py --logs /tmp/paper-logs   # keep logs/status/timin
 
 `run_all.py` drives every suite through `run_one.sh`, which gives it a private
 `TMPDIR`, captures its output to `<logs>/<suite>.log`, and records its exit
-status and wall time under `<logs>/status/`. A suite that fails is re-run ALONE
-once: a timing-sensitive suite that only failed because the other suites were
+status and wall time under `<logs>/status/`. `--logs DIR` is reusable: an
+existing non-empty `DIR` is left untouched and a fresh `run-<random>/`
+subdirectory is created (and printed as `logs=`), so the same
+`--logs /tmp/paper-logs` works on every invocation. A suite that fails is re-run
+ALONE once: a timing-sensitive suite that only failed because the other suites were
 competing with it is reported as `flaky` (and named), while a suite that fails alone too
 is a real failure whose `[FAIL]` lines are quoted. Exit status is 0 when nothing
 really failed, 1 otherwise.

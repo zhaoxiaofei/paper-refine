@@ -1411,6 +1411,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "declarations and the files they resolve to")
     phf.add_argument("--clear", action="store_true",
                      help="remove every placeholder-file declaration and exit")
+    phf.add_argument("--force", action="store_true",
+                     help="change the evidence policy although this root already has run records")
     phf.set_defaults(func=cmd_set_placeholder_file)
 
     ptf = sub.add_parser("set-tiebreak-defect-floor", parents=[common],

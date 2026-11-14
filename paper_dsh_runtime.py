@@ -68,6 +68,22 @@ def _echo_stdout(data: bytes) -> None:
         sys.stdout.flush()
 
 
+def _dsh_stdin():
+    """The inherited stdin, or DEVNULL when it has no file descriptor.
+
+    pytest's capture object (and any StringIO/pseudo-file a caller installs)
+    has no ``fileno()``; handing it to ``Popen`` raises
+    ``io.UnsupportedOperation`` instead of a clear error.  Such a caller has no
+    prompt to forward, so the child gets an empty stdin and can still stream.
+    """
+    stream = sys.stdin
+    try:
+        stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return subprocess.DEVNULL
+    return stream
+
+
 def run_dsh_streaming(cmd: list, env: dict, adapter: str) -> tuple:
     """(returncode, turn_failed) with the harness's stdout ECHOED, not buffered.
 
@@ -75,7 +91,7 @@ def run_dsh_streaming(cmd: list, env: dict, adapter: str) -> tuple:
     accumulated whole. The stream is read in bounded chunks, echoed as it
     arrives, and only complete lines are parsed.
     """
-    proc = subprocess.Popen(cmd, stdin=sys.stdin, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(cmd, stdin=_dsh_stdin(), stdout=subprocess.PIPE,
                             stderr=sys.stderr, env=env)
     turn_failed = None
     saw_turn_end = False

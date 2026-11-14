@@ -66,6 +66,20 @@ def xml_guard_text(data: bytes) -> str:
     return data.decode("utf-8", "ignore")
 
 
+def ooxml_part_text(data: bytes) -> str:
+    """Decoded text of one untrusted OOXML XML part, honouring UTF-16.
+
+    A legal OOXML part may be UTF-16 (BOM-bearing or, with its XML declaration,
+    BOM-less). Decoding every content part with `.decode("utf-8", "replace")`
+    turned such a part into NUL-interleaved text, so the regex readers matched
+    nothing and returned an EMPTY, error-free inventory. Reuse the DTD guard's
+    encoding picker; a plain UTF-8 part keeps the previous `replace` behaviour.
+    """
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in data[:400]:
+        return xml_guard_text(data)
+    return data.decode("utf-8", "replace")
+
+
 POLICY_DEFAULTS = {
     # FMT-IM4: a raster placed below this effective resolution is reported
     # (advisory). 0 disables it; a venue profile that states a number sets it.
@@ -206,9 +220,52 @@ NON_TEXT_TOKENS = re.compile(r"<w:(?:noBreakHyphen|sym)(?=[\s/>])[^>]*/?>")
 # The same walk, in DOCUMENT ORDER, for the callers that need both kinds of
 # piece at once (the text writer splices a fragment's new text at its own
 # offset, so a break counts as one character exactly like `text_of` says).
-_FRAG_OR_BREAK_RE = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>"
-                               r"|<w:(?:br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>",
-                               re.S)
+_FRAG_OR_BREAK_PATTERN = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>"
+                                    r"|<w:(?:br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>",
+                                    re.S)
+# The tab-STOP definitions a paragraph carries in `<w:pPr><w:tabs>`: `<w:tab>`
+# there is formatting (where the next tab lands), never a character of the text.
+_TAB_STOP_SPANS_RE = re.compile(r"<w:tabs(?=[\s/>])[^>]*>.*?</w:tabs>", re.S)
+_ROOT_TAG_RE = re.compile(r"<\s*([A-Za-z_][\w:.-]*)(?=[\s/>])")
+
+
+def _root_element_tag(frag: str) -> str:
+    """The first element name in `frag` (`w:p`, `w:r`, `w:document`, ...)."""
+    m = _ROOT_TAG_RE.search(frag or "")
+    return m.group(1) if m else ""
+
+
+class _FragOrBreakFinder:
+    """`finditer` over text/break tokens that skips non-content tokens.
+
+    Two tokens match the data-only pattern but are NOT characters a reader sees:
+    a `<w:tab>` inside `<w:tabs>` (a tab-STOP definition, rendered as a spurious
+    newline per stop) and every token inside a `<w:p>` nested in another `<w:p>`
+    (a text-box paragraph that `paragraphs()` now emits as its own paragraph).
+    Filtering them here keeps `text_of`, `field_result_text_ranges`, the field
+    offset table and the fixer's `rewrite_text_spans` on one offset model.
+    """
+
+    pattern = _FRAG_OR_BREAK_PATTERN.pattern
+
+    def finditer(self, frag: str):
+        if _root_element_tag(frag) == "w:r":
+            # A RUN never owns a paragraph: any `<w:p>` inside a drawing it
+            # carries is a text-box paragraph, not this run's text.
+            nested = [(s, e) for s, e, _t in _paragraph_spans(frag)]
+        else:
+            nested = _nested_paragraph_spans(frag)
+        stops = [(m.start(), m.end()) for m in _TAB_STOP_SPANS_RE.finditer(frag)]
+        for m in _FRAG_OR_BREAK_PATTERN.finditer(frag):
+            if any(a <= m.start() < b for a, b in nested):
+                continue
+            if stops and m.group(0).startswith("<w:tab") \
+                    and any(a <= m.start() < b for a, b in stops):
+                continue
+            yield m
+
+
+_FRAG_OR_BREAK_RE = _FragOrBreakFinder()
 RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
 FIELD_CHAR_RE = re.compile(r"<w:fldChar[^>]*w:fldCharType=\"(\w+)\"[^>]*/?>")
 INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?(?<!/)>.*?</w:instrText>", re.S)
@@ -399,6 +456,46 @@ def _spans(xml: str, tokens: re.Pattern) -> list:
     return out
 
 
+def _paragraph_spans(xml: str) -> list:
+    """(start, end, text) for EVERY `<w:p>`, nested ones included, in start order.
+
+    `_spans` emits a span only when a same-name element's depth returns to 0, so
+    an inner `<w:p>` (the normal shape of `w:txbxContent` inside a drawing of an
+    outer `<w:p>`) was never a paragraph while its text was folded into the host.
+    A stack walk keeps both: the outer host and the box's own paragraph get one
+    span each.
+    """
+    out, stack = [], []
+    for m in PARA_TOKENS.finditer(xml):
+        if m.group(0).startswith("</"):
+            if stack:
+                start = stack.pop()
+                out.append((start, m.end(), xml[start:m.end()]))
+            continue
+        tag_end = xml.find(">", m.start())
+        if tag_end == -1:
+            break
+        if xml[tag_end - 1] == "/":
+            out.append((m.start(), tag_end + 1, xml[m.start():tag_end + 1]))
+        else:
+            stack.append(m.start())
+    for start in stack:                    # hand-edited XML: close at EOF
+        out.append((start, len(xml), xml[start:]))
+    out.sort(key=lambda sp: sp[0])
+    return out
+
+
+def _nested_paragraph_spans(xml: str) -> list:
+    """(start, end) of every `<w:p>` that sits INSIDE another `<w:p>`.
+
+    Those are the text-box/shape paragraphs. They now get a paragraph entry of
+    their own, so the host's text (and its run list) must not read them again.
+    """
+    spans = [(s, e) for s, e, _t in _paragraph_spans(xml)]
+    return [(s, e) for s, e in spans
+            if any(a < s and e <= b for a, b in spans)]
+
+
 def _mc_hidden_spans(xml: str) -> list:
     """XML spans of the `mc:Fallback` branches Word does NOT render.
 
@@ -420,14 +517,30 @@ def _mc_hidden_spans(xml: str) -> list:
 
 def paragraphs(xml: str) -> list:
     hidden = _mc_hidden_spans(xml)
-    spans = _spans(xml, PARA_TOKENS)
-    if not hidden:
-        return spans
-    return [sp for sp in spans if not any(a <= sp[0] < b for a, b in hidden)]
+    spans = _paragraph_spans(xml)
+    nested = _nested_paragraph_spans(xml)
+    out = []
+    for sp in spans:
+        if any(a <= sp[0] < b for a, b in hidden):
+            continue
+        # A host paragraph whose only content is a nested (text-box/shape)
+        # paragraph contributes no text of its own: the nested span carries it.
+        # Keeping the empty host would add a phantom blank paragraph that the
+        # single-visible-branch contract (F28) never had.
+        if (any(sp[0] < ns and ne <= sp[1] for ns, ne in nested)
+                and not text_of(sp[2])):
+            continue
+        out.append(sp)
+    return out
 
 
 def runs(frag: str) -> list:
-    return _spans(frag, RUN_TOKENS)
+    """Every run in `frag`, skipping the branches/paragraphs text_of does not read."""
+    spans = _spans(frag, RUN_TOKENS)
+    hidden = _mc_hidden_spans(frag) + _nested_paragraph_spans(frag)
+    if not hidden:
+        return spans
+    return [sp for sp in spans if not any(a <= sp[0] < b for a, b in hidden)]
 
 
 _MC_ALTERNATE_RE = re.compile(r"<mc:AlternateContent\b.*?</mc:AlternateContent>", re.S)
@@ -641,8 +754,23 @@ def is_on(frag: str | None, tag: str) -> bool:
     return v is not None and str(v).lower() not in ("0", "false", "off", "none")
 
 
+def _fld_simple_instruction(tag: str) -> str:
+    """The `w:instr` ATTRIBUTE of a `w:fldSimple` element, decoded once."""
+    m = re.search(r'w:instr="([^"]*)"', tag or "")
+    if not m:
+        return ""
+    return (unesc(m.group(1)).replace("&quot;", '"').replace("&apos;", "'")).strip()
+
+
 def field_ranges(xml: str) -> list:
-    """(start, end, instruction) of every complex field, in document order."""
+    """(start, end, instruction) of every live field, in document order.
+
+    Both serializations Word uses are inventoried: the complex field
+    (`w:fldChar` begin/separate/end) and the single-element `w:fldSimple`.
+    `in_field` is the fixer's fence, so reading only the complex form left a
+    simple field's cached result unprotected although `_field_result_spans()`
+    already protects it.
+    """
     out, stack = [], []
     for m in FIELD_CHAR_RE.finditer(xml):
         kind = m.group(1)
@@ -654,6 +782,16 @@ def field_ranges(xml: str) -> list:
             raw = instr.group(0) if instr else ""
             out.append((start, m.end(),
                         unesc(raw[raw.find(">") + 1:raw.rfind("<")]).strip() if raw else ""))
+    simple_stack = []
+    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple>", xml):
+        tag = m.group(0)
+        if tag.startswith("</"):
+            if simple_stack:
+                start, opening = simple_stack.pop()
+                out.append((start, m.end(), _fld_simple_instruction(opening)))
+        elif not tag.rstrip().endswith("/>"):
+            simple_stack.append((m.start(), tag))
+    out.sort(key=lambda r: r[0])
     return out
 
 
@@ -1022,9 +1160,9 @@ def zotero_report_for_docx(path) -> dict:
             problem = _docx_zip_problem(pkg)
             if problem:
                 raise OSError(problem)
-            xmls = [(n, _docx_xml_part_guarded(pkg, n).decode("utf-8", "replace"))
+            xmls = [(n, ooxml_part_text(_docx_xml_part_guarded(pkg, n)))
                     for n in parts]
-            style_parts = {n: _docx_xml_part_guarded(pkg, n).decode("utf-8", "replace")
+            style_parts = {n: ooxml_part_text(_docx_xml_part_guarded(pkg, n))
                            for n in ("word/settings.xml", "docProps/custom.xml")
                            if n in pkg.namelist()}
     # RuntimeError is what `zipfile` raises for an ENCRYPTED entry and
@@ -1096,6 +1234,18 @@ def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
         warnings.append(f"{sum(repaired_sigs.values())} field-integrity condition(s) from the "
                         f"previous version are gone in this version")
 
+    # An UNREADABLE package is not an empty field inventory. The degraded
+    # baseline used to be a warning only, and the template gate skipped the
+    # whole check when both counts and `errors` were empty, so an unreadable
+    # source shipped with "checked: 0" instead of a recorded failure.
+    if "unreadable-docx" in (base.get("error_codes") or {}):
+        errors.append("the previous version's DOCX package could not be read "
+                      "(unreadable-docx), so this comparison has no field baseline: "
+                      "restore a readable baseline before trusting it")
+    if "unreadable-docx" in (out.get("error_codes") or {}):
+        errors.append("this version's DOCX package could not be read (unreadable-docx), "
+                      "so its Zotero fields could not be inventoried: an unreadable "
+                      "package is not a field-clean one")
     if base_fields and not out_fields:
         errors.append(f"ALL {len(base_fields)} Zotero field(s) were deleted (a version may add, "
                       f"edit or delete fields, but never remove every live field at once)")
@@ -1240,6 +1390,14 @@ def parse_styles(pkg: zipfile.ZipFile) -> dict:
     # XML DTD/entity declaration is refused before ElementTree expands it.
     text = xml_guard_text(raw)
     if "<!DOCTYPE" in text or "<!ENTITY" in text:
+        # The SAME refusal the document part gets -- but only for a real styles
+        # part. Returning an empty table made the scan report "no style
+        # findings" for a package that evaded the DTD guard and silently lost
+        # every style-derived check; the caller's unreadable-package path turns
+        # this into the FMT-X1 row. A part with no `<w:styles>` root has no
+        # style table to lose and keeps the historical empty result.
+        if re.search(r"<[A-Za-z0-9_.-]*:?styles(?=[\s/>])", text):
+            raise OSError("part 'word/styles.xml' carries an XML DTD/entity declaration")
         return out
     root = ET.fromstring(raw)
     defaults = root.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
@@ -1283,8 +1441,7 @@ def docx_style_ids(path: Path) -> list:
             problem = _docx_zip_problem(pkg)
             if problem:
                 raise OSError(problem)
-            xml = _docx_xml_part_guarded(pkg, "word/styles.xml").decode(
-                "utf-8", "replace")
+            xml = ooxml_part_text(_docx_xml_part_guarded(pkg, "word/styles.xml"))
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return []
     return sorted(set(re.findall(r'w:styleId="([^"]+)"', xml)))
@@ -1305,11 +1462,9 @@ def _template_uses_even_odd(template: Path) -> bool:
             if problem:
                 raise OSError(problem)
             names = set(tpkg.namelist())
-            settings = (_docx_xml_part_guarded(tpkg, "word/settings.xml").decode(
-                "utf-8", "replace")
+            settings = (ooxml_part_text(_docx_xml_part_guarded(tpkg, "word/settings.xml"))
                 if "word/settings.xml" in names else "")
-            doc = (_docx_xml_part_guarded(tpkg, "word/document.xml").decode(
-                "utf-8", "replace")
+            doc = (ooxml_part_text(_docx_xml_part_guarded(tpkg, "word/document.xml"))
                 if "word/document.xml" in names else "")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return False
@@ -1336,12 +1491,10 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
             if problem:
                 raise OSError(problem)
             names = set(pkg.namelist())
-            doc = _docx_xml_part_guarded(pkg, "word/document.xml").decode("utf-8", "replace")
-            rels = (_docx_xml_part_guarded(pkg, "word/_rels/document.xml.rels").decode(
-                        "utf-8", "replace")
+            doc = ooxml_part_text(_docx_xml_part_guarded(pkg, "word/document.xml"))
+            rels = (ooxml_part_text(_docx_xml_part_guarded(pkg, "word/_rels/document.xml.rels"))
                     if "word/_rels/document.xml.rels" in names else "")
-            settings = (_docx_xml_part_guarded(pkg, "word/settings.xml").decode(
-                            "utf-8", "replace")
+            settings = (ooxml_part_text(_docx_xml_part_guarded(pkg, "word/settings.xml"))
                         if "word/settings.xml" in names else "")
             hf_parts = {n: _docx_xml_part_guarded(pkg, n) for n in names
                         if n.startswith(("word/header", "word/footer")) and n.endswith(".xml")}
@@ -1372,7 +1525,7 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
     if first_header:
         name = f"word/{first_header}" if not first_header.startswith("word/") else first_header
         if name in hf_parts:
-            hx = hf_parts[name].decode("utf-8", "replace")
+            hx = ooxml_part_text(hf_parts[name])
             logo = bool(re.search(r"<w:drawing|<w:pict|<v:imagedata|<a:blip", hx))
     styles, texts = [], []
     for p in paragraphs(doc):
@@ -1440,8 +1593,8 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
             problem = _docx_zip_problem(tpkg)
             if problem:
                 raise OSError(problem)
-            tpl_doc = _docx_xml_part_guarded(
-                tpkg, "word/document.xml").decode("utf-8", "replace")
+            tpl_doc = ooxml_part_text(_docx_xml_part_guarded(
+                tpkg, "word/document.xml"))
         layout = _template_front_layout(tpl_doc)
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         layout = {}

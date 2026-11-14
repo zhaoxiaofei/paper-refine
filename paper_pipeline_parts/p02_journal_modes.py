@@ -538,6 +538,11 @@ def journal_previous_responses(ctx: Ctx) -> list:
     """
     if not ctx.pristine.is_dir():
         return []
+    streams = journal_feedback_streams(ctx)
+    if streams and "human" not in streams:
+        # `llm` mode reads ONLY the LLM review: a previous reply that sits beside
+        # a human letter is not context for that mode either.
+        return []
     # `_COVER_WORD_RE` is the module's already-correct word matcher; a local
     # copy compiled with re.I made its camel-case lookarounds match ANY letter
     # pair, so `uncover_response.docx` was mistaken for a cover letter.
@@ -1279,8 +1284,10 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
         if v is None:
             continue
         # A command-line value arrives as ONE string ("5", "0xFF,3"); a config
-        # value may already be a list of ints. Both shapes are accepted.
-        parts = re.split(r"[,;\s]+", str(v).strip()) if isinstance(v, str) else [v]
+        # value may already be a list of ints. Both shapes are accepted. `_` is
+        # a list separator here exactly as in parse_round_counts: without it
+        # `1_2` was one mask of int("1_2", 0) == 12.
+        parts = re.split(r"[,;_\s]+", str(v).strip()) if isinstance(v, str) else [v]
         vals.extend(p for p in parts if str(p).strip() != "")
     masks = []
     for v in vals:
@@ -1357,6 +1364,33 @@ def integrators_config_note(ctx) -> str:
                       lambda v: f"0x{int(v):X}")
 
 
+def _recorded_round_plan(ctx, r: int) -> dict:
+    """The plan a round recorded, or {} when it recorded none.
+
+    An UNREADABLE record is a hard error: substituting {} would re-derive the
+    round's candidate set from the CURRENT config, the exact
+    non-reproducibility the recorded plan exists to prevent.
+    """
+    if not callable(getattr(ctx, "round_get", None)):
+        # A hand-built synthetic context (unit tests, the report helpers) has no
+        # round store at all; that is "no recorded plan", not an unreadable one.
+        return {}
+    try:
+        rec = ctx.round_get(int(r)) or {}
+    except Exception as e:                                   # noqa: BLE001
+        die(f"the recorded plan for round {int(r)} could not be read "
+            f"({type(e).__name__}: {e}); refusing to re-derive the round's plan "
+            f"from the current pipeline_config.json")
+    plan = rec.get("plan") if isinstance(rec, dict) else None
+    if plan is None:
+        return {}
+    if not isinstance(plan, dict):
+        die(f"the recorded plan for round {int(r)} is not an object "
+            f"({type(plan).__name__}); refusing to re-derive it from the current "
+            f"pipeline_config.json")
+    return plan
+
+
 def round_counts(ctx, r: int) -> tuple:
     """(M, N) for round `r`: rewrites and reviewed-and-revised candidates.
 
@@ -1368,17 +1402,20 @@ def round_counts(ctx, r: int) -> tuple:
     longer matched the stored one and `decide` reported a bogus integrity
     problem about judge sheets that were perfectly fine.
     """
-    try:
-        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
-    except Exception:                                        # noqa: BLE001
-        plan = {}
-    if is_int(plan.get("rewrites")) and is_int(plan.get("revises")):
-        return max(0, int(plan["rewrites"])), max(0, int(plan["revises"]))
+    plan = _recorded_round_plan(ctx, r)
+    # Read each recorded key INDEPENDENTLY: a plan that recorded only one of
+    # the two counts must not discard the half it did record.
+    recorded_m = plan.get("rewrites") if is_int(plan.get("rewrites")) else None
+    recorded_n = plan.get("revises") if is_int(plan.get("revises")) else None
+    if recorded_m is not None and recorded_n is not None:
+        return max(0, int(recorded_m)), max(0, int(recorded_n))
     rounds = config_rounds(ctx)
     idx = round_index(r, rounds)
-    m = counts_of(getattr(ctx, "cfg", None), "rewrites", rounds)[idx]
-    n = counts_of(getattr(ctx, "cfg", None), "revises", rounds)[idx]
-    return int(m), int(n)
+    m = (int(recorded_m) if recorded_m is not None else
+         int(counts_of(getattr(ctx, "cfg", None), "rewrites", rounds)[idx]))
+    n = (int(recorded_n) if recorded_n is not None else
+         int(counts_of(getattr(ctx, "cfg", None), "revises", rounds)[idx]))
+    return max(0, m), max(0, n)
 
 
 def champion_select_of(ctx=None) -> str:
@@ -1465,12 +1502,13 @@ def judgeable_ids(ctx, r: int) -> list:
     the pinned run id, e.g. `r1_w2` -- in round 2 the base member IS that pin; the
     fresh `a1` copy of it is always content-identical and dropped by the field's
     deduplication), the round's pool (a1, w1.., a2..) and the integration arms the
-    round's `--integrators` mask selected -- not just the pool, which is why
+    round actually RAN -- its recorded `integrated` list when it has one, else
+    the `--integrators` mask's arms -- not just the pool, which is why
     `r2_judge_i1_j1` is a valid selector.
     """
     m, n = round_counts(ctx, r)
     return [ORIGINAL_ID] + round_pin_ids(ctx, r) + list(round_pool_ids(m, n)) \
-        + [integrate_vid(k) for k in integrator_arms(m, n, round_integrators(ctx, r))]
+        + list(round_integrated_run_ids(ctx, r, m, n))
 
 
 def round_pin_ids(ctx, r: int) -> list:
@@ -1639,10 +1677,7 @@ def round_judges(ctx, r: int) -> int:
     so a later edit of the config can never turn a complete panel into a
     "stale --judges value" gap.
     """
-    try:
-        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
-    except Exception:                                        # noqa: BLE001
-        plan = {}
+    plan = _recorded_round_plan(ctx, r)
     if is_int(plan.get("judges")):
         return max(0, int(plan["judges"]))
     rounds = config_rounds(ctx)
@@ -1659,10 +1694,7 @@ def round_integrators(ctx, r: int) -> int:
     mode keeps the configured mask (the promoted arm must be part of it; see
     `auto_champion_vid`).
     """
-    try:
-        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
-    except Exception:                                        # noqa: BLE001
-        plan = {}
+    plan = _recorded_round_plan(ctx, r)
     if is_int(plan.get("integrators")):
         return max(0, int(plan["integrators"]))
     if champion_select_of(ctx) == "revise":
@@ -1750,10 +1782,7 @@ def round_integrated_run_ids(ctx, r: int, m: int = None, n: int = None) -> list:
     empty list means the round runs no integration at all (mask 0, or every
     applicable bit clear).
     """
-    try:
-        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
-    except Exception:                                        # noqa: BLE001
-        plan = {}
+    plan = _recorded_round_plan(ctx, r)
     recorded = plan.get("integrated")
     if isinstance(recorded, (list, tuple)):
         # An EMPTY recorded list is meaningful: the round ran no integration at
@@ -2736,13 +2765,24 @@ def caption_report_text(profile=None) -> str:
     if published:
         # A disabled cap on a PUBLISHING venue is not "the venue publishes no
         # limit": the venue's number is known and the operator switched the
-        # proxy off for this run. Say exactly that.
-        origin = (f"{source}. {prof.label} publishes a figure-legend limit of {published} "
-                  f"words, but the OPERATOR DISABLED the proxy cap for this run "
-                  f"(`--caption-limit 0`), so the pipeline applies no number; the author "
-                  f"compares each recorded legend with the venue's {published}-word limit")
-        disposition = (f"recorded — the operator disabled the cap this run; {prof.label} "
-                       f"publishes {published} words and the author compares it in Word")
+        # proxy off for this run. Say exactly that -- UNLESS the profile itself
+        # selected the schema's documented counts-only form (an explicit
+        # `default_cap: 0` beside the published number), which is the profile's
+        # choice, not an operator override.
+        if not captions.get("default_cap"):
+            origin = (f"{source}. {prof.label} publishes a figure-legend limit of {published} "
+                      f"words, and this profile records it as COUNTS ONLY (`default_cap: 0`): "
+                      f"the pipeline applies no proxy cap, so the author compares each "
+                      f"recorded legend with the venue's {published}-word limit")
+            disposition = (f"recorded — the venue's profile selects counts only; {prof.label} "
+                           f"publishes {published} words and the author compares it in Word")
+        else:
+            origin = (f"{source}. {prof.label} publishes a figure-legend limit of {published} "
+                      f"words, but the OPERATOR DISABLED the proxy cap for this run "
+                      f"(`--caption-limit 0`), so the pipeline applies no number; the author "
+                      f"compares each recorded legend with the venue's {published}-word limit")
+            disposition = (f"recorded — the operator disabled the cap this run; {prof.label} "
+                           f"publishes {published} words and the author compares it in Word")
     else:
         origin = (f"{source}, and no proxy cap is\n"
                   f"    configured (`--caption-limit 0`)")
@@ -2928,7 +2968,24 @@ def m19_blocks(profile=None) -> dict:
     # margin, not a second cap. A section between the two used to be reported
     # clean everywhere, which is how an abstract of 164 words passed a 150-word
     # venue: the band clause makes it a row every stage must dispose.
+    limits = prof.length_limits()
+    band_bits = []
+    for _key, _label in (("abstract", "abstract"), ("main text", "main text")):
+        _spec = limits[_key]
+        _base, _cap = _spec.get("base"), _spec.get("cap")
+        if _base is None or _cap is None or int(_cap) <= int(_base):
+            continue
+        _margin = int(round((float(_spec["relaxation"]) - 1.0) * 100))
+        band_bits.append(f"{_label} base {_base} +{_margin}% = {_cap} words")
     band_clause = ""
+    if band_bits:
+        band_clause = (
+            "THE BAND IS REPORTED, NOT ENFORCED: a section above the venue's own base but "
+            "within this pipeline's relaxed cap (" + "; ".join(band_bits) + ") must be "
+            "RECORDED as its own M19 row naming the venue's base, the margin and the relaxed "
+            "cap -- the row says the section is within the relaxed cap, not that the venue's "
+            "base was met. It is within the limit applied here, so it is never a finding, "
+            "never compressed and never scored.")
     review = f"""3b. The PIPELINE-MANDATED length sweep M19 (see the length rule in the standing
    exemptions): enumerate the ABSTRACT and the MAIN TEXT of every submission document that carries
    one -- and the PERSUADING PART of the cover letter -- into guided_review/artifacts/M19_length.md, one
@@ -4114,8 +4171,11 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
     # The fallback must produce the SAME classified inventory the readme rule
     # requires, not a prose bullet: one four-column row per item, in the ONE
     # table, with a T-id that does not collide with the rows already there
-    # (F20).
-    used = [int(m.group(1)) for m in re.finditer(r"\bT-(\d+)\b", existing)]
+    # (F20). The id space is SHARED with MANUAL_STEPS.md (the gate reads both
+    # files as ONE inventory), so `text` -- the source of these items -- counts
+    # toward the collision check as well.
+    used = [int(m.group(1)) for m in
+            re.finditer(r"\bT-(\d+)\b", "\n".join(t for t in (existing, text) if t))]
     next_n = max(used, default=0) + 1
     classified = []
     for offset, it in enumerate(new):
@@ -4163,6 +4223,15 @@ MANUAL_ACTIONS = (
     "MANUALLY DO/DO_NOT correct without any LLMs-recommended corrections",
 )
 MANUAL_TODO_FILES = ("MANUAL_STEPS.md", AUTHOR_TO_COMPLETE_README)
+# Ledger statuses that record an edit ALREADY APPLIED to the package: the author
+# must confirm or reject it (author action 1), never be told no recommendation
+# exists. `manual-required`/`unresolved` keep the "recommendation provided" or
+# "no recommendation" action.
+MANUAL_TODO_APPLIED_STATUSES = ("fixed", "fixed-with-caveat", "placeholder-inserted")
+# The documented id spelling (`T-001`, `T-002`, ...): the prefix, at least three
+# digits, no redundant leading zero (T-0001 would sit in the same numeric slot
+# as T-001 in the one id space) and never T-000.
+MANUAL_TODO_ID_RE = re.compile(r"^T-(?:0(?!00)\d{2}|[1-9]\d{2,})$")
 
 
 def _manual_md_cells(line: str) -> list:
@@ -4274,6 +4343,9 @@ def manual_todo_rows_from_text(text: str) -> tuple:
             bad = []
             if not ident:
                 bad.append("empty TODO item ID")
+            elif not MANUAL_TODO_ID_RE.match(ident):
+                bad.append("TODO item ID must be the documented T-### form (e.g. T-001), "
+                           f"got {ident!r}")
             if not importance:
                 bad.append("importance must be one of " + ", ".join(MANUAL_IMPORTANCES))
             if not action:
@@ -4670,6 +4742,7 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     """
     root = Path(root)
     rows, problems = [], []
+    actions = {}
     oi = open_items or {}
     # "discarded" rows are findings the auditor refused, not work the author
     # owes. Re-emitting one as a checklist item would make it impossible for
@@ -4689,7 +4762,15 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
                 f"{'; ' + tag if tag else ''}] "
                 f"{loc + ': ' if loc else ''}{ev}").strip()
         if text:
-            rows.append(_clean_handoff_row(text))
+            row = _clean_handoff_row(text)
+            rows.append(row)
+            # The published row must carry the author action the manual-TODO
+            # rule assigns: an already-applied correction is CONFIRM/REJECT
+            # (action 1), never the "no LLMs-recommended corrections" action.
+            actions[row.lower()] = (
+                MANUAL_ACTIONS[0]
+                if status.lower() in MANUAL_TODO_APPLIED_STATUSES
+                else MANUAL_ACTIONS[2])
     markers = _handoff_marker_occurrences(root, problems=problems)
     for occ in markers:
         payload = _clean_handoff_row(occ["marker"])
@@ -4729,7 +4810,12 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
         existing = read_text_bounded(Path(existing_from)) or ""
     external, _managed_rows, had_block = _split_managed_handoff_readme(existing)
     if stage_text:
-        stage_rows, _stage_problems = manual_todo_rows_from_text(stage_text)
+        stage_rows, stage_problems = manual_todo_rows_from_text(stage_text)
+        if stage_problems:
+            # A stage table row the parser refused (a malformed T-id, a bad
+            # importance) must be REPORTED: silently dropping it from the merge
+            # would lose the author's work item.
+            problems.extend(p for p in stage_problems if p not in problems)
         if stage_rows:
             stage_ids = {str(r.get("id") or "").strip() for r in stage_rows}
             if external.strip():
@@ -4767,7 +4853,7 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     managed_rows = [{
         MANUAL_TODO_COLUMNS[0]: f"T-{next_n + i:03d}",
         MANUAL_TODO_COLUMNS[1]: "major",
-        MANUAL_TODO_COLUMNS[2]: MANUAL_ACTIONS[2],
+        MANUAL_TODO_COLUMNS[2]: actions.get(row.lower(), MANUAL_ACTIONS[2]),
         MANUAL_TODO_COLUMNS[3]: row,
     } for i, row in enumerate(managed_now)]
     result = {"path": (target.name if target.parent == root else str(target)),
@@ -4788,8 +4874,15 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     pieces = [base]
     if managed_now:
         table = manual_todo_markdown_table(managed_rows).rstrip("\n")
-        pieces.append(AUTHOR_TO_COMPLETE_MANAGED_BEGIN + "\n" + table + "\n"
-                      + AUTHOR_TO_COMPLETE_MANAGED_END)
+        if _manual_has_table(base):
+            # The preserved author text already carries THE classified table:
+            # append the generated rows to it instead of writing a SECOND
+            # inventory in the managed block (the manual rule requires one).
+            base = _merge_manual_todo_rows(base, managed_rows).rstrip("\n")
+            pieces = [base]
+        else:
+            pieces.append(AUTHOR_TO_COMPLETE_MANAGED_BEGIN + "\n" + table + "\n"
+                          + AUTHOR_TO_COMPLETE_MANAGED_END)
     text = "\n\n".join(pieces).rstrip() + "\n"
     action = "unchanged" if existing == text else ("updated" if existing else "created")
     if action != "unchanged":
@@ -5410,7 +5503,9 @@ defect the same way; only the deliverable differs):
     break-only paragraph that pushes a page break is artifact damage, graded by the extent of
     what it displaces. A length/caption row (`M18`/`M19`) is always a @@T_FORMATTING@@ MINOR row:
     the venue's relaxed length margins mean slight over-length is intended, so length may move a
-    comparison by at most one point and is NEVER a scoring tier of its own.
+    comparison by at most one point and is NEVER a scoring tier of its own. The cover letter's
+    TOTAL content (salutation, body, disclosures and signature) is @@COVER_LETTER_TOTAL_CLAUSE@@:
+    an over-cap TOTAL is the same formatting-tier M19 row, reported and never a gate.
   * @@PAGE_BUDGET_RULE@@
   * An improvement claim must name the class it improves and the concrete item behind it, with a
     location: "this edit is better" without one is not an improvement claim. A difference that

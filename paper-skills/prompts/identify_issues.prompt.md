@@ -1457,7 +1457,7 @@ and availability statements.
 `\cref`/literal cross-reference, every availability statement, every
 abbreviation definition and every term-family choice, paired with the
 main-text counterpart (the pipeline's `work/NUMBERS_LEDGER.md`,
-`work/M24_concepts.md` and `work/IDENTIFIERS.md` carry the code-side rows).
+`guided_review/artifacts/M24_concepts.md` and `work/IDENTIFIERS.md` carry the code-side rows).
 
 **Artifact.** `M23_supp_parity.md`: item | SI statement | main-text counterpart
 | agrees? | disposition.
@@ -1474,13 +1474,16 @@ family chosen differently in the SI and the main text.
 be individually correct while two families compete for one concept (CN vs CNV vs
 CNA; emulate vs simulate; rank vs score).
 
-**Enumeration.** The orchestrator seeds `work/M24_concepts.md` and
-`work/GLOSSARY.md` from the corpus: every concept with two competing families
-and the counts per surface form. Decide the authoritative term per concept in
-`GLOSSARY.md` (definition · authoritative term · forbidden synonyms) and then
-check EVERY occurrence against it.
+**Enumeration.** The orchestrator seeds `guided_review/work/M24_concepts.md` and
+`guided_review/work/GLOSSARY.md` from the corpus: every concept with two competing families
+and the counts per surface form. The same two tables are seeded under
+`guided_review/artifacts/M24_concepts.md` and `guided_review/artifacts/GLOSSARY.md`; dispose THOSE
+two (they are the tables the postcheck reads) -- the `work/` copies are working seeds only.
+Decide the authoritative term per concept in `guided_review/artifacts/GLOSSARY.md` (definition ·
+authoritative term · forbidden synonyms) and then check EVERY occurrence against it.
 
-**Artifact.** `M24_concepts.md` (rows, disposed) + `GLOSSARY.md` (decisions).
+**Artifact.** `guided_review/artifacts/M24_concepts.md` (rows, disposed) +
+`guided_review/artifacts/GLOSSARY.md` (decisions).
 
 **Finding rules (one per instance).** Both families used for one concept with no
 decided term · a hedge the manuscript introduces ("a qualitative ranking",

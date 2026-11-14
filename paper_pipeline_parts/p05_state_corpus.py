@@ -328,7 +328,15 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         return [rid_for_fresh(r, v) for v in pool if is_fresh_vid(v)]
     if kind == "judge":
         ids = [rec.get("target_id")] + list(rec.get("field_ids") or [])
-        return [rid_for_fresh(r, v) for v in ids if is_fresh_vid(v)]
+        if ctx is not None:
+            # `materialize_judges` requires EVERY round arm to be done (it
+            # deduplicates content-identical arms only AFTER building the
+            # field), so a deduplicated arm is absent from field_ids while
+            # still required. Listing only target+field_ids let `unmet_deps`
+            # pass and the rebuild die in the materializer's RuntimeError
+            # instead of deferring the run.
+            ids += list(round_produced_ids(ctx, r))
+        return [rid_for_fresh(r, v) for v in dict.fromkeys(ids) if is_fresh_vid(v)]
     return []
 
 
@@ -396,7 +404,7 @@ def superseded_dir_of(ctx: Ctx) -> Path:
 # 56 MiB of it was redundant copies of evidence packs that already live on disk:
 #   * runs.<judge>.judge_evidence  -> reports/judge_evidence_<run>.json
 #   * runs.<id>.evidence_after     -> runs/<id>/CODE_SCANS_after.json
-#   * runs.<id>.format_fix         -> runs/<id>/FORMAT_FIX.json
+#   * runs.<id>.format_fix         -> runs/<id>/FORMAT_FIX_<id>.json
 # `judge_evidence` alone was 41.6 MiB across 45 judge sessions, 33 MiB of that
 # the M4 number ledger of the judge's blinded target, replicated once per
 # session. Three layers keep the registry small and its failures diagnosable:
@@ -531,10 +539,15 @@ def compact_state(st: dict) -> int:
         if not isinstance(rec, dict):
             continue
         sb = str(rec.get("sandbox") or f"runs/{rid}")
+        # `normalize_formatting_in_dir` names its artifact after the record's own
+        # label (`FORMAT_FIX_<label>.json`, p04_utils), so the compaction's
+        # `full` pointer must use that name -- the old bare `FORMAT_FIX.json`
+        # was written by nobody and left the dropped payload with no home.
+        ff_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(rec.get("id") or rid)) or "format"
         for field, path_rel, summarize in (
                 ("judge_evidence", f"reports/judge_evidence_{rid}.json", _evidence_summary),
                 ("evidence_after", f"{sb}/CODE_SCANS_after.json", _evidence_summary),
-                ("format_fix", f"{sb}/FORMAT_FIX.json", _format_fix_summary)):
+                ("format_fix", f"{sb}/FORMAT_FIX_{ff_name}.json", _format_fix_summary)):
             payload = rec.get(field)
             if not isinstance(payload, dict) or payload.get("compacted"):
                 continue
@@ -690,6 +703,18 @@ class Ctx:
                     not isinstance(st.get("pinned"), list):
                 die(f"state.json is damaged: 'rounds' must be an object and 'pinned' a list.\n"
                     f"       {self.state_path}")
+            # `log` and `run_logs` are containers every command APPENDS to. A
+            # hand-edited/truncated null survived `setdefault` and made
+            # `ctx.log()` / `save_state()` die with a bare AttributeError
+            # instead of the actionable message this loader promises.
+            if not isinstance(st.setdefault("log", []), list):
+                die(f"state.json is damaged: 'log' must be a list (got "
+                    f"{type(st.get('log')).__name__}).\n       {self.state_path}\n"
+                    f"       Restore state.json from a backup.")
+            if "run_logs" in st and not isinstance(st["run_logs"], list):
+                die(f"state.json is damaged: 'run_logs' must be a list (got "
+                    f"{type(st.get('run_logs')).__name__}).\n       {self.state_path}\n"
+                    f"       Restore state.json from a backup.")
             for rk, rr in st["rounds"].items():
                 if not isinstance(rr, dict):
                     die(f"state.json is damaged: round record {rk!r} is not an object.\n"
@@ -3333,6 +3358,11 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
         "duration": rec.get("last_duration"),
         "status": rec.get("status"),
         "ok": bool(ok),
+        # The attempt's own diagnostic when the process died with an EMPTY
+        # error list: `attempt_history_lines` reads this key from the entry,
+        # but the entry never carried it, so such an attempt always printed
+        # "agent process failed: no message".
+        "last_error": rec.get("last_error"),
         # The TRUE totals, next to the (complete, but size-capped) lists: an
         # operator can see at a glance how many problems an attempt carried even
         # if a pathological list was cut.
@@ -3384,15 +3414,20 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
     """
     n = attempt_number(rec)
     sb = ctx.sandbox_of(rec)
+    # `sandbox_of()` returns a RESOLVED path while `ctx.root` keeps the raw
+    # `--root` spelling: a root reached through a symlink made every
+    # `relative_to(ctx.root)` below raise ValueError (not an OSError, so the
+    # callers' handlers missed it) before the attempt could be archived.
+    root = ctx.root.resolve()
     inside = sandbox_attempts(rec) or [n]
     dest = failed_sandbox_dir(ctx, rec)
     history = rec.get("attempts_log") or []
     entry = next((e for e in reversed(history) if e.get("attempt") == n), None)
     record = dict(entry or {"attempt": n, "ok": False, "errors": [], "warnings": []})
     record.update({"run_id": rec.get("id"), "kind": rec.get("kind"), "round": rec.get("round"),
-                   "sandbox": str(sb.relative_to(ctx.root)) if sb.is_dir() else None,
+                   "sandbox": str(sb.relative_to(root)) if sb.is_dir() else None,
                    "attempts_in_sandbox": inside,
-                   "moved_at": utcnow(), "moved_to": str(dest.relative_to(ctx.root))})
+                   "moved_at": utcnow(), "moved_to": str(dest.resolve().relative_to(root))})
     if not sb.is_dir():
         dest.mkdir(parents=True, exist_ok=True)
         write_json_atomic(dest / "record.json", record)
@@ -3403,7 +3438,7 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
         # record.json: unique_path() may have renamed it, and the post-write
         # update below used to reach only the in-memory dict, leaving the
         # archived record pointing at the pre-collision name.
-        record["moved_to"] = str(dest.relative_to(ctx.root))
+        record["moved_to"] = str(dest.resolve().relative_to(root))
         try:
             sb.rename(dest)
         except OSError:
@@ -3412,18 +3447,18 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
         write_json_atomic(dest / "record.json", record)
     if entry is not None:
         entry["archived"] = True
-        entry["archive"] = str(dest.relative_to(ctx.root))
-        entry["sandbox_moved_to"] = str(dest.relative_to(ctx.root))
+        entry["archive"] = str(dest.resolve().relative_to(root))
+        entry["sandbox_moved_to"] = str(dest.resolve().relative_to(root))
         log = dest / "_agent.log"
         if log.is_file():
-            entry["agent_log"] = str(log.relative_to(ctx.root))
+            entry["agent_log"] = str(log.resolve().relative_to(root))
     else:
         rec.setdefault("attempts_log", []).append(record)
     ctx.log("failed-sandbox-moved", rec.get("id"),
-            f"attempt {n}: {dest.relative_to(ctx.root)}")
+            f"attempt {n}: {dest.resolve().relative_to(root)}")
     print(f"  [keep] {rec['id']}: failed try {dest.name.rsplit('_try', 1)[-1].split('_')[0]}'s "
           f"sandbox (attempt(s) {', '.join(str(a) for a in inside)}) is kept at "
-          f"{dest.relative_to(ctx.root)}/ -- deliverables, transcript and record.json")
+          f"{dest.resolve().relative_to(root)}/ -- deliverables, transcript and record.json")
     return dest
 
 
@@ -3450,7 +3485,7 @@ def keep_failed_sandboxes(ctx: Ctx, manual: bool = False) -> list:
             continue
         try:
             kept.append(move_failed_sandbox(ctx, rec))
-        except OSError as e:                                        # noqa: BLE001
+        except (OSError, ValueError) as e:                          # noqa: BLE001
             print(f"  [warn] {rec['id']}: could not keep the failed sandbox ({e}); its "
                   f"diagnostics stay in state.json's attempts_log")
     if kept:
@@ -3574,6 +3609,13 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
         src_id, src_dir = pin["id"], pinned_docs_dir(ctx, pin)
     want = (working_original_digest(ctx) if src_id == ORIGINAL_ID
             else (find_pin(ctx, src_id) or {}).get("digest"))
+    if not want and src_dir.is_dir():
+        # A legacy/damaged registry (or a pin with no recorded digest) used to
+        # make BOTH the stale-base guard and the post-copy check no-ops, so an
+        # existing base/ was trusted even when it was not the source. Derive
+        # the source digest from the SOURCE so the guard compares against what
+        # the round must start from, and record a real verified digest.
+        want = manifest_digest(manifest_for_sources([(src_dir, "", ())]))
     if (base.exists() and want
             and manifest_digest(manifest_for_sources([(base, "", ())])) != want):
         # An earlier round was re-run and its champion changed: a stale base copy
@@ -3702,6 +3744,26 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     return rec
 
 
+def prior_audit_observations(ctx: Ctx, r_prior: int):
+    """The prior round's accepted audit observations, or None.
+
+    ONE predicate shared by `materialize_review` (which COPIES the file into
+    the next review's `prior_audit/`) and `_input_freshness_problems` (which
+    requires the copy to equal it). The materializer only carries observations
+    of a `done` audit; the freshness check used to accept ANY audit record, so
+    a failed/pending audit that had already written UNRESOLVED.md could never
+    match -- every invocation reset the completed review and its dependents.
+    """
+    audit_rec = ctx.run(rid_audit(r_prior))
+    if audit_rec is None or audit_rec.get("status") != "done":
+        return None
+    audit_obs = ctx.sandbox_of(audit_rec) / "audit" / "UNRESOLVED.md"
+    # `is_file()` follows a symlink, and copy2 then imports the target's bytes
+    # into the next review as if the accepted audit had written them. Only a
+    # regular observation file is a prior-audit artifact.
+    return audit_obs if (audit_obs.is_file() and not audit_obs.is_symlink()) else None
+
+
 def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     """(ii) Phase-1 sandbox: base/ + non_revised/ + prior_round/ (r>1) + guided_review/ (OUT)."""
     rid = rid_guided_review(r) if part == "a" else rid_guided_review_b(r)
@@ -3750,39 +3812,34 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     if prior_audit_dir.exists():
         rmtree_force(prior_audit_dir, ignore_errors=True)
     if r > 1:
-        audit_rec = ctx.run(rid_audit(r - 1))
-        if audit_rec is not None and audit_rec.get("status") == "done":
-            audit_obs = ctx.sandbox_of(audit_rec) / "audit" / "UNRESOLVED.md"
-            # `is_file()` follows a symlink, and copy2 then imports the target's
-            # bytes into the next review as if the accepted audit had written
-            # them. Only a regular observation file is a prior-audit artifact.
-            if audit_obs.is_file() and not audit_obs.is_symlink():
-                prior_audit_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(audit_obs, prior_audit_dir / "UNRESOLVED.md")
-                # The observations are prose lines with no ids, so a review could
-                # not name the one it disposed. Stage the SAME lines with stable
-                # ids (an indexed READ-ONLY view; UNRESOLVED.md stays verbatim)
-                # and let the postcheck require one disposition per id.
-                _obs_lines = prior_audit_observation_lines(
-                    read_text_bounded(prior_audit_dir / "UNRESOLVED.md") or "")
-                write_text_atomic(
-                    prior_audit_dir / "OBSERVATIONS.md",
-                    "\n".join([
-                        "# PRIOR-AUDIT OBSERVATIONS — stable ids (read-only)",
-                        "",
-                        "One row per observation line of `UNRESOLVED.md`, in the same order.",
-                        "Cite the id in the disposition: a finding's explanation says",
-                        "`from prior audit observation <id>`; a not-reproducible note says",
-                        "`prior <id>: not reproducible in base/`.",
-                        "",
-                        "| id | observation |",
-                        "|---|---|",
-                        *[f"| {oid} | {md_table_cell(line)} |"
-                          for oid, line in (
-                              (f"AU-OBS-{i:03d}", line)
-                              for i, line in enumerate(_obs_lines, 1))],
-                    ]) + "\n")
-                inputs["prior_audit"] = hash_manifest(prior_audit_dir)
+        audit_obs = prior_audit_observations(ctx, r - 1)
+        if audit_obs is not None:
+            prior_audit_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(audit_obs, prior_audit_dir / "UNRESOLVED.md")
+            # The observations are prose lines with no ids, so a review could
+            # not name the one it disposed. Stage the SAME lines with stable
+            # ids (an indexed READ-ONLY view; UNRESOLVED.md stays verbatim)
+            # and let the postcheck require one disposition per id.
+            _obs_lines = prior_audit_observation_lines(
+                read_text_bounded(prior_audit_dir / "UNRESOLVED.md") or "")
+            write_text_atomic(
+                prior_audit_dir / "OBSERVATIONS.md",
+                "\n".join([
+                    "# PRIOR-AUDIT OBSERVATIONS — stable ids (read-only)",
+                    "",
+                    "One row per observation line of `UNRESOLVED.md`, in the same order.",
+                    "Cite the id in the disposition: a finding's explanation says",
+                    "`from prior audit observation <id>`; a not-reproducible note says",
+                    "`prior <id>: not reproducible in base/`.",
+                    "",
+                    "| id | observation |",
+                    "|---|---|",
+                    *[f"| {oid} | {md_table_cell(line)} |"
+                      for oid, line in (
+                          (f"AU-OBS-{i:03d}", line)
+                          for i, line in enumerate(_obs_lines, 1))],
+                ]) + "\n")
+            inputs["prior_audit"] = hash_manifest(prior_audit_dir)
     split_mode = review_split_of(ctx)
     review_a_findings = None
     if part == "b" and split_mode != "off":
@@ -4418,6 +4475,12 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
             entry.update(status="missing")
             results.append(entry)
             continue
+        # Enforce the AGGREGATE budget on this run too: checking elapsed only
+        # BEFORE each verifier let one started just under the total run its
+        # full per-script timeout, so the enforced wall clock exceeded
+        # COLD_START_REPRO_TOTAL_BUDGET by up to COLD_START_REPRO_TIMEOUT.
+        remaining = COLD_START_REPRO_TOTAL_BUDGET - (time.monotonic() - started)
+        timeout = max(0.0, min(COLD_START_REPRO_TIMEOUT, remaining))
         try:
             # The WHOLE stdout, not its final 8192 bytes: a correct last line
             # longer than that failed, and a long line whose suffix happened to
@@ -4425,7 +4488,7 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
             # a verifier that floods stdout is an over-budget failure, never
             # unbounded memory in the orchestrator (F61).
             rc, out, _err = run_bounded(
-                [sys.executable, str(target)], COLD_START_REPRO_TIMEOUT, cwd=str(sb))
+                [sys.executable, str(target)], timeout, cwd=str(sb))
             text = (out or b"").decode("utf-8", "replace")
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             produced = lines[-1] if lines else ""
@@ -4439,7 +4502,7 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
             else:
                 entry.update(status="mismatch")
         except subprocess.TimeoutExpired:
-            entry.update(status="timeout", detail=f"over {COLD_START_REPRO_TIMEOUT}s")
+            entry.update(status="timeout", detail=f"over {timeout:.0f}s")
         except ToolOutputOverBudget as e:
             entry.update(status="failed", detail=str(e)[:120])
         except OSError as e:                                     # noqa: BLE001
@@ -4626,7 +4689,11 @@ def cold_start_findings_for_merge(existing_ids, rows) -> tuple:
         row = dict(row)
         fid = str(row.get("id") or "").strip()
         new = fid
-        if not DISCOVERY_X_ID_RE.match(new) or new in used:
+        # The docstring's invariant is the RESERVED X-9xx block, not the
+        # discovery pattern (^X-\d+$): `DISCOVERY_X_ID_RE` accepted an
+        # out-of-block id such as X-101 and passed it into the merged frozen
+        # list, where every later probe-id check rejects it.
+        if not COLD_START_ID_RE.match(new) or new in used:
             k = COLD_START_FINDING_ID_BASE + 1
             while True:
                 cand = f"X-{k:03d}"
@@ -4701,7 +4768,10 @@ def merge_cold_start_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
         ctx, r, cold_start_review_upstream_doc(ctx, r))
     if merged is None:
         return {"rows": 0, "remap": {}}
-    current = read_json(target, revive=False, lenient=True)
+    # PIPELINE-written (write_json_atomic above): revive the NUL-escaped
+    # "NaN"/"Infinity" sentinels, or a finding value that happens to be one of
+    # those exact strings never compares equal and every call rewrites the file.
+    current = read_json(target, revive=True, lenient=True)
     if isinstance(current, dict) and current == merged:
         return {"rows": len(merged_rows), "remap": remap, "skipped": True}
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -5195,6 +5265,23 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             view_seed = judge_view_seed_for(ctx, r, vid, j)
             ensure_judge_view(ctx, r, vid, sb / "target", view_stamp, f"{view_seed}|target")
             labels = sample_labels(r, vid, j, k_opp, salt=judge_salt_of(ctx))
+            # This branch runs when the sandbox exists WITHOUT a PROMPT.md (an
+            # interrupted first materialization). Delete every field/<label>
+            # directory this attempt does not name: a leftover opponent is an
+            # unlisted, possibly superseded version the judge can read, and the
+            # inputs_manifest recorded below then protects the stale view.
+            field_root = sb / "field"
+            if field_root.is_symlink():
+                field_root.unlink()
+            elif field_root.is_dir():
+                keep = set(labels)
+                for stale in list(field_root.iterdir()):
+                    if stale.name in keep:
+                        continue
+                    if stale.is_symlink() or stale.is_file():
+                        stale.unlink()
+                    else:
+                        rmtree_force(stale, ignore_errors=True)
             label_map = {}
             for label, w in zip(labels, others):
                 ensure_judge_view(ctx, r, w["id"], sb / "field" / label, view_stamp,
@@ -5368,7 +5455,7 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
         # builds a fresh sandbox at the original path.
         try:
             move_failed_sandbox(ctx, rec)
-        except OSError as e:                                    # noqa: BLE001
+        except (OSError, ValueError) as e:                      # noqa: BLE001
             print(f"  [warn] {rec['id']}: could not keep attempt {attempt_number(rec)}'s sandbox "
                   f"({e}); its diagnostics stay in state.json's attempts_log")
             rmtree_force(sb, ignore_errors=True)
@@ -5478,7 +5565,9 @@ def _synthesized_review_problems(ctx: Ctx, r: int, sb: Path) -> list:
     and every reviser, exactly like a review retry (F01).
     """
     rel = f"{GUIDED_REVIEW_DIR}/round2/findings_extra.json"
-    doc = read_json(sb / rel, revive=False, lenient=True)
+    # synthesize_frozen_review() writes this with write_json_atomic, so the
+    # matching read must revive its sentinel strings (see read_json's docstring).
+    doc = read_json(sb / rel, revive=True, lenient=True)
     actual = doc.get("findings") if isinstance(doc, dict) else None
     want = list(cold_start_findings_rows(ctx, r) or [])
     if actual != want:
@@ -5517,7 +5606,9 @@ def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
         return (f"{GUIDED_REVIEW_DIR}/ no longer matches its current upstream source "
                 f"({', '.join(others[:3])})")
     expected, _rows, _remap = cold_start_merged_review_doc(ctx, r, cold_start_review_upstream_doc(ctx, r))
-    actual = read_json(sb / GUIDED_REVIEW_DIR / rel, revive=False, lenient=True)
+    # PIPELINE-written merged view (merge_cold_start_into_review_copy /
+    # synthesize_frozen_review use write_json_atomic): read it back the same way.
+    actual = read_json(sb / GUIDED_REVIEW_DIR / rel, revive=True, lenient=True)
     if expected is None or actual != expected:
         return (f"{GUIDED_REVIEW_DIR}/{rel} no longer matches the frozen list this round's auditor "
                 f"and revisers must consume (the probe findings changed)")
@@ -5590,13 +5681,8 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
                         if (prior / name).is_file()}
             if expected and hash_manifest(sb / "prior_round").get("files") != expected:
                 probs.append("prior_round/ no longer matches the archived prior review")
-        prior_audit_obs = None
-        if r > 1:
-            audit_rec = ctx.run(rid_audit(r - 1))
-            if audit_rec is not None:
-                cand = ctx.sandbox_of(audit_rec) / "audit" / "UNRESOLVED.md"
-                if cand.is_file():
-                    prior_audit_obs = cand
+        # The SAME predicate the materializer copies with (one source of truth).
+        prior_audit_obs = prior_audit_observations(ctx, r - 1) if r > 1 else None
         prior_audit_copy = sb / "prior_audit" / "UNRESOLVED.md"
         if prior_audit_obs is not None:
             if (not prior_audit_copy.is_file()

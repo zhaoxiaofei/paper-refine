@@ -17,9 +17,9 @@ Every suite runs through `run_one.sh`, which gives it a private TMPDIR
 (`$rundir/tmp/<suite>`) and captures its output to `$rundir/<suite>.log` plus its
 status/timing in `$rundir/status/`. The runner prints one line per suite and a
 total; a suite that fails is RE-RUN ALONE once (`--no-rerun` disables that), so a
-timing-sensitive suite that only failed because 15 others were competing is
-reported as `flaky` instead of a false alarm -- and a suite that fails alone too
-is a real failure, with its `[FAIL]` lines quoted.
+timing-sensitive suite that only failed because the other suites were competing
+is reported as `flaky` instead of a false alarm -- and a suite that fails alone
+too is a real failure, with its `[FAIL]`/`FAIL` lines quoted.
 
 A zero EXIT is not a pass by itself: a suite that exits 0 without printing a
 single check line (`[ok ]`/`[FAIL]`, `OK ...`, or `  ok  ...`) is reported
@@ -27,7 +27,9 @@ single check line (`[ok ]`/`[FAIL]`, `OK ...`, or `  ok  ...`) is reported
 used to exit 0 after its imports and be reported as `PASS` with zero checks run.
 
 Exit status: 0 when every suite passed (a flaky suite that passed alone counts as
-passed, but is named), 1 when one failed both ways, 2 on a usage error.
+passed, but is named); 1 when a suite failed both in the parallel pass and alone,
+or exited 0 without printing a single check line (NOCHK) even when run alone;
+2 on a usage error.
 """
 from __future__ import annotations
 
@@ -55,8 +57,11 @@ NO_CHECK_RC = 97
 CHECK_LINE_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail|skip)\]|ok\b|fail\b|skip\b)")
 # A FAILure MARKER must start its check line: a passing check's detail can quote
 # `[FAIL]` (attempt-history does), and counting that as a failure hides a real
-# pass while the zero-exit guard is doing its job.
-FAIL_CHECK_RE = re.compile(r"(?im)^\s*\[FAIL\]")
+# pass while the zero-exit guard is doing its job. The runner accepts the same
+# failure shapes CHECK_LINE_RE does -- `[FAIL]` and the bare `FAIL ...` form the
+# suites' own OK/FAIL convention allows -- so a suite that prints `FAIL ...` and
+# forgets `sys.exit(1)` is not reported PASS.
+FAIL_CHECK_RE = re.compile(r"(?im)^\s*(?:\[fail\]|fail\b)")
 # The operator's standing request for this box: use 32 parallel sessions by
 # default (`-j 32`). The effective default is capped only by the number of
 # suites to run; `-j N` caps it on a smaller box, `-j 1` is the old sequential
@@ -84,11 +89,18 @@ def run_dir_under(path: str = None) -> Path:
             usage_error(f"--logs {p} is not a directory; choose a fresh directory")
         if p.exists():
             try:
-                empty = not any(p.iterdir())
+                not_empty = any(p.iterdir())
             except OSError as e:
                 usage_error(f"--logs {p} cannot be read ({e}); choose a fresh directory")
-            if not empty:
-                usage_error(f"--logs {p} is not empty; choose a fresh directory")
+            if not_empty:
+                # A reusable log location (`--logs /tmp/paper-logs`): keep the
+                # existing tree untouched and start a fresh, printed run under it.
+                try:
+                    p.mkdir(parents=True, exist_ok=True)
+                    return Path(tempfile.mkdtemp(prefix="run-", dir=p))
+                except OSError as e:
+                    usage_error(f"--logs {p} cannot be written ({e}); "
+                                f"choose another directory")
         p.mkdir(parents=True, exist_ok=True)
         return p
     return Path(tempfile.mkdtemp(prefix="paper-tests-"))
@@ -137,7 +149,7 @@ def engine_python(todo: list, jobs: int, rundir: Path, python: str) -> None:
 
 
 def tail_failures(suite: str, rundir: Path, limit: int = 6) -> list:
-    """The suite's own `[FAIL]` CHECK lines (not a `[FAIL]` quoted in a detail).
+    """The suite's own `[FAIL]`/`FAIL ...` CHECK lines (not one quoted in a detail).
 
     A passing check may print `[ok ] ... -- [FAIL] ...` as its evidence (the
     attempt-history suite does). Matching the marker anywhere in the line made
@@ -259,12 +271,9 @@ def main() -> int:
     failed = [s for s in todo if results[s][0] != 0]
     flaky = []
     if failed and not args.no_rerun:
-        print(f"\n[tests] {len(failed)} suite(s) failed under load; re-running each ALONE "
-              f"(--no-rerun disables this)")
+        print(f"\n[tests] {len(failed)} suite(s) did not pass in the parallel pass; "
+              f"re-running each ALONE (--no-rerun disables this)")
         for suite in failed:
-            if suite in no_checks:
-                print(f"[tests] {suite}: NOT re-run -- it printed no checks at all")
-                continue
             quiet = rundir / "alone"
             quiet.mkdir(exist_ok=True)
             run_one(suite, quiet, python)
@@ -275,6 +284,8 @@ def main() -> int:
                 rc = 1
             where = f"{secs:.0f}s" if secs is not None else "no timing recorded"
             if rc == 0 and not ran_checks(suite, quiet):
+                # Also covers a NOCHK suite: it gets the same quiet second
+                # chance, and only a still-checkless quiet run is a real failure.
                 print(f"[tests] {suite}: NO CHECKS alone either -- real failure")
             elif rc == 0:
                 flaky.append(suite)

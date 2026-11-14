@@ -43,8 +43,12 @@ basename has none. All payload documents of one package carry the SAME token.
 Legacy letter tokens remain readable by the pipeline, but new revisions do not
 produce them.
 
-Exit status: 0 (also when --verify matches); 1 on a verify mismatch or a
-read error.
+Exit status: 0 (also when --verify matches, and for a package with no payload
+files); 1 on a verify mismatch, or when payload files exist but none could be
+read or hashed; 2 on a symlinked package root (a link is not package content).
+An unreadable or over-budget payload file is SKIPPED and reported in `notes`
+(the readable remainder is still hashed, exactly like the pipeline's
+`revision_token_for_dir`); a partial skip does not change the exit status.
 """
 from __future__ import annotations
 
@@ -251,6 +255,16 @@ def content_token_free(data: bytes, tokens) -> bytes:
     alts = [re.escape(t.encode()) for t in sorted(set(tokens), key=len, reverse=True) if t]
     alts.append(rb"[0-9a-f]{7}")
     tok = rb"(?:" + b"|".join(alts) + rb")"
+    # A remote URL is not a version-tokenized package file: its path segment
+    # may happen to look like a 7-hex token, and erasing it changed a distinct
+    # external identifier (the pipeline twin stashes URLs the same way).
+    _urls = []
+
+    def _stash_url(m):
+        _urls.append(m.group(0))
+        return b"\x00VIEWURL%d\x00" % (len(_urls) - 1)
+
+    data = re.sub(rb"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>)]+", _stash_url, data)
     data = re.sub(rb"([-_])" + tok + rb"(?=\.[A-Za-z][A-Za-z0-9]{0,9}\b)",
                   rb"", data)
     cmd = re.compile(
@@ -262,7 +276,10 @@ def content_token_free(data: bytes, tokens) -> bytes:
         inner = re.sub(rb"([-_])" + tok + rb"(?![0-9A-Za-z_])", rb"", m.group(2))
         return m.group(1) + inner + m.group(3)
 
-    return cmd.sub(_arg, data)
+    data = cmd.sub(_arg, data)
+    for _i, _url in enumerate(_urls):
+        data = data.replace(b"\x00VIEWURL%d\x00" % _i, _url)
+    return data
 
 
 def revision_token(root: Path) -> dict:
@@ -290,8 +307,19 @@ def revision_token(root: Path) -> dict:
             continue
         digs.append(hashlib.sha256(content_token_free(data, tokens)).hexdigest())
     if not digs:
-        return {"token": "", "files": 0, "tokens_seen": [],
-                "consistent": False, "notes": ["no payload file found"]}
+        notes = []
+        if skipped:
+            # The skipped-file diagnostics are the only record of WHY there is
+            # no token; dropping them and claiming "no payload file found" hid
+            # an over-budget/unreadable package.
+            notes.append("unreadable payload file(s) skipped: " + "; ".join(skipped[:3]))
+        elif root.is_symlink():
+            notes.append("the package root is a symlink; a link is not package content, "
+                         "so no payload file was hashed (pass the target directory)")
+        else:
+            notes.append("no payload file found")
+        return {"token": "", "files": len(files), "tokens_seen": [],
+                "consistent": False, "notes": notes}
     token = hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()[:7]
     # A name inside a READ-ONLY evidence area is NOT this package's naming
     # evidence (its token belongs to the corpus the evidence came from); it
@@ -320,7 +348,14 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--verify", default=None, help="compare against this token; exit 1 on mismatch")
     args = ap.parse_args(argv)
-    info = revision_token(Path(args.directory))
+    root = Path(args.directory)
+    if root.is_symlink():
+        # A user who points the tool at a symlinked revised/ used to get an
+        # EMPTY token and exit 0; a link is not package content, so say so.
+        print(f"error: refusing a symlinked package root: {root} — a link is not "
+              f"package content; pass the target directory explicitly", file=sys.stderr)
+        return 2
+    info = revision_token(root)
     if args.verify is not None:
         ok = info["token"] == args.verify
         print(f"{'OK' if ok else 'MISMATCH'}: content token {info['token']} vs --verify "
@@ -334,6 +369,10 @@ def main(argv=None) -> int:
         print(f"tokens in filenames: {info['tokens_seen'] or '(none)'}")
         for note in info["notes"]:
             print(f"note: {note}")
+    if not info["token"] and info.get("files"):
+        print("error: no payload file could be read or hashed; the token is empty",
+              file=sys.stderr)
+        return 1
     return 0
 
 

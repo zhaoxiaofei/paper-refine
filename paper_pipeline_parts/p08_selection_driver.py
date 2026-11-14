@@ -299,7 +299,13 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             # a human reads, and the sign count), never a ranking input -- the
             # pair is too small for one outlier session not to flip it.
             "vs_base_vals": sorted(int(x) for x in base_vals),
-            "vs_base_expected": (0 if base_rep in (None, vid) else 2 * judges),
+            # J(V) + J(base): the same ENABLED per-version judge counts
+            # `vs_original_expected` uses, so a `--only` selection that skipped a
+            # judge session does not report a pair expectation the panel could
+            # never reach (a full panel is 2*judges).
+            "vs_base_expected": (0 if base_rep in (None, vid) else
+                                 per_judges.get(vid, judges)
+                                 + per_judges.get(base_rep, judges)),
             "is_base": vid == base_rep,
             "own_counts": {opp: len(v) for opp, v in sorted(st["own"].items())},
             "received_counts": {opp: len(v) for opp, v in sorted(st["received"].items())},
@@ -663,15 +669,21 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
     if sel["ranking"]:
         prefix_cells = int((sel.get("tiebreak") or {}).get("cells_used") or 0)
         for i, t in enumerate(sel["ranking"], 1):
+            # A complete row can still carry a missing panel statistic (a legacy
+            # or partial stats provider); format through guards so the report
+            # adapter cannot abort after the champion was already derived.
+            _med, _iqr = t.get("median"), t.get("iqr")
+            _mean = (f"{t['mean']:.3f}" if isinstance(t.get("mean"), (int, float))
+                     else "n/a")
             sel["trace"].append(
-                f"  {i}. {t['id']}: median={t['median']:g} mean={t['mean']:.3f} "
+                f"  {i}. {t['id']}: median={_g(_med)} mean={_mean} "
                 f"vs_original={_g(t['vs_original'])} vs_base={_g(t['vs_base'])} "
                 f"defects@{prefix_cells}={t['defect_prefix_total']} "
                 + "(cf/maj/min peer+own="
                 + "/".join(f"{t['issues'][g]['peer']}+{t['issues'][g]['own']}"
                            for g in ("fatal", "critical", "major", "minor"))
                 + ") "
-                f"iqr={t['iqr']:g} critical_remaining={t['critical_remaining']} "
+                f"iqr={_g(_iqr)} critical_remaining={t['critical_remaining']} "
                 f"writing_remaining={t['writing_remaining']} "
                 f"manual_steps={t['manual_steps']} "
                 f"placeholders={t['author_placeholders'] or 0} "
@@ -738,7 +750,10 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
              "note"]]
     census = (agg or {}).get("issue_census") or {}
     for e in field:
-        s = st[e["id"]]
+        # A legacy/stale field list can name a member the aggregation has no
+        # stats row for; render the row as "no record" ('-') instead of
+        # aborting the report AFTER the round was pinned.
+        s = st.get(e["id"]) or {}
         note = ""
         if e["id"] == champ_rep:
             note = "CHAMPION" if sel.get("champion") == e["id"] else \
@@ -782,12 +797,14 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
                 writing = candidate_tiebreak_inputs(ctx, r, e["id"])[1]
         rows.append([e["id"],
                      f"{prefix}" if prefix is not None else "-",
-                     f"{s['median']:g}" if s["median"] is not None else "-",
+                     f"{s['median']:g}" if s.get("median") is not None else "-",
                      f"{s['mean']:.2f}" if s.get("mean") is not None else "-",
-                     f"{s['iqr']:g}" if s["iqr"] is not None else "-",
+                     f"{s['iqr']:g}" if s.get("iqr") is not None else "-",
                      (str(s.get("digest") or "")[:12] or "-"),
-                     f"{s['n']}/{s['expected_n']}",
-                     f"{s['vs_original']:g}" if s["vs_original"] is not None else "-",
+                     (f"{s['n']}/{s['expected_n']}"
+                      if s.get("n") is not None and s.get("expected_n") is not None
+                      else "-"),
+                     f"{s['vs_original']:g}" if s.get("vs_original") is not None else "-",
                      f"{s['vs_base']:g}" if s.get("vs_base") is not None else "-",
                      severity_cell, _count_cell(writing),
                      f"{s.get('author_placeholders') or 0}", note])
@@ -797,8 +814,13 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
 def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
     """Copy the round's champion into pinned/<r>_<champion_id>/ and register it.
 
-    The pinned set grows monotonically and is deduplicated by content digest,
-    so it may be smaller than the number of rounds -- that is correct.
+    The pinned set grows monotonically with ONE pin record per round -- the id
+    is `r<round>_<champion>`, so the chain names the round that produced each
+    champion, and a round that re-crowns its base keeps the same bytes under the
+    new round's id. Content deduplication happens in the FIELD (`build_field`
+    drops a later member whose documents are identical to an earlier one), which
+    is what Rule 5's "content-identical candidates are one candidate" needs: a
+    second pin is a round record, not a second candidate.
     The documents/ directory is swapped in atomically so a retried round can
     never leave a mix of old and new pinned content on disk.
     """
@@ -819,7 +841,7 @@ def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
     if recorded and digest != recorded:
         die(f"internal inconsistency: the pinned copy of '{champ_id}' hashes to {digest[:12]} "
             f"but its run recorded {str(recorded)[:12]}")
-    if docs.is_dir() and corpus_tree_digest(docs) == digest:
+    if docs.is_dir() and manifest_digest(corpus_dir_manifest(docs)) == digest:
         rmtree_force(tmp)          # idempotent resume: identical already
     else:
         if docs.exists():
@@ -882,7 +904,7 @@ def publish_winner(ctx: Ctx, r: int, champ_id: str, pin: dict, agg: dict) -> dic
     if pin.get("digest") and digest != pin["digest"]:
         die(f"internal inconsistency: the round {r} winner copy hashes to {digest[:12]} but its "
             f"pin recorded {str(pin.get('digest'))[:12]}")
-    if dst.is_dir() and corpus_tree_digest(dst) == digest:
+    if dst.is_dir() and manifest_digest(corpus_dir_manifest(dst)) == digest:
         rmtree_force(tmp)                      # idempotent resume: identical already
     else:
         if dst.exists():
@@ -936,6 +958,25 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
     integrated = round_integrated_run_ids(ctx, r, m, n)
     csel = str(sel.get("champion_select") or round_champion_select(ctx, r))
     auto_promoted = bool(sel.get("auto_promoted"))
+    # Freeze the floor the ranking ACTUALLY used: `select_champion` accepts an
+    # explicit floor, and a config change between selection and finalize must
+    # not be recorded in its place -- `decide` re-derives with the recorded
+    # value, so a wrong freeze re-ranks a past round.
+    used_floor = (sel.get("tiebreak") or {}).get("floor")
+    if used_floor is None:
+        used_floor = tiebreak_defect_floor_of(ctx)
+    # Keep this round's review deliverables (finding list, discovery output) so the
+    # next round can carry them forward and the operator keeps them after a prune.
+    # Done BEFORE the record is frozen: the archive is best-effort (it must never
+    # fail the round), but a failure is a real loss of the next review's required
+    # prior-round input, so it is recorded on the round record instead of being a
+    # console line only.
+    review_archive_error = None
+    try:
+        archive_review_outputs(ctx, r)
+    except Exception as e:                                      # noqa: BLE001
+        review_archive_error = str(e)
+        print(f"[run] round {r} WARNING: could not archive the review outputs: {e}")
     rrec.update({
         "status": "done", "completed": utcnow(),
         "plan": {"rewrites": m, "revises": n, "pool": round_pool_ids(m, n),
@@ -963,20 +1004,18 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
         # The ranking key's two MUTABLE inputs are frozen on the record: a later
         # `set-tiebreak-defect-floor`/`set-dedup-mode --force` must not change
         # what `decide` re-derives for this round (F18/F19).
-        "tiebreak_defect_floor": tiebreak_defect_floor_of(ctx),
+        "tiebreak_defect_floor": used_floor,
         "dedup_mode": agg.get("dedup_mode") or dedup_mode_of(ctx),
         "anti_regression_rule": agg.get("anti_regression_rule")
         or vs_original_rule_of(ctx),
         "pipeline_version": VERSION,
+        # None when the review deliverables were archived; otherwise the reason
+        # they were NOT, so the loss is visible in the record `status`/`decide`
+        # read (the archive itself stays best-effort).
+        "review_archive_error": review_archive_error,
     })
     write_json_atomic(ctx.reports_dir / f"round{r}.json",
                       {"round_record": rrec, "aggregation": agg, "selection": sel})
-    # Keep this round's review deliverables (finding list, discovery output) so the
-    # next round can carry them forward and the operator keeps them after a prune.
-    try:
-        archive_review_outputs(ctx, r)
-    except Exception as e:                                      # noqa: BLE001
-        print(f"[run] round {r} WARNING: could not archive the review outputs: {e}")
     ctx.log("round-done", f"round{r}", f"champion={sel['champion']} pin={pin['id']}")
     return rrec
 
@@ -1053,7 +1092,8 @@ def invalidate_from_round(ctx: Ctx, r: int, reason: str) -> list:
                   "field", "field_entries", "field_dropped", "stats", "selection", "diagnostics",
                   "completed", "winner_dir", "winner_digest", "tiebreak_inputs", "panel_gaps",
                   "base_id", "base_rep", "plan", "pipeline_version",
-                  "judges_enabled", "auto_promoted", "judged", "certified"):
+                  "judges_enabled", "auto_promoted", "judged", "certified",
+                  "review_archive_error"):
             rec.pop(k, None)
         for run_rec in ctx.runs(round_no=rr):
             touched.append(run_rec["id"])

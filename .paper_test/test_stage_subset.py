@@ -144,7 +144,7 @@ def test_parser():
         spec.validate(2)
         check("an out-of-range round is rejected against --rounds", False, "no SystemExit")
     except SystemExit as e:
-        check("an out-of-range round is rejected against --rounds", e.code == 1, str(e.code))
+        check("an out-of-range round is rejected against --rounds", e.code == 2, str(e.code))
 
 
 def test_end_to_end():
@@ -339,7 +339,7 @@ def test_retry_runs_selection():
           (empty.stdout + empty.stderr)[-200:])
     beyond = retry_runs(root, "--runs", "1,2")
     check("a round this root does not have is refused",
-          beyond.returncode == 1 and "do not exist" in (beyond.stdout + beyond.stderr),
+          beyond.returncode == 2 and "do not exist" in (beyond.stdout + beyond.stderr),
           (beyond.stdout + beyond.stderr)[-200:])
     none_yet = retry_runs(root, "--runs", "1:concerns")
     check("a stage this root's plan has no sessions for names the fact and resets nothing",

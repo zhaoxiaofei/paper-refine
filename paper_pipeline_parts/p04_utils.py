@@ -39,20 +39,20 @@ class TimestampedStream:
             text = str(text)
         if not text:
             return 0
-        written = 0
         with self._lock:
             for line in text.splitlines(keepends=True):
                 if self._at_line_start and line not in ("\n", "\r\n"):
                     stamp = f"{local_stamp()} "
                     self._stream.write(stamp)
-                    written += len(stamp)
                     self._at_line_start = False
                 if line.endswith(("\n", "\r")):
                     self._at_line_start = True
                 self._stream.write(line)
-                written += len(line)
             self._stream.flush()
-        return written
+        # TextIOBase.write returns the number of characters of `text` consumed,
+        # never the wrapper's injected prefix (F93): a caller doing
+        # short-write detection must see len(text), not len(text)+len(stamp).
+        return len(text)
 
     def flush(self) -> None:
         try:
@@ -1150,8 +1150,13 @@ def sha256_files(paths, on_error=None) -> list:
 
 
 def _iter_tree_files(root: Path, follow_dir_links: bool = False,
-                     owner_root: Path = None) -> list:
+                     owner_root: Path = None, gaps: list = None) -> list:
     """Every file under `root`; optionally descend into EVIDENCE-area links.
+
+    `gaps`, when given, receives the relative path of every subdirectory whose
+    entries could not be listed: the walk keeps the rest of the tree, and the
+    caller can surface the incompleteness instead of silently certifying a
+    partial identity (F95).
 
     `pathlib.rglob` does NOT follow directory symlinks -- and the read-only
     evidence areas of a sandbox ARE symlinks to the root's canonical copy (see
@@ -1218,6 +1223,11 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
             # hash_manifest's on_error only covered file hashing, so a
             # chmod-000 subdirectory aborted every integrity pass. Record the
             # gap and keep the rest of the manifest.
+            if gaps is not None:
+                try:
+                    gaps.append(d.relative_to(root).as_posix())
+                except ValueError:
+                    gaps.append(str(d))
             print(f"warning: cannot read directory {d}: {e}; its files are not in the manifest", file=sys.stderr)
             return
         for p in entries:
@@ -1285,7 +1295,8 @@ def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=(),
             ok = _evidence_link_shape_ok(dirp)      # unit fixture / legacy root
         if not (follow_dir_links and ok):
             return {"files": {}, "count": 0}
-    paths = _iter_tree_files(dirp, follow_dir_links=follow_dir_links)
+    gaps = []
+    paths = _iter_tree_files(dirp, follow_dir_links=follow_dir_links, gaps=gaps)
     if exclude_top or exclude_top_only:
         blocked = set(exclude_top)
         blocked_root = set(exclude_top_only)
@@ -1300,7 +1311,14 @@ def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=(),
         paths = kept
     digs = sha256_files(paths, on_error=on_error)
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
-    return {"files": files, "count": len(files)}
+    out = {"files": files, "count": len(files)}
+    if gaps:
+        # The walk kept the readable part of the tree; name the unreadable
+        # subtree so a caller can tell an incomplete identity from a complete
+        # one (F95). Absent key == complete walk, so existing digests are
+        # unchanged.
+        out["unreadable_dirs"] = sorted(gaps)
+    return out
 
 
 def manifests_equal(a, b) -> bool:
@@ -1388,18 +1406,29 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
             return False
         if is_bookkeeping_name(p.name):
             return False
-        if excluded_corpus_component(p.relative_to(dirp).as_posix(), exclude_top):
+        rel = p.relative_to(dirp).as_posix()
+        # An inert `<evidence area>.disabled/` tree is not corpus content:
+        # copy_into() and manifest_for_sources() both skip it, so including it
+        # here gave the same corpus two identities (F90).
+        if is_disabled_evidence_rel(rel):
+            return False
+        if excluded_corpus_component(rel, exclude_top):
             return False
         return True
 
-    paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True) if keep(p)]
+    gaps = []
+    paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True, gaps=gaps)
+             if keep(p)]
     digs = sha256_files(paths, on_error="<unreadable>")
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
     # `count` is `len(files)`, not `len(paths)`: `manifest_digest` hashes this
     # whole dict, so a count that included a file `keep()` rejected would put
     # the junk class back into the identity through the back door (and make the
     # pin check fail again the moment a delivery-side strip ran first).
-    return {"files": files, "count": len(files)}
+    out = {"files": files, "count": len(files)}
+    if gaps:
+        out["unreadable_dirs"] = sorted(gaps)
+    return out
 
 
 def corpus_tree_digest(dirp: Path) -> str:
@@ -1433,10 +1462,13 @@ def _json_safe(obj):
 
     A *string* with one of those exact spellings (an agent's legitimate "NaN"
     field) is escaped with a leading NUL so the revive pass returns the string
-    unchanged instead of corrupting its type to float.
+    unchanged instead of corrupting its type to float. A string that ALREADY
+    starts with a NUL is escaped the same way (an extra NUL), or a legitimate
+    "\u0000NaN" came back as the float NaN (F94).
     """
     if isinstance(obj, str):
-        return "\u0000" + obj if obj in _JSON_SENTINELS else obj
+        return ("\u0000" + obj
+                if obj in _JSON_SENTINELS or obj[:1] == "\u0000" else obj)
     if isinstance(obj, float):
         if math.isnan(obj):
             return "NaN"
@@ -1457,6 +1489,10 @@ def _json_revive(obj):
             return float("inf") if obj == "Infinity" else (
                 float("-inf") if obj == "-Infinity" else float("nan"))
         if obj[:1] == "\u0000" and obj[1:] in _JSON_SENTINELS:
+            return obj[1:]
+        # A doubled leading NUL is the escape _json_safe writes for a string
+        # that legitimately begins with one: unescape exactly one (F94).
+        if obj[:1] == "\u0000" and obj[1:2] == "\u0000":
             return obj[1:]
     if isinstance(obj, dict):
         return {k: _json_revive(v) for k, v in obj.items()}
@@ -1868,7 +1904,7 @@ def _json_from_text(text: str, lenient: bool):
     # a complete JSON document that follows it (F13). The lists are separate
     # and bounded: counting nested values against one cap made a large ordinary
     # JSON document exceed the cap before its own closing brace.
-    top_starts, nested_starts = [], []      # (start, end)
+    top_starts, nested_starts = [], []      # (start, end) / (start, end, outer_start)
     stack = []                              # (expected closer, start), innermost last
     in_string = False
     escaped = False
@@ -1892,14 +1928,30 @@ def _json_from_text(text: str, lenient: bool):
                     if len(top_starts) < 64:
                         top_starts.append((start, i + 1))
                 elif len(nested_starts) < 64:
-                    nested_starts.append((start, i + 1))
+                    # `stack[0]` is the OUTERMOST still-open bracket: the opener
+                    # this value is nested inside.
+                    nested_starts.append((start, i + 1, stack[0][1]))
             elif stack:
                 # Mismatched prose brackets: no value can start here.
                 stack.clear()
     # Try BOTH candidate lists, in document order: an earlier `{}` in prose is
     # a complete top-level value, and it must not hide a later complete
     # document that closes while that prose opener is still unmatched.
-    starts = sorted(set(top_starts) | set(nested_starts))
+    top_start_at = {s for s, _e in top_starts}
+    starts = list(top_starts)
+    for s, _end, outer in nested_starts:
+        # A nested value is a FALLBACK for a stray prose opener, never a
+        # replacement for the document itself (F86): an opener that is a
+        # complete top-level value (the malformed `[{"a":1},]`) or that opens
+        # the text -- bare or right after a markdown fence (the truncated
+        # `[{"a":1}`, "```json\n[{"a":1}") -- is the document's own bracket,
+        # so a complete child of it is a fragment, not the payload.
+        prefix = text[:outer].strip()
+        if (outer in top_start_at or not prefix
+                or re.fullmatch(r"[`~]{3,}[^\n]*", prefix)):
+            continue
+        starts.append((s, _end))
+    starts = sorted(set(starts))
     found = []                       # (start, end, value)
     for i, _end in starts:
         try:
@@ -4410,6 +4462,27 @@ TEMPLATE_PACKAGE_DIRNAME = "template_package"
 TEMPLATE_REWRITE_DIRNAME = "template_rewrite"
 
 
+def _prompt_docx_names(src: Path) -> list:
+    """The package-relative `.docx` paths the template postcheck will require.
+
+    The prompt must name the SAME document set `template_rewrite_postcheck`'s
+    `_template_docs()` requires (every submission `.docx` under the package,
+    nested `supp/` included, minus scratch/aux/evidence) -- a top-level-only
+    `glob("*.docx")` told the session about a smaller set and then failed the
+    stage on the nested supplementary document it never mentioned (F89).
+    """
+    out = []
+    root = Path(src)
+    for p in _docx_files_under(root):
+        if not p.is_file() or _is_aux_doc(p.name) or p.name.startswith("~$"):
+            continue
+        rel = p.relative_to(root)
+        if "work" in rel.parts[:-1] or is_non_manuscript_rel(rel.as_posix()):
+            continue
+        out.append(rel.as_posix())
+    return sorted(out)
+
+
 def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str:
     """The TEMPLATE-FIRST rewrite prompt: copy the journal's templates, fill them.
 
@@ -4445,7 +4518,7 @@ def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str
                  "from source/, edited in place and formatted per the venue's guidelines)")
     main_src = ("venue_template/word/" + main.name) if main else \
         "the source document itself (no main-text template ships)"
-    docs = sorted(p.name for p in Path(src).glob("*.docx")) or ["(no .docx in source/)"]
+    docs = _prompt_docx_names(src) or ["(no .docx in source/)"]
     prof = venue_profile_of(ctx, required=False)
     label = (prof.label if prof is not None else venue_id_of(ctx))
     guide_clause = (cover_letter_guidance_clause(cover_letter_guidance(prof))
@@ -4654,7 +4727,7 @@ def apply_guideline_conform_prompt(ctx: Ctx, src: Path) -> str:
     established academic convention. The deliverable is the WHOLE package in
     `out/`, content-identical to `source/` and re-authored to those rules.
     """
-    docs = sorted(p.name for p in Path(src).glob("*.docx")) or ["(no .docx in source/)"]
+    docs = _prompt_docx_names(src) or ["(no .docx in source/)"]
     prof = venue_profile_of(ctx, required=False)
     label = (prof.label if prof is not None else venue_id_of(ctx))
     prompt = (prof.prompt if prof is not None else {})
@@ -5133,7 +5206,12 @@ def _docx_hf_signature(path: Path) -> dict:
                     continue
                 raw_hf = _docx_xml_part(z, n)
                 if raw_hf is None:
-                    return {}
+                    # A furniture part that EXISTS but cannot be read is not the
+                    # same value as "this document has no furniture": returning
+                    # {} here made _hf_gap(want={}) skip the conformance check
+                    # (F92). Mark it so the gap is reported as unverified.
+                    return {"roles": [], "parts": [], "logo": False, "page": False,
+                            "unreadable": True}
                 hf[n] = raw_hf.decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return {}
@@ -5166,6 +5244,12 @@ def _docx_hf_signature(path: Path) -> dict:
 
 def _hf_gap(want: dict, got: dict) -> dict:
     """What the template's furniture has that the output lacks ({} when complete)."""
+    if (want or {}).get("unreadable"):
+        # The TEMPLATE's furniture could not be read: the conformance check is
+        # unverified, not satisfied -- report the gap instead of {} (F92).
+        return {"unverified": "the template's header/footer part could not be read"}
+    if (got or {}).get("unreadable"):
+        return {"unverified": "the output's header/footer part could not be read"}
     if not want:
         return {}
     missing_roles = [r for r in want.get("roles") or [] if r not in (got.get("roles") or [])]
@@ -8498,6 +8582,7 @@ def collect_documents(sources: list) -> dict:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
+        entries = []
         for p in _iter_tree_files(src):
             if _is_aux_doc(p.name):
                 continue
@@ -8521,7 +8606,14 @@ def collect_documents(sources: list) -> dict:
                 continue
             if p.suffix.lower() not in EDITABLE_DOC_EXTS:
                 continue
-            out.setdefault(_doc_key(prefix + rel), []).append((prefix + rel, sha256_file(p)))
+            entries.append(p)
+        # An unreadable manuscript must be REPORTED as unreadable, not abort the
+        # whole document-set comparison with PermissionError (F88); this is the
+        # same sentinel the integrity paths already use.
+        digs = sha256_files(entries, on_error="<unreadable>")
+        for p, digest in zip(entries, digs):
+            rel = p.relative_to(src).as_posix()
+            out.setdefault(_doc_key(prefix + rel), []).append((prefix + rel, digest))
     return out
 
 
@@ -8851,6 +8943,11 @@ def hold_internal_readme_notes(dirp: Path, dest_dir: Path,
     for p in sorted(dirp.rglob("*")):
         if not p.is_file() or not is_non_submitted_readme_name(p.name) \
                 or is_author_to_complete_readme_name(p.name):
+            continue
+        # A README inside an EVIDENCE area is part of the byte-frozen input,
+        # never package documentation: moving it out of raw_data/ silently
+        # changed a read-only input (F91; see strip_non_shippable_files_in_dir).
+        if is_evidence_rel(p.relative_to(dirp).as_posix()):
             continue
         rows = readme_internal_note_rows(p)
         if not rows:
@@ -9396,7 +9493,20 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
             ok = False
         for name in areas:
             link = dst / name
-            if not link.is_symlink() or link.resolve() != want[name].resolve():
+            if link.is_symlink():
+                if link.resolve() != want[name].resolve():
+                    ok = False
+                    break
+            elif link.is_dir():
+                # Symlinks are unavailable: the fallback copied the area as a
+                # REAL directory. Accepting it when it byte-matches the
+                # canonical area makes the second call converge instead of
+                # deleting and re-copying the whole input every time (F87).
+                if (hash_manifest(link, follow_dir_links=True).get("files")
+                        != hash_manifest(want[name]).get("files")):
+                    ok = False
+                    break
+            else:
                 ok = False
                 break
     if ok:

@@ -477,15 +477,34 @@ def _track_one_entry(ctx: Ctx, entry: dict, *, out_key: str, r: int, vid: str,
         entry["skipped"].append({"baseline": token, "reason": "no base corpus"})
         return
     for ext in TRACKABLE_EXTS:
-        pairs, unmatched_base, unmatched_cand = match_track_pairs(base_sources, srcs, ext)
+        unreadable_base, unreadable_cand = [], []
+        pairs, unmatched_base, unmatched_cand = match_track_pairs(
+            base_sources, srcs, ext, base_problems=unreadable_base,
+            cand_problems=unreadable_cand)
+        # An unreadable file is not an absent counterpart: record the real
+        # error instead of blaming the other side (same defect as F173).
+        bad_base = {p["rel"] for p in unreadable_base}
+        bad_cand = {p["rel"] for p in unreadable_cand}
         for rel in unmatched_base:
+            if rel in bad_base:
+                continue
             entry["skipped"].append({
                 "baseline": token, "base_rel": rel,
                 "reason": f"no corresponding {ext} in this version"})
         for rel in unmatched_cand:
+            if rel in bad_cand:
+                continue
             entry["skipped"].append({
                 "baseline": token, "revised_rel": rel,
                 "reason": f"new {ext} with no counterpart in the {token} baseline"})
+        for prob in unreadable_base:
+            entry["skipped"].append({
+                "baseline": token, "base_rel": prob["rel"],
+                "reason": f"unreadable trackable file (not compared): {prob['error']}"})
+        for prob in unreadable_cand:
+            entry["skipped"].append({
+                "baseline": token, "revised_rel": prob["rel"],
+                "reason": f"unreadable trackable file (not compared): {prob['error']}"})
         for pair in pairs:
             # Which redlines-tree label may stand in for THIS pair: the original
             # baseline is `from-original`; a baseline that really is the round
@@ -1349,18 +1368,21 @@ def _cmd_track_locked(ctx: Ctx, args) -> None:
         try:
             cmd_template = json.loads(args.redline_cmd)
         except ValueError:
-            die("--redline-cmd must be a JSON argv list")
+            die("--redline-cmd must be a JSON argv list", code=2)
         if not isinstance(cmd_template, list) or not cmd_template:
-            die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}")
+            die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}", code=2)
     if args.round is not None and int(args.round) < 1:
-        die(f"--round takes a 1-based round number, got {args.round!r}")
+        die(f"--round takes a 1-based round number, got {args.round!r}", code=2)
+    if args.round is not None and int(args.round) > ctx.rounds_count():
+        die(f"--round {int(args.round)} does not exist: this pipeline root is configured "
+            f"with {ctx.rounds_count()} round(s) (rounds are 1-based)", code=2)
     rounds = [int(args.round)] if args.round else None
     versions = (None if args.version == "all"
                 else [v.strip() for v in str(args.version).split(",") if v.strip()])
     if versions is not None and not all(is_fresh_vid(v) for v in versions):
         bad = [v for v in versions if not is_fresh_vid(v)]
         die(f"--version takes a round-local candidate version id or a comma-separated list "
-            f"of them, or 'all'; got {', '.join(bad)}")
+            f"of them, or 'all'; got {', '.join(bad)}", code=2)
     print(f"[track] root={ctx.root} tool={args.tool} rounds={rounds or 'all'} "
           f"versions={versions or 'all versions of each round'}")
     manifest = run_difference_tracking(ctx, rounds=rounds, versions=versions, tool=args.tool,

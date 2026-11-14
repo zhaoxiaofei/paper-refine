@@ -42,8 +42,13 @@ REDLINE_COMPARE_BACKEND = "docx-compare (Word CompareDocuments via MCP)"
 TRACKABLE_EXTS = (".docx", ".tex", ".bib")
 
 
-def list_track_files(sources: list, exts=TRACKABLE_EXTS) -> list:
-    """[{rel, path, key, digest, ext}] for the trackable files of one corpus view."""
+def list_track_files(sources: list, exts=TRACKABLE_EXTS, problems: list = None) -> list:
+    """[{rel, path, key, digest, ext}] for the trackable files of one corpus view.
+
+    `problems`, when a list, receives `{rel, error}` for every trackable file that
+    could not be read: the caller records the real reason in its manifest instead
+    of attributing the missing document to the OTHER side (F173).
+    """
     out = []
     overrides = corpus_source_overrides(sources)
     for i, (src, prefix, excluded) in enumerate(sources):
@@ -81,6 +86,8 @@ def list_track_files(sources: list, exts=TRACKABLE_EXTS) -> list:
                 # track/redline pass: skip it and record the gap.
                 print(f"warning: skipped unreadable trackable file {p}: {e}",
                       file=sys.stderr)
+                if problems is not None:
+                    problems.append({"rel": full, "error": str(e)})
                 continue
             out.append({"rel": full, "path": p, "key": _doc_key(full),
                         "digest": digest, "ext": p.suffix.lower()})
@@ -92,14 +99,17 @@ def list_docx_files(sources: list) -> list:
     return list_track_files(sources, exts=(".docx",))
 
 
-def match_track_pairs(base_sources: list, cand_sources: list, ext: str) -> tuple:
+def match_track_pairs(base_sources: list, cand_sources: list, ext: str,
+                      base_problems: list = None, cand_problems: list = None) -> tuple:
     """(pairs, unmatched_base, unmatched_candidate) -- 1:1, content-aware.
 
     Only documents of the SAME extension are ever paired: a `.docx` revision of
     a `.tex` source is a different document, not a tracked change.
     """
-    base = [f for f in list_track_files(base_sources) if f["ext"] == ext]
-    cand = [f for f in list_track_files(cand_sources) if f["ext"] == ext]
+    base = [f for f in list_track_files(base_sources, problems=base_problems)
+            if f["ext"] == ext]
+    cand = [f for f in list_track_files(cand_sources, problems=cand_problems)
+            if f["ext"] == ext]
     pool, used = list(enumerate(cand)), set()
 
     def take(match):
@@ -129,9 +139,11 @@ def match_track_pairs(base_sources: list, cand_sources: list, ext: str) -> tuple
     return pairs, unmatched, [c["rel"] for i, c in pool if i not in used]
 
 
-def match_docx_pairs(base_sources: list, cand_sources: list) -> tuple:
+def match_docx_pairs(base_sources: list, cand_sources: list,
+                     base_problems: list = None, cand_problems: list = None) -> tuple:
     """(pairs, unmatched_base, unmatched_candidate) for `.docx` -- 1:1, content-aware."""
-    return match_track_pairs(base_sources, cand_sources, ".docx")
+    return match_track_pairs(base_sources, cand_sources, ".docx",
+                             base_problems=base_problems, cand_problems=cand_problems)
 
 
 def redline_adapter_path() -> Path:
@@ -166,7 +178,11 @@ def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
         tmp_cache = None
         for use_tmp in (False, True):
             if use_tmp and tmp_cache is None:
-                tmp_cache = tempfile.mkdtemp(prefix="paper-redlines-")
+                try:
+                    tmp_cache = tempfile.mkdtemp(prefix="paper-redlines-")
+                except OSError as e:
+                    attempts.append(f"{eng_name}: cannot create a temp cache: {e}")
+                    continue
             try:
                 data, _stdout, _stderr = (cls(tmp_cache) if use_tmp else cls()).run_redline(
                     REDLINE_AUTHOR, str(base), str(revised))
@@ -861,19 +877,44 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     payload = _serialize_document(base_root, base_raw)
     out_docx.parent.mkdir(parents=True, exist_ok=True)
 
+    # Every OTHER package part (headers, footers, footnotes/endnotes, comments,
+    # media) used to be copied from the BASE while only word/document.xml was
+    # substituted, so a revised header/media change was silently dropped with no
+    # warning. Carry the revised bytes and report that their internal changes are
+    # not marked (F167).
+    def _parts(path) -> dict:
+        with zipfile.ZipFile(path) as z:
+            return {i.filename: z.read(i.filename) for i in z.infolist()}
+
+    base_parts, rev_parts = _parts(base_docx), _parts(revised_docx)
+    changed_parts = []
+    for name in sorted(set(base_parts) | set(rev_parts)):
+        if name == "word/document.xml" or name.startswith("docProps/"):
+            continue                    # docProps are volatile save bookkeeping
+        if base_parts.get(name) != rev_parts.get(name):
+            changed_parts.append(name)
+
     def _write_zip(f) -> None:
         with zipfile.ZipFile(base_docx) as zin, \
                 zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zout:
+            written = set()
             for item in zin.infolist():
-                data = zin.read(item.filename)
                 if item.filename == "word/document.xml":
                     data = payload
+                else:
+                    data = rev_parts.get(item.filename, zin.read(item.filename))
                 zout.writestr(item, data)
+                written.add(item.filename)
+            for name in sorted(rev_parts):
+                if name not in written and name != "word/document.xml":
+                    zout.writestr(name, rev_parts[name])
 
     _atomic_write_bytes(tmp_path_for(out_docx), out_docx, _write_zip, binary=True)
     info = {"paragraphs_inserted": n_ins, "paragraphs_deleted": n_del,
             "revision_ids": counter[0],
-            "non_paragraph_changed": non_paragraph_changed}
+            "non_paragraph_changed": non_paragraph_changed,
+            "non_document_parts_changed": changed_parts}
+    warnings = []
     if non_paragraph_relocated:
         warning = ("tables/content-controls/section properties MOVED relative to the "
                    "paragraphs; the built-in writer places them at their revised "
@@ -882,12 +923,20 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
         if non_paragraph_internal_changed:
             warning += ("; the revised non-paragraph content also differs, and the "
                         "built-in writer does NOT mark changes inside it")
-        info["warning"] = warning + " -- inspect the diff with a real tracked-changes backend"
+        warnings.append(warning + " -- inspect the diff with a real tracked-changes backend")
     elif non_paragraph_changed:
-        info["warning"] = ("tables/content-controls/section properties differ between base and "
-                           "revised; the built-in writer keeps the revised ones in place but "
-                           "does NOT mark changes inside them -- inspect the diff with a real "
-                           "tracked-changes backend")
+        warnings.append("tables/content-controls/section properties differ between base and "
+                        "revised; the built-in writer keeps the revised ones in place but "
+                        "does NOT mark changes inside them -- inspect the diff with a real "
+                        "tracked-changes backend")
+    if changed_parts:
+        shown = ", ".join(changed_parts[:8]) + (" ..." if len(changed_parts) > 8 else "")
+        warnings.append(f"package part(s) outside word/document.xml differ between base and "
+                        f"revised ({shown}); the built-in writer carries the revised parts but "
+                        f"does NOT mark changes inside them -- inspect the diff with a real "
+                        f"tracked-changes backend")
+    if warnings:
+        info["warning"] = "; ".join(warnings)
     return info
 
 
@@ -1135,6 +1184,8 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
                                  "detail": f"w:ins paragraphs={info['paragraphs_inserted']} "
                                            f"w:del paragraphs={info['paragraphs_deleted']}",
                                  "non_paragraph_changed": info.get("non_paragraph_changed"),
+                                 "non_document_parts_changed":
+                                     info.get("non_document_parts_changed"),
                                  "warning": info.get("warning")})
             except Exception as e:                              # noqa: BLE001
                 attempts.append({"backend": "builtin-ooxml", "cmd": ["builtin"], "rc": None,
@@ -1152,10 +1203,13 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         fidelity = redline_fidelity(base, revised, out)
         last["fidelity"] = fidelity
         if fidelity["over_marked"]:
-            last["warning"] = (f"over-marked redline: {fidelity['marked_words']} marked word(s) "
-                               f"for {fidelity['minimal_words']} word(s) of real change (the "
-                               f"backend rewrites whole paragraphs when a run is not plain "
-                               f"text)")
+            _over = (f"over-marked redline: {fidelity['marked_words']} marked word(s) "
+                     f"for {fidelity['minimal_words']} word(s) of real change (the "
+                     f"backend rewrites whole paragraphs when a run is not plain "
+                     f"text)")
+            # APPEND: the structural caveat recorded by the writer (e.g. an
+            # unmarked table edit) must survive into the manifest/README.
+            last["warning"] = "; ".join(x for x in (last.get("warning"), _over) if x)
         # An operator's EXPLICIT choice of backend (`--redline-tool`, or a
         # `--redline-cmd` they wired) is honoured: the numbers are recorded and
         # the caveat is reported, but the chain does not shop for a quieter
@@ -1163,8 +1217,15 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         if not fidelity["over_marked"] or tool != "auto":
             winner = last
             break
-        fd, saved_name = tempfile.mkstemp(prefix="paper-redline-", suffix=".docx")
-        os.close(fd)
+        try:
+            fd, saved_name = tempfile.mkstemp(prefix="paper-redline-", suffix=".docx")
+            os.close(fd)
+        except OSError as exc:
+            # A temp-dir failure must not abort the pair (or the whole pass):
+            # record the failure exactly as the copy failure below does (F171).
+            attempts.append({"backend": last.get("backend", tool), "ok": False,
+                             "detail": f"the over-marked candidate could not be saved: {exc}"})
+            continue
         saved = Path(saved_name)
         try:
             shutil.copyfile(out, saved)
@@ -1220,6 +1281,20 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
             "warning": (winner or {}).get("warning")}
 
 
+def _md_table_cell(text) -> str:
+    """One Markdown table/bullet text: a pipe or newline cannot break the row."""
+    return " ".join(str(text or "").split()).replace("|", "\\|")
+
+
+def _md_code(text) -> str:
+    """A Markdown code span for a path, even when the path carries a backtick."""
+    text = " ".join(str(text or "").split()).replace("|", "\\|")
+    run = max((len(m) for m in re.findall(r"`+", text)), default=0) + 1
+    ticks = "`" * run
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
 def redline_readme(manifest: dict) -> str:
     L = ["# Tracked changes (redlines)", "",
          f"Generated: {manifest['generated']}  |  requested tool: `{manifest['tool']}`", "",
@@ -1251,8 +1326,9 @@ def redline_readme(manifest: dict) -> str:
         for c in v["comparisons"]:
             _result = ("skipped (tool=none)" if c.get("skipped")
                        else ("ok" if c["ok"] else "FAILED"))
-            L.append(f"| {v['round']} | {v['version']} | {c['source']} | `{c['base_rel']}` -> "
-                     f"`{c['revised_rel']}` | {c['basis']} | {c['tool'] or '-'} | "
+            L.append(f"| {v['round']} | {v['version']} | {c['source']} | "
+                     f"{_md_code(c['base_rel'])} -> {_md_code(c['revised_rel'])} | "
+                     f"{_md_table_cell(c['basis'])} | {c['tool'] or '-'} | "
                      f"{_result} |")
     L += ["", "`ok` means the backend exited 0 AND the file it wrote is a readable OOXML package "
               "(a zip whose `word/document.xml` parses) -- a text dump, a truncated zip or a "
@@ -1262,7 +1338,8 @@ def redline_readme(manifest: dict) -> str:
     if warn_rows:
         L += ["## Caveats on files that were still written", ""]
         for r, vid, c in warn_rows:
-            L.append(f"- r{r} {vid} `{c['revised_rel']}` ({c['tool']}): {c['warning']}")
+            L.append(f"- r{r} {vid} {_md_code(c['revised_rel'])} ({c['tool']}): "
+                     f"{_md_table_cell(c['warning'])}")
         L.append("")
     if manifest["notes"]:
         L += ["", "## Notes", ""] + [f"- {n}" for n in manifest["notes"]]
@@ -1271,8 +1348,9 @@ def redline_readme(manifest: dict) -> str:
     if not skipped:
         L.append("- (none)")
     for r, vid, s in skipped:
-        L.append(f"- r{r} {vid}: {s.get('base_rel') or s.get('revised_rel') or s.get('source')} "
-                 f"-- {s['reason']}")
+        L.append(f"- r{r} {vid}: "
+                 f"{_md_code(s.get('base_rel') or s.get('revised_rel') or s.get('source'))} "
+                 f"-- {_md_table_cell(s['reason'])}")
     L.append("")
     return "\n".join(L)
 
@@ -1352,15 +1430,35 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
                     continue
                 if note:
                     entry["skipped"].append({"source": label, "reason": note})
-                pairs, unmatched_base, unmatched_cand = match_docx_pairs(base_sources, srcs)
+                unreadable_base, unreadable_cand = [], []
+                pairs, unmatched_base, unmatched_cand = match_docx_pairs(
+                    base_sources, srcs, base_problems=unreadable_base,
+                    cand_problems=unreadable_cand)
+                # A file that could not be read is NOT an absent counterpart: name
+                # the real reason and suppress the false "no corresponding .docx"
+                # row for it (F173).
+                unreadable_base_rels = {p["rel"] for p in unreadable_base}
+                unreadable_cand_rels = {p["rel"] for p in unreadable_cand}
                 for rel in unmatched_base:
+                    if rel in unreadable_base_rels:
+                        continue
                     entry["skipped"].append({"source": label, "base_rel": rel,
                                              "reason": "no corresponding .docx in the revised "
                                                        "package"})
                 for rel in unmatched_cand:
+                    if rel in unreadable_cand_rels:
+                        continue
                     entry["skipped"].append({"source": label, "revised_rel": rel,
                                              "reason": "new .docx with no counterpart in this "
                                                        "source"})
+                for prob in unreadable_base:
+                    entry["skipped"].append({"source": label, "base_rel": prob["rel"],
+                                             "reason": "unreadable trackable file (not "
+                                                       f"compared): {prob['error']}"})
+                for prob in unreadable_cand:
+                    entry["skipped"].append({"source": label, "revised_rel": prob["rel"],
+                                             "reason": "unreadable trackable file (not "
+                                                       f"compared): {prob['error']}"})
                 for pair in pairs:
                     out = out_root / f"r{r}_{vid}" / label / pair["cand_rel"]
                     if tool == "none":
@@ -1373,8 +1471,18 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
                             "attempts": []})
                         continue
                     else:
-                        result = redline_one_pair(tool, redline_cmd, pair["base_path"],
-                                                  pair["cand_path"], out)
+                        try:
+                            result = redline_one_pair(tool, redline_cmd, pair["base_path"],
+                                                      pair["cand_path"], out)
+                        except Exception as e:                    # noqa: BLE001
+                            # One pair's unexpected failure must not lose the
+                            # attempts already collected: record it as this
+                            # pair's failed attempt and continue (F171).
+                            result = {"ok": False, "tool": None,
+                                      "attempts": [{"backend": tool, "ok": False,
+                                                    "detail": f"{type(e).__name__}: {e}"[:300]}],
+                                      "validated_ooxml": False,
+                                      "validation_detail": "no output", "warning": None}
                     entry["comparisons"].append({
                         "source": label, "base_rel": pair["base_rel"],
                         "revised_rel": pair["cand_rel"], "basis": pair["basis"],
@@ -1419,11 +1527,14 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
         try:
             cmd_template = json.loads(args.redline_cmd)
         except ValueError:
-            die("--redline-cmd must be a JSON argv list")
+            die("--redline-cmd must be a JSON argv list", code=2)
         if not isinstance(cmd_template, list) or not cmd_template:
-            die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}")
+            die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}", code=2)
     if args.round is not None and int(args.round) < 1:
-        die(f"--round takes a 1-based round number, got {args.round!r}")
+        die(f"--round takes a 1-based round number, got {args.round!r}", code=2)
+    if args.round is not None and int(args.round) > ctx.rounds_count():
+        die(f"--round {int(args.round)} does not exist: this pipeline root is configured "
+            f"with {ctx.rounds_count()} round(s) (rounds are 1-based)", code=2)
     rounds = [int(args.round)] if args.round else None
     versions = (None if args.version == "all"
                 else [v.strip() for v in str(args.version).split(",") if v.strip()])
@@ -1431,7 +1542,7 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
         bad = [v for v in versions if not is_fresh_vid(v)]
         die(f"--version takes a round-local candidate version id or a comma-separated list of "
             f"them (the round's own plan decides which exist: a1/w1../a2../i1..), or 'all'; "
-            f"got {', '.join(bad)}")
+            f"got {', '.join(bad)}", code=2)
     print(f"[redline] root={ctx.root} tool={args.tool} rounds={rounds or 'all'} "
           f"versions={versions or 'all candidates of each round'}")
     manifest = run_redlines(ctx, rounds=rounds, versions=versions, tool=args.tool,

@@ -94,7 +94,7 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 
 ## Bundled scripts (use them — they exist so enumeration is deterministic)
 
-All stdlib-only Python, runnable anywhere Python 3.8+ exists. Copy them into `WORK/` or invoke them in place; keep any adaptations in `WORK/` so runs are reproducible.
+All stdlib-only Python, runnable anywhere Python 3.8+ exists. Copy them into `WORK/` **together with every sibling module they import** (`evidence_names.py`, `manuscript_words.py` — a lone script copy fails on import) or invoke them in place; keep any adaptations in `WORK/` so runs are reproducible.
 
 | script | purpose |
 |---|---|
@@ -105,6 +105,8 @@ All stdlib-only Python, runnable anywhere Python 3.8+ exists. Copy them into `WO
 | `scripts/extract_occurrences.py` | M8 term variants; also reused by paper-revise for propagation. Writes `WORK/occurrences_<slug>.md` (multi-target runs get a hash suffix so runs cannot overwrite each other). `--term`, `--value` and `--variants-file` are repeatable, so every corrected number can be enumerated in one run: `--value 0.021 --value 0.031` |
 | `scripts/enumerate_conventions.py` | M26 house-style/orthographic convention sweep: every occurrence of a US/UK spelling, hyphenation or preverb variant, from a built-in family list plus data-driven candidate pairs, one row per occurrence. Also reused by paper-revise for the convention propagation pass. |
 | `scripts/count_words.py` | M19: counts a document's abstract, main text and cover letter with the pipeline's word rule (maximal runs of non-space characters, newline = space); `--section cover-letter` counts the persuading part (salutation/signature/disclosures excluded) against the user's 300-500-word preference AND, when the profile sets `cover_letter.total_max`, the letter's TOTAL content against that operator cap. `--json` for the artifact rows and `--base-abstract`/`--base-main-text` for another content type. It also LOCATES figure/table captions to subtract them from the main-text count, but it has no per-caption enumeration mode: M18 enumerates each legend from the corpus and applies the same word rule, recording `document | caption id | word count`. Deterministic counting, never estimation |
+| `scripts/evidence_names.py` | required companion, not a standalone tool: the shared filename rules (`is_evidence`, the evidence-area names) imported by the five extractors, `count_words.py` and `enumerate_conventions.py` from their own directory, so a copy must carry it too |
+| `scripts/manuscript_words.py` | required companion, not a standalone tool: the shared word/token helpers imported by `count_words.py` from its own directory, so a copy must carry it too |
 
 If a script misses a case class (e.g., a citation style it can't parse), **extend it in `WORK/`** rather than falling back to eyeballing.
 

@@ -39,6 +39,12 @@ def cmd_setup(args) -> None:
     venue_arg = str(getattr(args, "venue", None) or "").strip()
     venue_profile_file = str(getattr(args, "venue_profile", None) or "").strip()
     journal_arg = str(getattr(args, "journal", None) or "").strip()
+    if journal_arg:
+        # The same one-line/160-character rule `set-journal`/`set-venue` apply:
+        # setup is the ONLY route that reached the config (and every stage
+        # prompt) unvalidated, so a newline or an overlong name was accepted at
+        # root creation and rejected only afterwards.
+        journal_arg = _validate_journal_name(journal_arg)
     article_arg = str(getattr(args, "article_type", None) or "").strip().lower()
     strict_venue = bool(getattr(args, "strict_venue", False))
     if venue_profile_file:
@@ -46,7 +52,7 @@ def cmd_setup(args) -> None:
         # profile file, while `set-venue --profile` needs an existing root --
         # the operator was told to do something impossible. Now `setup` loads
         # and installs the file into the new root itself.
-        pf = Path(venue_profile_file)
+        pf = Path(venue_profile_file).expanduser()
         if not pf.is_file():
             die(f"--venue-profile {venue_profile_file!r} is not a readable file", code=2)
         try:
@@ -106,7 +112,8 @@ def cmd_setup(args) -> None:
     format_policy = {}
     if getattr(args, "format_policy", None):
         try:
-            format_policy = json.loads(Path(args.format_policy).read_text(encoding="utf-8"))
+            format_policy = json.loads(
+                Path(args.format_policy).expanduser().read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
             die(f"--format-policy {args.format_policy!r} is not readable JSON: {e}", code=2)
         if not isinstance(format_policy, dict):
@@ -429,35 +436,63 @@ def cmd_setup(args) -> None:
                               for i, vid, mask in _enabled_arms))
     source = Path(args.source).resolve()
     if not source.is_dir():
-        die(f"--source directory not found: {source}")
+        die(f"--source directory not found: {source}", code=2)
     _legacy = legacy_input_area_problems(source)
     if _legacy:
         die("--source uses a removed input-area spelling:\n  - " + "\n  - ".join(_legacy)
             + "\n       Rename the directory once, then run setup again; the pipeline does not "
-              "resolve legacy aliases.")
+              "resolve legacy aliases.", code=2)
     # Count only what the copy actually carries: `_ignore_symlinks` skips every
     # symlink (except a canonical evidence link), but `p.is_file()` followed the
     # link, so a source made only of symlinked documents passed this check and
     # produced a root with an EMPTY pristine corpus.
+    def _canonical_source_link(p: Path):
+        """The run root owning a top-level evidence link in --source, or None.
+
+        `is_canonical_evidence_link` proves containment against the root that
+        OWNS the copy. The NEW root does not exist yet (mkdir runs later), so
+        passing it could never succeed; the owner is derived from the link's
+        TARGET instead -- a link is accepted only when it points at an existing
+        run root's `<root>/non_revised/<area>` store, and the copy is
+        materialized into the new root's pristine tree.
+        """
+        try:
+            if not p.is_symlink() or not is_evidence_rel(p.name):
+                return None
+            target = p.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if not target.is_dir():
+            return None
+        owner = _enclosing_run_root(target)
+        if owner is not None and is_canonical_evidence_link(p, owner):
+            return owner
+        return None
+
     def _copyable(p: Path) -> bool:
         if not p.is_file():
             return False
         if not p.is_symlink():
             return True
         try:
-            return is_canonical_evidence_link(p, args.root)
+            return _canonical_source_link(p) is not None
         except (OSError, RuntimeError):
             return False
 
     files = [p for p in source.rglob("*") if _copyable(p)]
-    if not files:
+    # A source may be nothing but the canonical evidence links: setup
+    # materializes those, so count them as content instead of refusing the
+    # only layout the refusal message recommends.
+    _canonical_links = [p for p in source.iterdir()
+                        if p.is_dir() and _canonical_source_link(p) is not None]
+    if not files and not _canonical_links:
         _links = [str(p) for p in source.rglob("*") if p.is_symlink()]
         if _links:
             die(f"--source contains only symlink(s), which setup never copies: "
                 f"{', '.join(_links[:5])}{' ...' if len(_links) > 5 else ''}\n"
-                f"       Point --source at the real files (or at the canonical "
-                f"<root>/non_revised/<area> evidence links).")
-        die(f"--source directory is empty: {source}")
+                f"       Point --source at the real files, or at a link to an existing "
+                f"root's canonical <root>/non_revised/<area> evidence store.", code=2)
+        die(f"--source directory is empty: {source}", code=2)
     if JOURNAL_MODES[revision_mode]["feedback"]:
         # The evidence the whole mode rests on must exist BEFORE a root is
         # created: a journal mode with no feedback file would run the scoped
@@ -465,7 +500,7 @@ def cmd_setup(args) -> None:
         if revision_mode != JOURNAL_MODE_LLM:
             _resolved_feedback = []
             for item in journal_feedback:
-                q = Path(item)
+                q = Path(item).expanduser()
                 if not q.is_absolute():
                     root_rel = Path(args.root).resolve() / q
                     q = root_rel if root_rel.exists() else (Path.cwd() / q)
@@ -515,7 +550,7 @@ def cmd_setup(args) -> None:
         # NotADirectoryError mid-setup instead of the clean refusal every other
         # unusable root gets.
         die(f"--root exists and is a FILE, not a directory: {root} "
-            f"(choose a fresh --root or delete it)")
+            f"(choose a fresh --root or delete it)", code=2)
     if root.exists() and any(root.iterdir()):
         # A root this pipeline created and never finished (the marker is written
         # before the first copy and removed only once state.json exists) is
@@ -529,7 +564,7 @@ def cmd_setup(args) -> None:
         else:
             die(f"--root exists and is not empty: {root} (choose a fresh --root or delete it)")
     if is_within(root, source) or is_within(source, root):
-        die("--root and --source must not be nested inside each other")
+        die("--root and --source must not be nested inside each other", code=2)
     # A new root must not freeze an OLD ROOT's pipeline snapshot by accident
     # (2026-10-15) -- checked BEFORE anything is created, so a refused setup
     # leaves the filesystem exactly as it found it. This is structural, not a
@@ -616,7 +651,7 @@ def cmd_setup(args) -> None:
             path = Path(_dir) / name
             if os.path.islink(path):
                 canonical = (at_source_root and is_evidence_rel(name)
-                             and is_canonical_evidence_link(path, root))
+                             and _canonical_source_link(path) is not None)
                 if not canonical:
                     _skipped_links.append(os.path.join(_dir, name))
                     out.append(name)
@@ -666,12 +701,21 @@ def cmd_setup(args) -> None:
         try:
             _dest = root / VENUE_PROFILES_DIRNAME / f"{venue_profile.id}{VENUE_PROFILE_SUFFIX}"
             _dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(Path(venue_profile_file), _dest)
+            shutil.copyfile(pf, _dest)
             print(f"[setup] venue profile:           installed {venue_profile.id!r} from "
                   f"{venue_profile_file} into {VENUE_PROFILES_DIRNAME}/ (the new root is "
                   f"self-contained)")
         except OSError as e:
             die(f"could not install --venue-profile {venue_profile_file!r} into {root}: {e}")
+        # The installed file is part of the FROZEN bundle: record the manifest of
+        # the root as it now stands. The captured `_pipeline_state` described the
+        # maintained tree, so every later `status` reported the root's own
+        # installed profile as tampering. `ctx.state["pipeline"]` is a shallow
+        # copy of `_pipeline_state` and state is rebuilt later from the latter.
+        _pipeline_modules = module_manifest(root)
+        _pipeline_state["modules"] = _pipeline_modules
+        if ctx.state.get("pipeline") is not None:
+            ctx.state["pipeline"]["modules"] = _pipeline_modules
     # Normalize the pristine copy BEFORE the manifests/digests are recorded, so
     # the byte-identity checks, the round-1 base (a1) and every later pin all
     # refer to the SAME repaired text. This is the formatting analogue of the
@@ -1376,15 +1420,44 @@ def cmd_set_venue(args) -> None:
     caption_limit = int(ctx.cfg.get("caption_limit")
                         if caption_source == "operator" and ctx.cfg.get("caption_limit") is not None
                         else profile.caption_default)
+    if journal and getattr(args, "strict_venue", False) \
+            and not profile.journal_matches(journal):
+        # `setup --strict-venue` and `set-journal --strict-venue` both refuse
+        # this mismatch BEFORE the write; this route only warned, so a
+        # --strict-venue root could end up with a journal its rule set does not
+        # describe.
+        die("--strict-venue: " + (
+            f"{journal!r} is not one of the journals venue profile {profile.id!r} "
+            f"describes ({', '.join(profile.known_journals())}); the venue's rules still "
+            f"apply. Use `set-venue <id>` for another rule set."), code=2)
     with ctx.lock("set-venue"):
+        _profile_dest = None
+        _profile_prior = None
+        _profile_existed = False
         if installed is not None:
             dest_dir = ctx.root / VENUE_PROFILES_DIRNAME
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / f"{profile.id}{VENUE_PROFILE_SUFFIX}"
-            write_json_atomic(dest, profile.to_dict())
-            print(f"[set-venue] installed profile -> {dest}")
-            profile = VenueProfile(profile.to_dict(), origin=f"root-local profile: {dest}",
-                                   path=dest)
+            _profile_dest = dest_dir / f"{profile.id}{VENUE_PROFILE_SUFFIX}"
+            _profile_existed = _profile_dest.exists()
+            if _profile_existed:
+                try:
+                    _profile_prior = _profile_dest.read_bytes()
+                except OSError:
+                    _profile_prior = None
+            write_json_atomic(_profile_dest, profile.to_dict())
+            print(f"[set-venue] installed profile -> {_profile_dest}")
+            profile = VenueProfile(profile.to_dict(),
+                                   origin=f"root-local profile: {_profile_dest}",
+                                   path=_profile_dest)
+            # The installed file is part of the root's FROZEN bundle: record the
+            # new digest, or every later `status` reports a healthy root as
+            # tampered with after setup.
+            _pipeline = ctx.state.get("pipeline")
+            if isinstance(_pipeline, dict):
+                _modules = dict(_pipeline.get("modules") or {})
+                _modules[VENUE_PROFILES_DIRNAME] = asset_dir_digest(
+                    ctx.root, VENUE_PROFILES_DIRNAME)
+                _pipeline["modules"] = _modules
         snapshot = profile.to_dict()
         snapshot["origin"] = profile.describe_origin()
         snapshot["recorded"] = utcnow()
@@ -1397,7 +1470,29 @@ def cmd_set_venue(args) -> None:
         ctx.cfg["caption_limit_source"] = ("operator" if caption_source == "operator"
                                            else "profile-default")
         ctx.cfg["venue_profile"] = snapshot
-        _save_root_config(ctx, "set-venue", detail=f"venue={profile.id} journal={journal or '(unset)'}")
+        try:
+            _save_root_config(ctx, "set-venue",
+                              detail=f"venue={profile.id} journal={journal or '(unset)'}")
+        except BaseException:
+            # A failed config/state save must not leave a profile installed but
+            # unselected: put back the entry setup recorded (or remove the new
+            # one). If the config file already names the new venue, the profile
+            # must stay -- removing it would leave the config pointing at a
+            # missing profile.
+            if _profile_dest is not None:
+                try:
+                    _on_disk = read_json(ctx.cfg_path) or {}
+                except Exception:                                 # noqa: BLE001
+                    _on_disk = {}
+                if str(_on_disk.get("venue") or "") != profile.id:
+                    try:
+                        if not _profile_existed:
+                            _profile_dest.unlink()
+                        elif _profile_prior is not None:
+                            _profile_dest.write_bytes(_profile_prior)
+                    except OSError:
+                        pass
+            raise
     print(f"[set-venue] venue:   {profile.id} (\"{profile.label}\", {profile.describe_origin()})")
     print(f"[set-venue] article: {profile.article_type} (`{profile.article_type_id}`, "
           f"{'operator-set' if article_type_source == 'operator' else 'the profile default'})")
@@ -2745,7 +2840,21 @@ def cmd_set_placeholder_file(args) -> None:
     patterns = [str(x).strip() for x in (getattr(args, "patterns", None) or [])
                 if str(x).strip()]
     current = [str(x) for x in ((ctx.cfg or {}).get("placeholder_files") or [])]
+    _mutating = bool(getattr(args, "clear", False)) or bool(patterns)
+    if _mutating and ctx.state.get("runs") and not getattr(args, "force", False):
+        # Declarations change which corpus files are EVIDENCE for every later
+        # re-derivation (decide, a resumed run, readiness/evidence scans). Every
+        # other plan-shaping setter guards a root with run records; this one
+        # silently reinterpreted already-decided rounds.
+        die(f"this root already has {len(ctx.state['runs'])} run record(s): the placeholder "
+            f"declarations change which files count as evidence for every later "
+            f"re-derivation.\n"
+            f"       Re-run with --force if the change is intended.")
     if bool(getattr(args, "clear", False)):
+        if patterns:
+            die("--clear takes no pattern operand: it removes every declaration. Run without "
+                "--clear to add one, or clear first and add in a second invocation.", code=2)
+        begin_run_log("set-placeholder-file", ctx.root, sys.argv)
         with ctx.lock("set-placeholder-file"):
             ctx.cfg["placeholder_files"] = []
             _save_root_config(ctx, "set-placeholder-file", detail="cleared")
@@ -2914,6 +3023,20 @@ def cmd_adopt_sweep(args) -> None:
     sweeps = (Path(str(args.sweeps)).expanduser() if getattr(args, "sweeps", None) else
               Path(__file__).resolve().parent / "paper-skills" / "paper-review"
               / "references" / "sweeps.md")
+    _snap = frozen_snapshot_root()
+    if _snap and is_within(sweeps, Path(_snap["root"])):
+        # The default target is the paper-skills pack frozen BESIDE this running
+        # driver. Rewriting it leaves the root's recorded module manifest stale,
+        # so the very next `run`/`decide` refuses the root, and `sync-code`
+        # would copy the maintained pack back over the adoption. The adoption
+        # belongs in the maintained checkout, then `sync-code` into the root.
+        die(f"adopt-sweep would rewrite the FROZEN paper-skills of the root it is "
+            f"running from ({_snap['root']}), which would stop that root matching its "
+            f"own recorded module manifest.\n"
+            f"       Run adopt-sweep from the MAINTAINED checkout (the tree holding the "
+            f"paper_pipeline.py you maintain), then sync the root:\n"
+            f"       python3 {_snap.get('origin_path') or '<maintained>/paper_pipeline.py'} "
+            f"sync-code --root {_snap['root']}", code=2)
     if not sweeps.is_file():
         die(f"the target sweeps.md {sweeps} does not exist (pass --sweeps PATH)", code=2)
     try:
@@ -3049,21 +3172,26 @@ def cmd_set_revision_mode(args) -> None:
             f"       Re-run `set-revision-mode {mode_arg} --force` if the change is intended.")
     named = [str(x) for x in (getattr(args, "journal_feedback", None) or []) if str(x).strip()]
     info = JOURNAL_MODES[mode_arg]
-    _named_resolved = []
-    for item in named:
-        q = Path(item)
-        if not q.is_absolute():
-            root_rel = ctx.root / q
-            q = root_rel if root_rel.exists() else (Path.cwd() / q)
-        if not q.is_file():
-            die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
-        if info["feedback"] and mode_arg != JOURNAL_MODE_LLM:
-            # Freeze an external letter into the root and store it root-relative;
-            # the root must not read a mutable path outside itself (rule 11).
-            _named_resolved.append(_freeze_journal_feedback(ctx.root, q))
-        else:
-            _named_resolved.append(str(q))
-    named = _named_resolved
+    if info["feedback"]:
+        # Resolve/validate ONLY for a mode that reads feedback: a no-feedback
+        # mode (init/continue) documents the flag as ignored, so a wrapper
+        # passing a stale path through must not be a fatal error.
+        _named_resolved = []
+        for item in named:
+            q = Path(item).expanduser()
+            if not q.is_absolute():
+                root_rel = ctx.root / q
+                q = root_rel if root_rel.exists() else (Path.cwd() / q)
+            if not q.is_file():
+                die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
+            if mode_arg != JOURNAL_MODE_LLM:
+                # Freeze an external letter into the root and store it
+                # root-relative; the root must not read a mutable path outside
+                # itself (rule 11).
+                _named_resolved.append(_freeze_journal_feedback(ctx.root, q))
+            else:
+                _named_resolved.append(str(q))
+        named = _named_resolved
     if named and not info["feedback"]:
         print(f"[set-revision-mode] note: mode {mode_arg!r} reads no journal feedback; "
               f"--journal-feedback/--journal-feedback-from are ignored")
@@ -3543,10 +3671,13 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             agent_choice(_judge_cli_h) if _judge_cli_h
             else agent_choice(os.environ.get("PAPER_JUDGE_AGENT_HARNESS", "")))
         _raw_jm = _judge_cli_m or os.environ.get("PAPER_JUDGE_AGENT_MODEL")
-        if agent_model_is_endpoint(_raw_jm):
-            _judge_m = str(_raw_jm).strip()
-        else:
-            _judge_m = agent_choice(_raw_jm) if _raw_jm else ""
+        try:
+            # The same validation the producer path applies: a userinfo/query
+            # credential or a malformed endpoint URL must be refused here, not
+            # carried into the adapter argv and the recorded judge command.
+            _judge_m = agent_model_choice(_raw_jm) if _raw_jm else ""
+        except ValueError as _jm_exc:
+            die(f"--judge-agent-model: {_jm_exc}", code=2)
         _judge_name = _judge_cli_name or os.environ.get("PAPER_JUDGE_AGENT_MODEL_NAME")
         _judge_key = _judge_cli_key or os.environ.get("PAPER_JUDGE_AGENT_MODEL_API_KEY")
         if (_judge_cli_name or _judge_cli_key or _judge_cli_prep) and not _judge_m:

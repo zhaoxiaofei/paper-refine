@@ -153,6 +153,19 @@ text seem to disagree, the CONTRADICTION RULE below decides, and a
 reading-economy hint never relaxes a stage obligation.
 """
 
+#: The contract for a prompt in which NOTHING was paged: the sentences that
+#: point at `INSTRUCTIONS/PROFILE_RULES.md` and its pointers are omitted, so a
+#: session is never told to read a file this stage never wrote (F200).
+MEDIUM_PROFILE_CONTRACT_INLINE = MEDIUM_PROFILE_CONTRACT.replace(
+    "This run states the stage contract inline and PAGES the long rule sections to\n"
+    "`INSTRUCTIONS/PROFILE_RULES.md` (see the pointers below), so the instruction\n"
+    "payload of every model call stays bounded.  This block is operating guidance for\n"
+    "a paged run: it restates no rule and it changes none.\n\n", "").replace(
+    "  5. THE PAGED RULES ARE BINDING. A pointer like\n"
+    "     `[PROFILE RULES — SECTION: see INSTRUCTIONS/PROFILE_RULES.md]` replaces\n"
+    "     rule text that this profile does not inline. Read the section your stage\n"
+    "     needs; it is authoritative and it is not optional.\n", "")
+
 #: One stage's prompt pointer, substituted for a paged rule section.
 PROFILE_POINTER_TMPL = (
     "[PROFILE RULES — {section}: this rule section is NOT inlined by the "
@@ -327,12 +340,21 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     ordered = sorted(((t, b) for t, b in blocks if b and isinstance(b, str)),
                      key=lambda tb: -len(tb[1]))
     sections = []          # (title, body), in replacement order
+    # Section titles are the pointer's identity, so two blocks that share a
+    # title must not share a heading: the first keeps the title and each later
+    # one gets a suffix. Without this both pointers named one `## SAME` heading,
+    # the file was reordered to replacement order, and a section-bounded read
+    # could not select the block its pointer named (F201).
+    title_counts: dict = {}
     for title, body in ordered:
         if body not in text:
             continue
+        title_counts[title] = title_counts.get(title, 0) + 1
+        section = title if title_counts[title] == 1 \
+            else f"{title} [{title_counts[title]}]"
         text = text.replace(body, PROFILE_POINTER_TMPL.format(
-            section=title, rel=rel))
-        sections.append((title, body))
+            section=section, rel=rel))
+        sections.append((section, body))
     if sections:
         instr = sb / PROFILE_INSTRUCTIONS_DIR
         # The sandbox is agent-writable: a planted `INSTRUCTIONS -> /outside`
@@ -381,10 +403,10 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     # same conflict-resolution order `high` uses (AGENTS.md rule 12).
     contract = _stage_contract_header(profile)
     if contract:
-        # No section written means no pointer either: keep the documented
-        # default path in the contract's example rather than naming a sidecar
-        # that does not exist.
-        contract = contract.replace(PROFILE_RULES_REL, rel if sections else PROFILE_RULES_REL)
+        # No section written means no pointer and no paged file: use the
+        # inline-only variant instead of naming a file this prompt never wrote.
+        contract = (contract.replace(PROFILE_RULES_REL, rel) if sections
+                    else MEDIUM_PROFILE_CONTRACT_INLINE)
     return contract + ensure_external_content_rule(CONTRADICTION_RULE + text)
 
 
@@ -436,11 +458,15 @@ def synthesize_frozen_review(ctx, r: int, sb) -> dict:
     target.mkdir(parents=True, exist_ok=True)
     (target / "round2").mkdir(parents=True, exist_ok=True)
     write_json_atomic(sb / FINDINGS_REL, _frozen_review_doc(r))
+    rows_md = "\n".join(
+        f"- {r.get('id')} — {r.get('title') or '(untitled)'}" for r in rows) or "- (none)"
     write_text_atomic(sb / GUIDED_REVIEW_DIR / "findings.md",
                       "# Frozen finding list — cold-start review only\n\n"
                       f"{GUIDED_REVIEW_GAP}\n\n"
                       f"The {len(rows)} X-9xx row(s) below are the cold-start review's "
-                      f"findings, in `guided_review/round2/findings_extra.json`.\n")
+                      f"findings (the same rows are in "
+                      f"`guided_review/round2/findings_extra.json`).\n\n"
+                      f"{rows_md}\n")
     discovery_json = f"{GUIDED_REVIEW_DIR}/round2/findings_extra.json"
     write_json_atomic(sb / discovery_json,
                       {"findings": rows, "source": "cold_start_review",

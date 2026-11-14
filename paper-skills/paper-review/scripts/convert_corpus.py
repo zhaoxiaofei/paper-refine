@@ -239,6 +239,11 @@ def _mc_visible_branch(m) -> str:
 # expanded a 70 MiB part from a 70 KiB submission while the orchestrator
 # refused it, so the two readers disagreed about the corpus.
 MAX_DOCX_PART_BYTES = 64 * 1024 * 1024
+# The plain-text sources are read whole too, so the same budget applies before
+# the read: an untrusted 80 MiB .md (or a binary renamed .txt) used to raise
+# MemoryError inside plain_copy and kill conversion before any inventory row
+# could record it.
+MAX_PLAIN_BYTES = 64 * 1024 * 1024
 
 
 def _docx_part(z, name: str):
@@ -754,12 +759,19 @@ def plain_copy(path: str) -> tuple:
     if not os.path.isfile(path):
         return "", ["unreadable — not a regular file"]
     try:
+        if os.path.getsize(path) > MAX_PLAIN_BYTES:
+            return "", ["unreadable — over the %d MiB conversion budget, not read"
+                        % (MAX_PLAIN_BYTES // (1024 * 1024))]
         raw = open(path, "rb").read()
     except OSError as e:
         # Every other converter records a failed conversion; this path (all
         # .md/.txt/.tex/.bib/.csv sources) used to propagate the error out of
         # main() before any inventory or corpus was written.
         return "", ["unreadable — %s" % e]
+    except MemoryError:
+        # The size budget bounds the normal read; a very low memory ceiling can
+        # still trip here, and that must be an inventory row, not a traceback.
+        return "", ["unreadable — could not be read into memory"]
     # A BOM is authoritative: Word/Notepad exports a .txt as UTF-16 on Windows,
     # and reading it as UTF-8 "succeeded" with NUL-separated mojibake that then
     # fed the corpus sweeps as if it were text. The UTF-8 BOM matters too: left

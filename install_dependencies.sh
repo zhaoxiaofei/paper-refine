@@ -197,6 +197,25 @@ if [ "${#MISSING_TOOLS[@]}" -gt 0 ]; then
         exit 2
     fi
 fi
+# A `node` on PATH is not enough: the shipped MCP servers (and the importer this
+# script runs through install_agent_tooling.sh) need Node >= 20. An older one
+# used to pass this gate and fail later, after the live install had been
+# switched in, with an opaque JavaScript SyntaxError.
+if [ "$DO_NODE" = 1 ] && have node; then
+    node_major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)
+    case "$node_major" in
+        ''|*[!0-9]*)
+            warn "could not determine the node version; the shipped MCP servers need Node >= 20"
+            [ "$DRY_RUN" = 0 ] && exit 2
+            ;;
+        *)
+            if [ "$node_major" -lt 20 ]; then
+                warn "node $(node -v 2>/dev/null) is too old; the shipped MCP servers need Node >= 20"
+                [ "$DRY_RUN" = 0 ] && exit 2
+            fi
+            ;;
+    esac
+fi
 
 # ---- required agent-common submodule --------------------------------------
 # `agent-common/` is a git submodule the pipeline imports before any stage can
@@ -315,6 +334,20 @@ install_repo() {
                     warn "could not check out $name/$ref; keeping the existing checkout"
             else
                 warn "could not fetch $name/$ref; keeping the existing checkout"
+                # `--strict-external` promises to fail "when an external repo
+                # fails"; a checkout that could not be refreshed stays at an
+                # arbitrary old commit, so it is that failure and not a warning.
+                [ "$STRICT_EXTERNAL" = 1 ] && \
+                    fail_step "could not refresh external checkout: $name/$ref"
+            fi
+        else
+            # A dirty checkout is deliberately not refreshed (the local edits
+            # would be lost); say so instead of silently recording the old HEAD
+            # as though the install had just fetched it.
+            if [ "$OFFLINE" = 0 ]; then
+                warn "not refreshing $name: local modifications in $dest"
+                [ "$STRICT_EXTERNAL" = 1 ] && \
+                    fail_step "external checkout has local modifications: $name"
             fi
         fi
     elif [ -e "$dest" ]; then

@@ -432,6 +432,27 @@ def _write_zip_parts_atomic(out: Path, parts: dict) -> None:
         raise
 
 
+def _publish_unchanged_copy(res: dict, out: Path, parts: dict) -> dict:
+    """Publish a byte-equivalent copy on a strip helper's no-op success path.
+
+    `out` is the documented output of both PKG-2 strip helpers, so a success
+    that removes nothing must still materialise it: a caller that gated on
+    `ok`/exit 0 and then opened `out` found no file at the path it was handed
+    (the same contract `repair_layout_package` already honours for a clean
+    input). The package is written through the same O_EXCL writer the repair
+    path uses.
+    """
+    try:
+        _write_zip_parts_atomic(Path(out), parts)
+    except (OSError, RuntimeError, NotImplementedError) as e:
+        res["ok"] = False
+        res["error"] = f"could not write the repaired DOCX: {type(e).__name__}: {e}"
+        return res
+    res["output"] = str(out)
+    res["ok"] = True
+    return res
+
+
 def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
     """Remove every SENTENCE of `src` that `finder` names as a dangling pointer.
 
@@ -559,8 +580,7 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
                 "expected_text": expected_text})
     if not edits:
         res["verified"] = {"removed": 0, "xml": True, "fields": True, "text": True}
-        res["ok"] = True
-        return res
+        return _publish_unchanged_copy(res, out, parts)
     new_xml = apply_edits(xml, edits)
     try:
         ET.fromstring(new_xml)
@@ -679,9 +699,8 @@ def strip_local_path_links(src: Path, out: Path) -> dict:
     settings = "word/_rels/settings.xml.rels"
     if settings not in parts:
         res["skipped"].append("no word/_rels/settings.xml.rels part")
-        res["ok"] = True
         res["verified"] = {"removed": 0, "parts": len(parts)}
-        return res
+        return _publish_unchanged_copy(res, out, parts)
     rels = parts[settings].decode("utf-8", "replace")
     kill = []
     for m in _REL_ENTRY_RE.finditer(rels):
@@ -694,9 +713,8 @@ def strip_local_path_links(src: Path, out: Path) -> dict:
         kill.append((m.start(), m.end(), target, attr_of(entry, "Id") or ""))
     if not kill:
         res["skipped"].append("no attached-template link to a local path")
-        res["ok"] = True
         res["verified"] = {"removed": 0, "parts": len(parts)}
-        return res
+        return _publish_unchanged_copy(res, out, parts)
     # Rebuild by splicing from the end so earlier offsets stay valid.
     new_rels = rels
     for a, b, _t, _rid in sorted(kill, key=lambda k: -k[0]):
@@ -1344,8 +1362,16 @@ def _caption_continuation_runs(inner: str, styles: dict, src_style: str,
                 latin = f'<w:sz w:val="{src_sz}"/>'
                 complex_script = f'<w:szCs w:val="{src_sz}"/>'
             new_run = _run_with_override(new_run, latin, key)
-            new_run = _run_with_override(
-                new_run, complex_script, "szCs" if key == "sz" else key + "Cs")
+            # CT_RPr allows each child at most ONCE, and Word routinely writes
+            # the complex-script companion already (`<w:bCs/>`): blindly
+            # appending it duplicated the element and left the two copies free
+            # to disagree. Update an existing companion in place instead.
+            companion = "szCs" if key == "sz" else key + "Cs"
+            existing = elem(rpr_of(new_run), companion)
+            if existing is not None:
+                new_run = new_run.replace(existing, complex_script, 1)
+            else:
+                new_run = _run_with_override(new_run, complex_script, companion)
         out.append(new_run)
         pos = r1
     out.append(inner[pos:])
@@ -2995,7 +3021,16 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
     `fixes` are (start, end, new) against `part_xml`; the scanner uses the rows
     only, the fixer applies the fixes.
     """
-    tol = float(policy.get("image_aspect_tolerance", 0.02) or 0.02)
+    # An explicit None check, never `or 0.02`: the tolerance is an INCLUSION
+    # threshold ("differs by more than this"), so a configured 0 means "any
+    # difference is a defect" and must not be replaced by the permissive
+    # default. `0 or 0.02 == 0.02` silently ignored an exact-ratio policy.
+    _tol = policy.get("image_aspect_tolerance")
+    try:
+        tol = 0.02 if _tol is None else float(_tol)
+    except (TypeError, ValueError):
+        tol = 0.02
+
     rows, fixes = [], []
     for idx, (p0, _p1, para) in enumerate(paragraphs(part_xml)):
         for m in re.finditer(r"<w:(?:drawing|pict)(?=[\s/>]).*?</w:(?:drawing|pict)>",
@@ -5428,6 +5463,20 @@ def refresh_zotero_package(src, out=None, policy: dict = None) -> dict:
     rep["nothing_to_do"] = bool(inner.get("nothing_to_do"))
     rep["zotero"] = inner.get("zotero")
     if not inner.get("changed"):
+        # A REFUSAL is not a success with no output: `cmd_zotero_refresh`
+        # documents it as "nothing is written" and exits 1, so only a
+        # NOTHING-TO-DO success (no field to refresh, or an already-clean
+        # document) materialises the documented `--out` copy.
+        _refused = (bool(rep.get("skip")) and not rep.get("nothing_to_do")
+                    and str(rep.get("skip")) != "no live citation fields")
+        if out is not None and not _refused:
+            dst = Path(out)
+            try:
+                _write_zip_parts_atomic(dst, parts)
+            except (OSError, RuntimeError, NotImplementedError) as e:
+                return dict(rep, ok=False,
+                            skip=f"could not write the refreshed DOCX ({e})")
+            rep["output"] = str(dst)
         return rep
     rep["changed"] = True
     parts = inner["parts"]

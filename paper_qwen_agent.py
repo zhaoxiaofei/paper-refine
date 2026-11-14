@@ -29,9 +29,9 @@ Environment (all optional):
     PAPER_QWEN_MODEL           default qwen3.8-27b
     PAPER_QWEN_API_KEY         default `dummy` (vLLM usually needs no key)
     PAPER_QWEN_HARNESS         codex | dsh | claude | chat (default codex)
-    PAPER_AGENT_REASONING_EFFORT  shared override (low | medium | high | xhigh |
-                                max; default from the model catalog, currently
-                                medium)
+    PAPER_AGENT_REASONING_EFFORT  shared override (off | minimal | low | medium |
+                                high | xhigh | max; default from the model
+                                catalog, currently medium)
     PAPER_QWEN_TUNNEL          auto | off | require (default auto)
     PAPER_QWEN_SSH_HOST        default zxf@101.6.31.113
     PAPER_QWEN_SSH_PORT        default 52080
@@ -460,7 +460,7 @@ def claude_env(cfg: dict) -> dict:
     root = cfg["base_url"]
     if root.endswith("/v1"):
         root = root[:-3]
-    return dict(
+    env = dict(
         os.environ,
         ANTHROPIC_BASE_URL=root,
         ANTHROPIC_AUTH_TOKEN=cfg["api_key"] or "dummy",
@@ -471,6 +471,13 @@ def claude_env(cfg: dict) -> dict:
         ANTHROPIC_DEFAULT_HAIKU_MODEL=cfg["model"],
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
     )
+    # Claude Code ignores a level outside its own vocabulary; ``_claude_code_effort``
+    # translates the adapter's wire level (``off``/``xhigh`` have no Claude Code
+    # spelling) and returns "" when there is nothing to set.
+    effort = rt._claude_code_effort(cfg.get("effort"))
+    if effort:
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
+    return env
 
 
 def ensure_dsh_home() -> tuple:
@@ -506,7 +513,7 @@ def dsh_argv(cfg: dict) -> tuple:
         f.write(dsh_patch_text(cfg))
     _PATCH_TMP = patch
     env = dict(os.environ, DSH_HOME=home, PAPER_QWEN_API_KEY=cfg["api_key"])
-    return (_build_dsh_argv(patch_path=patch), env, "")
+    return (_build_dsh_argv(patch_path=patch, extra_args=("-",)), env, "")
 
 
 def _chat_output_budget(cfg: dict, prompt: str, system: str = "") -> int:
@@ -596,7 +603,7 @@ def main(argv=None) -> int:
     p.add_argument("--model", default=None)
     p.add_argument("--base-url", default=None)
     p.add_argument("--api-key", default=None)
-    p.add_argument("--reasoning-effort", choices=("low", "medium", "xhigh"),
+    p.add_argument("--reasoning-effort", choices=rt.REASONING_EFFORT_LEVELS,
                    default=None)
     p.add_argument("--tunnel", choices=("auto", "off", "require"), default=None)
     p.add_argument("--ssh-host", default=None)
