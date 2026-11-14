@@ -1467,6 +1467,14 @@ def postcheck_revise(ctx: Ctx, rec: dict):
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del,
                                       prefer_rewrite=_edit_prefer))
+    if fact_survival_required(_edit_ins, _edit_del):
+        # No mode that permits a deletion has a unit-level check on it, so this
+        # is the gate that stops a deletion from taking a value or identifier
+        # with it (D8).
+        errs.extend(fact_preservation_problems(
+            sb / "base", rev, "revise",
+            exempt_removed=pipeline_removed_sentences(rec, with_document=True)))
+    errs.extend(identity_typo_problems(rev, "revise"))
     # AFTER the recovery, so the READ-ONLY raw-data directory ends up exactly as
     # the untouched original has it -- never as the base (or a donor) left it.
     rec["raw_data"] = verify_readonly_raw_data(ctx, rev, warns)
@@ -1807,6 +1815,11 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del,
                                       prefer_rewrite=_edit_prefer))
+    if fact_survival_required(_edit_ins, _edit_del):
+        errs.extend(fact_preservation_problems(
+            sb / "self", out, "integrate",
+            exempt_removed=pipeline_removed_sentences(rec, with_document=True)))
+    errs.extend(identity_typo_problems(out, "integrate"))
     rec["raw_data"] = verify_readonly_raw_data(ctx, out, warns)
     errs.extend(rec["raw_data"].get("legacy_input_areas") or [])
     _record_revision_token(rec, out, warns, errs=errs)
@@ -1981,6 +1994,11 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del,
                                       prefer_rewrite=_edit_prefer))
+    if fact_survival_required(_edit_ins, _edit_del):
+        errs.extend(fact_preservation_problems(
+            sb / "base", sb / REWRITTEN_DIR, "rewrite",
+            exempt_removed=pipeline_removed_sentences(rec, with_document=True)))
+    errs.extend(identity_typo_problems(sb / REWRITTEN_DIR, "rewrite"))
     rec["raw_data"] = verify_readonly_raw_data(ctx, sb / REWRITTEN_DIR, warns)
     errs.extend(rec["raw_data"].get("legacy_input_areas") or [])
     _record_revision_token(rec, sb / REWRITTEN_DIR, warns, errs=errs)
@@ -5954,6 +5972,310 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
     return problems
 
 
+# ---------------------------------------------------------------------
+# FACT SURVIVAL (shared rule D8) -- enforced in BOTH content-edit modes
+#
+# The content-edit switches decide whether a content UNIT may disappear; they
+# do not decide whether a FACT may. The revise/rewrite/integrate prompts
+# already require a wrong value, name, definition or claim to be repaired by
+# writing the correct fact, never by removing the sentence that carries it,
+# and the pipeline's own contract is that nothing in the delivered package may
+# be worse than the base. Prompt text alone did not hold: a review finding that
+# calls a paragraph redundant, procedural, orphaned or corrupted can still be
+# carrying a value the manuscript needs (a count, a measurement, an
+# identifier), and a deletion then removes the only carrier while every
+# finding is reported as resolved and the audit reports "no fact is lost".
+#
+# This layer makes the rule mechanical without knowing any finding kind: a base
+# sentence that has no counterpart in the delivered package may not take a
+# numeric or identifier fact with it. A value that genuinely should go is
+# recorded as manual-required, which is what the manual list is for; it is
+# never dropped silently. It runs in the PERMISSIVE mode too -- that is the
+# mode with no unit-level check, and the mode where a deletion is allowed
+# precisely because it is supposed to be redundant.
+# ---------------------------------------------------------------------
+_FACT_SURVIVAL_NUMBER_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w.])")
+_FACT_SURVIVAL_IDENT_RE = re.compile(
+    r"(?i)(?:https?://[^\s)>]+|doi:\s*10\.[^\s,;)]+|10\.\d{4,9}/[^\s,;)]+|"
+    r"orcid[:\s]+\d[\dX-]+|accession[:\s]+[A-Z0-9][A-Z0-9.\-]+)")
+# A two-digit floor: a lone "1" or "2" is a list marker, a section number or a
+# cross-reference in nearly every paragraph, so it cannot prove a fact survived.
+_FACT_SURVIVAL_MIN_DIGITS = 2
+
+
+def _fact_survival_key(token) -> str:
+    """One comparable key for a printed value or identifier."""
+    raw = str(token or "").strip().rstrip(",.;:)")
+    if not raw:
+        return ""
+    if re.search(r"[A-Za-z/]", raw):
+        return raw.lower()
+    try:
+        return repr(float(raw.replace(",", "")))
+    except ValueError:
+        return raw.replace(",", "")
+
+
+def _fact_survival_tokens(text) -> list:
+    """Numeric values and identifiers a text carries, in printing order."""
+    found = []
+    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(str(text or "")):
+        raw = match.group(0)
+        if len(re.sub(r"\D", "", raw)) >= _FACT_SURVIVAL_MIN_DIGITS:
+            found.append(raw)
+    for match in _FACT_SURVIVAL_IDENT_RE.finditer(str(text or "")):
+        found.append(match.group(0))
+    return found
+
+
+def _fact_survival_keys(units) -> set:
+    keys = set()
+    for unit in units or ():
+        for token in _fact_survival_tokens(unit.get("text") or ""):
+            keys.add(_fact_survival_key(token))
+    return keys
+
+
+def _fact_loss_examples(missing_units, surviving_keys) -> list:
+    """[(unit, [lost tokens])] for deleted units that took a fact with them."""
+    lost = []
+    for unit in missing_units or ():
+        tokens = [token for token in _fact_survival_tokens(unit.get("text") or "")
+                  if _fact_survival_key(token) not in surviving_keys]
+        if tokens:
+            lost.append((unit, tokens))
+    return lost
+
+
+# ---------------------------------------------------------------------
+# IDENTITY INTEGRITY -- two spellings of one identity value in one package
+#
+# An identity field (an address, a name) is a fact, and a package cannot carry
+# two spellings of it: one of them is a typo. The revise prompt already requires
+# a wrong value to be corrected by writing the CORRECT fact, and a package that
+# declares an identity statement authoritative supplies that fact; nothing made
+# the rule mechanical, so a front-matter address that disagreed with the
+# authoritative one could be reported as an "author query" and shipped twice.
+#
+# The check is deliberately narrow: it fires only when two occurrences share
+# their local part and their DOMAINS differ by at most two characters, which is
+# the signature of a domain typo and is not how two different people's
+# addresses usually differ.
+# ---------------------------------------------------------------------
+_EMAIL_TOKEN_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _bounded_edit_distance(a: str, b: str, limit: int = 2) -> int:
+    """Levenshtein distance, returning limit+1 as soon as it cannot beat limit."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i] + [0] * len(b)
+        best = i
+        for j, cb in enumerate(b, 1):
+            current[j] = min(previous[j] + 1, current[j - 1] + 1,
+                             previous[j - 1] + (ca != cb))
+            if current[j] < best:
+                best = current[j]
+        if best > limit:
+            return limit + 1
+        previous = current
+    return previous[-1]
+
+
+def fact_survival_required(insertions_allowed: bool, deletions_allowed: bool) -> bool:
+    """Is the shared D8 fact-survival gate needed for this content-edit policy?
+
+    It is needed exactly when a DELETION is permitted. The strict no-deletion
+    mode already reports every missing base unit from `content_edit_problems`,
+    while every mode that permits a deletion has no other gate that stops it
+    from taking a value or identifier with it -- including `--disable-insertions`
+    alone, where the unit-level deletion check does not run.
+    """
+    return bool(deletions_allowed)
+
+
+def identity_typo_problems(candidate_package: Path, stage: str = "") -> list:
+    """Two spellings of one address in the submitted prose.
+
+    The package's own authoritative identity statement decides which spelling
+    is correct; leaving both in place ships a typo the author cannot see. A pair
+    that is genuinely two people (the heuristic cannot know) is disposed by
+    recording both spellings in the package's own author hand-off, exactly like
+    a removed fact: that record is what clears this gate.
+    """
+    package = Path(candidate_package)
+    if not package.is_dir():
+        return []
+    handoff_texts = [text.lower() for _name, text in _manual_handoff_texts(package)]
+    seen: dict = {}
+    for unit in _content_unit_sentences(package):
+        for match in _EMAIL_TOKEN_RE.finditer(unit.get("text") or ""):
+            address = match.group(0)
+            local, _, domain = address.partition("@")
+            seen.setdefault(local.lower(), []).append(
+                (domain.lower(), address, unit.get("document") or "",
+                 int(unit.get("line") or 0)))
+    problems = []
+    for _local, rows in sorted(seen.items()):
+        domains = sorted({row[0] for row in rows})
+        if len(domains) < 2:
+            continue
+        for i in range(len(domains)):
+            for j in range(i + 1, len(domains)):
+                if _bounded_edit_distance(domains[i], domains[j], 2) > 2:
+                    continue
+                first = next(row for row in rows if row[0] == domains[i])
+                second = next(row for row in rows if row[0] == domains[j])
+                if any(first[1].lower() in text and second[1].lower() in text
+                       for text in handoff_texts):
+                    continue           # recorded for the author: a genuine pair
+                label = f"{stage}: " if stage else ""
+                problems.append(
+                    f"{label}the same address is printed with two domains: "
+                    f"{first[1]} ({first[2]}:{first[3]}) and {second[1]} "
+                    f"({second[2]}:{second[3]}). One spelling is a typo, and the package's "
+                    f"own authoritative identity statement decides which: correct the other "
+                    f"occurrence to that value (an identity typo is a decidable correction, "
+                    f"not an author query). If the pair is genuinely two people, record both "
+                    f"spellings in README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md as "
+                    f"manual-required with the evidence -- that record clears this gate.")
+                break
+    return problems[:3]
+
+
+def _manual_handoff_texts(package: Path) -> list:
+    """[(name, text)] of the package's OWN author hand-off files.
+
+    The compliant route the prompts name is `README-AUTHOR-TO-COMPLETE.md` /
+    `MANUAL_STEPS.md` beside the submitted documents. Reading them makes a
+    gate's message actionable instead of sending the session into a retry loop
+    no edit can pass. Only the package ROOT is read: a same-named file under
+    `work/` (agent scratch) or an evidence area is not the author hand-off, so
+    it must not be able to clear a gate. `read_text_bounded` keeps an
+    agent-written file from exhausting memory and refuses a planted symlink.
+    """
+    root = Path(package)
+    if not root.is_dir():
+        return []
+    wanted = {AUTHOR_TO_COMPLETE_README.lower(), "manual_steps.md"}
+    out = []
+    try:
+        entries = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return []
+    for path in entries:
+        if path.name.lower() not in wanted or not path.is_file():
+            continue
+        text = read_text_bounded(path)
+        if text:
+            out.append((path.name, text))
+    return out
+
+
+def _manual_handoff_keys(package: Path) -> set:
+    """Value keys the delivered package records in its author hand-off list."""
+    keys = set()
+    for _name, text in _manual_handoff_texts(package):
+        for token in _fact_survival_tokens(text):
+            keys.add(_fact_survival_key(token))
+    return keys
+
+
+def _fact_loss_message(lost, label: str) -> str:
+    def one(item):
+        unit, tokens = item
+        return (f"{unit.get('document') or '?'}:{int(unit.get('line') or 0)} lost "
+                f"{', '.join(sorted(set(tokens)))} "
+                f"({str(unit.get('text') or '')[:80]})")
+
+    return (f"{label}{len(lost)} deleted content unit(s) carry a value or identifier that no "
+            f"surviving sentence states: " + "; ".join(one(x) for x in lost[:5])
+            + (" ..." if len(lost) > 5 else "")
+            + ". A wrong value, name, definition or claim is repaired by writing the CORRECT "
+              "fact in place (rule D8); removing the sentence that carries it is not a repair. "
+              "If the value cannot be decided from the package, record it in "
+              "README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md as manual-required with the "
+              "value to restore -- that record clears this gate; do not drop it silently.")
+
+
+def _fact_exempt_sets(exempt_removed):
+    exempt_text, exempt_document = set(), set()
+    for s in (exempt_removed or ()):
+        if isinstance(s, (tuple, list)) and len(s) == 2:
+            doc, sentence = s
+            if str(sentence or "").strip():
+                exempt_document.add((str(doc), _deleted_para_norm(sentence).lower()))
+        elif str(s or "").strip():
+            exempt_text.add(_deleted_para_norm(s).lower())
+    return exempt_text, exempt_document
+
+
+def fact_preservation_problems(base_package: Path, candidate_package: Path,
+                               stage: str = "", exempt_removed=None) -> list:
+    """Problems where a deleted base sentence took a value/identifier with it.
+
+    `exempt_removed` honours the same exemptions the content-edit policy uses
+    (the pipeline's own packaging removals), so a required removal never trips
+    this check.
+    """
+    base_package, candidate_package = Path(base_package), Path(candidate_package)
+    if not base_package.is_dir() or not candidate_package.is_dir():
+        return []
+    exempt_text, exempt_document = _fact_exempt_sets(exempt_removed)
+    skipped = []
+    base_units = [u for u in _content_unit_sentences(base_package, skipped=skipped)
+                  if u["norm"] not in exempt_text
+                  and (u["document"], u["norm"]) not in exempt_document]
+    cand_units = _content_unit_sentences(candidate_package, skipped=skipped)
+    missing, _added = _match_content_units(base_units, cand_units)
+    surviving = _fact_survival_keys(cand_units) | _manual_handoff_keys(candidate_package)
+    lost = _fact_loss_examples(missing, surviving)
+    if not lost:
+        return []
+    return [_fact_loss_message(lost, f"{stage}: " if stage else "")]
+
+
+def deletion_row_fact_loss_problems(sandbox: Path, rows, full_by_ref=None) -> list:
+    """Per-row backstop: an `OK — no fact is lost` row that DID lose a value.
+
+    The revision audit's dispositions are the pipeline's own record of what a
+    deletion cost. A row disposed `OK — <why no fact is lost>` while the value
+    it carried appears nowhere in `revised/`'s own prose is a false record,
+    whatever the revise stage was told. The compliant dispositions already
+    exist: `fact removed — RP-xxx` (with a plan row) and `manual-required`.
+
+    `full_by_ref` maps the seeded occurrence id to the FULL paragraph text: the
+    table cell is display-truncated to a fixed budget, so checking only the
+    visible cell would miss a value beyond the cut (a false negative).
+    """
+    package = Path(sandbox) / REVISED_DIR
+    if not package.is_dir():
+        return []
+    surviving = _fact_survival_keys(_content_unit_sentences(package))
+    problems = []
+    for row in rows or ():
+        disposition = str(row.get("disposition") or "").strip()
+        if not re.match(r"(?i)^OK\s*[\u2014\u2013:-]", disposition):
+            continue
+        paragraph = str((full_by_ref or {}).get(str(row.get("#") or "").strip())
+                        or row.get("paragraph") or "")
+        lost = [token for token in _fact_survival_tokens(paragraph)
+                if _fact_survival_key(token) not in surviving]
+        if not lost:
+            continue
+        problems.append(
+            f"row {str(row.get('#') or '?').strip()} is disposed "
+            f"{disposition[:60]!r} but the value(s) {', '.join(sorted(set(lost)))} it carried "
+            f"appear nowhere in {REVISED_DIR}/'s own prose: `OK — no fact is lost` is not "
+            f"available for a deleted paragraph whose value has no surviving manuscript "
+            f"carrier (a hand-off-only value is `manual-required`, not `OK`). Dispose it as "
+            f"`fact removed — RP-xxx` (and add the row to REPAIR_PLAN.json), or as "
+            f"`manual-required — <what the author must restore>`.")
+    return problems
+
+
 def _deletion_disposition_ok(value) -> bool:
     """Does a DELETED_PARAGRAPHS disposition use the seeded vocabulary?
 
@@ -6015,6 +6337,7 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
     # dropped row as kept).
     _norm_para = _deletion_audit_identity
     problems, seen_rows = [], 0
+    all_rows = []
     seen_paragraphs = set()
     seen_refs = {}
     expected_refs = [_deletion_audit_ref(i, row)
@@ -6025,6 +6348,7 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
         if not block["rows"]:
             continue
         seen_rows += len(block["rows"])
+        all_rows.extend(block["rows"])
         seen_paragraphs.update(_deletion_audit_identity(row.get("paragraph"))
                                for row in block["rows"]
                                if str(row.get("paragraph") or "").strip())
@@ -6082,6 +6406,14 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
                 f"{p.name} disposes seeded row id(s) {len(duplicated)} time(s) instead of "
                 f"once (e.g. {duplicated[0]!r}): one paragraph cannot be disposed twice "
                 f"in place of a distinct one")
+    # The dispositions are the audit's own record of what a deletion cost. A row
+    # disposed `OK — no fact is lost` while the value it carried appears nowhere
+    # in the delivered package is a false record (D8), whatever the revise stage
+    # was told. Check the FULL seeded paragraph, not the table's truncated cell.
+    _full_by_ref = {_deletion_audit_ref(i, row): str(row.get("paragraph") or "")
+                    for i, row in enumerate(expected_occurrences or ())}
+    problems += [f"{p.name}: {item}"
+                 for item in deletion_row_fact_loss_problems(sb, all_rows, _full_by_ref)]
     return problems
 
 

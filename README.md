@@ -2255,6 +2255,26 @@ bypass the mandatory audit. Supply an agent command to perform it.
 and `PAPER_REVISION_AUDIT=off` cannot disable the mandatory gate. `--audit off`
 still skips only the earlier review-disposition auditor.
 
+The revision chain's audit writes ONE product, `revision_audit/REPAIR_PLAN.json`
+(plus a readable `REPAIR_PLAN.md`): one row per defect it confirms in the
+revision, each naming the location, the LITERAL `wrong` text of the file it
+names (the shortest verbatim fragment that contains the change) and the correct
+value with a basis another session can re-run; a pure deletion carries its
+removed text in `wrong` and an empty `correct`. An empty plan is a valid,
+complete audit. The audit's own `revision_audit/DELETED_PARAGRAPHS.md` is
+checked, not taken on trust: every deleted base paragraph is disposed
+`OK — <why no fact is lost>`, `manual-required`, or `fact removed — RP-xxx`, and
+an `OK` row whose numeric value or identifier appears nowhere in the delivered
+package's own prose fails the audit. The same fact-survival rule runs at the
+revise/rewrite/integrate postcheck whenever a deletion is permitted. An
+identity value is the same kind of fact: two spellings of one address whose
+domains differ by at most two characters are a typo, the package's own
+authoritative identity statement decides which is right, and a pair that is
+genuinely two people is recorded `manual-required` instead. A bounded repair
+that breaks its own contract never publishes the rejected bytes: `revised/` is
+restored from `revised_prerepair/` before the final postcheck, and the arm
+fails when that baseline is missing, stale or tampered with.
+
 ## The cold-start review (`setup --cold-start-review on`): a second, independent discovery pass
 
 Every checklist pass is finite, and one review pass is a sample of the defect space. A real run
@@ -2432,7 +2452,7 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | integrate | 118 KB | 65 KB | 45% |
 | rewrite | 111 KB | 61 KB | 45% |
 | judge | 104 KB | 74 KB | 29% |
-| revision_audit | 23 KB | 13 KB | 41% |
+| revision_audit | 24 KB | 14 KB | 40% |
 | revision_repair | 22 KB | 9 KB | 57% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
@@ -3596,7 +3616,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 219 suites (a few
+any failure. They are independent, so run them in parallel — 220 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
