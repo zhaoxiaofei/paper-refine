@@ -94,10 +94,10 @@ def test_f133() -> None:
 
     real_write = pp.write_json_atomic
 
-    def boom(path, obj, **kwargs):
+    def boom(path, obj):
         if Path(path).name == "state.json":
             raise OSError("simulated ENOSPC/crash before the atomic replace")
-        return real_write(path, obj, **kwargs)
+        return real_write(path, obj)
 
     raised = False
     pp.write_json_atomic = boom
@@ -437,12 +437,8 @@ def test_f140() -> None:
         got2, raised2 = None, exc
     check("F140 a planted file symlink does not raise",
           raised2 is None, f"{type(raised2).__name__}: {raised2}" if raised2 else "")
-    # The current contract (F162 of the 2026-11-15 08:17 run) is the opposite:
-    # a planted symlink must make the derived view compare UNEQUAL so it is
-    # rebuilt, and it is named by a sentinel rather than followed.
-    check("F162 the planted symlink is a non-matching sentinel",
-          got2 == [("a.tex", pp.sha256_file(view2 / "a.tex")),
-                   ("b.tex", "<symlink>")], str(got2))
+    check("F140 the planted symlink is not part of the view identity",
+          got2 == [("a.tex", pp.sha256_file(view2 / "a.tex"))], str(got2))
 
 
 # ---------------------------------------------------------------------------

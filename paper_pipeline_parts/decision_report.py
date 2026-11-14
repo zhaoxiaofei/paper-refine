@@ -43,10 +43,19 @@ def header_lines(*, generated, root, version, config_line, venue_lines, certific
     L.append("")
     L.append("## 0. Integrity")
     L.append("")
-    L.append(f"- pristine original: {'ok' if integrity['pristine_ok'] else 'CHANGED'} "
-             f"({integrity['pristine_detail']})")
-    L.append(f"- pinned champion chain: {'ok' if not integrity['pinned_errors'] else 'CHANGED'} "
-             f"({pin_count} pinned version(s))")
+    if integrity.get("hash_checks") == "skipped":
+        # The same line said 'not verified (--skip-hash)' in its detail while the
+        # status word claimed 'ok'. A skipped check is neither ok nor CHANGED.
+        L.append(f"- pristine original: not verified (--skip-hash) "
+                 f"({integrity.get('pristine_detail') or 'digest recorded, not checked'})")
+        L.append(f"- pinned champion chain: not verified (--skip-hash) "
+                 f"({pin_count} pinned version(s))")
+    else:
+        L.append(f"- pristine original: {'ok' if integrity['pristine_ok'] else 'CHANGED'} "
+                 f"({integrity['pristine_detail']})")
+        L.append(f"- pinned champion chain: "
+                 f"{'ok' if not integrity['pinned_errors'] else 'CHANGED'} "
+                 f"({pin_count} pinned version(s))")
     for e in integrity["pinned_errors"]:
         L.append(f"  - {e}")
     if integrity.get("evidence_not_verifiable"):

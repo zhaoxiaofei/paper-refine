@@ -5,6 +5,165 @@
 # the single-file source.
 from __future__ import annotations
 
+_XML_INTER_ELEMENT = rf"(?:\s|{_XML_MISC})*"
+_PARAGRAPH_OPEN_RE = re.compile(rf"<w:p(?=[\s/>]){_XML_ATTRIBUTES}>")
+_PARAGRAPH_PROPERTIES_OPEN_RE = re.compile(rf"<w:pPr(?=[\s/>]){_XML_ATTRIBUTES}>")
+_RUN_PROPERTIES_RE = re.compile(
+    rf"<w:r(?=[\s/>]){_XML_ATTRIBUTES}(?<!/)>{_XML_INTER_ELEMENT}(?=<w:rPr(?=[\s/>]))")
+_PARAGRAPH_PROPERTIES_RE = re.compile(
+    rf"<w:p(?=[\s/>]){_XML_ATTRIBUTES}(?<!/)>{_XML_INTER_ELEMENT}(?=<w:pPr(?=[\s/>]))")
+_PAGE_BREAK_DISABLED_RE = re.compile(r"""\sw:val\s*=\s*(?:"(?:0|false|off)"|'(?:0|false|off)')""")
+
+
+def _break_only_paragraph(para: str) -> bool:
+    return (bool(PAGEBREAK_RE.search(para)) and not text_of(para).strip()
+            and not has_drawing(para) and not has_field(para) and not has_anchor(para)
+            # OMML math is content too: `<m:t>` is invisible to text_of, so a
+            # page break + display equation paragraph used to be deleted whole.
+            and not has_math(para)
+            # A paragraph carrying a tracked change is revision history:
+            # `text_of` does not read `w:delText`, so a break-only paragraph
+            # whose only other content was a tracked deletion must not be
+            # spliced out (the stray-empty repair has the same guard).
+            and not REVISION_CONTENT_RE.search(para))
+
+
+# ---- input / output path safety -------------------------------------------
+# A DOCX/PDF reader that opens ANY existing pathname blocks forever on a FIFO
+# (and a writer that open()s a symlink writes its target): the guards below are
+# shared by every command so the CLI reports an input error instead of hanging,
+# and never follows a planted link out of the package.
+def _input_file_problem(path) -> str:
+    """Why `path` is not a readable regular package file, or "" when it is."""
+    p = Path(path)
+    try:
+        if p.is_symlink():
+            return "it is a symlink, not a package file"
+        if not p.is_file():
+            return "it is not a regular file"
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+def _non_regular_paths(paths) -> list:
+    """The CALLER-named paths that are neither a directory nor a regular file."""
+    out = []
+    for raw in paths:
+        p = Path(raw)
+        try:
+            if p.exists() and not p.is_dir() and (p.is_symlink() or not p.is_file()):
+                out.append(p)
+        except OSError:
+            out.append(p)
+    return out
+
+
+def _output_path_problem(out, protected=()) -> str:
+    """Why `out` must not be written, or "" when the destination is safe.
+
+    Two hazards the direct writers missed: a destination that is a symlink (the
+    open()/copy2() followed it and overwrote the linked file outside the
+    package) and a destination that is one of the command's INPUT documents
+    (`xfa-export form.pdf --out form.pdf`, `scan pkg --json pkg/main.docx`).
+    """
+    o = Path(out)
+    try:
+        if o.is_symlink():
+            return "it is a symlink; refusing to write through it"
+    except OSError:
+        pass
+    try:
+        o_real = o.resolve()
+    except OSError:
+        return ""
+    for item in protected:
+        if item is None:
+            continue
+        try:
+            if Path(item).resolve() == o_real:
+                return f"it is the input file {item}"
+        except OSError:
+            continue
+    return ""
+
+
+def _atomic_write_bytes(out, data: bytes) -> None:
+    """Write `data` through an exclusive sibling, then os.replace() it.
+
+    The temp owns the name (`mkstemp`), so a pre-planted symlink at `out` is
+    replaced, never followed, and a crash cannot leave truncated bytes.
+    """
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp",
+                                dir=str(out.parent))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(name, out)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+        raise
+
+
+def _atomic_write_text(out, text: str, encoding: str = "utf-8") -> None:
+    _atomic_write_bytes(out, str(text).encode(encoding))
+
+
+def _write_report(path, obj, protected=()) -> str:
+    """write_json() with the report-vs-input guard; returns an error or ""."""
+    problem = _output_path_problem(path, protected)
+    if problem:
+        return problem
+    write_json(path, obj)
+    return ""
+
+
+def _reference_para_flags(paras: list) -> list:
+    """Which paragraphs are reference-list entries, for BOTH scan and fix.
+
+    `para_style(...) == "Bibliography"` is the Word-native marker, but
+    `apply_word_template` remaps style ids by NAME: a restyled package carries
+    its reference list under another id. When no paragraph uses the literal id
+    and the document HAS an explicit bibliography heading, the numbered entries
+    under it are the list (the same structural primitive FMT-Z2/step 9 use).
+    Every reference-sensitive rule must share this definition or scan and fix
+    disagree on the same document.
+    """
+    flags = [para_style(p[2]) == "Bibliography" for p in paras]
+    if paras and not any(flags):
+        texts = [text_of(p[2]) for p in paras]
+        start = _bibliography_entry_start(texts)
+        if start > 0:
+            flags = [bool(flags[i])
+                     or (i >= start
+                         and bool(re.match(r"^\s*\d+\s*[\.\)]\s*\S",
+                                           str(texts[i] or ""))))
+                     for i in range(len(flags))]
+    return flags
+
+
+def _fill_missing_row_tiers(rows) -> None:
+    """The FORMAT_SCAN row contract: EVERY row carries a `tier`.
+
+    Most producers set it through `row()`/`tier_of`, but three direct appends
+    (the emphasis rows, the unreadable-package FMT-X1 row and the FMT-T8h gap
+    row) omitted it, so a consumer that read `row["tier"]` hit KeyError or
+    misclassified a finding-tier row as advisory. Normalise once per completed
+    row list rather than trusting every future append site.
+    """
+    for r in rows:
+        if "tier" not in r:
+            r["tier"] = tier_of(str(r.get("rule") or ""))
+
+
 def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                      sizes: dict = None, rels: dict = None) -> dict:
     rows = []
@@ -38,15 +197,10 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # break otherwise made the whole document's fix verify as failed and threw
     # away every other repair.
     in_table = _table_paragraph_indices(xml, paras)
+    in_text_box = _text_box_paragraph_indices(xml, paras)
     for idx, (p0, p1, para) in enumerate(paras):
         text = text_of(para)
-        # A field run is CONTENT, never an empty paragraph: the fixer refuses to
-        # touch one (moving its page break would unbalance the field), so a row
-        # the scan still filed `mechanical` could never be repaired and made the
-        # whole fix verify as failed. The two sides read the same definition.
-        empty = not text.strip() and not has_drawing(para) and not has_field(para) \
-            and not has_anchor(para)
-        if PAGEBREAK_RE.search(para) and empty:
+        if idx not in in_text_box and _break_only_paragraph(para):
             # In a table cell the fixer cannot move/delete the paragraph (that
             # would leave an empty `<w:tc>`); report the defect as manual rather
             # than filing a mechanical row the fixer refuses by design. A
@@ -166,12 +320,17 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # Biotechnology" italic in one sentence, roman in the next, and looked clean
     # to this scanner.
     policy_j = policy["journal_italics"]
+    # ONE reference-list definition (with the template-restyle fallback) for
+    # every reference-sensitive rule below: testing the literal "Bibliography"
+    # id made a restyled list look like prose, de-italicised its journal titles
+    # and left mechanical rows the fixer refused.
+    ref_flags = _reference_para_flags(paras)
     journal_regions = defaultdict(lambda: defaultdict(lambda: {True: [], False: []}))
     for idx, (p0, p1, para) in enumerate(paras):
         text = text_of(para)
         style = para_style(para)
         analysis = journal_emphasis_runs(styles, style, para)
-        region = "refs" if style == "Bibliography" else "prose"
+        region = "refs" if ref_flags[idx] else "prose"
         for r0, r1, run in runs(para):
             rtext = text_of(run)
             if not rtext.strip() or not run_is_italic(styles, style, run):
@@ -184,7 +343,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                     f"italic run in the title/correspondence block: {rtext[:50]!r}",
                     "the correspondence and affiliation blocks must be roman"
                     + (f" (Zotero field: {field})" if field else ""), protected=protect)
-            if style == "Bibliography" and re.search(r"\bet\s+al\.", rtext):
+            if ref_flags[idx] and re.search(r"\bet\s+al\.", rtext):
                 row("FMT-T6b", "medium", f"p{idx}", f"italic 'et al.' in a reference: {rtext[:40]!r}",
                     "only the journal title is italic in a reference"
                     + (f" (Zotero field: {field})" if field else ""), protected=protect)
@@ -241,11 +400,12 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                     protected=any_field)
 
     for i, (p0, p1, p) in enumerate(paras):
-        if para_style(p) != "Bibliography":
+        if not ref_flags[i]:
             continue
         text = text_of(p)
+        style = para_style(p)
         ital = [text_of(r[2]) for r in runs(p)
-                if text_of(r[2]).strip() and run_is_italic(styles, "Bibliography", r[2])]
+                if text_of(r[2]).strip() and run_is_italic(styles, style, r[2])]
         field = in_field(franges, p0)
         if re.search(r"\(\d{4}[a-z]?\)", text) and not ital:
             row("FMT-T6d", "medium", f"p{i}", f"reference with no italic journal title: {text[:60]!r}",
@@ -265,7 +425,8 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             if not URL_RE.search(rtext):
                 continue
             in_link = any(a <= r0 < b for a, b in link_spans)
-            rpr = rpr_of(run)
+            opening = _RUN_PROPERTIES_RE.match(run)
+            rpr = rpr_of(run[opening.end():]) if opening else None
             t = ("link" if in_link else "plain",
                  elem_val(rpr, "rStyle") or "-",
                  elem_val(rpr, "color") or "-",
@@ -313,7 +474,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # FMT-P3 (doubled spaces, bracket spacing, zero-width marks), FMT-G2
     # (possible lowercase sentence start) and FMT-G3 (missing space after
     # punctuation) are reported for the editing arms.
-    is_ref_para = [para_style(p[2]) == "Bibliography" for p in paras]
+    is_ref_para = ref_flags
     doc_field_results = _field_result_spans(xml)
     field_result_text = [field_result_text_ranges(p[2], doc_field_results, p[0])
                          for p in paras]
@@ -370,22 +531,14 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # are document-TEXT problems: they are read from the paragraph text so the same
     # rules can also run over the LaTeX/markdown sources (paper_pipeline scans those).
     para_texts = [text_of(p[2]) for p in paras]
-    para_is_ref = [para_style(p[2]) == "Bibliography" for p in paras]
     # The reference-SHAPE rules must survive a venue template that remaps style
     # ids by NAME (apply_word_template rewrites them): a package restyled that
     # way carries its reference list under another style id and every FMT-R
-    # rule switched off silently. When no paragraph uses the literal id but the
-    # document HAS an explicit bibliography heading, fall back to the numbered
-    # entries under it (the same structural primitive FMT-Z2 uses).
-    para_is_ref_rows = para_is_ref
-    if not any(para_is_ref):
-        bib_start = _bibliography_entry_start(para_texts)
-        if bib_start > 0:
-            para_is_ref_rows = [bool(para_is_ref[i])
-                                or (i >= bib_start
-                                    and bool(re.match(r"^\s*\d+\s*[\.\)]\s*\S",
-                                                      str(para_texts[i] or ""))))
-                                for i in range(len(para_is_ref))]
+    # rule switched off silently. `_reference_para_flags` is the ONE predicate
+    # (literal id, else the numbered entries under an explicit bibliography
+    # heading) that scan, hygiene and the fixer all use.
+    para_is_ref = ref_flags
+    para_is_ref_rows = ref_flags
     para_is_head = [bool((para_style(p[2]) or "").startswith("Heading"))
                     for p in paras]
     # A caption/legend paragraph is not a display-item CALL-OUT: the ordering
@@ -408,10 +561,11 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # (a supplementary file carries its own reference list and availability
     # note, a cover letter can carry another publisher's boilerplate), so they
     # run on every document the package scan opens.
-    for r in reference_entry_rows(para_texts, para_is_ref_rows, policy):
+    for r in reference_entry_rows(para_texts, para_is_ref_rows, policy,
+                                  field_ranges=field_result_text):
         rows.append({"rule": r["rule"], "severity": r["severity"], "document": doc,
                      "location": r["location"], "evidence": r["evidence"],
-                     "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
+                     "detail": r["detail"], "fix": r.get("fix") or _fix_kind(r["rule"], policy),
                      "protected": bool(r.get("protected")),
                      "tier": tier_of(r["rule"])})
     for r in correspondence_glue_rows(para_texts, para_is_ref):
@@ -511,6 +665,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     rows.extend(reference_bold_rows(xml, styles, doc))
     rows.extend(availability_claim_rows(para_texts, doc))
 
+    _fill_missing_row_tiers(rows)
     return {"rows": rows, "paras": len(paras), "words": words, "legend_idx": legend_idx,
             "fields": [f[2][:60] for f in franges],
             "style_survey": style_survey(xml, styles),
@@ -628,6 +783,17 @@ def _run_text_tool(argv, timeout: int) -> tuple:
 def analyse_package(path: Path, policy: dict) -> dict:
     app_pages = None
     sizes, doc_rels, aux_parts, aux_xml, part_targets = {}, {}, [], {}, {}
+    # A FIFO named `trap.docx` wedged the scanner forever inside ZipFile(); a
+    # named path is only a package when it is a regular file (the corpus walker
+    # already refuses symlinks).
+    problem = _input_file_problem(path)
+    if problem:
+        row = {"rule": "FMT-X1", "severity": "high", "document": Path(path).name,
+               "location": "-", "evidence": problem,
+               "detail": "unreadable DOCX package",
+               "fix": "manual", "protected": False, "tier": "finding"}
+        return {"file": str(path), "rows": [row], "by_rule": {"FMT-X1": 1},
+                "high": 1, "medium": 0, "low": 0, "documents": {}}
     try:
         with zipfile.ZipFile(path) as pkg:
             problem = _docx_zip_problem(pkg)
@@ -656,13 +822,11 @@ def analyse_package(path: Path, policy: dict) -> dict:
             rels_name = "word/_rels/document.xml.rels"
             if rels_name in pkg.namelist():
                 rels_xml = pkg.read(rels_name).decode("utf-8", "replace")
-                for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
-                    attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
-                    typ = attrs.get("Type", "")
-                    if attrs.get("Id") and (typ.endswith("/header") or typ.endswith("/footer")):
-                        target = attrs.get("Target", "").lstrip("/").replace("\\", "/")
-                        part_targets[attrs["Id"]] = (target if target.startswith("word/")
-                                                     else "word/" + target)
+                for rel in _rels_entries(rels_xml):
+                    if rel["type"] in ("header", "footer"):
+                        target = str(rel["target"]).lstrip("/").replace("\\", "/")
+                        part_targets[rel["id"]] = (target if target.startswith("word/")
+                                                   else "word/" + target)
             for name in sorted(pkg.namelist()):
                 if re.match(r"word/(?:header|footer)[A-Za-z0-9_\-]*\.xml$", name):
                     aux_parts.append((name, part_rels(pkg, name)))
@@ -679,7 +843,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
         # password-protected .docx is unreadable like any other, not a crash.
         row = {"rule": "FMT-X1", "severity": "high", "document": path.name, "location": "-",
                "evidence": f"{type(e).__name__}: {e}", "detail": "unreadable DOCX package",
-               "fix": "manual", "protected": False}
+               "fix": "manual", "protected": False, "tier": "finding"}
         return {"file": str(path), "rows": [row], "by_rule": {"FMT-X1": 1},
                 "high": 1, "medium": 0, "low": 0, "documents": {}}
     res = analyse_document(xml, styles, policy, path.name, sizes=sizes, rels=doc_rels)
@@ -710,13 +874,32 @@ def analyse_package(path: Path, policy: dict) -> dict:
                               "reference FORMAT can change (and no longer match the target "
                               "journal's style) without any other warning",
                     "fix": "manual", "protected": True, "tier": tier_of("FMT-Z5")})
-    except (zipfile.BadZipFile, KeyError, OSError):
-        pass
+    except (zipfile.BadZipFile, KeyError, OSError, RuntimeError,
+            NotImplementedError, UnicodeDecodeError, ValueError,
+            ET.ParseError) as exc:
+        # The SAME unreadable-package tuple the document-read block above
+        # catches: `pkg.read` raises RuntimeError for an ENCRYPTED entry and
+        # NotImplementedError for an unsupported compression method, so the
+        # narrow tuple let a bad word/settings.xml escape analyse_package and
+        # abort the whole corpus scan instead of yielding a reported package.
+        # The style-store class is a named gap here, not a silent pass.
+        res["rows"].append({
+            "rule": "FMT-Z5", "severity": "low", "document": path.name,
+            "location": "document preferences",
+            "evidence": f"the Zotero style store(s) could not be read: "
+                        f"{type(exc).__name__}: {exc}",
+            "detail": ("the package-level style-store check (FMT-Z5) is a named gap "
+                       "for this file: word/settings.xml, docProps/custom.xml or a "
+                       "customXml payload could not be read, so two conflicting "
+                       "stores could not be ruled out"),
+            "fix": "manual", "protected": False, "tier": "advisory"})
     # Only a REFERENCED header/footer part is printed: the template packages
     # carry orphan numbered parts (footer2.xml) that Word never uses, and a row
     # against one of those is a false positive.
-    ref_ids = set(re.findall(
-        r"<w:(?:header|footer)Reference[^>]*r:id=\"([^\"]+)\"", xml))
+    # `attr_of` accepts single- or double-quoted attributes; OOXML permits both.
+    ref_ids = {attr_of(m.group(0), "r:id")
+               for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>", xml)}
+    ref_ids.discard(None)
     referenced = {part_targets[rid] for rid in ref_ids if rid in part_targets}
     res["rows"].extend(page_field_rows(
         [(name, aux_xml[name]) for name in sorted(referenced) if name in aux_xml],
@@ -806,6 +989,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
                        "measure the artwork's type at the printed width or re-run with "
                        "figure_ocr on"),
             "fix": "manual", "protected": False, "tier": "advisory"})
+    _fill_missing_row_tiers(res["rows"])
     counts = Counter(r["rule"] for r in res["rows"])
     return {"file": str(path), "rows": res["rows"], "by_rule": dict(counts),
             "high": sum(1 for r in res["rows"] if r["severity"] == "high"),
@@ -826,9 +1010,13 @@ def docx_files_under(dirp: Path) -> list:
     # rglob("*.DOCX") both miss `Main.Docx` on a case-sensitive filesystem.
     # A FILE symlink is not package content (the corpus walker refuses one):
     # following it made the formatter read and report on a document outside the
-    # package, whose target may be a private local file.
+    # package, whose target may be a private local file. A FIFO/socket/device
+    # named `*.docx` must not be handed to ZipFile() (it blocks forever); the
+    # `is_file() or is_dir()` test admits regular files AND a directory named
+    # `x.docx`, which analyse_package reports as FMT-X1 instead of opening it.
     return sorted({p for p in dirp.rglob("*")
-                   if p.suffix.lower() == ".docx" and not p.is_symlink()})
+                   if p.suffix.lower() == ".docx"
+                   and (p.is_file() or p.is_dir()) and not p.is_symlink()})
 
 
 def scan_paths(paths: list, policy: dict) -> dict:
@@ -849,7 +1037,8 @@ def scan_paths(paths: list, policy: dict) -> dict:
     for p in paths:
         if not p.exists():
             continue
-        files = docx_files_under(p) if p.is_dir() else [p]
+        files = (docx_files_under(p) if p.is_dir()
+                 else ([p] if not p.is_symlink() and p.is_file() else []))
         for f in files:
             if f.name.startswith("~$") or _is_aux_name(f.name):
                 continue
@@ -938,9 +1127,12 @@ PPR_SPACING_AFTER = ("pStyle", "keepNext", "keepLines", "pageBreakBefore", "fram
 
 
 def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepLines")) -> str:
-    ppr = ppr_of(para)
+    # A host can lack a pPr even when its text box has one.
+    opening = _PARAGRAPH_PROPERTIES_RE.match(para)
+    ppr = ppr_of(para[opening.end():]) if opening else None
     if ppr is None:
-        tag_end = para.find(">") + 1
+        paragraph_tag = _PARAGRAPH_OPEN_RE.match(para)
+        tag_end = paragraph_tag.end() if paragraph_tag else para.find(">") + 1
         head, tail = para[:tag_end], para[tag_end:]
         if head.rstrip().endswith("/>"):
             # A self-closing paragraph (`<w:p w:rsidR="..."/>`, what python-docx
@@ -954,20 +1146,22 @@ def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepL
     for tag in after:
         # Only a DIRECT child may anchor the insert: a pStyle inside
         # w:pPrChange is revision history, not live formatting.
-        el = child_elem(ppr, tag)
-        if el:
-            pos = max(pos, ppr.find(el) + len(el))
+        span = _child_element_span(ppr, tag)
+        if span:
+            pos = max(pos, span[1])
     if pos == 0:
         # Anchor at the END of the `w:pPr` open tag, not at a fixed offset: Word
         # writes attributes on it (`<w:pPr w:rsidR="...">`), and splicing a child
         # in after a fixed `len("<w:pPr>")` corrupts the tag. A self-closing
         # `w:pPr` has to be expanded before the child can go inside it.
-        m = re.match(r"<w:pPr(?=[\s/>])[^>]*>", ppr)
+        m = _PARAGRAPH_PROPERTIES_OPEN_RE.match(ppr)
         if m and m.group(0).rstrip().endswith("/>"):
             head = m.group(0).rstrip()[:-2].rstrip() + ">"
-            return para.replace(ppr, head + element + "</w:pPr>", 1)
+            at = opening.end()
+            return para[:at] + head + element + "</w:pPr>" + para[at + len(ppr):]
         pos = m.end() if m else len("<w:pPr>")
-    return para.replace(ppr, ppr[:pos] + element + ppr[pos:], 1)
+    at = opening.end() + pos
+    return para[:at] + element + para[at:]
 
 
 def _unlink_fields(xml: str) -> tuple:
@@ -1095,23 +1289,18 @@ def fix_document(xml: str, styles: dict, policy: dict,
                            f"are now plain text (refreshable in the Zotero copy only)")
 
     # 2. break-only empty paragraph -> pageBreakBefore on the next paragraph ----
-    # A paragraph inside a table cell is NEVER the target and never the
-    # paragraph the break moves onto: splicing a cell's only (empty) paragraph
-    # out leaves `<w:tc></w:tc>`, which Word reports as a corrupt file (the same
-    # hazard `_table_paragraph_indices` documents for step 2b), and a
-    # `w:pageBreakBefore` written into a cell is not the document-level break
-    # the rule means. The next BODY paragraph still receives the break.
+    # Table cells and text boxes must keep their paragraphs. A body break
+    # moves onto the next body paragraph, even when that paragraph only holds
+    # a drawing with a text box.
     for _ in range(50):
-        plist = paragraphs(xml)
-        in_table = _table_paragraph_indices(xml, plist)
+        plist = paragraphs(xml, include_empty_hosts=True)
+        excluded = (_table_paragraph_indices(xml, plist)
+                    | _text_box_paragraph_indices(xml, plist))
         target = None
         for idx, (p0, p1, para) in enumerate(plist):
-            if idx in in_table:
+            if idx in excluded:
                 continue
-            if PAGEBREAK_RE.search(para) and not text_of(para).strip() \
-                    and not has_drawing(para) and not has_field(para) \
-                    and not has_anchor(para) \
-                    and "<w:sectPr" not in para:
+            if _break_only_paragraph(para) and "<w:sectPr" not in para:
                 # A paragraph that carries a section-break property IS the
                 # section boundary: deleting it destroys the section (the
                 # following page settings and header/footer references go).
@@ -1121,17 +1310,24 @@ def fix_document(xml: str, styles: dict, policy: dict,
             break
         idx, p0, p1, para = target
         edits = [(p0, p1, "")]
-        nxt = next((j for j in range(idx + 1, len(plist)) if j not in in_table), None)
+        nxt = next((j for j in range(idx + 1, len(plist)) if j not in excluded), None)
         if nxt is not None:
             np0, np1, npara = plist[nxt]
-            if child_elem(ppr_of(npara), "pageBreakBefore"):
+            opening = _PARAGRAPH_PROPERTIES_RE.match(npara)
+            ppr = ppr_of(npara[opening.end():]) if opening else None
+            existing = _child_element_span(ppr, "pageBreakBefore")
+            if existing is None:
+                edits.append((np0, np1, insert_into_ppr(npara, "<w:pageBreakBefore/>")))
+                changes.append(f"moved the page break onto the following paragraph (was the empty p{idx})")
+            elif _PAGE_BREAK_DISABLED_RE.search(ppr[existing[0]:existing[1]]):
+                start = np0 + opening.end()
+                edits.append((start + existing[0], start + existing[1], "<w:pageBreakBefore/>"))
+                changes.append(f"enabled pageBreakBefore on the following paragraph (was the empty p{idx})")
+            else:
                 # The target already carries the property: a second
                 # <w:pageBreakBefore/> is schema-invalid.
                 changes.append(f"removed the empty page-break paragraph p{idx} "
                                f"(the following paragraph already has pageBreakBefore)")
-            else:
-                edits.append((np0, np1, insert_into_ppr(npara, "<w:pageBreakBefore/>")))
-                changes.append(f"moved the page break onto the following paragraph (was the empty p{idx})")
         else:
             changes.append(f"removed the trailing break-only paragraph p{idx}")
         xml = apply_edits(xml, edits)
@@ -1341,6 +1537,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
 
     # 6. unintended italics (title block, italic 'et al.' outside fields) -------
     plist = paragraphs(xml)
+    step6_is_ref = _reference_para_flags(plist)
     franges = field_ranges(xml)
     title_end = None
     for i, (_, _, p) in enumerate(plist):
@@ -1365,7 +1562,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
             in_field_run = bool(in_field(franges, p0 + r0))
             if in_field_run and not policy["unlink_zotero_fields"]:
                 continue                      # reported as style-field, never silently "fixed"
-            if block or (style == "Bibliography" and re.search(r"\bet\s+al\.", rtext)):
+            if block or (step6_is_ref[idx] and re.search(r"\bet\s+al\.", rtext)):
                 if rpr:
                     # Clear the emphasis on the LIVE rPr only; the revision
                     # record stays byte-identical (the helper splits rPrChange).
@@ -1387,9 +1584,11 @@ def fix_document(xml: str, styles: dict, policy: dict,
     if policy_j in ("refs-only", "everywhere", "off"):
         edits, flipped = [], 0
         franges = field_ranges(xml)
-        for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
+        step6b_paras = paragraphs(xml)
+        step6b_is_ref = _reference_para_flags(step6b_paras)
+        for idx, (p0, p1, para) in enumerate(step6b_paras):
             style = para_style(para)
-            region = "refs" if style == "Bibliography" else "prose"
+            region = "refs" if step6b_is_ref[idx] else "prose"
             want_italic = (region == "refs" and policy_j in ("refs-only", "everywhere")) \
                 or (region == "prose" and policy_j == "everywhere")
             analysis = journal_emphasis_runs(styles, style, para)
@@ -1527,12 +1726,15 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # plain runs that carry a URL/email must match: no link style, no colour,
         # no underline, no italic (the correspondence block used dark-grey italic)
         edits, n2 = [], 0
-        for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
-            for r0, r1, run in runs(para):
+        for p0, _p1, para in paragraphs(xml):
+            for r0, _r1, run in runs(para):
                 if not URL_RE.search(text_of(run)):
                     continue
-                rpr = rpr_of(run)
-                if not rpr:
+                opening = _RUN_PROPERTIES_RE.match(run)
+                if opening is None:
+                    continue
+                rpr = rpr_of(run[opening.end():])
+                if rpr is None:
                     continue
                 # Strip only the LIVE segments: rPrChange is the tracked
                 # change's history and must stay byte-identical.
@@ -1545,7 +1747,10 @@ def fix_document(xml: str, styles: dict, policy: dict,
                             flags=re.S)
                 stripped = "".join(_segs)
                 if stripped != rpr:
-                    edits.append((p0 + r0, p0 + r1, run.replace(rpr, stripped, 1)))
+                    # Splice only the property element. A full host run
+                    # can enclose other runs being edited in its text box.
+                    start = p0 + r0 + opening.end()
+                    edits.append((start, start + len(rpr), stripped))
                     n2 += 1
         if edits:
             xml = apply_edits(xml, edits)
@@ -1600,7 +1805,13 @@ def fix_document(xml: str, styles: dict, policy: dict,
             """Normalize one paragraph's text runs with state across runs."""
             prev_open = True
             pieces, pos = [], 0
-            for mm in TEXT_RE.finditer(xml_frag):
+            # XML comments are not text runs: iterating the raw fragment let
+            # the quote normalizer rewrite a RETIRED `<w:t>` inside
+            # `<!-- ... -->`. `_mask_noncontent` blanks comments (and the
+            # unrendered Fallback / tracked deletions) length-preservingly, so
+            # the matched offsets still address `xml_frag`.
+            masked = _mask_noncontent(xml_frag)
+            for mm in TEXT_RE.finditer(masked):
                 gap = xml_frag[pos:mm.start()]
                 # A tab or a line break starts a new visual line: the next
                 # quote opens. (Both live OUTSIDE `<w:t>`, so the text scan
@@ -1653,22 +1864,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
     bodies = []
     step9_paras = paragraphs(xml)
     step9_texts = [text_of(p[2]) for p in step9_paras]
-    step9_is_ref = [para_style(p[2]) == "Bibliography"
-                    for p in step9_paras]
-    if not any(step9_is_ref):
-        # A template-restyled package carries its reference list under another
-        # style id. The scanner's FMT-R rules already fall back to the numbered
-        # entries under an explicit bibliography heading; step 9 must use the
-        # same definition, or it rewrites reference TITLES ("Colour" -> "Color")
-        # even though the module promises the reference list is never rewritten
-        # (its titles are quotations).
-        bib_start = _bibliography_entry_start(step9_texts)
-        if bib_start > 0:
-            step9_is_ref = [
-                step9_is_ref[i]
-                or (i >= bib_start
-                    and bool(re.match(r"^\s*\d+\s*[\.\)]\s*\S", step9_texts[i])))
-                for i in range(len(step9_is_ref))]
+    # The scanner's ONE reference definition (literal style id, else the
+    # numbered entries under an explicit bibliography heading): with a second
+    # copy of the fallback here, step 9 could disagree with the FMT-R rules and
+    # rewrite reference TITLES ("Colour" -> "Color") even though the module
+    # promises the reference list is never rewritten (its titles are quotations).
+    step9_is_ref = _reference_para_flags(step9_paras)
     for idx, (p0, p1, para) in enumerate(step9_paras):
         if step9_is_ref[idx]:
             continue
@@ -1794,7 +1995,14 @@ def fix_document(xml: str, styles: dict, policy: dict,
 def fix_package(src: Path, out: Path, policy: dict) -> dict:
     # The scanner reports an unreadable package as a FMT-X1 row and never
     # raises; the fixer must fail the same way (a clean `ok: false` report the
-    # CLI turns into exit 1) instead of leaking a zip/KeyError traceback.
+    # CLI turns into exit 1) instead of leaking a zip/KeyError traceback. A
+    # FIFO/socket/device named as the source would block ZipFile() forever, so
+    # a non-regular source is refused before any read.
+    src, out = Path(src), Path(out)
+    problem = _input_file_problem(src)
+    if problem:
+        return {"source": str(src), "output": str(out), "changes": [], "verified": {},
+                "error": f"unreadable DOCX package: {problem}", "ok": False}
     try:
         with zipfile.ZipFile(src) as probe:
             probe_names = set(probe.namelist())
@@ -2216,29 +2424,33 @@ _SIMPLE_PAGE_FOOTER = (
 
 
 def _set_para_style(para: str, style: str) -> str:
-    """Force `w:pStyle` on a paragraph fragment (insert or replace)."""
-    m = re.search(r"<w:pPr(?=[\s/>])[^>]*/>|<w:pPr(?=[\s>])[^>]*>[\s\S]*?</w:pPr>", para)
-    if m:
-        block = m.group(0)
-        if block.rstrip().endswith("/>"):
-            new = (block[:block.rfind("/>")].rstrip() + ">"
-                   + f'<w:pStyle w:val="{style}"/>' + "</w:pPr>")
-        else:
-            live = child_elem(block, "pStyle")
-            if live is not None:
-                # Replace the LIVE direct child only: a `w:pPrChange` history
-                # record can carry its own `w:pStyle`, and `count=1` used to hit
-                # that first when the paragraph had no live style.
-                at = block.find(live)
-                new = block[:at] + f'<w:pStyle w:val="{style}"/>' + block[at + len(live):]
-            else:
-                om = re.match(r"<w:pPr(?=[\s>])[^>]*>", block)
-                new = block[:om.end()] + f'<w:pStyle w:val="{style}"/>' + block[om.end():]
-        return para.replace(block, new, 1)
-    # No pPr: `insert_into_ppr` owns the self-closing `<w:p .../>` expansion
-    # (an empty paragraph): the old fallback inserted the pPr AFTER the `/>`,
-    # making it a sibling of the paragraph and the part schema-invalid (F23).
-    return insert_into_ppr(para, f'<w:pStyle w:val="{style}"/>')
+    """Force `w:pStyle` on a paragraph fragment (insert or replace).
+
+    The target is the SAME live pPr `ppr_of()` (and therefore the scorer)
+    reads: a commented-out pPr is not it, and the span comes from the balanced
+    reader so an identical commented element before the live one cannot be
+    spliced by `str.find`.
+    """
+    span = _property_element_span(para, "pPr")
+    if span is None:
+        # No pPr: `insert_into_ppr` owns the self-closing `<w:p .../>` expansion
+        # (an empty paragraph): the old fallback inserted the pPr AFTER the `/>`,
+        # making it a sibling of the paragraph and the part schema-invalid (F23).
+        return insert_into_ppr(para, f'<w:pStyle w:val="{style}"/>')
+    s, e = span
+    block = para[s:e]
+    if block.rstrip().endswith("/>"):
+        head = block[:block.rfind("/>")].rstrip() + ">"
+        return para[:s] + head + f'<w:pStyle w:val="{style}"/>' + "</w:pPr>" + para[e:]
+    live = _child_element_span(block, "pStyle")
+    if live is not None:
+        # Replace the LIVE direct child only: a `w:pPrChange` history record can
+        # carry its own `w:pStyle`, and `count=1` used to hit that first.
+        at = s + live[0]
+        return para[:at] + f'<w:pStyle w:val="{style}"/>' + para[s + live[1]:]
+    om = _PARAGRAPH_PROPERTIES_OPEN_RE.match(block)
+    at = s + (om.end() if om else len("<w:pPr>"))
+    return para[:at] + f'<w:pStyle w:val="{style}"/>' + para[at:]
 
 
 def _style_index(styles_xml: str) -> tuple:
@@ -2960,11 +3172,12 @@ def _apply_ppr_extra(frag: str, extra: str) -> str:
     # (which carries a `</w:pPr>` of its own) is not mistaken for its end --
     # the lazy regex that stopped at the first `</w:pPr>` truncated the block
     # inside the recorded change and spliced the template's children into the
-    # revision record.
-    pm = re.compile(r"<w:pPr(?=[\s/>])").search(frag, om.end())
-    if not pm:
+    # revision record. The same reader `ppr_of()` uses keeps a commented-out
+    # copy from being taken for the live property bag.
+    pm = _property_element_span(frag, "pPr")
+    if pm is None:
         return frag[:om.end()] + f"<w:pPr>{extra}</w:pPr>" + frag[om.end():]
-    s, e = element_span(frag, pm.start(), "pPr")
+    s, e = pm
     block = frag[s:e]
     # The direct spacing/ind/jc the template replaces: confined to the part
     # BEFORE a recorded `w:pPrChange`, whose nested pPr is revision record
@@ -3124,12 +3337,14 @@ def _strip_direct_props(frag: str, strip_num: bool = False) -> str:
     The old global regexes also deleted revision history
     (`w:pPrChange`/`w:rPrChange`) and a run's character spacing
     (`w:rPr/w:spacing`), which is not paragraph geometry. `child_elem` returns
-    a DIRECT child of the live pPr, so neither is touched.
+    a DIRECT child of the live pPr, so neither is touched. The pPr is located by
+    the same balanced reader `ppr_of()` uses (a commented-out copy before it is
+    not the live element and is left byte-identical).
     """
-    m = re.search(r"<w:pPr(?=[\s/>])[^>]*/>|<w:pPr(?=[\s>])[^>]*>[\s\S]*?</w:pPr>", frag)
-    if m:
-        ppr = m.group(0)
-        new_ppr = ppr
+    span = _property_element_span(frag, "pPr")
+    if span is not None:
+        s, e = span
+        new_ppr = frag[s:e]
         for tag in ("ind", "spacing", "jc"):
             el = child_elem(new_ppr, tag)
             while el is not None:
@@ -3140,7 +3355,7 @@ def _strip_direct_props(frag: str, strip_num: bool = False) -> str:
             while el is not None:
                 new_ppr = new_ppr.replace(el, "", 1)
                 el = child_elem(new_ppr, "numPr")
-        frag = frag[:m.start()] + new_ppr + frag[m.end():]
+        frag = frag[:s] + new_ppr + frag[e:]
     return frag
 
 
@@ -3445,6 +3660,12 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
     (reported as `text_unchanged`, and the caller keeps the original when it is
     not).
     """
+    # A FIFO/socket/device named as either package wedges ZipFile(); a named
+    # path is a DOCX only when it is a regular file.
+    problem = _input_file_problem(src) or _input_file_problem(template)
+    if problem:
+        return {"file": str(src), "ok": False,
+                "error": f"unreadable DOCX package: {problem}"}
     try:
         with zipfile.ZipFile(src) as spkg, zipfile.ZipFile(template) as tpkg:
             tnames = set(tpkg.namelist())
@@ -3664,7 +3885,12 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
     owns_scratch = workdir is None
     try:
         try:
-            target_dir = scratch / path.parent.name if not workdir else scratch
+            # `path.parent.name` is "" for a bare relative `main.tex` (parent
+            # is ".") and ".." for `../main.tex`: the old expression selected
+            # the already-existing scratch (so the copy was skipped) or the
+            # scratch's PARENT. A fixed subdirectory keeps the compile inside
+            # the scratch and always copies the source tree into it.
+            target_dir = (scratch / "src") if not workdir else scratch
             if not target_dir.is_dir():
                 # A name-based ignore callback (not glob patterns): the tracking
                 # token space is open (a1/w2/a3/winner1/...), so only the shared
@@ -3694,26 +3920,42 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
 def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> dict:
     """Validate every DOCX (XML/schema) and .tex (compile) under `paths`."""
     files = []
+    unreadable = []
     for p in paths:
         p = Path(p)
         if p.is_dir():
             rel_of = lambda q: (q.relative_to(p).parts[:-1]
                                 if q.is_relative_to(p) else q.parts[:-1])
+            # The SAME corpus definition `scan_paths` uses: stage scratch under
+            # `work/` is not a deliverable, so a malformed scratch DOCX there
+            # must not fail a package whose real deliverables are valid. The
+            # old two-branch walk filtered evidence but not work/.
             files += [q for q in docx_files_under(p)
                       if not q.name.startswith("~$") and not _is_aux_name(q.name)
+                      and not any(part == "work" for part in rel_of(q))
                       and not any(is_evidence_part(part) for part in rel_of(q))]
             files += [q for q in sorted(p.rglob("*"))
                       if q.is_file() and not q.is_symlink()
                       and q.suffix.lower() in (".tex", ".ltx")
+                      if not any(part == "work" for part in rel_of(q))
                       if not any(is_evidence_part(part) for part in rel_of(q))
                       # A difference-tracking copy (a latexdiff file, or the
                       # commented-out logging fallback) is not a document of the
                       # package: compiling it would report the AUXILIARY as a
                       # failed deliverable (a fragment's copy has no preamble).
                       and not _is_aux_name(q.name)]
-        elif p.is_file():
+        elif not p.is_symlink() and p.is_file():
             files.append(p)
-    results = []
+        elif p.exists():
+            # An explicitly named FIFO/socket/device/symlink is not a document:
+            # opening it wedged the validator, and reporting nothing read it as
+            # a success. It is an input error the caller sees as a failure.
+            unreadable.append(p)
+    results = [{"file": str(p), "kind": (p.suffix.lower().lstrip(".") or "file")[:4],
+                "ok": False,
+                "errors": [_input_file_problem(p) or "not a regular file"],
+                "detail": "not a document this validator can check"}
+               for p in unreadable]
     for p in files:
         if p.suffix.lower() == ".docx":
             results.append(validate_docx_parts(p))
@@ -3730,10 +3972,23 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
                            f"expected .docx, .tex or .ltx"],
                 "detail": "not a document this validator can check"})
     bad = [r for r in results if r["ok"] is False]
-    report = {"files": len(results), "failed": len(bad), "results": results,
-              "ok": not bad}
+    passed = [r for r in results if r["ok"] is True]
+    # A SKIP (ok=None) is legitimate only beside at least one document that
+    # WAS checked: a non-empty run where nothing compiled/validated is the
+    # false-clean the zero-file branch already refuses.
+    report = {"files": len(results), "failed": len(bad), "passed": len(passed),
+              "skipped": len(results) - len(bad) - len(passed),
+              "results": results, "ok": (not bad) and (bool(passed) or not results)}
     if json_out:
-        write_json(json_out, report)
+        # A report path that RESOLVES to a validated input document used to be
+        # replaced by the report (write_json's atomic replace) while the command
+        # exited 0. The caller turns `json_error` into exit 2, never a success.
+        problem = _output_path_problem(json_out,
+                                       [Path(r["file"]) for r in results])
+        if problem:
+            report["json_error"] = problem
+        else:
+            write_json(json_out, report)
     return report
 
 
@@ -4395,6 +4650,24 @@ def pdf_production_note(text: str) -> str:
 
 
 def check_pdf(path: Path, policy: dict) -> dict:
+    # A FIFO named `trap.pdf` was handed straight to pdftotext, which blocked on
+    # the open until the 60 s runner timeout (and blocked the whole scan). A
+    # PDF is a regular file; a symlink's target is outside the package. A
+    # MISSING path keeps the historical pdftotext path (it reports the same
+    # unreadable-PDF row), so callers that hand a to-be-rendered name through
+    # are not turned into an input-path error by this guard.
+    _p = Path(path)
+    if _p.is_symlink() or (_p.exists() and not _p.is_file()):
+        problem = _input_file_problem(_p)
+        if problem:
+            return {"file": str(path), "pages": 0, "blank_pages": [], "ok": False,
+                    "rows": [{"rule": "FMT-S2", "severity": "high",
+                              "document": Path(path).name, "location": "-",
+                              "evidence": f"not a readable PDF input: {problem}",
+                              "detail": "the PDF could not be read; no blank-page "
+                                        "verdict is possible",
+                              "fix": "manual", "protected": False,
+                              "tier": tier_of("FMT-S2")}]}
     if not shutil.which("pdftotext"):
         return {"file": str(path), "pages": 0, "blank_pages": [], "ok": None,
                 "rows": [{"rule": "FMT-S2", "severity": "low", "document": path.name,
@@ -4761,7 +5034,13 @@ def table_layout_fixes(xml: str, rows: list) -> list:
                                  + "</w:tblGrid>"))
         for ri, (r0, r1, row) in enumerate(trs):
             cs = _table_cell_widths(row)
-            if len(cs) != len(widths) or any(sp != 1 for _w, sp in cs):
+            # `_table_cell_widths` returns None for a pct/auto cell. Rewriting
+            # its number as a twip count while keeping w:type="pct" turned
+            # "50%" into "2794%" (the defect this repair exists to fix, in the
+            # other direction), so refuse the whole table unless every cell is
+            # already dxa.
+            if len(cs) != len(widths) or any(sp != 1 for _w, sp in cs) \
+                    or any(w is None for w, _sp in cs):
                 continue
             cells = _spans(row, CELL_TOKENS)
             for ci, (_w, _sp) in enumerate(cs):
@@ -4793,15 +5072,15 @@ def referenced_header_footer_parts(parts: dict, document_xml: str) -> set:
     rels_xml = parts[rels_name].decode("utf-8", "replace") \
         if isinstance(parts[rels_name], bytes) else str(parts[rels_name])
     targets = {}
-    for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
-        attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
-        typ = attrs.get("Type", "")
-        if attrs.get("Id") and (typ.endswith("/header") or typ.endswith("/footer")):
-            target = attrs.get("Target", "").lstrip("/").replace("\\", "/")
-            targets[attrs["Id"]] = (target if target.startswith("word/")
-                                    else "word/" + target)
-    ref_ids = re.findall(r'<w:(?:header|footer)Reference[^>]*r:id="([^"]+)"',
-                         document_xml or "")
+    for rel in _rels_entries(rels_xml):
+        if rel["type"] in ("header", "footer"):
+            target = str(rel["target"]).lstrip("/").replace("\\", "/")
+            targets[rel["id"]] = (target if target.startswith("word/")
+                                  else "word/" + target)
+    ref_ids = {attr_of(m.group(0), "r:id")
+               for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>",
+                                    document_xml or "")}
+    ref_ids.discard(None)
     return {targets[rid] for rid in ref_ids if rid in targets}
 
 
@@ -4918,7 +5197,10 @@ def _ocr_text(path: Path, psm: str = "3") -> str | None:
             ["tesseract", str(path), "-", "--psm", str(psm)], 120)
     except (OSError, subprocess.SubprocessError):
         return None
-    return out if rc == 0 else ""
+    # A non-zero tesseract exit (a corrupt/unsupported image, a write error) is
+    # a READ FAILURE, not "the figure has no text": returning "" made the
+    # figure-label scan report "no label finding" on artwork it never read.
+    return out if rc == 0 else None
 
 
 def _ocr_text_variants(path: Path) -> list | None:
@@ -5055,6 +5337,18 @@ def figure_label_rows(paths: list, terms: list) -> list:
     for p in paths:
         texts = _ocr_text_variants(Path(p))
         if texts is None:
+            # The engine EXISTS (checked above), so None is a failed OCR read of
+            # this file, never "the artwork has no label". Record the class as a
+            # gap: a corrupt image otherwise produced "0 row(s) -- no label
+            # finding" and exit 0, including under --strict.
+            rows.append({
+                "rule": "FMT-IM5", "severity": "low", "document": Path(p).name,
+                "location": "artwork text",
+                "evidence": "tesseract could not read the figure",
+                "detail": ("the figure-label check (FMT-IM5) is a named gap for this "
+                           "file: OCR failed (a corrupt/unsupported image or a failed "
+                           "OCR invocation), so the labels were NOT examined"),
+                "fix": "manual", "protected": False, "tier": tier_of("FMT-IM5")})
             continue
         seen = set()
         for term in terms:
@@ -5140,12 +5434,15 @@ def availability_claim_rows(para_texts: list, doc: str) -> list:
 def reference_bold_rows(xml: str, styles: dict, doc: str) -> list:
     """FMT-T6h: a bibliography bold run covers a year or a page range."""
     rows = []
-    for idx, (_p0, _p1, para) in enumerate(paragraphs(xml or "")):
-        if para_style(para) != "Bibliography":
+    _paras = paragraphs(xml or "")
+    ref_flags = _reference_para_flags(_paras)
+    for idx, (_p0, _p1, para) in enumerate(_paras):
+        if not ref_flags[idx]:
             continue
+        style = para_style(para)
         for r in runs(para):
             text = text_of(r[2]).strip()
-            if not text or not run_is_bold(styles, "Bibliography", r[2]):
+            if not text or not run_is_bold(styles, style, r[2]):
                 continue
             if re.search(r"\(\d{4}[a-z]?\)", text) or re.search(r"\d+\s*[-\u2013]\s*\d+", text):
                 rows.append({
@@ -5624,6 +5921,13 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
     policy = dict(POLICY_DEFAULTS, **(policy or {}))
     report = {"source": str(src), "output": str(out), "changes": [], "remaining": [],
               "ok": False}
+    # A non-regular source (FIFO/socket/device) wedges ZipFile(); a symlinked or
+    # input-equal destination let a "clean" repair overwrite the linked target
+    # outside the package. Both are input/output errors, reported not raised.
+    problem = _input_file_problem(src) or _output_path_problem(out, [src])
+    if problem:
+        report["error"] = f"refusing this repair: {problem}"
+        return report
     try:
         with zipfile.ZipFile(src) as z:
             problem = _docx_zip_problem(z)
@@ -5698,10 +6002,11 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         # clean input still produces an output. Returning without writing one
         # made `repair-layout FILE --out OUT` print "verified: OUT" and exit 0
         # with no file there (a downstream fix/publish step then read nothing
-        # or a stale file). A byte-for-byte copy preserves the no-change proof.
-        out.parent.mkdir(parents=True, exist_ok=True)
+        # or a stale file). A byte-for-byte copy preserves the no-change proof;
+        # it is written through mkstemp+os.replace (NOT shutil.copy2, which
+        # followed a pre-planted symlink at `out` and overwrote its target).
         try:
-            shutil.copy2(src, out)
+            _atomic_write_bytes(out, src.read_bytes())
         except OSError as exc:
             report["error"] = f"could not write the repaired copy: {exc}"
             return report
@@ -5773,7 +6078,12 @@ def cmd_scan_figures(args) -> int:
     if getattr(args, "terms", None):
         terms = [x.strip() for x in re.split(r"[,;]", args.terms) if x.strip()]
     texts = []
-    for f in getattr(args, "from_docx", None) or []:
+    from_docx = list(getattr(args, "from_docx", None) or [])
+    for f in from_docx:
+        problem = _input_file_problem(f)
+        if problem:
+            log(f"error: cannot read {f}: {problem}")
+            return 2
         try:
             with zipfile.ZipFile(f) as z:
                 problem = _docx_zip_problem(z)
@@ -5801,16 +6111,35 @@ def cmd_scan_figures(args) -> int:
                       if q.is_file() and not q.is_symlink()
                       and q.suffix.lower() in (".png", ".jpg", ".jpeg",
                                                ".tif", ".tiff")]
-        elif p.is_file():
+        elif not p.is_symlink() and p.is_file():
+            # An explicitly named NON-IMAGE file is an input error, not a figure
+            # whose labels were found correct: only the four OCR-able suffixes
+            # are figures (the empty-directory case is refused below).
+            if p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
+                log(f"error: not a figure file (expected .png/.jpg/.jpeg/.tif/.tiff): {p}")
+                return 2
             paths.append(p)
+        elif p.exists():
+            log(f"error: not a regular file: {p}")
+            return 2
         else:
             log(f"error: no such file or directory: {p}")
             return 2
+    if not paths:
+        # "0 figure file(s); 0 row(s) -- no label finding" read as a clean
+        # FMT-IM5 pass on a directory that held no figure. Nothing was read.
+        print("figure-label scan: not checked -- no figure (.png/.jpg/.jpeg/.tif/.tiff) "
+              "under " + ", ".join(str(p) for p in args.paths))
+        return 2
     rows = figure_label_rows(paths, terms)
     out = {"files": [str(p) for p in paths], "terms": terms, "rows": rows,
            "by_rule": dict(Counter(r["rule"] for r in rows))}
     if args.json:
-        write_json(args.json, out)
+        problem = _write_report(args.json, out,
+                                protected=list(paths) + [Path(f) for f in from_docx])
+        if problem:
+            log(f"error: refusing to write --json: {problem}")
+            return 2
     # A FIGURE-LABEL summary, never `format_note`: with zero rows that helper
     # prints "OOXML formatting: clean (no structural/typographic findings)", so a
     # figure-label scan that found nothing claimed a formatting pass it never
@@ -5829,9 +6158,16 @@ def cmd_repair_layout(args) -> int:
     if src.resolve() == out.resolve():
         log("error: --out must differ from the input")
         return 2
+    problem = _input_file_problem(src)
+    if problem:
+        log(f"error: cannot read {src}: {problem}")
+        return 2
     rep = repair_layout_package(src, out, policy)
     if args.json:
-        write_json(args.json, rep)
+        problem = _write_report(args.json, rep, protected=[src, out])
+        if problem:
+            log(f"error: refusing to write --json: {problem}")
+            return 2
     for c in rep.get("changes") or []:
         log(f"  [fixed] {c}")
     for r in rep.get("remaining") or []:
@@ -5850,6 +6186,11 @@ def cmd_scan(args) -> int:
         for m in missing:
             log(f"error: no such file or directory: {m}")
         return 2
+    bad = _non_regular_paths(args.paths)
+    if bad:
+        for b in bad:
+            log(f"error: not a regular file: {b}")
+        return 2
     info = scan_paths([Path(p) for p in args.paths], policy)
     if args.pdf:
         pdf = check_pdf(Path(args.pdf), policy)
@@ -5860,7 +6201,15 @@ def cmd_scan(args) -> int:
             info[sev] = sum(1 for r in info["rows"] if r["severity"] == sev)
     out = {"policy": policy, **info}
     if args.json:
-        write_json(args.json, out)
+        # The report path may not resolve to a document the scan just read: the
+        # atomic write_json would replace that input with JSON and exit 0.
+        problem = _write_report(
+            args.json, out,
+            protected=[Path(f) for f in out.get("files") or []]
+            + ([Path(args.pdf)] if args.pdf else []))
+        if problem:
+            log(f"error: refusing to write --json: {problem}")
+            return 2
     # `_missing_paths` refuses a path that does not exist; an EXISTING path that
     # yields no document is the same "read nothing, report clean" failure: an
     # empty directory (or one holding only figures/PDFs) printed "OOXML
@@ -5892,6 +6241,18 @@ def cmd_fix(args) -> int:
     if src.resolve() == out.resolve():
         log("error: --out must differ from the input")
         return 2
+    problem = _input_file_problem(src)
+    if problem:
+        log(f"error: cannot read {src}: {problem}")
+        return 2
+    if args.json:
+        # `--json` is the same kind of destination as `--out`: writing the
+        # report over the input (or over the just-fixed output) destroys it
+        # while the command exits 0. Refuse before doing any work.
+        problem = _output_path_problem(Path(args.json), [src, out])
+        if problem:
+            log(f"error: refusing to write --json: {problem}")
+            return 2
     rep = fix_package(src, out, policy)
     if not rep.get("verified"):
         log(f"error: {rep.get('error') or 'the fix could not be verified'}")
@@ -5932,6 +6293,11 @@ def cmd_fix(args) -> int:
 
 def cmd_check_pdf(args) -> int:
     policy = load_policy(args.policy)
+    if args.json:
+        problem = _output_path_problem(Path(args.json), [Path(args.pdf)])
+        if problem:
+            log(f"error: refusing to write --json: {problem}")
+            return 2
     res = check_pdf(Path(args.pdf), policy)
     # `ok is None` is a skipped tool; `ok is False` with 0 pages is an
     # unreadable/missing PDF whose empty text parses as 0 pages and 0 blank
@@ -5954,9 +6320,12 @@ def cmd_check_pdf(args) -> int:
 # Field-integrity faults that are Zotero's own shapes ("bad-citation-json", a
 # Zotero field without its separate, a duplicate citationID, a stray Zotero
 # instruction). `unclosed-field`/`duplicate-separate` can belong to ANY Word
-# field, so they count only when their message names a Zotero field kind.
+# field, so they count only when their message names a Zotero field kind. A
+# field END/SEPARATE with no matching BEGIN is a broken field STRUCTURE whatever
+# its kind: Word cannot render it predictably, so both are hard faults too.
 ZOTERO_FAULT_CODES = ("bad-citation-json", "no-separate", "duplicate-citation-id",
-                      "zotero-instr-outside-field")
+                      "zotero-instr-outside-field", "end-outside-field",
+                      "separate-outside-field")
 ZOTERO_FAULT_KIND_WORDS = ("the item field", "the bibliography field",
                            "the zotero-other field")
 
@@ -6004,6 +6373,11 @@ def cmd_zotero_check(args) -> int:
     document whose citation cache cannot be trusted.
     """
     path = Path(args.file)
+    if args.json:
+        problem = _output_path_problem(Path(args.json), [path])
+        if problem:
+            log(f"error: refusing to write --json: {problem}")
+            return 2
     try:
         with zipfile.ZipFile(path) as pkg:
             names = list(pkg.namelist())
@@ -6106,6 +6480,13 @@ def cmd_zotero_refresh(args) -> int:
     copy).
     """
     policy = load_policy(args.policy)
+    if args.json:
+        problem = _output_path_problem(
+            Path(args.json),
+            [Path(args.file)] + ([Path(args.out)] if args.out else []))
+        if problem:
+            log(f"error: refusing to write --json: {problem}")
+            return 2
     if getattr(args, "unlink", False):
         # refresh → verify → unlink, as ONE fixer chain: the flatten is refused
         # whenever the refresh could not make the numbering clean.
@@ -6215,7 +6596,19 @@ def cmd_xfa_export(args) -> int:
         print(f"{args.file}: no XFA dataset answers found (nothing to export)")
         return 1
     out = Path(args.out) if args.out else Path(args.file).with_suffix(".xfa-answers.txt")
-    out.write_text(text, encoding="utf-8")
+    # `--out` equal to the input (or a symlink at --out) replaced the PDF /
+    # followed the link: the export is a REPORT, never a rewrite of its input.
+    problem = _output_path_problem(out, [Path(args.file)])
+    if problem:
+        print(f"error: refusing to write {out}: {problem}", file=sys.stderr)
+        return 2
+    try:
+        # A direct write_text truncated the destination before writing and left
+        # a partial export on failure; the atomic writer replaces, never follows.
+        _atomic_write_text(out, text)
+    except OSError as exc:
+        print(f"error: could not write {out}: {exc}", file=sys.stderr)
+        return 2
     print(f"{args.file}: answers rendered to {out}")
     return 0
 
@@ -6226,8 +6619,16 @@ def cmd_validate(args) -> int:
         for m in missing:
             log(f"error: no such file or directory: {m}")
         return 2
+    bad = _non_regular_paths(args.paths)
+    if bad:
+        for b in bad:
+            log(f"error: not a regular file: {b}")
+        return 2
     report = validate_paths([Path(p) for p in args.paths], Path(args.json) if args.json else None,
                             timeout=args.timeout)
+    if report.get("json_error"):
+        log(f"error: refusing to write --json: {report['json_error']}")
+        return 2
     for r in report["results"]:
         mark = {True: "OK  ", False: "FAIL", None: "SKIP"}[r["ok"]]
         detail = r.get("detail") or ""
@@ -6240,6 +6641,10 @@ def cmd_validate(args) -> int:
         # supposed to prove a document compiles. Say what happened, exit 2.
         print(f"validation: not checked -- no .docx/.tex under "
               + ", ".join(str(p) for p in args.paths))
+        return 2
+    if not report["ok"] and not report["failed"] and not report.get("passed"):
+        print(f"validation: not checked -- {report['files']} file(s) were skipped "
+              f"(fragment or no TeX engine); nothing was compiled or validated")
         return 2
     print(f"validation: {report['files']} file(s), {report['failed']} failure(s)"
           + ("" if report["ok"] else " -- fix and re-run"))

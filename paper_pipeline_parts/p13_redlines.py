@@ -564,6 +564,59 @@ def _emit_text(out: list, text: str, spans: list, marks: list, start: int, end: 
     out.append(wrapper)
 
 
+_PPr_VOLATILE_RE = re.compile(
+    rb"\s(?:[A-Za-z0-9_]+:)?(?:rsid[A-Za-z]*|paraId|textId|durableId)=\"[^\"]*\"")
+
+
+def _ppr_bytes(el) -> bytes:
+    """Serialised `w:pPr` without per-save bookkeeping attributes."""
+    if el is None:
+        return b""
+    cp = copy.deepcopy(el)
+    cp.tail = None
+    return _PPr_VOLATILE_RE.sub(b"", ET.tostring(cp))
+
+
+def _para_content_bytes(p) -> bytes:
+    """A paragraph's non-`w:pPr` children, volatile ids stripped."""
+    cp = copy.deepcopy(p)
+    cp.tail = None
+    for pr in cp.findall(_w("pPr")):
+        cp.remove(pr)
+    return _PPr_VOLATILE_RE.sub(b"", ET.tostring(cp))
+
+
+def _ppr_only_change(bp, rp) -> bool:
+    """True when the ONLY paragraph difference is its mark (`w:pPr`)."""
+    return (_ppr_bytes(bp.find(_w("pPr"))) != _ppr_bytes(rp.find(_w("pPr")))
+            and _para_content_bytes(bp) == _para_content_bytes(rp))
+
+
+def _pPr_for(bp, rp, counter: list, ts: str):
+    """The revised `w:pPr`, carrying a `w:pPrChange` when the mark changed.
+
+    Copying the revised pPr without the change record made a paragraph-mark
+    edit (heading level, list numbering) impossible to reject: both accept-all
+    and reject-all produced the revised style (F252). `w:pPrChange` is the
+    OOXML representation Word writes for exactly this change.
+    """
+    pr = rp.find(_w("pPr")) if rp.find(_w("pPr")) is not None else bp.find(_w("pPr"))
+    if pr is None:
+        return None
+    pr = copy.deepcopy(pr)
+    old = bp.find(_w("pPr"))
+    if _ppr_bytes(pr) != _ppr_bytes(old):
+        for existing in pr.findall(_w("pPrChange")):
+            pr.remove(existing)
+        change = _track_change("pPrChange", counter, ts)
+        old_pr = ET.SubElement(change, _w("pPr"))
+        if old is not None:
+            for child in list(old):
+                old_pr.append(copy.deepcopy(child))
+        pr.append(change)
+    return pr
+
+
 def _replace_para(bp, rp, counter: list, ts: str):
     """Word-level tracked changes inside one changed paragraph.
 
@@ -588,6 +641,14 @@ def _replace_para(bp, rp, counter: list, ts: str):
     except (ET.ParseError, RecursionError):
         return _whole_paragraph_change(bp, rp, counter, ts)
     if base_text != _para_text(bp) or rev_text != _para_text(rp):
+        return _whole_paragraph_change(bp, rp, counter, ts)
+    # The piecewise walk renders the equal ranges from the REVISED stream only,
+    # so a mark that exists only in the BASE (soft break/tab/field/drawing) was
+    # dropped and a revised-only mark was emitted with no w:ins. When the two
+    # mark inventories differ, use whole-paragraph markup: both streams then
+    # carry every mark inside their own del/ins (F249).
+    if sorted(str(a.get("text") or "") for _p, a in base_marks) != \
+            sorted(str(a.get("text") or "") for _p, a in rev_marks):
         return _whole_paragraph_change(bp, rp, counter, ts)
 
     # Token offsets must be the offsets in the FULL paragraph. `\S+\s*`
@@ -625,9 +686,9 @@ def _replace_para(bp, rp, counter: list, ts: str):
         return _whole_paragraph_change(bp, rp, counter, ts)
 
     new_p = ET.Element(_w("p"))
-    pr = rp.find(_w("pPr")) if rp.find(_w("pPr")) is not None else bp.find(_w("pPr"))
+    pr = _pPr_for(bp, rp, counter, ts)
     if pr is not None:
-        new_p.append(copy.deepcopy(pr))
+        new_p.append(pr)
     for element in out:
         new_p.append(element)
     return new_p
@@ -641,9 +702,17 @@ def _whole_paragraph_change(bp, rp, counter: list, ts: str):
     (and the attempt log records that), never lossy.
     """
     wrapper = ET.Element(_w("p"))
-    pr = rp.find(_w("pPr")) if rp.find(_w("pPr")) is not None else bp.find(_w("pPr"))
+    pr = _pPr_for(bp, rp, counter, ts)
     if pr is not None:
-        wrapper.append(copy.deepcopy(pr))
+        wrapper.append(pr)
+    if pr is not None and _ppr_only_change(bp, rp):
+        # The ONLY change is the paragraph mark (style/numbering). A
+        # del+ins of identical text cannot express rejectable formatting; the
+        # pPrChange above is the whole change, so emit no run wrapper at all.
+        for child in list(rp):
+            if child is not rp.find(_w("pPr")):
+                wrapper.append(copy.deepcopy(child))
+        return wrapper
     del_el = _track_change("del", counter, ts)
     for child in list(bp):
         if child is not bp.find(_w("pPr")):
@@ -843,8 +912,9 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
                     # paragraph, reject-all yields the base.
                     emit(_whole_paragraph_change(bp, rp, counter, ts),
                          base_after=k + 1, rev_after=rp_index + 1)
-                    n_del += 1
-                    n_ins += 1
+                    if not _ppr_only_change(bp, rp):
+                        n_del += 1
+                        n_ins += 1
         elif tag == "delete":
             for k in range(i1, i2):
                 emit(_wrap_para(base_paras[k], "del", True, counter, ts), base_after=k + 1)
@@ -901,8 +971,14 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
             for item in zin.infolist():
                 if item.filename == "word/document.xml":
                     data = payload
+                elif item.filename not in rev_parts:
+                    # A part the revised package DELETED (header/footer/media)
+                    # must not survive from the base: it has no relationship or
+                    # content-type override in the revised package and accepting
+                    # all changes did not reproduce the revision (F251).
+                    continue
                 else:
-                    data = rev_parts.get(item.filename, zin.read(item.filename))
+                    data = rev_parts[item.filename]
                 zout.writestr(item, data)
                 written.add(item.filename)
             for name in sorted(rev_parts):
@@ -990,8 +1066,12 @@ def redline_minimal_weight(base: Path, revised: Path) -> dict:
         _, base_root = _docx_root(base)
         _, rev_root = _docx_root(revised)
         base_body, rev_body = base_root.find(_w("body")), rev_root.find(_w("body"))
-        base_texts = [_para_text(p) for p in base_body.findall(_w("p"))]
-        rev_texts = [_para_text(p) for p in rev_body.findall(_w("p"))]
+        # The MARKED weight counts every w:ins/w:del word anywhere under
+        # word/document.xml (table cells included), so the minimal estimate must
+        # count the same regions or a faithful table-heavy redline looks
+        # order-of-magnitude over-marked and is rejected (F250).
+        base_texts = [_para_text(p) for p in base_body.iter(_w("p"))]
+        rev_texts = [_para_text(p) for p in rev_body.iter(_w("p"))]
     except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError, AttributeError):
         return {"ins": 0, "del": 0}
     ins = dele = 0
@@ -1505,6 +1585,20 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
             entry["status"] = (f"{ok_n}/{len(entry['comparisons'])} written"
                                if entry["comparisons"] else "no .docx pairs")
             manifest["versions"].append(entry)
+    # ACCUMULATE across invocations: the round close calls this once per round,
+    # and a fresh manifest erased every earlier round's rows (while their files
+    # stayed on disk), so the tracking pass could not reuse them (F253).
+    try:
+        _prev = read_json(out_root / "manifest.json") or {}
+    except (OSError, ValueError):
+        _prev = {}
+    _new_keys = {(v.get("round"), v.get("version")) for v in manifest["versions"]}
+    _kept = [v for v in (_prev.get("versions") or [])
+             if (v.get("round"), v.get("version")) not in _new_keys]
+    if _kept:
+        manifest["versions"] = _kept + manifest["versions"]
+        manifest["versions"].sort(key=lambda v: (int(v.get("round") or 0),
+                                                 str(v.get("version") or "")))
     write_json_atomic(out_root / "manifest.json", manifest)
     write_text_atomic(out_root / "README.md", redline_readme(manifest))
     return manifest

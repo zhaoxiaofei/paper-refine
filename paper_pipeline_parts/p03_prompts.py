@@ -174,6 +174,11 @@ why. Files that remain unchanged should be copied from "non_revised/" to "revise
 ATTACHED_FULL = ATTACHED_HEAD + "\n" + ATTACHED_PHASE1 + "\n" + ATTACHED_PHASE2
 
 
+# An operator-supplied venue value keeps its own `@@` sequences verbatim: they
+# are encoded while the prompt's template passes run and decoded at the end.
+_VENUE_LITERAL_AT_AT = "\x00PIPELINE_VENUE_LITERAL_AT_AT\x00"
+
+
 def render_venue_tokens(text: str, profile=None) -> str:
     """Fill the @@VENUE_*@@ tokens of the master-prompt prose.
 
@@ -184,15 +189,36 @@ def render_venue_tokens(text: str, profile=None) -> str:
     """
     prof = _as_profile(profile)
     prompt = prof.prompt
-    return (text
-            .replace("@@VENUE_SUBJECT@@", prompt["subject"])
-            .replace("@@VENUE_EDITOR@@", prompt["editor"])
-            .replace("@@VENUE_REQUIREMENTS@@", prompt["requirements"])
-            .replace("@@VENUE_REQUIREMENT_AUTHORITY@@", prompt["requirement_authority"])
-            .replace("@@VENUE_GUIDELINES_SOURCE@@", prompt["guidelines_source"])
-            .replace("@@VENUE_LABEL@@", prof.label)
-            .replace("@@VENUE_ID@@", prof.id)
-            .replace("@@VENUE_SHORT@@", prof.short))
+    # Hold every profile value in its own sentinel until ALL eight replacements
+    # are done: a chained buffer let a venue field that itself carries a
+    # `@@VENUE_*@@`/`@@SELFCHECK@@` token be rewritten by a later pass (double
+    # substitution or template injection -- F97). The value is operator data,
+    # never template syntax.
+    values = (("@@VENUE_SUBJECT@@", prompt["subject"]),
+              ("@@VENUE_EDITOR@@", prompt["editor"]),
+              ("@@VENUE_REQUIREMENTS@@", prompt["requirements"]),
+              ("@@VENUE_REQUIREMENT_AUTHORITY@@", prompt["requirement_authority"]),
+              ("@@VENUE_GUIDELINES_SOURCE@@", prompt["guidelines_source"]),
+              ("@@VENUE_LABEL@@", prof.label),
+              ("@@VENUE_ID@@", prof.id),
+              ("@@VENUE_SHORT@@", prof.short))
+    held = []
+    for index, (token, value) in enumerate(values):
+        holder = f"\x00PIPELINE_VENUE_LITERAL_{index}\x00"
+        # The value is operator data: an `@@...@@` sequence inside it must not be
+        # seen by the builder's later placeholder passes, so it is encoded here
+        # and decoded once the prompt is fully assembled (`restore_venue_literals`
+        # runs from page_stage_prompt, the single finalisation point -- F97).
+        held.append((holder, str(value).replace("@@", _VENUE_LITERAL_AT_AT)))
+        text = text.replace(token, holder)
+    for holder, value in held:
+        text = text.replace(holder, value)
+    return text
+
+
+def restore_venue_literals(text: str) -> str:
+    """Decode the `@@` sequences held out of operator-supplied venue values (F97)."""
+    return str(text).replace(_VENUE_LITERAL_AT_AT, "@@")
 
 
 def attached_head(profile=None) -> str:
@@ -881,6 +907,41 @@ def _legacy_content_edit_policy_block(insertions_allowed: bool = True,
             "rule says and record it in the hand-off list.",
             "",
         ]
+    # Key the repair/precedence paragraphs on the direction THIS block actually
+    # forbids. With --disable-insertions only, a deletion is still allowed, so
+    # telling the agent that removing text is banned (or that a later removal
+    # instruction is overridden) contradicts the mechanical gate; the
+    # prefer-rewrite builder was already fixed for exactly this asymmetry (R01),
+    # the off path used by every non-prefer strict run was not (F01).
+    if not insertions_allowed and not deletions_allowed:
+        repair_ban = "removing or adding"
+        precedence_lines = [
+            "PRECEDENCE: this block overrides every later instruction that would add or",
+            "remove a unit, including the language pass's split/merge/add-sibling repairs,",
+            "a rewrite's requested transitions, and an integration port that would replace",
+            "a unit. Where a later mandate can be met without adding or removing a unit,",
+            "make that in-place edit; otherwise record the item as manual-required/unable",
+            "and leave the unit unchanged.",
+        ]
+    elif not insertions_allowed:
+        repair_ban = "adding"
+        precedence_lines = [
+            "PRECEDENCE: this block overrides every later instruction that would add a",
+            "unit, including a later split, add-sibling, transition or integration port",
+            "that would create one. Where a later mandate can be met without adding a",
+            "unit, make that in-place edit; a deletion remains allowed when it is",
+            "honestly the best repair; otherwise record the item as manual-required/unable",
+            "and leave the unit unchanged.",
+        ]
+    else:
+        repair_ban = "removing"
+        precedence_lines = [
+            "PRECEDENCE: this block overrides every later instruction that would remove a",
+            "unit, including a later merge, transition or integration port that would",
+            "drop one. Where a later mandate can be met without removing a unit, make",
+            "that in-place edit; otherwise record the item as manual-required/unable and",
+            "leave the unit unchanged.",
+        ]
     lines += [
         "WHAT IS STILL ALLOWED: rewriting the words INSIDE an existing unit, and",
         "replacing an existing statement with a corrected statement of the same unit",
@@ -891,19 +952,12 @@ def _legacy_content_edit_policy_block(insertions_allowed: bool = True,
         "THE ORCHESTRATOR ENFORCES THIS MECHANICALLY. Its postcheck compares the",
         "delivered package with the base and fails the attempt for every sentence it",
         "finds violating this policy. A failed attempt is retried with that message;",
-        "make the repair in place rather than removing or adding text. The mechanical",
+        (f"make the repair in place rather than {repair_ban} text. The mechanical"),
         "comparison is sentence-level: the paragraph/heading/caption/row/document",
         "classes above are policy guidance, so a heading- or row-only change may not",
         "be caught by the postcheck. Keep them anyway; the policy still applies.",
         "",
-        "PRECEDENCE: this block overrides every later instruction that would add or",
-        "remove a unit, including the language pass's split/merge/add-sibling repairs,",
-        "a rewrite's requested transitions, and an integration port that would replace",
-        "a unit. Where a later mandate can be met without adding or removing a unit,",
-        "make that in-place edit; otherwise record the item as manual-required/unable",
-        "and leave the unit unchanged.",
-        "",
-    ]
+    ] + precedence_lines + [""]
     return "\n".join(lines) + "\n"
 
 
@@ -1307,8 +1361,8 @@ Explicit requirements that override skill defaults where they conflict:
      payload files (your own reports, the difference-tracking auxiliaries -- current
      *.tracking-<token>.<ext> / *.logging-<token>.<ext> auxiliaries -- and the
      work/ scratch are excluded; file NAMES do not enter the hash, and existing version-token
-     references inside file contents are normalized to "<VERSION>" first, so APPLYING the token
-     does not change it). Run the tool BEFORE renaming; then call it again with
+     references inside file contents are REMOVED first (the marker and its separator), so
+     APPLYING the token does not change it). Run the tool BEFORE renaming; then call it again with
      `--verify <token>` after the rename/repoint pass and require the OK line.
      Apply the token to EVERY editable manuscript document (doc/docx/tex/bib/md/txt/xlsx):
        * an existing trailing version token is REPLACED: "...-a.docx" -> "...-<token>.docx",
@@ -1823,7 +1877,7 @@ token to every editable document by replacing its trailing version token or appe
 when it has none, repoint every LaTeX
 \\input/\\include/\\includegraphics/\\addbibresource/\\bibliography reference and build script, and
 record the rename in integrated/DIFF_LEDGER.md; verify with `revision_token.py <integrated>
---verify <token>` (it must print OK -- the tool normalizes version-token references, so applying
+--verify <token>` (it must print OK -- the tool REMOVES version-token references, so applying
 the token does not change it). A trailing NUMBER that is part of a document's identity
 (SI-Table-1.csv, Figure-3.xlsx) is not a version token and never shifts; never renumber siblings.
 The only other rename allowed is the collision fallback -- when the destination already holds a
@@ -2051,7 +2105,7 @@ the original.
      of a document's identity (SI-Table-1.csv, Figure-3.xlsx) is not a version token and never
      shifts. Repoint every LaTeX \\input/\\include/\\includegraphics/\\addbibresource/\\bibliography
      reference and every build script, list the rename in rewritten/CHANGELOG.md, and verify with
-     `revision_token.py <rewritten/> --verify <token>` (the tool normalizes version-token
+     `revision_token.py <rewritten/> --verify <token>` (the tool removes version-token
      references, so applying the token does not change it; it must print OK). The only other rename
      allowed is the collision fallback -- rewritten/ already holds a same-named file (a re-run, or
      two source versions) -- in which case the NEW copy gets "_rev2", "_rev3", … before the
@@ -4060,11 +4114,14 @@ def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: 
     prof = _as_profile(venue)
     text = (COLD_START_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            # Hold the operator-supplied values until every @@...@@ pass is done:
+            # a sandbox path or retry diagnostic carrying `@@ROUND@@`/`@@SELFCHECK@@`
+            # must not be reinterpreted as template syntax (F95/F96).
+            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@VERIFIER_MAX@@", str(int(COLD_START_REPRO_MAX_VERIFIERS)))
             .replace("@@VERIFIER_SECONDS@@", str(int(COLD_START_REPRO_TOTAL_BUDGET)))
-            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
+            .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
@@ -4072,6 +4129,8 @@ def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: 
             .replace("@@SELFCHECK@@", selfcheck_block("cold_start_review", run_id, r, sandbox,
                                              author_to_complete=author_to_complete)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(COLD_START_DIR))
+    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
+    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     # This role is handed NO checklist: it gets the shared taxonomy and evidence
     # rules, not ADOPTED_SWEEPS_BLOCK. `pageable_rule_blocks` also carries the
     # with-checklist block, which no longer occurs in this prompt; the clean
@@ -4236,7 +4295,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
     labels = ", ".join(opponent_labels)
     text = (JUDGE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@TARGET_ID@@", target_id)
             .replace("@@JUDGE_INDEX@@", str(int(judge_index)))
@@ -4281,6 +4340,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
         # The OPT-IN structured-location dedup needs machine-locatable evidence
         # rows; in the default mode this block is never concatenated.
         text += DEDUP_LOCATION_JUDGE_RULE
+    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
     text = page_stage_prompt(sandbox, text + shared_blocks() + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete),
                              "judge", execution_profile)
@@ -4375,6 +4435,10 @@ WHAT TO AUDIT — one row per CONFIRMED defect in the revision:
      `work/FACT_VERIFICATION.json` for an identifier; a newly ADDED identifier for new content is
      not a correction, but its own lookup still governs it).
 
+A WRONG-VALUE row (task 3) is decided by the SOURCE HIERARCHY, not by whichever editable surface
+the revision happened to touch:
+@@HIERARCHY_RECONCILE@@
+
 DELETED-PARAGRAPH AUDIT — mandatory, and it is not satisfied by the plan alone:
 `revision_audit/DELETED_PARAGRAPHS.md` lists every base prose paragraph whose normalised text is
 absent from `revised/`. A moved, merged or lightly reworded paragraph appears there too: decide
@@ -4400,8 +4464,13 @@ is seeded truncated to a fixed character budget: keep that truncated text exactl
 The audit FAILS (and the stage is retried) while any row's disposition cell is empty. An empty plan
 is still a valid result only after every deleted-paragraph row is disposed.
 
-For every row you must give a LOCATION, the WRONG text or value, the CORRECT value, and the BASIS
-(the exact file/line/table/identifier that decides it, re-runnable by another session). `wrong` and
+Every row MUST carry all SIX keys, and the plan reader REJECTS THE WHOLE PLAN -- not merely the
+offending row, which would silently drop a defect you found -- when any row omits a key, leaves
+`location`, `basis`, `edit` or `evidence` empty, quotes neither `wrong` nor `correct`, or names a
+directory instead of ONE file. The six are `location`, `wrong`, `correct`, `basis`, `edit` and
+`evidence`: a LOCATION, the WRONG text or value, the CORRECT value, the BASIS (the exact
+file/line/table/identifier that decides it, re-runnable by another session), the EDIT (the exact
+repair to apply) and the EVIDENCE (what you re-read or re-ran to prove the row). `wrong` and
 `correct` are LITERAL text, not a description: `wrong` quotes the shortest verbatim fragment of the
 named file that contains the change, with its own characters and spacing; `correct` is the exact
 replacement text to write there (it need not already appear in the file). Put the location in
@@ -4441,7 +4510,7 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
     """
     text = (REVISION_AUDIT_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
             .replace("@@ROUND@@", str(int(r))))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
                                      prefer_rewrite)
@@ -4452,9 +4521,10 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
     # M1-M36/J1-J5 worklist is a conflicting second mandate rather than useful
     # shared vocabulary (PR151-081).
     shared = shared_blocks(include_checks=False)
-    text = apply_hierarchy_reconcile(text + shared, "revise")
+    text = apply_hierarchy_reconcile(text + shared, "revision_audit")
     text = with_context_budget(text)
     text = apply_author_to_complete_prompt(text)
+    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
     return page_stage_prompt(sandbox, text, [("SHARED DECISION RULES", shared)],
                              "revision_audit", execution_profile)
 
@@ -4484,6 +4554,7 @@ with a `rows` list (an empty plan's ledger is `{"rows": []}`):
 Apply only `confirmed` rows. A rejected row gets its exact contradicting evidence in `reason`; do not
 apply it, and do not invent a different repair. A row you cannot check is `rejected` with the missing
 check named. Never accept a plan row merely because the auditor wrote it.
+@@HIERARCHY_RECONCILE@@
 `before` and `after` are QUOTES of the applied text, not a summary of the edit: copy the exact text
 from `revised/` as it stood before the edit and as it stands after it (for a pure insertion leave
 `before` empty and quote the added text as `after`; for a pure deletion leave `after` empty). The
@@ -4524,15 +4595,16 @@ def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int,
     """The BOUNDED REPAIR prompt: re-validate the plan, apply only confirmed rows."""
     text = (REVISION_REPAIR_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@ROWS@@", str(int(rows))))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
                                      prefer_rewrite)
     shared = shared_blocks()
-    text = apply_hierarchy_reconcile(text + shared, "revise")
+    text = apply_hierarchy_reconcile(text + shared, "revision_repair")
     text = with_context_budget(text)
     text = apply_author_to_complete_prompt(text)
+    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
     return page_stage_prompt(sandbox, text, [("SHARED DECISION RULES", shared)],
                              "revision_repair", execution_profile)
 

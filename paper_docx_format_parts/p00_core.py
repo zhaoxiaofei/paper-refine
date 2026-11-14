@@ -5,6 +5,7 @@ import contextlib
 import csv
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -18,6 +19,7 @@ import zipfile
 from bisect import bisect_right
 import zlib
 from collections import Counter, defaultdict
+from decimal import Decimal
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
@@ -249,14 +251,18 @@ class _FragOrBreakFinder:
     pattern = _FRAG_OR_BREAK_PATTERN.pattern
 
     def finditer(self, frag: str):
-        if _root_element_tag(frag) == "w:r":
+        # Non-content spans (comments, the unrendered Fallback, tracked
+        # deletions) are blanked to spaces first: the yielded tokens keep their
+        # offsets into `frag`, and a hidden token is never a text character.
+        text = _mask_noncontent(frag)
+        if _root_element_tag(text) == "w:r":
             # A RUN never owns a paragraph: any `<w:p>` inside a drawing it
             # carries is a text-box paragraph, not this run's text.
-            nested = [(s, e) for s, e, _t in _paragraph_spans(frag)]
+            nested = [(s, e) for s, e, _parent in _paragraph_offsets(text)]
         else:
-            nested = _nested_paragraph_spans(frag)
-        stops = [(m.start(), m.end()) for m in _TAB_STOP_SPANS_RE.finditer(frag)]
-        for m in _FRAG_OR_BREAK_PATTERN.finditer(frag):
+            nested = _nested_paragraph_spans(text)
+        stops = [(m.start(), m.end()) for m in _TAB_STOP_SPANS_RE.finditer(text)]
+        for m in _FRAG_OR_BREAK_PATTERN.finditer(text):
             if any(a <= m.start() < b for a, b in nested):
                 continue
             if stops and m.group(0).startswith("<w:tab") \
@@ -275,10 +281,24 @@ INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?(?<!/)>.*?</w:instrText>", re.S)
 ANCHOR_RE = re.compile(
     r"<w:(?:footnoteReference|endnoteReference|commentReference|"
     r"bookmarkStart|bookmarkEnd|fldSimple|sdt)(?=[\s/>])")
+# OOXML math: its text lives in `<m:t>`, never in `<w:t>`, so every `<w:t>`-only
+# walker read an equation-only paragraph as blank (see `has_math`).
+MATH_RE = re.compile(r"<m:(?:oMath|oMathPara)(?=[\s/>])")
 # Reading a DOCUMENT's sections: a legal self-closing `<w:sectPr .../>` (an
 # empty section) must match as the element it is, never run to the NEXT
 # section's closing tag -- that reported the wrong section's page-1 furniture.
-SECT_READ_RE = re.compile(r"<w:sectPr(?=[\s/>])[^>]*/>|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>")
+# A LIVE section carries its tracked-change record at the end as
+# `<w:sectPrChange><w:sectPr>...old...</w:sectPr></w:sectPrChange>`; the lazy
+# arm stopped at that NESTED old section's close, so the "live" span held the
+# obsolete header/footer references (and cut the element unbalanced). The
+# lookahead skips a close that ends a change record, so the match ends at the
+# LIVE section's own `</w:sectPr>`.
+SECT_READ_RE = re.compile(
+    r"<w:sectPr(?=[\s/>])[^>]*/>"
+    r"|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>(?!\s*</w:sectPrChange>)")
+# The tracked-change record itself: its `<w:sectPr>` is the section properties
+# BEFORE the edit and is not attached to the document any more.
+_SECT_CHANGE_RE = re.compile(r"<w:sectPrChange(?=[\s/>])[\s\S]*?</w:sectPrChange>")
 PROOFERR_RE = re.compile(r"<w:proofErr[^>]*/>")
 # Revision marks beyond the run-level w:ins/w:del pair: Word records tracked
 # table/cell edits and property changes with their own elements, and a final
@@ -300,7 +320,7 @@ PAGEBREAK_RE = re.compile(r"<w:br[^>]*w:type=\"page\"[^>]*/?>")
 # ("Figure C.", "Fig. I.") is a body sentence/panel, not figure 100.
 LEGEND_RE = re.compile(
     r"^\s*(?:supplementary\s+|supp\.?\s+|extended\s+data\s+)?fig(?:ure)?s?\.?\s*"
-    r"(?:S?\d+[A-Za-z]?|[IVXLC]{2,})\s*[|:.\u2014\u2013-]", re.I)
+    r"(?:S?\d+[A-Za-z]?|[IVXLC]{2,})\s*[|:.\u2014\u2013-](?=\s|$)", re.I)
 STRAIGHT_RE = re.compile(r"[\"']")
 CURLY_RE = re.compile("[\u2018\u2019\u201c\u201d]")
 EM, EN = "\u2014", "\u2013"
@@ -426,11 +446,138 @@ def load_policy(path) -> dict:
 # --------------------------------------------------------------------------
 # byte-level scanning (never re-serialize)
 # --------------------------------------------------------------------------
+# The tag walkers below are regex token walks, and a token regex cannot tell
+# live markup from markup a READER never sees. Three classes were read as live
+# content (and, for the fixer, edited as if they were):
+#   * an XML comment / processing instruction -- `<!-- <w:p><w:t>retired</w:t>
+#     </w:p> -->` supplied text, paragraphs and spelling rows, and a tag inside
+#     a comment desynchronised every later paragraph span;
+#   * the `mc:Fallback` branch of an `mc:AlternateContent` (Word renders Choice)
+#     -- once NESTED, the lazy regex stopped at the inner element and the
+#     unrendered OUTER Fallback was returned as manuscript prose;
+#   * tracked deletions -- a run-level `w:del` / `w:moveFrom`, a table ROW whose
+#     `w:trPr` carries `w:del`, and a CELL whose `w:tcPr` carries `w:cellDel`
+#     keep their `<w:t>`/`<w:delText>` text, which Word's Final view hides.
+# `_mask_noncontent` blanks them to same-length spaces before a walk, so every
+# span found on the masked copy addresses the ORIGINAL bytes.
+_XML_MISC_SPAN_RE = re.compile(r"<!--(?:[^-]|-(?!->))*-->|<\?(?:[^?]|\?(?!>))*\?>", re.S)
+
+
+def _blank_spans(text: str, spans: list) -> str:
+    """`text` with each span replaced by spaces, newlines preserved.
+
+    The replacement keeps the byte length, so a span found on the blanked copy
+    still addresses the original bytes; callers that splice keep working.
+    """
+    if not spans:
+        return text
+    out, pos = [], 0
+    for a, b in sorted(spans):
+        if b <= pos:
+            continue
+        a = max(a, pos)
+        out.append(text[pos:a])
+        out.append(re.sub(r"[^\n]", " ", text[a:b]))
+        pos = b
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _element_spans_by_name(xml: str, tag: str) -> list:
+    """(start, end) of every balanced element whose LOCAL name is `tag`.
+
+    `_CHILD_TAG_RE` skips XML comments and processing instructions, so a
+    commented-out element is never live, and it balances nested copies of the
+    SAME element -- a `w:tr` of a nested table, an `mc:AlternateContent` inside
+    a text box -- which the old lazy single-match regexes did not. Every nested
+    copy is returned (outer before inner when they share a start).
+    """
+    if not xml:
+        return []
+    spans, stack = [], []
+    for m in _CHILD_TAG_RE.finditer(xml):
+        closing, name, rest = m.group(1), m.group(2), m.group(3)
+        if name is None or name.split(":")[-1] != tag:
+            continue
+        self_closing = (closing == "") and (rest or "").rstrip().endswith("/")
+        if closing:
+            if stack:
+                spans.append((stack.pop(), m.end()))
+        elif self_closing:
+            spans.append((m.start(), m.end()))
+        else:
+            stack.append(m.start())
+    spans.sort()
+    return spans
+
+
+def _mc_hidden_spans(xml: str) -> list:
+    """XML spans of the `mc:Fallback` branches Word does NOT render.
+
+    `text_of` reads only the branch Word renders (Choice when present, else
+    Fallback), but the paragraph walker returned both branches' `w:p` elements
+    (and the text-offset walk counted both branches' runs), duplicating text-box
+    content and shifting every later field span. Only a Fallback that has a
+    DIRECT-child Choice beside it is hidden: a nested AlternateContent inside the
+    Fallback has its own Choice, and reading that one as the outer branch made
+    the outer Fallback -- the branch Word does not render -- look visible.
+    """
+    out = []
+    for s, e in _element_spans_by_name(xml, "AlternateContent"):
+        block = xml[s:e]
+        choice = _child_element_span(block, "Choice")
+        fallback = _child_element_span(block, "Fallback")
+        if choice is not None and fallback is not None:
+            out.append((s + fallback[0], s + fallback[1]))
+    return out
+
+
+def _tracked_delete_spans(xml: str) -> list:
+    """Spans whose content Word's Final view does not render (tracked deletes).
+
+    A run-level `<w:del>` / `<w:moveFrom>` keeps its text (as `w:delText`, or as
+    `w:t` from other producers); a deleted table ROW marks itself with a
+    `<w:del/>` child of its own `w:trPr`, and a deleted CELL with a
+    `<w:cellDel/>` child of its own `w:tcPr`. Reading them as live prose inflated
+    every word / em-dash / spelling count, and a move was counted twice.
+    """
+    spans = list(_element_spans_by_name(xml, "del"))
+    spans.extend(_element_spans_by_name(xml, "moveFrom"))
+    for row_tag, prop_tag, mark in (("tr", "trPr", "del"),
+                                    ("tc", "tcPr", "cellDel")):
+        if f"<w:{mark}" not in xml:
+            continue
+        for s, e in _element_spans_by_name(xml, row_tag):
+            props = child_elem(xml[s:e], prop_tag)
+            if props and re.search(rf"<w:{mark}(?=[\s/>])", props):
+                spans.append((s, e))
+    return spans
+
+
+def _mask_noncontent(xml: str) -> str:
+    """`xml` with comments/PIs, hidden Fallback branches and tracked deletes blank.
+
+    The blanking is length-preserving, so a walker over the result reports
+    offsets that still address `xml` and callers that splice stay correct.
+    """
+    if not xml:
+        return xml
+    text = xml
+    if "<!--" in text or "<?" in text:
+        text = _XML_MISC_SPAN_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+    spans = []
+    if "<mc:AlternateContent" in text:
+        spans.extend(_mc_hidden_spans(text))
+    if "<w:del" in text or "<w:moveFrom" in text or "<w:cellDel" in text:
+        spans.extend(_tracked_delete_spans(text))
+    return _blank_spans(text, spans)
+
 
 def _spans(xml: str, tokens: re.Pattern) -> list:
     """(start, end, text) for balanced elements; nested elements each get a span."""
+    text = _mask_noncontent(xml)
     out, depth, start = [], 0, None
-    for m in tokens.finditer(xml):
+    for m in tokens.finditer(text):
         if m.group(0).startswith("</"):
             # A hand-edited package can carry an unmatched close tag; without
             # the clamp the depth goes negative and every later span is lost
@@ -440,97 +587,71 @@ def _spans(xml: str, tokens: re.Pattern) -> list:
                 out.append((start, m.end(), xml[start:m.end()]))
                 start, depth = None, 0
             continue
-        tag_end = xml.find(">", m.start())
+        tag_end = text.find(">", m.start())
         if tag_end == -1:
             break
         if depth == 0:
             start = m.start()
-        if xml[tag_end - 1] == "/":
+        if text[tag_end - 1] == "/":
             if depth == 0 and start is not None:
                 out.append((start, tag_end + 1, xml[start:tag_end + 1]))
                 start = None
             continue
         depth += 1
     if start is not None:
-        out.append((start, len(xml), xml[start:]))
+        out.append((start, len(text), xml[start:]))
     return out
 
 
-def _paragraph_spans(xml: str) -> list:
-    """(start, end, text) for EVERY `<w:p>`, nested ones included, in start order.
-
-    `_spans` emits a span only when a same-name element's depth returns to 0, so
-    an inner `<w:p>` (the normal shape of `w:txbxContent` inside a drawing of an
-    outer `<w:p>`) was never a paragraph while its text was folded into the host.
-    A stack walk keeps both: the outer host and the box's own paragraph get one
-    span each.
-    """
-    out, stack = [], []
-    for m in PARA_TOKENS.finditer(xml):
+def _paragraph_offsets(xml: str) -> list:
+    """Return paragraph offsets and their parent starts in opening order."""
+    text = _mask_noncontent(xml)
+    offsets, stack = [], []
+    for m in PARA_TOKENS.finditer(text):
         if m.group(0).startswith("</"):
             if stack:
-                start = stack.pop()
-                out.append((start, m.end(), xml[start:m.end()]))
+                offsets[stack.pop()][1] = m.end()
             continue
-        tag_end = xml.find(">", m.start())
+        start = m.start()
+        tag_end = text.find(">", start)
         if tag_end == -1:
             break
-        if xml[tag_end - 1] == "/":
-            out.append((m.start(), tag_end + 1, xml[m.start():tag_end + 1]))
-        else:
-            stack.append(m.start())
-    for start in stack:                    # hand-edited XML: close at EOF
-        out.append((start, len(xml), xml[start:]))
-    out.sort(key=lambda sp: sp[0])
-    return out
+        parent = offsets[stack[-1]][0] if stack else None
+        self_closing = text[tag_end - 1] == "/"
+        end = tag_end + 1 if self_closing else len(text)
+        offsets.append([start, end, parent])
+        if not self_closing:
+            stack.append(len(offsets) - 1)
+    return offsets
 
 
 def _nested_paragraph_spans(xml: str) -> list:
-    """(start, end) of every `<w:p>` that sits INSIDE another `<w:p>`.
-
-    Those are the text-box/shape paragraphs. They now get a paragraph entry of
-    their own, so the host's text (and its run list) must not read them again.
-    """
-    spans = [(s, e) for s, e, _t in _paragraph_spans(xml)]
-    return [(s, e) for s, e in spans
-            if any(a < s and e <= b for a, b in spans)]
+    """Return the ranges of paragraphs inside another paragraph."""
+    return [(start, end) for start, end, parent in _paragraph_offsets(xml)
+            if parent is not None]
 
 
-def _mc_hidden_spans(xml: str) -> list:
-    """XML spans of the `mc:Fallback` branches Word does NOT render.
-
-    `text_of` already reads only the Choice branch, but the paragraph walker
-    returned both branches' `w:p` elements (and the text-offset walk counted
-    both branches' runs), duplicating text-box content and shifting every
-    later field span. Only a Fallback that has a Choice beside it is hidden.
-    """
-    out = []
-    for m in _MC_ALTERNATE_RE.finditer(xml):
-        block = m.group(0)
-        if _MC_CHOICE_RE.search(block) is None:
-            continue
-        fb = _MC_FALLBACK_RE.search(block)
-        if fb is not None:
-            out.append((m.start() + fb.start(), m.start() + fb.end()))
-    return out
+def _text_box_paragraph_indices(xml: str, paras: list) -> set:
+    """Identify text-box paragraphs even when their host is absent from paras."""
+    if not xml:
+        return set()
+    starts = {start for start, _end in _nested_paragraph_spans(xml)}
+    return {i for i, (start, _end, _para) in enumerate(paras) if start in starts}
 
 
-def paragraphs(xml: str) -> list:
+def paragraphs(xml: str, *, include_empty_hosts: bool = False) -> list:
     hidden = _mc_hidden_spans(xml)
-    spans = _paragraph_spans(xml)
-    nested = _nested_paragraph_spans(xml)
+    offsets = _paragraph_offsets(xml)
+    hosts = {parent for _start, _end, parent in offsets if parent is not None}
     out = []
-    for sp in spans:
-        if any(a <= sp[0] < b for a, b in hidden):
+    for start, end, _parent in offsets:
+        if any(a <= start < b for a, b in hidden):
             continue
-        # A host paragraph whose only content is a nested (text-box/shape)
-        # paragraph contributes no text of its own: the nested span carries it.
-        # Keeping the empty host would add a phantom blank paragraph that the
-        # single-visible-branch contract (F28) never had.
-        if (any(sp[0] < ns and ne <= sp[1] for ns, ne in nested)
-                and not text_of(sp[2])):
+        para = xml[start:end]
+        # A host with only text-box content contributes no body text.
+        if not include_empty_hosts and start in hosts and not text_of(para):
             continue
-        out.append(sp)
+        out.append((start, end, para))
     return out
 
 
@@ -543,24 +664,6 @@ def runs(frag: str) -> list:
     return [sp for sp in spans if not any(a <= sp[0] < b for a, b in hidden)]
 
 
-_MC_ALTERNATE_RE = re.compile(r"<mc:AlternateContent\b.*?</mc:AlternateContent>", re.S)
-_MC_CHOICE_RE = re.compile(r"<mc:Choice\b.*?</mc:Choice>", re.S)
-_MC_FALLBACK_RE = re.compile(r"<mc:Fallback\b.*?</mc:Fallback>", re.S)
-
-
-def _mc_visible_branch(m) -> str:
-    """The ONE branch Word renders: Choice when present, else Fallback.
-
-    `mc:AlternateContent` carries the same content twice (a modern Choice and a
-    Fallback for older readers). Reading both doubled the text ("HelloHello")
-    and inflated every count; reading only Choice keeps the shape Word shows in
-    the document this pipeline targets.
-    """
-    block = m.group(0)
-    branch = _MC_CHOICE_RE.search(block) or _MC_FALLBACK_RE.search(block)
-    return branch.group(0) if branch else ""
-
-
 def text_of(frag: str) -> str:
     """The text of `frag`, with each soft break/tab rendered as a NEWLINE.
 
@@ -569,9 +672,10 @@ def text_of(frag: str) -> str:
     reader sees is the text these scans compare (a line break starts a new line
     for FMT-P4).
     """
-    # Word renders ONE AlternateContent branch; walking the raw fragment read
-    # both and doubled every text box / DrawingML fallback.
-    frag = _MC_ALTERNATE_RE.sub(_mc_visible_branch, frag)
+    # The walker masks what a reader never sees (comments, the unrendered
+    # mc:Fallback branch, tracked deletions) BEFORE tokenizing, so the text and
+    # its offsets stay aligned with `frag` -- substituting a branch here moved
+    # every later offset.
     # DOCUMENT ORDER: a break sits BETWEEN two `<w:t>` parts (and can also sit
     # inside a run), so ONE walk over both kinds of token yields text and
     # delimiters as it meets them -- emitting the markup that lies between two
@@ -618,24 +722,70 @@ def has_anchor(frag: str) -> bool:
     return bool(ANCHOR_RE.search(frag))
 
 
-def _property_element(frag: str, tag: str) -> str | None:
-    """The WHOLE `<w:tag>` property element, balanced through nested copies.
+def has_math(frag: str) -> bool:
+    """True when the fragment carries OOXML math (a display equation is content).
+
+    Math is `<m:oMath>`/`<m:oMathPara>` with `<m:t>` text, which the `<w:t>`
+    text walkers cannot see: an equation-only paragraph therefore looked empty
+    to the stray-empty and break-only predicates, and the mechanical fixer
+    deleted the WHOLE paragraph -- equation included -- while its text-based
+    self-verification reported nothing lost.
+    """
+    return bool(MATH_RE.search(frag))
+
+
+def _property_element_span(frag: str, tag: str) -> tuple[int, int] | None:
+    """(start, end) of the WHOLE live `<w:tag>` property element, or None.
 
     A tracked-formatting paragraph carries `<w:pPrChange><w:pPr>…</w:pPr>
     </w:pPrChange>` INSIDE its own pPr (and a run's rPr can carry
     `<w:rPrChange>`); the lazy regex used to stop at the inner closing tag, so a
     caller that spliced the returned block back replaced only its prefix and
-    left the rest of the element dangling. `element_span` is the balanced reader
-    the pPrChange-aware edits already use.
+    left the rest of the element dangling. The walk below balances the nested
+    copies of the SAME tag, which is how the pPrChange-aware edits read it.
+
+    The scan runs over `_CHILD_TAG_RE`, the same tokenizer `child_elem` uses, so
+    a COMMENTED-OUT property (`<!-- <w:pPr><w:pStyle .../></w:pPr> -->`) is not
+    the live element: `re.search` + `element_span` used to return the commented
+    copy, which made the scanner read the comment's style while the fixer (which
+    now splices the paragraph's OWN pPr) repaired the live one -- the re-scan
+    still saw the comment and `fix` rejected the whole document. Quoted `>`
+    inside an attribute is handled there too, so an attribute value can no
+    longer be mistaken for the tag's end. Callers that splice bytes need the
+    SPAN, not the text: an identical element can also sit inside a comment
+    before the live one, which is why `str.find` is not enough.
     """
-    m = re.search(rf"<w:{tag}(?=[\s/>])", frag)
-    if not m:
+    if not frag:
         return None
-    s, e = element_span(frag, m.start(), tag)
-    block = frag[s:e]
-    if block.endswith("/>") or re.search(rf"</w:{tag}\s*>$", block):
-        return block
+    start = None
+    depth = 0
+    for m in _CHILD_TAG_RE.finditer(frag):
+        closing, name, rest = m.group(1), m.group(2), m.group(3)
+        if name is None:                       # a comment or processing instruction
+            continue
+        short = name.split(":")[-1]
+        self_closing = (closing == "") and (rest or "").rstrip().endswith("/")
+        if start is None:
+            if not closing and short == tag:
+                if self_closing:
+                    return m.start(), m.end()
+                start, depth = m.start(), 1
+            continue
+        if short != tag:                       # a nested element of another name
+            continue
+        if closing:
+            depth -= 1
+            if depth <= 0:
+                return start, m.end()
+        elif not self_closing:
+            depth += 1
     return None
+
+
+def _property_element(frag: str, tag: str) -> str | None:
+    """The WHOLE live `<w:tag>` property element, balanced through nested copies."""
+    span = _property_element_span(frag, tag)
+    return frag[span[0]:span[1]] if span is not None else None
 
 
 def ppr_of(frag: str) -> str | None:
@@ -656,9 +806,23 @@ def first_section_props(xml: str) -> str | None:
     A self-closing `<w:sectPr .../>` is a legal empty section and must match as
     the element it is: the old pattern ran to the NEXT section's closing tag, so
     page 1 was reported with the following section's furniture.
+
+    The tracked-change record (`w:sectPrChange`) inside the live section is
+    blanked out of the returned text: its nested `<w:sectPr>` is the OLD section
+    and its header/footer references are not attached any more, so a reader that
+    looped over the returned refs let the obsolete rId win.
     """
     m = SECT_READ_RE.search(xml)
-    return m.group(0) if m else None
+    if not m:
+        return None
+    return _strip_sect_changes(m.group(0))
+
+
+def _strip_sect_changes(xml: str | None) -> str:
+    """`xml` with every `<w:sectPrChange>` record blanked (length-preserving)."""
+    if not xml or "<w:sectPrChange" not in xml:
+        return xml or ""
+    return _SECT_CHANGE_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), xml)
 
 
 def rpr_of(frag: str) -> str | None:
@@ -689,18 +853,13 @@ def elem(frag: str | None, tag: str) -> str | None:
     return m.group(0) if m else None
 
 
-_CHILD_TAG_RE = re.compile(r"<(/?)([A-Za-z0-9:_.-]+)(?=[\s/>])([^>]*)>")
+_XML_MISC = r"<!--(?:[^-]|-(?!->))*-->|<\?(?:[^?]|\?(?!>))*\?>"
+_XML_ATTRIBUTES = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
+_CHILD_TAG_RE = re.compile(rf"{_XML_MISC}|<(/?)([A-Za-z0-9:_.-]+)(?=[\s/>])({_XML_ATTRIBUTES})>")
 
 
-def child_elem(frag: str | None, tag: str) -> str | None:
-    """The DIRECT child `<w:tag>` of `frag`, never a descendant.
-
-    `elem()` searches the whole fragment, so `elem(ppr, "spacing")` returned a
-    paragraph MARK's character spacing (`<w:pPr><w:rPr><w:spacing .../>`) as
-    if it were the paragraph's line spacing -- the scanner reported FMT-T2
-    rows that did not exist and the fixer wrote a paragraph-level element
-    inside `w:rPr`, which is invalid OOXML.
-    """
+def _child_element_span(frag: str | None, tag: str) -> tuple[int, int] | None:
+    """Offsets of the direct child named tag."""
     if not frag:
         return None
     depth = 0
@@ -708,21 +867,29 @@ def child_elem(frag: str | None, tag: str) -> str | None:
     start_depth = None
     for m in _CHILD_TAG_RE.finditer(frag):
         closing, name, rest = m.group(1), m.group(2), m.group(3)
+        if name is None:
+            continue
         self_closing = bool(closing == "") and rest.rstrip().endswith("/")
         if closing:
             depth -= 1
             if (start is not None and depth == start_depth
                     and name.split(":")[-1] == tag):
-                return frag[start:m.end()]
+                return start, m.end()
             continue
         if depth == 1 and name.split(":")[-1] == tag:
             if self_closing:
-                return m.group(0)
+                return m.span()
             start = m.start()
             start_depth = depth
         if not self_closing:
             depth += 1
     return None
+
+
+def child_elem(frag: str | None, tag: str) -> str | None:
+    """The direct child of frag, excluding descendant properties."""
+    span = _child_element_span(frag, tag)
+    return frag[span[0]:span[1]] if span is not None else None
 
 
 def ppr_style(ppr: str | None) -> str | None:
@@ -1470,7 +1637,9 @@ def _template_uses_even_odd(template: Path) -> bool:
         return False
     if is_on(settings, "evenAndOddHeaders"):
         return True
-    sects = SECT_READ_RE.findall(doc)
+    # A sectPrChange record holds the OLD section: an even-page reference there
+    # is not attached to the document any more.
+    sects = SECT_READ_RE.findall(_strip_sect_changes(doc))
     # Every section, not only the last, and any attribute order: Word writes
     # `w:type` before or after `r:id` depending on the producer.
     return any(re.search(r'<w:(?:header|footer)Reference\b[^>]*\bw:type="even"', sect)
@@ -1504,20 +1673,28 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
     # The section that governs page 1 decides the FIRST-PAGE furniture (see
     # `first_section_props`): reading the last one let a two-section manuscript
     # whose page 1 was not the venue's layout report no gap at all.
-    sects = SECT_READ_RE.findall(doc)
+    sects = SECT_READ_RE.findall(_strip_sect_changes(doc))
     sect = first_section_props(doc) or (sects[-1] if sects else "")
+    # first_section_props() already blanks the change record; strip again so a
+    # caller that only has the raw section text behaves the same.
+    sect = _strip_sect_changes(sect)
     refs = {}
     for m in re.finditer(r"<w:(header|footer)Reference\b[^>]*>", sect):
         typ = attr_of(m.group(0), "w:type")
         rid = attr_of(m.group(0), "r:id")
+        # The FIRST reference of a type is the live one: a later copy can only
+        # sit in a change record (blanked above) or be a duplicate.
         if typ and rid:
-            refs[(m.group(1), typ)] = rid
+            refs.setdefault((m.group(1), typ), rid)
 
     def part(kind: str, typ: str) -> str:
         rid = refs.get((kind, typ))
         k, target = rel_map.get(rid, ("", ""))
         if k == kind and target and not target.startswith("http"):
-            return target
+            # A legal package target may be written '/word/header1.xml'; the
+            # sibling reader strips that leading slash, so this one must too
+            # (otherwise it built 'word//word/header1.xml' and never resolved).
+            return target.lstrip("/")
         return ""
 
     first_header = part("header", "first") or part("header", "default")

@@ -71,12 +71,26 @@ def _ize_family(stems, name="-ize/-ise verb family"):
     return name, variants
 
 
+def _inflect(stem: str, suffix: str) -> str:
+    """Append an inflection, dropping the silent -e before -ed/-ing.
+
+    The old blind concatenation produced "centreed"/"centring" while the real
+    UK forms are "centred"/"centring", so mixed centred/centered text was never
+    enumerated.
+    """
+    if suffix == "ed" and stem.endswith("e"):
+        return stem + "d"
+    if suffix == "ing" and stem.endswith("e"):
+        return stem[:-1] + "ing"
+    return stem + suffix
+
+
 def _pair_family(pairs, name, suffixes=("", "s")):
     variants = []
     for a, b in pairs:
         for suffix in suffixes:
-            variants.append(a + suffix)
-            variants.append(b + suffix)
+            variants.append(_inflect(a, suffix))
+            variants.append(_inflect(b, suffix))
     return name, variants
 
 
@@ -170,8 +184,10 @@ def _candidate_key(token: str) -> str:
 # The region is blanked line-for-line (never deleted) so artifact line numbers
 # still point at the real file.
 _REF_HEADING_RE = re.compile(
-    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography|"
-    r"(?:literature|works) cited)\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)
+    r"^\s*(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|"
+    r"(?:literature|works) cited)\s*(?:\*{1,2}|_{1,2})?"
+    r"\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)
 _REF_TEX_HEADING_RE = re.compile(
     r"^\s*\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}"
     r"|^\s*\\begin\{thebibliography\}"
@@ -180,7 +196,7 @@ _REF_END_RE = re.compile(
     r"^\s*(?:#{1,6}\s+\S|\\section\*?\s*\{|\\end\{thebibliography\}"
     r"|(?:abstract|methods?|materials and methods|acknowledg\w*|"
     r"author contributions?|data availability|code availability|"
-    r"competing interests?|conflicts? of interest|funding|supplementary\w*|"
+    r"competing interests?|conflicts? of interest|funding|supplementary(?:\s+\w+)?|"
     r"figure legends?)\s*(?::|\s*$))", re.I)
 # Role words are NAME TOKENS, not substrings: a manuscript named
 # `immune_response.md` or `biofeedback_results.txt` is real prose, while a role

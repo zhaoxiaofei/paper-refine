@@ -238,8 +238,22 @@ def latex_source_text(text: str) -> str:
     return "\n".join(kept)
 
 REF_HEAD_RE = re.compile(
-    r"^\s*(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
-    r"(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
+    r"^\s*(?:"
+    # LaTeX head forms (F269): without these a \bibitem's "Smith et al. 2019"
+    # became a phantom M2 author-year call-out.
+    r"\\(?:section|subsection|chapter)\*?\s*\{\s*(?:references?|bibliography)\s*\}\s*(?:\\label\{[^{}]*\})?"
+    r"|\\begin\{thebibliography\}"
+    r"|\\(?:bibliography|printbibliography)\b.*"
+    # Plain/Markdown heading, optionally ATX and optionally emphasised.
+    r"|(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)"
+    r"\s*(?:\*{1,2}|_{1,2})?\s*[:.\u2014\u2013-]?\s*"
+    r")\s*(?:%.*)?$", re.I)
+# A LaTeX reference region also ends at the closing environment or the next
+# sectioning command.
+REF_TEX_END_RE = re.compile(
+    r"^\s*(?:\\end\{thebibliography\}|\\(?:section|subsection|chapter)\*?\s*\{)",
+    re.I)
 STOP_SECTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
     r"(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
@@ -349,6 +363,7 @@ def find_reference_region(lines):
             prev_blank = False
             continue  # a numbered reference entry is never a section heading
         if STOP_SECTION_RE.match(s) or MD_HEADING_RE.match(s) or \
+                REF_TEX_END_RE.match(s) or \
                 FIG_CAPTION_RE.match(s) or TABLE_CAPTION_RE.match(s):
             end = j
             note = "ends at the next heading/caption (line %d)" % (j + 1)
@@ -505,13 +520,14 @@ def main():
         # verbatim bodies removed) while reference-list entries keep the
         # source lines. Without this a commented-out `% see [7]` became a
         # numeric call-out and an orphan.
+        _lname = fname.lower()
         callout_lines = (latex_source_text(text).split("\n")
-                         if fname.endswith((".tex.txt", ".ltx.txt")) else lines)
-        if fname.endswith(".bib.txt"):
+                         if _lname.endswith((".tex.txt", ".ltx.txt")) else lines)
+        if _lname.endswith(".bib.txt"):
             for m in BIB_ENTRY_RE.finditer(text):
                 bib_entries.append({"file": fname, "key": m.group(1).strip()})
             continue
-        is_latex = fname.endswith((".tex.txt", ".ltx.txt"))
+        is_latex = _lname.endswith((".tex.txt", ".ltx.txt"))
         if is_latex:
             # Scan the WHOLE source, not one line at a time: whitespace
             # (including a newline) is legal inside a cite argument, and the
@@ -709,8 +725,38 @@ def main():
         """Corpus name without the suffix `convert_corpus` appended."""
         return re.sub(r"\.(?:tex|ltx|bib)\.txt$", "", str(name or ""))
 
+    # A flattened corpus name cannot be split on "__" to recover its directory:
+    # convert_corpus.py joins path components with "__" but keeps an original
+    # basename unchanged, so `supp__main.tex` (ONE file whose name contains
+    # "__") and `supp/main.tex` (a file in a directory) both become
+    # `supp__main.tex.txt`.  The inventory records the original relative path;
+    # resolve the directory from it instead of splitting blindly (F268).
+    _flat_dir_by_name, _flat_dirs_known = {}, set()
+    try:
+        with open(os.path.join(work, "inventory.json"), encoding="utf-8") as _inv:
+            for _entry in json.load(_inv):
+                _rel = str(_entry.get("path") or "")
+                if not _rel:
+                    continue
+                _flat_dir_by_name[_rel.replace(os.sep, "__") + ".txt"] = \
+                    os.path.dirname(_rel).replace(os.sep, "__")
+                _flat_dirs_known.add(os.path.dirname(_rel).replace(os.sep, "__"))
+    except (OSError, ValueError, TypeError):
+        _flat_dir_by_name, _flat_dirs_known = {}, set()
+
     def _flat_dir(name: str) -> str:
-        return "__".join(_flat_stem(name).split("__")[:-1])
+        exact = _flat_dir_by_name.get(str(name or ""))
+        if exact is not None:
+            return exact
+        parts = _flat_stem(name).split("__")
+        # A truncated/collision-renamed corpus file misses the exact map; the
+        # longest `__`-joined prefix that the inventory records as a real
+        # directory is still the right one.
+        for k in range(len(parts) - 1, 0, -1):
+            prefix = "__".join(parts[:k])
+            if prefix in _flat_dirs_known:
+                return prefix
+        return "__".join(parts[:-1])
 
     files_by_flat = {_flat_stem(f): f for f in tex_sources}
 

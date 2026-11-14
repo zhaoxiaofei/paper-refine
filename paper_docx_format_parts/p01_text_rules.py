@@ -44,6 +44,13 @@ def spelling_nonprose_mask(text: str) -> str:
     # a minority spelling inside `doi.org/10.1000/colour-map`.
     out = re.sub(r"\b(?:dx\.)?doi\.org/[^\s<>\"']+|\b10\.\d{4,9}/[^\s<>\"']+",
                  lambda m: " " * len(m.group(0)), out)
+    # A scheme-less HOST/PATH target (`github.com/lab/colour-tool`) is a URL
+    # too. URL_RE needs an `http(s)://`/`www.`/`doi:` prefix, so a bare
+    # repository path was prose to this mask: its minority spelling joined the
+    # count (it could even decide the majority direction) and the fixer
+    # rewrote the path, leaving a link to a different/nonexistent repository.
+    out = re.sub(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}/[^\s<>\"'`]*",
+                 lambda m: " " * len(m.group(0)), out)
     # A LaTeX verbatim span is code, not prose: `.tex`/`.ltx` sources reach the
     # same style rules, and a spelling variant inside `\code{catalogue}` /
     # `\verb|colour|` must not produce an FMT-T8d row (or decide the minority
@@ -1593,6 +1600,14 @@ REFERENCE_BIBITEM_RE = re.compile(
     r"(?m)^[ \t]*\\bibitem[ \t]*(?:\[[^\]]*\])?[ \t]*\{([^}]*)\}")
 REFERENCE_BIBENTRY_RE = re.compile(r"(?m)^[ \t]*@\w+[ \t]*\{[ \t]*([^,\s]+)[ \t]*,")
 REFERENCE_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+# A paragraph-per-entry reference list joins ONE ENTRY PER LINE with a single
+# "\n" (the DOCX corpus view does exactly that), and a Vancouver-style list has
+# no parenthetical year -- so the blank-line splitter returned the whole list as
+# ONE entry. A line that carries its OWN year or DOI is a complete entry.
+REFERENCE_ENTRY_DATE_RE = re.compile(r"\b(?:19|20)\d{2}\b|\b10\.\d{4,9}/\S+")
+# A line that OPENS a numbered entry (`1.`, `12)`, `[3]`): in a numbered list
+# the marker is the entry boundary even when the previous entry wrapped.
+REFERENCE_NUMBERED_LINE_RE = re.compile(r"^\s*(?:\[\d{1,3}\]|\d{1,3}[.)])\s+")
 # The entry SAYS it carries a DOI (`doi`, `DOI:`, `https://doi.org/`): only then
 # is a DOI-shaped token the syntax rejects worth a row.
 REFERENCE_DOI_CLAIM_RE = re.compile(r"(?i)(?:\bdoi\b[ \t]*[:\s]|https?://(?:dx\.)?doi\.org/)")
@@ -1693,7 +1708,8 @@ def _numbered_marker_run(spans: list) -> list:
     return best
 
 
-def _split_reference_entries(text: str, allow_paragraphs: bool) -> list:
+def _split_reference_entries(text: str, allow_paragraphs: bool,
+                             per_paragraph: bool = False) -> list:
     """[(label, entry_text)] for one reference-list region.
 
     Markers first (`\\bibitem{key}` / `@type{key,` carry their own labels, then a
@@ -1705,6 +1721,10 @@ def _split_reference_entries(text: str, allow_paragraphs: bool) -> list:
     happens to sit in a file is never read that way -- not even when it numbers
     its own sentences ("Test 1. ... Test 2. ... Test 3. ..."), which is the same
     shape and used to seed a row for a DOI the body merely mentioned.
+    `per_paragraph` says the region was joined from ONE ROW PER PARAGRAPH (the
+    DOCX corpus view): a single-newline break is then an entry boundary, and a
+    line carrying its own year/DOI is a complete entry even without a blank line
+    between two of them.
     """
     shapes = [(REFERENCE_BIBITEM_RE, True, 1), (REFERENCE_BIBENTRY_RE, True, 1)]
     if allow_paragraphs:
@@ -1748,6 +1768,24 @@ def _split_reference_entries(text: str, allow_paragraphs: bool) -> list:
         ends = starts[1:] + [len(text)]
         return [("", _fold_space(text[a:b])) for a, b in zip(starts, ends)]
     blocks = [b for b in re.split(r"\n[ \t]*\n", text or "") if b.strip()]
+    if per_paragraph and len(blocks) == 1:
+        # One row per paragraph arrives joined by a SINGLE "\n": the line break
+        # IS the entry boundary. A numbered marker always starts a new entry; an
+        # unnumbered line starts one only when BOTH it and the line before it
+        # carry their own year/DOI -- a hard-wrapped entry's continuation line
+        # carries no year of its own, so it stays inside its entry.
+        lines = [l for l in blocks[0].splitlines() if l.strip()]
+        starts = [0] if lines else []
+        for i in range(1, len(lines)):
+            numbered = bool(REFERENCE_NUMBERED_LINE_RE.match(lines[i]))
+            dated = bool(REFERENCE_ENTRY_DATE_RE.search(lines[i])
+                         and REFERENCE_ENTRY_DATE_RE.search(lines[i - 1]))
+            if numbered or dated:
+                starts.append(i)
+        if len(starts) > 1:
+            ends = starts[1:] + [len(lines)]
+            return [("", _fold_space("\n".join(lines[a:b])))
+                    for a, b in zip(starts, ends)]
     return [("", _fold_space(b)) for b in blocks]
 
 
@@ -1777,6 +1815,10 @@ def reference_entries(docs) -> list:
                          for r in rows)
         lines = text.splitlines()
         start = next((i for i, l in enumerate(lines) if _is_reference_heading(l)), None)
+        # One row per paragraph (the DOCX/text corpus views): a single-newline
+        # break is then an entry boundary, not a soft wrap.
+        per_paragraph = (len(rows) > 1
+                         and all(isinstance(r, (list, tuple)) for r in rows))
         if start is not None:
             # The region ends at the next section heading: a "Supplementary" or
             # "Acknowledgements" section after the list is not more entries.
@@ -1785,7 +1827,9 @@ def reference_entries(docs) -> list:
             region = "\n".join(lines[start + 1:end])
         else:
             region = text
-        for label, body in _split_reference_entries(region, allow_paragraphs=start is not None):
+        for label, body in _split_reference_entries(
+                region, allow_paragraphs=start is not None,
+                per_paragraph=per_paragraph):
             if body:
                 out.append((name, label, body))
     return out
@@ -2450,8 +2494,12 @@ def _simple_table(text: str):
     if len(lines) < 3:
         return None, None
     head = lines[0]
+    # A pipe table with no leading/trailing pipes has n-1 separators, so a
+    # legal TWO-column `sample | yield` header has only ONE pipe. Requiring two
+    # silently dropped every two-column pipe table from the value/statistics
+    # index.
     delim = ("\t" if "\t" in head else
-             ("|" if head.count("|") >= 2 else
+             ("|" if head.count("|") >= 1 else
               ("," if head.count(",") >= 1 else None)))
     if delim is None:
         return None, None
@@ -2763,18 +2811,25 @@ def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
                           f"max_tokens cap and were NOT compared with the written "
                           f"negative claims; this table is INCOMPLETE -- raise the cap "
                           f"or record the gap")}
+    # The ROW cap must say so too (hierarchy_seed_rows and the number seed both
+    # append an INCOMPLETE row at theirs): a bare `return` made the M30-NC seed
+    # look complete while the manuscript's later claims were never compared.
+    row_gap = None
 
     def _done(rows: list) -> list:
-        return rows + [gap] if gap else rows
+        return rows + [g for g in (gap, row_gap) if g]
 
     if not tokens:
         return _done([])
-    rows, seen = [], set()
+    total_claims = sum(len(NEGATIVE_CLAIM_RE.findall(
+        re.sub(r"\s+", " ", str(t or "")))) for t in (texts or []))
+    rows, seen, claims_seen = [], set(), 0
     for text in texts or []:
         s = re.sub(r"\s+", " ", str(text or "")).strip()
         if not s:
             continue
         for m in NEGATIVE_CLAIM_RE.finditer(s):
+            claims_seen += 1
             sentence = s[max(0, m.start() - 200):m.end() + 200]
             lowered = sentence.lower()
             # The claim's SUBJECT, inferred from word order: only a token that
@@ -2824,6 +2879,14 @@ def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
                                f"stale and must be removed, or the written claim is wrong"),
                 })
                 if len(rows) >= limit:
+                    omitted = max(0, total_claims - claims_seen)
+                    row_gap = {
+                        "rule": "M30-NC", "severity": "low", "claim": "",
+                        "token": "(truncated)", "producer": "",
+                        "detail": (f"{omitted} further written negative claim(s) were "
+                                   f"omitted by the {limit}-row M30-NC seed cap and were "
+                                   f"NOT compared with any table value; this seed is "
+                                   f"INCOMPLETE -- raise the cap or record the gap")}
                     return _done(rows)
                 if sum(per_token.values()) >= 4:
                     break
@@ -2999,6 +3062,12 @@ def _context_stem(token: str) -> str:
 def _context_tokens(text) -> set:
     out = set()
     for tok in _m30_header_tokens(text):
+        # The RAW token is tested against the stopwords BEFORE the plural
+        # stemmer: `_context_stem("values")` is "valu", "tables" -> "tabl",
+        # "files" -> "fil", none of which is in the (unstemmed) stopword set,
+        # so the generic-plural guard the comment above promises never fired.
+        if str(tok).lower() in _CONTEXT_STOPWORDS:
+            continue
         stem = _context_stem(tok)
         if len(stem) >= 3 and stem not in _CONTEXT_STOPWORDS and not stem.isdigit():
             out.add(stem)
@@ -3069,6 +3138,21 @@ def _number_proof_context_ok(row: dict, hit: dict) -> bool:
         _conflict = ("mean", "average", "median", "rate", "proportion",
                      "percentage", "ratio", "fraction", "share")
         if any(re.search(r"\b" + re.escape(w) + r"\b", _low) for w in _conflict):
+            return False
+        # F31 (wave 1): a column SUM cannot prove an extreme-value claim
+        # ("the maximum was 9" was proved by sum(2,3,4)=9). The check is scoped
+        # to the CLAUSE carrying the number, so the documented sum proof
+        # "yielded 45,365 cells; the largest had 2,055 cells" keeps its source
+        # (the word "largest" is in a different clause).
+        _clause = _low
+        if num and num in sentence:
+            _parts = re.split(r"(?<=[;.])\s+", sentence)
+            _clause = next((q.lower() for q in _parts if num in q), _low)
+        _extreme = {"sum": ("maximum", "minimum", "highest", "lowest", "peak",
+                            "largest", "smallest"),
+                    "max": ("minimum", "lowest", "smallest"),
+                    "min": ("maximum", "highest", "largest", "peak")}.get(kind, ())
+        if any(re.search(r"\b" + re.escape(w) + r"\b", _clause) for w in _extreme):
             return False
     if kind == "cell":
         hit_row = str(hit.get("row") or "").strip()

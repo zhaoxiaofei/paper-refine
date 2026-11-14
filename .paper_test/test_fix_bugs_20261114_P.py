@@ -137,7 +137,7 @@ def test_f183() -> None:
         np.build_corpus_dir = lambda c, r, vid, dst: (
             dst.mkdir(parents=True, exist_ok=True),
             (dst / "main.md").write_text("same bytes\n", encoding="utf-8"))
-        np.recorded_version_digest = lambda c, r, vid: None
+        np.recorded_version_digest = lambda c, r, vid: np.manifest_digest(np.corpus_dir_manifest(docs))
         np.caption_info_for = lambda c, r, vid: None
         np.scan_captions_in_sources = lambda *a, **k: None
         np.effective_content_fingerprint = lambda c, r, vid: "FP"

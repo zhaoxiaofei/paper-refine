@@ -399,7 +399,7 @@ def journal_feedback_files(ctx: Ctx) -> list:
     concerns sessions, which keeps each finding's provenance explicit.
     """
     streams = journal_feedback_streams(ctx)
-    if streams and "human" not in streams:
+    if "human" not in streams:
         # `llm` mode reads ONLY the LLM review: a human letter in the corpus is
         # not a concern source here (it stays evidence for the judges).
         return []
@@ -522,7 +522,7 @@ def journal_llm_feedback_files(ctx: Ctx) -> list:
     feedback.
     """
     streams = journal_feedback_streams(ctx)
-    if streams and "llm" not in streams:
+    if "llm" not in streams:
         return []
     if not ctx.pristine.is_dir():
         return []
@@ -539,7 +539,7 @@ def journal_previous_responses(ctx: Ctx) -> list:
     if not ctx.pristine.is_dir():
         return []
     streams = journal_feedback_streams(ctx)
-    if streams and "human" not in streams:
+    if "human" not in streams:
         # `llm` mode reads ONLY the LLM review: a previous reply that sits beside
         # a human letter is not context for that mode either.
         return []
@@ -1364,11 +1364,11 @@ def integrators_config_note(ctx) -> str:
                       lambda v: f"0x{int(v):X}")
 
 
-def _recorded_round_plan(ctx, r: int) -> dict:
-    """The plan a round recorded, or {} when it recorded none.
+def _round_record(ctx, r: int) -> dict:
+    """The round record, or {} when the context has no round store.
 
     An UNREADABLE record is a hard error: substituting {} would re-derive the
-    round's candidate set from the CURRENT config, the exact
+    round's plan from the CURRENT pipeline_config.json, the exact
     non-reproducibility the recorded plan exists to prevent.
     """
     if not callable(getattr(ctx, "round_get", None)):
@@ -1381,7 +1381,18 @@ def _recorded_round_plan(ctx, r: int) -> dict:
         die(f"the recorded plan for round {int(r)} could not be read "
             f"({type(e).__name__}: {e}); refusing to re-derive the round's plan "
             f"from the current pipeline_config.json")
-    plan = rec.get("plan") if isinstance(rec, dict) else None
+    return rec if isinstance(rec, dict) else {}
+
+
+def _recorded_round_plan(ctx, r: int) -> dict:
+    """The plan a round recorded, or {} when it recorded none.
+
+    An UNREADABLE record is a hard error: substituting {} would re-derive the
+    round's candidate set from the CURRENT config, the exact
+    non-reproducibility the recorded plan exists to prevent.
+    """
+    rec = _round_record(ctx, r)
+    plan = rec.get("plan")
     if plan is None:
         return {}
     if not isinstance(plan, dict):
@@ -1415,6 +1426,13 @@ def round_counts(ctx, r: int) -> tuple:
          int(counts_of(getattr(ctx, "cfg", None), "rewrites", rounds)[idx]))
     n = (int(recorded_n) if recorded_n is not None else
          int(counts_of(getattr(ctx, "cfg", None), "revises", rounds)[idx]))
+    if journal_is_scoped(ctx) and not journal_rewrites_allowed(ctx):
+        # major/minor are concern-scoped by definition: the round runs NO rewrite
+        # arm. The guarantee is enforced HERE, at the single place both the run
+        # plan and the decide re-derivation read M from, not only by setup's
+        # normalisation of the config: a hand-edited, restored or copied plan
+        # that records rewrites cannot stage (or re-derive) a full rewrite arm.
+        m = 0
     return max(0, m), max(0, n)
 
 
@@ -1439,14 +1457,20 @@ def champion_select_of(ctx=None) -> str:
 
 
 def round_champion_select(ctx, r: int) -> str:
-    """The mode round `r` records (a decided round wins over the config)."""
-    try:
-        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
-    except Exception:                                        # noqa: BLE001
-        plan = {}
+    """The mode round `r` records (a decided round wins over the config).
+
+    A recorded value that is not a champion-selection mode is a hard error, not a
+    silent fall-back to the mutable config: the mode the round USED is part of
+    the round's plan (see `_recorded_round_plan`).
+    """
+    plan = _recorded_round_plan(ctx, r)
     raw = str(plan.get("champion_select") or "").strip().lower()
-    if raw in CHAMPION_SELECT_MODES:
-        return raw
+    if raw:
+        if raw in CHAMPION_SELECT_MODES:
+            return raw
+        die(f"the recorded plan for round {int(r)} records champion_select {raw!r}, "
+            f"which is not one of {'|'.join(CHAMPION_SELECT_MODES)}; refusing to "
+            f"re-derive the round's champion mode from the current pipeline_config.json")
     return champion_select_of(ctx)
 
 
@@ -1531,16 +1555,11 @@ def judges_enabled_spec(ctx, r: int) -> str:
 
     A DECIDED round's recorded plan wins, exactly like round_judges(): `decide`
     must recompute the stored panel's expectation from the plan that produced it.
+    An unreadable round record is a hard error (see `_round_record`), never a
+    silent fall-back to every judge.
     """
-    try:
-        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
-    except Exception:                                        # noqa: BLE001
-        plan = {}
-    rrec = {}
-    try:
-        rrec = ctx.round_get(int(r)) or {}
-    except Exception:                                        # noqa: BLE001
-        rrec = {}
+    plan = _recorded_round_plan(ctx, r)
+    rrec = _round_record(ctx, r)
     if plan.get("judges_enabled") is not None:
         spec = str(plan["judges_enabled"])
     elif rrec.get("judges_enabled") is not None:
@@ -1710,14 +1729,18 @@ def round_review_scope(ctx, r: int) -> str:
     The recorded plan wins (a decided round must re-derive the same review
     contract); otherwise the per-round `review_scope` list from the config,
     extended by repeating its last element exactly like `--rewrites`/`--judges`.
+    An unreadable round record is a hard error (see `_round_record`), never a
+    silent fall-back to the config's scope.
     """
-    try:
-        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
-    except Exception:                                        # noqa: BLE001
-        plan = {}
-    scope = str(plan.get("review_scope") or "").strip().lower()
-    if scope in REVIEW_SCOPE_VALUES:
-        return scope
+    plan = _recorded_round_plan(ctx, r)
+    recorded_scope = str(plan.get("review_scope") or "").strip().lower()
+    if recorded_scope:
+        if recorded_scope in REVIEW_SCOPE_VALUES:
+            return recorded_scope
+        die(f"the recorded plan for round {int(r)} records review_scope "
+            f"{recorded_scope!r}, which is not one of {'|'.join(REVIEW_SCOPE_VALUES)}; "
+            f"refusing to re-derive the review contract from the current "
+            f"pipeline_config.json")
     rounds = config_rounds(ctx)
     raw = (getattr(ctx, "cfg", None) or {}).get("review_scope")
     if raw is None:
@@ -2009,7 +2032,9 @@ def caption_limit_of(ctx) -> int:
     try:
         v = int(raw)
     except (TypeError, ValueError):
-        return DEFAULT_CAPTION_LIMIT
+        die(f"pipeline_config.json records caption_limit={raw!r} with "
+            f"caption_limit_source 'operator'; it is not an integer. Repair the "
+            f"config (an explicit 0 means no cap).", code=2)
     return max(0, v)
 
 
@@ -2295,6 +2320,22 @@ def _article_phrase(profile: VenueProfile) -> str:
     return f"{_indefinite(label)} {art}"
 
 
+def _length_limit_gap_notes(profile: VenueProfile) -> str:
+    """The profile's recorded per-limit notes, joined (`""` when it records none).
+
+    A `note` records rules the source states that this pipeline does NOT model
+    (display-item caps, a reference cap). Every renderer that describes a limit
+    must name them, including the no-cap branch, where the numbers cannot carry
+    the rule at all (F94).
+    """
+    prof = _as_profile(profile)
+    try:
+        return " | ".join(n for n in (prof.length_limit_note("abstract"),
+                                      prof.length_limit_note("main_text")) if n)
+    except Exception:                                          # noqa: BLE001 -- never gate
+        return ""
+
+
 def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
     """The M19 mandate's cap clause, from the venue profile's own numbers.
 
@@ -2304,9 +2345,17 @@ def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
     """
     limits = _as_profile(profile).length_limits()
     abstract, main = limits["abstract"], limits["main text"]
+    # A per-limit `note` records rules this pipeline does NOT model. It is
+    # computed BEFORE the no-cap branch, because a profile with no numeric cap is
+    # exactly where the recorded gap must still reach M19 (F94).
+    gap_notes = _length_limit_gap_notes(profile)
     if abstract["cap"] is None and main["cap"] is None:
-        return ("this venue profile sets no abstract or main-text cap, so state the limit the "
-                "target journal's own guidelines give and its source in the artifact")
+        clause = ("this venue profile sets no abstract or main-text cap, so state the limit the "
+                  "target journal's own guidelines give and its source in the artifact")
+        if gap_notes:
+            clause += ("; the profile's own notes record rules this pipeline does NOT model "
+                       "(the absence of a cap is not the whole rule set): " + gap_notes)
+        return clause
     parts = []
     if abstract["cap"] is not None:
         parts.append(f"abstract <= {abstract['cap']} words")
@@ -2316,16 +2365,9 @@ def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
     if article:
         clause += (f" for {_article_phrase(profile)}, "
                    f"{_main_text_counting_short(profile)}")
-    # A per-limit `note` records the rules the source states that this pipeline
-    # does NOT model (display-item caps, a reference cap). Silently dropping it
-    # let an operator pass M19 while violating an unmodelled journal rule, so
-    # the mandate names the recorded gap instead of pretending the number is the
-    # whole rule set (AGENTS.md rule 3).
-    gaps = [n for n in (_as_profile(profile).length_limit_note("abstract"),
-                        _as_profile(profile).length_limit_note("main_text")) if n]
-    if gaps:
+    if gap_notes:
         clause += ("; the profile's own notes record what the number does not capture "
-                   "(including rules this pipeline does NOT model): " + " | ".join(gaps))
+                   "(including rules this pipeline does NOT model): " + gap_notes)
     return clause
 
 
@@ -2354,6 +2396,25 @@ def _cover_preference_clause(profile: VenueProfile) -> str:
     """
     cover = _as_profile(profile).length_limits()["cover letter"]
     return _cover_bound_text(cover.get("min"), cover.get("max"))
+
+
+def _cover_source_is_venue_guideline(profile: VenueProfile) -> bool:
+    """True when the cover-letter bound's recorded source is a venue guideline.
+
+    `length_rule_text` already distinguishes the master prompt's preference from
+    the venue profile's own recorded basis; every renderer of the cover-letter
+    rule must make the same distinction. Calling a venue guideline a 'user
+    preference' and denying ('the venue profile publishes no cover-letter limit')
+    a limit the profile itself records is the rule-3 defect this test prevents.
+    An absent source is not a venue guideline (the pipeline's own default
+    preference has an empty source at the boundary).
+    """
+    try:
+        lim = _as_profile(profile).length_limits().get("cover letter") or {}
+    except Exception:                                          # noqa: BLE001 -- never gate
+        return False
+    source = str(lim.get("source") or "").strip().lower()
+    return bool(source) and not source.startswith("master-prompt preference")
 
 
 def cover_letter_guidance(profile=None) -> dict:
@@ -2488,13 +2549,17 @@ def length_rule_text(profile=None) -> str:
     counting_clause = main_text_counting_text(prof)
     counting_sentence = counting_clause[:1].upper() + counting_clause[1:]
     if abstract["cap"] is None and main["cap"] is None:
+        gap_notes = _length_limit_gap_notes(prof)
         limits_para = (
             f"      carries): this venue profile publishes no abstract or main-text number for\n"
             f"      {_article_phrase(prof)}, so there is no relaxed cap to apply here. The limits "
             f"that DO\n"
             f"      apply are the target journal's own: every stage COUNTS the abstract and "
             f"the main text, and each\n"
-            f"      artifact names the limit it applied and the source it came from ({source}).")
+            f"      artifact names the limit it applied and the source it came from ({source})."
+            + ((" The profile's own notes also record rules this pipeline does NOT model, so "
+                "the absence of a cap is not the whole rule set: " + gap_notes + ".")
+               if gap_notes else ""))
     else:
         cap_bits = []
         if abstract["cap"] is not None:
@@ -2541,8 +2606,20 @@ def length_rule_text(profile=None) -> str:
         "is counted and recorded, but this profile configures no TOTAL-content cap, so "
         "no\n      total-word limit is applied to it.")
     if cover_clause:
+        # The heading and the "never a requirement" clause follow the SAME
+        # provenance test as the rest of the block: a bound recorded from a
+        # venue guideline may not be called a preference the venue does not
+        # state (F85). An absent source keeps the historical wording.
+        cover_from_venue = _cover_source_is_venue_guideline(prof)
+        cover_heading = ("THE COVER LETTER — THE VENUE PROFILE'S RECORDED LIMIT"
+                         if cover_from_venue else
+                         "A RECORDED PREFERENCE, NOT A COVER-LETTER WORD LIMIT")
+        cover_status = ("reported against that recorded basis, and it is never gated"
+                        if cover_from_venue else
+                        "never presented as a journal requirement, and it is never \"fixed\" "
+                        "by deleting content")
         cover_para = (
-            f"    * THE COVER LETTER — A RECORDED PREFERENCE, NOT A COVER-LETTER WORD LIMIT. "
+            f"    * {cover_heading}. "
             f"Provenance, stated honestly:\n"
             f"      {limits['cover letter'].get('source') or 'the venue profile states no official cover-letter limit.'}\n"
             f"      {cover_origin}the "
@@ -2555,9 +2632,7 @@ def length_rule_text(profile=None) -> str:
             f"be\n"
             f"      {cover_clause}. A persuading part outside that\n"
             f"      range is a MINOR formatting item (check id M19), reported and never gated; it "
-            f"is never\n"
-            f"      presented as a journal requirement, and it is never \"fixed\" by deleting "
-            f"content. Count it\n"
+            f"is {cover_status}. Count it\n"
             f"      with the pipeline's word rule. The letter's TOTAL content -- salutation, "
             f"body, disclosures\n"
             f"      and signature -- {cover_total_clause}")
@@ -2646,8 +2721,11 @@ def standing_exemptions_text(profile=None) -> str:
         "budget: file a page-budget finding only when the target journal's own guidelines "
         "state one, and cite the guideline")
     cover_bullet = (
-        f"  * The master prompt's COVER-LETTER rule (the persuading part must be {cover_clause})\n"
-        f"    stays a flaggable formatting item: report it, never gate on it. The LETTER ITSELF\n"
+        (f"  * The venue profile's recorded COVER-LETTER limit (the persuading part must be "
+         f"{cover_clause})\n"
+         if _cover_source_is_venue_guideline(prof) else
+         f"  * The master prompt's COVER-LETTER rule (the persuading part must be {cover_clause})\n")
+        + f"    stays a flaggable formatting item: report it, never gate on it. The LETTER ITSELF\n"
         f"    {page_rule} AND\n"
         f"    its TOTAL content -- salutation, body, disclosures and signature -- {total_pref}.\n"
         f"    Trim the non-persuading boilerplate first, never a claim about\n"
@@ -2918,27 +2996,47 @@ def m19_blocks(profile=None) -> dict:
     cover_clause = _cover_preference_clause(prof)
     has_caps = not caps.startswith("this venue profile sets no")
     counting_clause = main_text_counting_text(prof)
+    length_gap_notes = _length_limit_gap_notes(prof)
     cover_total = prof.length_limits()["cover letter"].get("total_max")
     cover_total_note = (
         f"the cover letter's TOTAL content must stay within {cover_total} words (every line "
         f"counts: salutation, body, disclosures and signature)"
         if cover_total is not None else
         "this venue profile sets no cover-letter total-word cap")
-    cover_note = (cover_total_note
-                  + (f", and its persuading part is the USER PREFERENCE {cover_clause}"
-                     if cover_clause else ""))
-    cover_tail = (f"this is the user's preference, not {_indefinite(prof.short)} requirement, "
+    cover_source_venue = _cover_source_is_venue_guideline(prof)
+    cover_note = cover_total_note
+    if cover_clause:
+        cover_note += (f", and its persuading part is the venue profile's recorded "
+                       f"limit ({cover_clause})"
+                       if cover_source_venue else
+                       f", and its persuading part is the USER PREFERENCE {cover_clause}")
+    cover_tail = (f"this is the venue profile's own recorded cover-letter limit, not "
+                  f"the operator's preference, and an over-limit persuading part is "
+                  f"reported as a MINOR formatting item (check id M19), never a gate"
+                  if cover_source_venue else
+                  f"this is the user's preference, not {_indefinite(prof.short)} requirement, "
                   f"and the venue "
-                  f"profile publishes no cover-letter limit"
-                  if cover_clause else "no cover-letter preference is configured")
+                  f"profile publishes no cover-letter limit")
     if cover_total is not None:
         cover_tail += f"; the {cover_total}-word TOTAL cap is the operator's budget"
     cover_row = (
-        f"only when the persuading part falls outside the user preference "
-        f"({cover_clause}) -- never as a journal requirement, and never a reason to delete content."
+        (f"only when the persuading part falls outside the venue profile's recorded "
+         f"limit ({cover_clause}) -- report it against that recorded basis, never as a "
+         f"pipeline-invented requirement, and never a reason to delete content."
+         if cover_source_venue else
+         f"only when the persuading part falls outside the user preference "
+         f"({cover_clause}) -- never as a journal requirement, and never a reason to "
+         f"delete content.")
         if cover_clause else
         "only when a cover-letter preference is configured -- never as a journal requirement, "
         "and never a reason to delete content.")
+    cover_judge_provenance = (
+        "the cover-letter limit is the one the venue profile records: an over-limit "
+        "persuading part is at most a +/-1 formatting-tier difference, reported against "
+        "that recorded basis and never a gate."
+        if cover_source_venue else
+        "the cover-letter preference is user-set: it is at most a +/-1 formatting-tier "
+        "difference, never a journal requirement.")
     # The cover-letter TOTAL cap is a profile value like every other M19
     # number: a profile that configures none must not be told to hit "the
     # configured cap" (or the default venue's 650) in a mandate.
@@ -2957,12 +3055,17 @@ def m19_blocks(profile=None) -> dict:
                            "and never cut it for length.")
         rewrite_cover = ("the cover letter has no configured TOTAL-content cap: count it and never "
                          "cut it for length")
-    # The persuading-part preference is separate from the TOTAL cap: say
-    # nothing about "the configured preference" when the profile configures
-    # none (an explicit null pair means none).
+    # The persuading-part rule is separate from the TOTAL cap: say nothing about
+    # "the configured preference" when the profile configures none (an explicit
+    # null pair means none), and name a recorded venue limit as the venue's own.
     pref_clause = (
-        f" -- and when the persuading part is outside the user's {cover_clause} preference, bring "
-        f"it into the range by removing redundancy only (never content); {cover_tail}"
+        (f" -- and when the persuading part is outside the venue profile's recorded "
+         f"limit ({cover_clause}), bring it into the range by removing redundancy only "
+         f"(never content); {cover_tail}"
+         if cover_source_venue else
+         f" -- and when the persuading part is outside the user's {cover_clause} "
+         f"preference, bring it into the range by removing redundancy only (never "
+         f"content); {cover_tail}")
         if cover_clause else "")
     # The venue's OWN number is the base one; the pipeline's relaxation is a
     # margin, not a second cap. A section between the two used to be reported
@@ -3028,30 +3131,34 @@ If the base is ALREADY over a cap, surface it in rewritten/REWRITE_REPORT.md
 under "PROBLEMS SURFACED" -- the revision and integration stages own the compression, and this
 stage must not change content to achieve it. {band_clause}"""
     else:
+        gap_sentence = (
+            " The profile's own notes record rules this pipeline does NOT model (the absence of "
+            "a cap is not the whole rule set): " + length_gap_notes
+            + "; count and report those rules too."
+            if length_gap_notes else "")
         revise = f"""Abstract/main-text length (check id M19; see the length rule): this venue profile sets no
      abstract or main-text cap, so do NOT compress, reword or cut a section for length: count the
      abstract and the main text, name the limit the target journal's own guidelines give (and its
      source) in CHANGELOG.md, and change that text only for the non-length findings you were
      handed. Count with the pipeline's definition (maximal runs of NON-SPACE characters; a newline
      is a space), and hand any length question you cannot answer from the guidelines to
-     revised/MANUAL_STEPS.md instead of guessing. Cover letter: {cover_note}."""
-        integrate = """Abstract/main-text length (check id M19) is a REPORTED difference class, not a compression one:
+     revised/MANUAL_STEPS.md instead of guessing. Cover letter: {cover_note}.{gap_sentence}"""
+        integrate = f"""Abstract/main-text length (check id M19) is a REPORTED difference class, not a compression one:
 this venue profile sets no cap, so enumerate and diff the counts, never port or cut text because
-one version is shorter or longer, and never let a word count decide a comparison."""
-        rewrite = """Abstract/main-text length (check id M19) is REPORTED here, not fixed: this venue profile sets
+one version is shorter or longer, and never let a word count decide a comparison.{gap_sentence}"""
+        rewrite = f"""Abstract/main-text length (check id M19) is REPORTED here, not fixed: this venue profile sets
 no cap, so count the abstract and the main text and surface the counts (with the limit the target
 journal's guidelines state, and its source) in rewritten/REWRITE_REPORT.md under "PROBLEMS
-SURFACED". Never change content to reach a word count."""
+SURFACED". Never change content to reach a word count.{gap_sentence}"""
     judge = f"""PLUS the pipeline-mandated length sweep M19 (count the abstract and the main
    text -- and the cover letter's persuading part -- with the pipeline's word definition and record the rows in
    judge_review/artifacts/M19_length.md; {caps_article}; {cover_note}). Length is FORMATTING-tier evidence: a version within the cap may be
    preferred to one that is over it by at most +/-1, two versions that are both over (or both
    within) are indistinguishable and score 0, and a length row is a formatting-tier MINOR row
    whose +/-1 can never outweigh a difference in a higher tier.
-   An over-cap section never makes a version ineligible, and the cover-letter preference is
-   user-set: it is at most a +/-1 formatting-tier difference, never a journal requirement. A cover
-   letter whose TOTAL content is over its cap is a formatting-tier item too: report it, never gate
-   on it, and never let it outweigh a higher tier. {band_clause}"""
+   An over-cap section never makes a version ineligible, and {cover_judge_provenance}
+   A cover letter whose TOTAL content is over its cap is a formatting-tier item too: report it,
+   never gate on it, and never let it outweigh a higher tier. {band_clause}"""
     return {"review": review, "revise": revise, "integrate": integrate, "rewrite": rewrite,
             "judge": judge}
 
@@ -3601,6 +3708,19 @@ HIERARCHY_RECONCILE_INTEGRATE = """SOURCE-HIERARCHY (check id M30): an M30 findi
    under code/ with its rerun note, raw_data/ is never edited, and the DIFF_LEDGER row names
    which side was authoritative and why."""
 
+HIERARCHY_RECONCILE_REVISION_AUDIT = """SOURCE-HIERARCHY (check id M30): the authority order a WRONG-VALUE row is decided by is
+   @@SOURCE_HIERARCHY@@. Code outranks raw data; raw data is a READ-ONLY source and outranks every
+   editable surface (figures, tables, main text, supplementary text). A revision that changed a
+   written value so that it now disagrees with a shipped producer is a row against the revision,
+   never against the producer. The audit plans and reports: it edits neither the code, the data
+   nor the manuscript."""
+
+HIERARCHY_RECONCILE_REVISION_REPAIR = """SOURCE-HIERARCHY (check id M30): re-validate the row's claim against the standing order
+   @@SOURCE_HIERARCHY@@. Code outranks raw data; raw data is READ-ONLY and outranks every editable
+   surface. A row whose proposed `correct` value would move the written surface AWAY from its
+   producer is `rejected` with the contradicting evidence, not applied. Never edit raw_data/ or
+   code/ here."""
+
 
 def apply_hierarchy_reconcile(text: str, where: str) -> str:
     """Substitute the M30 block for the stage that owns it."""
@@ -3608,7 +3728,9 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
              "audit": HIERARCHY_RECONCILE_AUDIT,
              "revise": HIERARCHY_RECONCILE_REVISE,
              "rewrite": HIERARCHY_RECONCILE_REWRITE,
-             "integrate": HIERARCHY_RECONCILE_INTEGRATE}.get(where, "")
+             "integrate": HIERARCHY_RECONCILE_INTEGRATE,
+             "revision_audit": HIERARCHY_RECONCILE_REVISION_AUDIT,
+             "revision_repair": HIERARCHY_RECONCILE_REVISION_REPAIR}.get(where, "")
     # The block spells the hierarchy itself: the guided-review/audit/rewrite builders
     # fill @@SOURCE_HIERARCHY@@ only inside the attached master prose, so a
     # token left here would reach the session unresolved.
@@ -4011,7 +4133,9 @@ def _atc_mode(value=None) -> str:
     """
     if isinstance(value, bool):
         return "document" if value else "off"
-    s = str(value or "").strip().lower()
+    if value is None:
+        return DEFAULT_AUTHOR_TO_COMPLETE
+    s = str(value).strip().lower()
     if not s:
         return DEFAULT_AUTHOR_TO_COMPLETE
     if s in AUTHOR_TO_COMPLETE_MODES:
@@ -4476,8 +4600,14 @@ def manual_todo_gate(pkg_dir: Path, write: bool = True, mode: str = None) -> tup
             return [], [f"{pkg.name}: {note}"]
         return [], []
     rows, problems, sources = manual_todo_rows(pkg)
-    counts = sum(int(count_manual_steps(p) or 0) for p in files)
+    counts = sum(int(n) for n in (count_manual_steps(p) for p in files)
+                 if n is not None and n >= 0)
     errs, warns = [], []
+    for _p in files:
+        if count_manual_steps(_p) == MANUAL_STEPS_UNREADABLE:
+            errs.append(f"{pkg.name}: {_p.name} exists but could not be read; its "
+                        f"manual-item count is UNKNOWN (not 0). Make the file readable "
+                        f"and re-run")
     if problems:
         return problems, warns
     if not sources:
@@ -4525,7 +4655,10 @@ def manual_todo_gate(pkg_dir: Path, write: bool = True, mode: str = None) -> tup
                 f"cannot be replaced by a MANUAL_STEPS.md table")
     rows_by_source = Counter(r.get("source") for r in rows)
     for path in files:
-        n = int(count_manual_steps(path) or 0)
+        _count = count_manual_steps(path)
+        if _count is None or _count < 0:
+            continue          # absent, or already reported as unreadable above
+        n = int(_count)
         table_n = rows_by_source.get(path.name, 0)
         if n > table_n:
             warns.append(
@@ -4585,6 +4718,52 @@ def _clean_handoff_row(value) -> str:
     row = re.sub(r"\[\s*AUTHOR\s+TO\s+COMPLETE", "AUTHOR TO COMPLETE", row,
                  flags=re.I)
     return re.sub(r"\s+", " ", row).strip(" .;:")
+
+
+_HANDOFF_LOC_PAYLOAD_RE = re.compile(r"^(?P<loc>[^:|]{1,200}?):\s*(?P<payload>.+)$")
+
+
+def _handoff_action_rank(action) -> int:
+    """Stronger author action = smaller rank (applied > recommended > none)."""
+    return {MANUAL_ACTIONS[0]: 0, MANUAL_ACTIONS[1]: 1}.get(str(action or ""), 2)
+
+
+def _handoff_item_key(location, payload) -> tuple:
+    """The identity of ONE hand-off item: (location, payload), normalized.
+
+    `()` when the source names no payload: an item with no payload cannot be
+    matched to another spelling of the same item without risking two DIFFERENT
+    items collapsing into one (which would lose author work). A `missing `
+    prefix and a location repeated at the head of the payload are removed, so a
+    ledger row (`a.txt: software version`), a marker row
+    (`a.txt: missing software version`) and a stage description
+    (`software version`) for the same item share one key (F86).
+    """
+    loc = re.sub(r"\s+", " ", str(location or "")).strip().strip(" .;:").lower()
+    pay = re.sub(r"\s+", " ", str(payload or "")).strip().strip(" .;:").lower()
+    pay = re.sub(r"^missing\s+", "", pay)
+    if loc and pay.startswith(loc + ": "):
+        pay = pay[len(loc) + 2:].strip()
+    return (loc, pay) if pay else ()
+
+
+def _handoff_description_key(description, payload_index: dict) -> tuple:
+    """The item identity a checklist row DESCRIPTION names, or () when ambiguous.
+
+    A description that names its location (`a.txt: software version`) is
+    self-identifying. A bare payload (`software version`) is used only when
+    exactly ONE known item carries it: two items in different files that happen
+    to name the same payload must stay two rows, never collapse into one.
+    """
+    text = re.sub(r"\s+", " ", str(description or "")).strip().strip(" .;:").lower()
+    if not text:
+        return ()
+    text = re.sub(r"^missing\s+", "", text)
+    match = _HANDOFF_LOC_PAYLOAD_RE.match(text)
+    if match:
+        return _handoff_item_key(match.group("loc"), match.group("payload"))
+    keys = payload_index.get(text) or ()
+    return next(iter(keys)) if len(keys) == 1 else ()
 
 
 def _readme_action_rows(text: str) -> list:
@@ -4741,8 +4920,7 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     author text and bullets outside that block are preserved.
     """
     root = Path(root)
-    rows, problems = [], []
-    actions = {}
+    items, problems = [], []
     oi = open_items or {}
     # "discarded" rows are findings the auditor refused, not work the author
     # owes. Re-emitting one as a checklist item would make it impossible for
@@ -4762,26 +4940,55 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
                 f"{'; ' + tag if tag else ''}] "
                 f"{loc + ': ' if loc else ''}{ev}").strip()
         if text:
-            row = _clean_handoff_row(text)
-            rows.append(row)
             # The published row must carry the author action the manual-TODO
             # rule assigns: an already-applied correction is CONFIRM/REJECT
             # (action 1), never the "no LLMs-recommended corrections" action.
-            actions[row.lower()] = (
-                MANUAL_ACTIONS[0]
-                if status.lower() in MANUAL_TODO_APPLIED_STATUSES
-                else MANUAL_ACTIONS[2])
+            items.append({
+                "row": _clean_handoff_row(text),
+                "action": (MANUAL_ACTIONS[0]
+                           if status.lower() in MANUAL_TODO_APPLIED_STATUSES
+                           else MANUAL_ACTIONS[2]),
+                "key": _handoff_item_key(loc, ev),
+            })
     markers = _handoff_marker_occurrences(root, problems=problems)
     for occ in markers:
         payload = _clean_handoff_row(occ["marker"])
-        rows.append(f"{occ['file']}: missing {payload or 'the marked item'}")
+        items.append({
+            "row": f"{occ['file']}: missing {payload or 'the marked item'}",
+            "action": MANUAL_ACTIONS[2],
+            "key": _handoff_item_key(occ["file"], payload),
+        })
     # A summary residual can say "N hand-off markers" while the marker text
     # sits in a format this package cannot parse (for example an image-only
     # PDF). It is additive: another parsed row must not hide the unparsed one.
     for it in (residuals or {}).get("items") or []:
         if "hand-off marker" in str(it):
-            rows.append(_clean_handoff_row(it))
-    rows = [_clean_handoff_row(r) for r in rows if str(r).strip()]
+            items.append({"row": _clean_handoff_row(it),
+                          "action": MANUAL_ACTIONS[2], "key": ()})
+    # Deduplicate by the ITEM's own identity, not by the formatted row string:
+    # a ledger row, a marker row and a stage table description for the same
+    # missing item never render identically, so whole-string comparison wrote
+    # all three rows with contradictory author actions (F86). When two sources
+    # describe one item, the stronger action wins (applied > recommended >
+    # none) and the first (most informative) row text is kept.
+    rows, action_of, payload_index, by_key = [], {}, {}, {}
+    for it in items:
+        if not it["row"]:
+            continue
+        key = it["key"]
+        if key:
+            prev = by_key.get(key)
+            if prev is not None:
+                if _handoff_action_rank(it["action"]) < _handoff_action_rank(prev["action"]):
+                    prev["action"] = it["action"]
+                    action_of[prev["row"]] = prev["action"]
+                continue
+            by_key[key] = it
+            payload_index.setdefault(key[1], set()).add(key)
+        if it["row"].lower() in action_of and not key:
+            continue
+        rows.append(it["row"])
+        action_of[it["row"].lower()] = it["action"]
     rows = list(dict.fromkeys(r for r in rows if r))
     target = Path(target_path) if target_path is not None \
         else root / AUTHOR_TO_COMPLETE_README
@@ -4831,17 +5038,55 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     # block below, so this cannot duplicate an active row.
     external_rows = _readme_action_rows(external)
     known = {row.lower() for row in external_rows}
+    # A stage checklist already carrying a row for the item must keep it: the
+    # publisher adds only the items the checklist does NOT cover. The row is
+    # matched by ITEM identity (its description), never by the whole formatted
+    # line, which cannot equal a ledger or marker row (F86).
+    ext_struct, _ext_problems = manual_todo_rows_from_text(external)
+    ext_descriptions = [str(er.get("description") or "") for er in ext_struct]
+    ext_descriptions += [
+        m.group(1) for m in (re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$", ln)
+                             for ln in str(external or "").splitlines()) if m
+    ]
+    matched_keys = set()
+    for description in ext_descriptions:
+        key = _handoff_description_key(description, payload_index)
+        if key and key in by_key:
+            matched_keys.add(key)
     managed_now = []
     seen = set()
     for row in rows:
+        key = next((k for k, item in by_key.items() if item["row"] == row), ())
+        if key and key in matched_keys:
+            continue
         if row.lower() in known or row.lower() in seen:
             continue
         seen.add(row.lower())
         managed_now.append(row)
+    # An external row that already carries the item keeps its own T-id, but its
+    # author action is UPGRADED when another source records a stronger one: an
+    # applied ledger correction must reach the author as CONFIRM/REJECT, not as
+    # the stage row's "no LLM corrections" action (F86).
+    upgrade_rows, upgrade_ids = [], set()
+    for er in ext_struct:
+        key = _handoff_description_key(er.get("description"), payload_index)
+        src = by_key.get(key) if key else None
+        if src is None or key not in matched_keys:
+            continue
+        if _handoff_action_rank(src["action"]) < _handoff_action_rank(er.get("action")):
+            upgrade_ids.add(str(er.get("id") or ""))
+            upgrade_rows.append({
+                MANUAL_TODO_COLUMNS[0]: str(er.get("id") or ""),
+                MANUAL_TODO_COLUMNS[1]: str(er.get("importance") or "major"),
+                MANUAL_TODO_COLUMNS[2]: src["action"],
+                MANUAL_TODO_COLUMNS[3]: src["row"],
+            })
     base = external.strip()
     if not base:
         base = AUTHOR_TO_COMPLETE_README_HEADER.strip()
     base = re.sub(r"\n{3,}", "\n\n", base)
+    if upgrade_ids:
+        base = _drop_manual_todo_rows(base, upgrade_ids).rstrip("\n")
     # The publisher's managed block must carry the SAME classified inventory
     # the readme rule promises the author: one four-column row per item (with a
     # T-id that does not collide with the author's own rows), not a bullet list
@@ -4850,21 +5095,21 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     used = [int(m.group(1)) for m in re.finditer(
         r"\bT-(\d+)\b", existing + ("\n" + stage_text if stage_text else ""))]
     next_n = max(used, default=0) + 1
-    managed_rows = [{
+    managed_rows = list(upgrade_rows) + [{
         MANUAL_TODO_COLUMNS[0]: f"T-{next_n + i:03d}",
         MANUAL_TODO_COLUMNS[1]: "major",
-        MANUAL_TODO_COLUMNS[2]: actions.get(row.lower(), MANUAL_ACTIONS[2]),
+        MANUAL_TODO_COLUMNS[2]: action_of.get(row.lower(), MANUAL_ACTIONS[2]),
         MANUAL_TODO_COLUMNS[3]: row,
     } for i, row in enumerate(managed_now)]
     result = {"path": (target.name if target.parent == root else str(target)),
-              "items": len(managed_now),
-              "external_items": len(external_rows),
+              "items": len(managed_now) + len(upgrade_rows),
+              "external_items": max(0, len(external_rows) - len(upgrade_rows)),
               "generated_from": ("revision ledger" if oi.get("items") or oi.get("discarded")
                                  else "package hand-off markers")}
     author_text = external.strip()
     if author_text == header:
         author_text = ""
-    if not managed_now and not external_rows and not author_text:
+    if not managed_rows and not external_rows and not author_text:
         if target.is_file():
             target.unlink()
         if problems:
@@ -4872,7 +5117,7 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
             return result
         return {}
     pieces = [base]
-    if managed_now:
+    if managed_rows:
         table = manual_todo_markdown_table(managed_rows).rstrip("\n")
         if _manual_has_table(base):
             # The preserved author text already carries THE classified table:
@@ -5763,13 +6008,13 @@ RAW_DATA_READONLY_RULE = """
         real concern with the same standing (the concern ledger and the response letter answer
         it too, and its provenance is kept in the ledger's `author`/`source` columns);
       - `human_review_feedback/original_submission/` (when present) may be read ONLY to resolve
-        what a raised concern refers to and to decide whether the CURRENT manuscript (`base/`)
-        already answers a concern the reviewers raised against the earlier version. Never edit
-        it, never copy its text into a candidate package (all edits are made in `base/`), never
-        sweep, count or quote it as the authors' current prose, and never treat it as a
-        competing version: a concern that no longer exists in `base/` is `already-addressed`
-        (quoting the `base/` location that answers it) or `not-applicable` (with the reason) --
-        never a `to-fix` row whose only location is `original_submission/`;
+        what a raised concern refers to and to decide whether the package under view already
+        answers a concern the reviewers raised against the earlier version. Never edit it, never
+        copy its text into a candidate package, never sweep, count or quote it as the authors'
+        current prose, and never treat it as a competing version: a concern that no longer exists
+        in the package under view is `already-addressed` (quoting the location that answers it)
+        or `not-applicable` (with the reason) -- never a `to-fix` row whose only location is
+        `original_submission/`;
       - a JUDGE sees every area in its anonymized view under the labeled `evidence/` directory
         (see the judge prompt): `raw_data/` may be used to check correctness/completeness, and
         the two feedback areas may be used to check whether a version ADDRESSES the raised

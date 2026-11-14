@@ -139,6 +139,38 @@ COVER_DISCLOSURE = re.compile(
 # a `.tex` manuscript is counted with the same rule as a .md/.docx one instead
 # of being answered with a markup-inclusive "whole file" row.
 TEX_EXTS = (".tex", ".ltx")
+# convert_corpus.py keeps the original basename and appends `.txt`, so the
+# uniform corpus carries LaTeX as `<name>.tex.txt` (and Word as
+# `<name>.docx.txt`).  Reading that file as plain text produced a cap-null
+# "whole file" M19 row (F277); recognise the converted suffixes instead.
+CONVERTED_TEX_SUFFIXES = (".tex.txt", ".ltx.txt")
+CONVERTED_DOC_SUFFIXES = (".docx.txt", ".xlsx.txt")
+# A synthetic part marker written by convert_corpus.py ("### corpus-marker:
+# header (word/header1.xml)").  Page furniture (running heads/footers) is not
+# the authors' prose, and a marker line is never a word.
+CORPUS_MARKER = re.compile(
+    r"^\s*###\s*corpus-marker:\s*([A-Za-z][A-Za-z -]*?)(?=\s*[(:]|\s*$)", re.I)
+
+
+def strip_converted_page_furniture(text: str) -> str:
+    """Drop converter part markers and the header/footer text they introduce.
+
+    The `.docx.txt` representation appends Word's header/footer parts; counting
+    them inflated a 3-word main text to 20 in the F277 fixture.  Footnote and
+    endnote bodies are document text and stay (only their marker is dropped).
+    """
+    out, skip = [], False
+    for line in (text or "").splitlines():
+        m = CORPUS_MARKER.match(line)
+        if m:
+            skip = m.group(1).strip().lower() in ("header", "footer")
+            continue
+        if skip:
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 TEX_SECTION = re.compile(r"^\\(?:sub)*section\*?(?:\[[^\]]*\])?\{([^{}]*)\}")
 TEX_CAPTION = re.compile(r"\\caption(?:of)?\*?\s*(?:\{[^{}]*\}\s*)?(?:\[[^\]]*\]\s*)?\{")
 TEX_ENV_TOKEN = re.compile(r"\\(?:begin|end)\s*\{[^{}]*\}(?:\s*\[[^\]]*\])?")
@@ -171,13 +203,20 @@ def _tex_include_path(base: Path, arg: str):
     cand = Path(arg)
     if cand.suffix.lower() not in TEX_EXTS:
         cand = Path(str(cand) + ".tex")
-    path = cand if cand.is_absolute() else (base / cand)
-    try:
-        resolved = path.resolve()
-        resolved.relative_to(base.resolve())
-    except (OSError, ValueError):
-        return None                     # a path outside the manuscript directory
-    return resolved if resolved.is_file() else None
+    # A converted corpus names a LaTeX child `<name>.tex.txt`; without the
+    # `.txt` fallback an included chapter is never found in the corpus and the
+    # root alone is counted.
+    candidates = [cand] + [Path(str(cand) + ".txt")]
+    for candidate in candidates:
+        path = candidate if candidate.is_absolute() else (base / candidate)
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(base.resolve())
+        except (OSError, ValueError):
+            continue                # a path outside the manuscript directory
+        if resolved.is_file():
+            return resolved
+    return None
 
 
 _DOCX_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -999,6 +1038,8 @@ def main(argv=None) -> int:
             failed = True
             continue
         ext = p.suffix.lower()
+        _lname = p.name.lower()
+        is_tex = ext in TEX_EXTS or _lname.endswith(CONVERTED_TEX_SUFFIXES)
         if ext == ".docx":
             # A DOCX is a ZIP: reading it as UTF-8 text counted replacement
             # characters as words (F06). Extract the visible paragraphs, and
@@ -1026,7 +1067,11 @@ def main(argv=None) -> int:
                 print(f"error: cannot read {name}: {e}", file=sys.stderr)
                 failed = True
                 continue
-        if ext in TEX_EXTS:
+            if _lname.endswith(CONVERTED_DOC_SUFFIXES):
+                # A converted Word corpus file carries the converter's part
+                # markers and the header/footer text; neither is counted prose.
+                text = strip_converted_page_furniture(text)
+        if is_tex:
             # A multi-file manuscript's body lives in the children; counting
             # the master alone reported 1-2 words (F06).
             text = _tex_expand_includes(text, p.parent, source=p)

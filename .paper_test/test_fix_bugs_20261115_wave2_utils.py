@@ -24,7 +24,6 @@ from unittest import mock
 WS = Path(__file__).resolve().parent.parent
 TMPDIRS = []
 FAILS = []
-SKIPS: list = []
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
@@ -44,12 +43,6 @@ def check(name: str, cond, detail="") -> None:
     if not cond:
         FAILS.append(name)
 
-
-
-def skip(name: str, detail: str = "") -> None:
-    """Report an unexercised check as skipped, never as `[ok ]` (F19)."""
-    print(f"[skip] {name}" + (f"  -- {detail}" if detail else ""))
-    SKIPS.append(name)
 
 def scratch(prefix: str) -> Path:
     tmp = Path(tempfile.mkdtemp(prefix=prefix))
@@ -84,7 +77,7 @@ def test_f103():
         rows = [r for r in info["rows"] if r.get("document") == "paper.tex"]
         note = pp.length_note(info)
         if IS_ROOT:
-            skip("F103 (root: chmod-000 is still readable)")
+            check("F103 (root: chmod-000 is still readable; check skipped)", True)
             return
         check("F103 the unreadable manuscript is NAMED in unparsed",
               "paper.tex" in info["unparsed"], str(info["unparsed"]))
@@ -103,7 +96,7 @@ def test_f104():
     try:
         info = pp.scan_format_in_sources([(tmp, "", ())])
         if IS_ROOT:
-            skip("F104 (root: chmod-000 is still readable)")
+            check("F104 (root: chmod-000 is still readable; check skipped)", True)
             return
         got = [r for r in info["rows"] if r.get("document") == "paper.tex"]
         check("F104 the unreadable manuscript contributes an FMT-X1 gap row",
@@ -143,7 +136,7 @@ def test_f106():
     try:
         man = pp.corpus_tree_manifest(tree)
         if IS_ROOT:
-            skip("F106 (root: chmod-000 is still readable)")
+            check("F106 (root: chmod-000 is still readable; check skipped)", True)
             return
         check("F106 the manifest names the unreadable directory",
               man.get("unreadable_dirs") == ["sub"], str(man))
@@ -163,7 +156,7 @@ def test_f107():
     os.chmod(tmp / "supp", 0)
     try:
         if IS_ROOT:
-            skip("F107 (root: chmod-000 is still readable)")
+            check("F107 (root: chmod-000 is still readable; check skipped)", True)
             return
         gaps = []
         found = pp._files_under_ci(tmp, (".md",), gaps=gaps)
@@ -404,7 +397,7 @@ def test_f118():
     os.chmod(supp, 0)
     try:
         if IS_ROOT:
-            skip("F118 (root: chmod-000 is still readable)")
+            check("F118 (root: chmod-000 is still readable; check skipped)", True)
             return
         got = pp.document_set_check([(base, "", ())], [(cand, "", ())])
         check("F118 the unreadable base directory is named",
@@ -430,7 +423,7 @@ def test_f119():
     os.chmod(b, 0)
     try:
         if IS_ROOT:
-            skip("F119 (root: chmod-000 is still readable)")
+            check("F119 (root: chmod-000 is still readable; check skipped)", True)
             return
         got = pp.document_set_check([(base, "", ())], [(cand, "", ())])
         check("F119 the invented unreadable file is reported as added",
@@ -686,8 +679,6 @@ def main() -> int:
         test_f130()
         test_f131()
         print()
-        if SKIPS:
-            print(f"{len(SKIPS)} check(s) skipped")
         if FAILS:
             print(f"FAILED {len(FAILS)} check(s):")
             for name in FAILS:

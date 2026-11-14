@@ -86,10 +86,23 @@ MAIN_START = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:introduction|main text|background)\s*[:.\u2014\u2013-]?\s*$",
     re.I)
 
+# A STRUCTURED abstract labels its own paragraphs ("Background:", "Methods:",
+# "Results:", "Conclusions:").  Those labels spell like body section headings,
+# so the abstract-end scan ended the abstract at the first label: a structured
+# abstract measured 0 words and its body was charged to the main text (F265).
+# A label inside the abstract's own block is a label, not a section boundary;
+# one that follows a blank line after abstract prose is a real boundary.
+STRUCT_ABSTRACT_SUBHEAD = re.compile(
+    r"^\s*(?:background|methods?|materials\s+(?:and|&)\s+methods?|"
+    r"results?|conclusions?|objectives?|purposes?|aims?|importance|significance|"
+    r"design|setting|participants?|interventions?|outcomes?|measurements?|"
+    r"findings)\s*(?:[:.\u2014\u2013-])?\s*$", re.I)
+
 
 SECTION_BOUND = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary|keywords?|introduction|background|"
-    r"results?|discussion|conclusions?|materials (?:and|&) methods|online methods?|methods?|"
+    r"results?\s*(?:and|&)\s*discussion|results?|discussion|conclusions?|"
+    r"methods?\s*(?:and|&)\s*materials?|materials (?:and|&) methods|online methods?|methods?|"
     r"star methods|experimental procedures|"
     r"references?|bibliography|(?:literature|works) cited|figure legends?|acknowledg\w*|"
     r"author contributions?|"
@@ -100,7 +113,8 @@ SECTION_BOUND = re.compile(
 
 SECTION_KIND_RES = (
     ("methods", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials (?:and|&) methods|online methods?|methods?|"
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:methods?\s*(?:and|&)\s*materials?|"
+        r"materials (?:and|&) methods|online methods?|methods?|"
         r"star methods|experimental procedures)\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("references", re.compile(
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography|"
@@ -209,20 +223,33 @@ def section_bounds(lines, abstract_end=None):
             j = abs_start
             seen_text = inline_abs
             first_blank = None
+            prev_blank = False
             boundary = False
             while j < n:
                 line = (lines[j] or "").strip()
                 heading = heading_text(line)
                 if SECTION_BOUND.match(heading) or \
                         MAIN_START.match(heading) or KEYWORDS.match(heading):
+                    # A structured-abstract label is part of the abstract
+                    # block, not its end (F265).  It is a heading, not prose:
+                    # blank it so the abstract row counts only its text, then
+                    # keep scanning for the real section boundary.
+                    if STRUCT_ABSTRACT_SUBHEAD.match(heading) and \
+                            (not seen_text or not prev_blank):
+                        lines[j] = ""
+                        prev_blank = False
+                        j += 1
+                        continue
                     boundary = True
                     break
                 if not line:
                     if seen_text and first_blank is None:
                         first_blank = j
+                    prev_blank = True
                     j += 1              # leading blanks right after the heading
                     continue
                 seen_text = True
+                prev_blank = False
                 j += 1
             # A multi-paragraph abstract is legitimate; only a document
             # with no section boundary at all falls back to its first
