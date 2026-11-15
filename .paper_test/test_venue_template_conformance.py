@@ -2112,7 +2112,7 @@ def test_visual_template_render_and_comparison():
     # name each template document with its page count and report the comparison.
     target = sb / "target"
     (target / "work").mkdir(parents=True)
-    (target / "work" / "rendered.pdf").write_bytes(b"%PDF-1.4\n")
+    (target / "work" / "rendered.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
     art = sb / "VISUAL_CHECK.md"
     art.write_text(
         "Rendered every page with the fake Word renderer and looked at them.\n\n"
@@ -2144,7 +2144,7 @@ def test_visual_template_render_and_comparison():
     sb2 = tmp / "sandbox2"
     (sb2 / "visual_template").mkdir(parents=True)
     (sb2 / "target" / "work").mkdir(parents=True)
-    (sb2 / "target" / "work" / "rendered.pdf").write_bytes(b"%PDF-1.4\n")
+    (sb2 / "target" / "work" / "rendered.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
     nb.write_json_atomic(sb2 / "visual_template" / "manifest.json",
                          {"renderer": "none",
                           "documents": [{"role": "main", "source": "Fake_Template.docx",

@@ -171,6 +171,78 @@ instructions if applicable, and a summary of what was fixed, what was left for m
 why. Files that remain unchanged should be copied from "non_revised/" to "revised/".
 """
 
+# The rewrite/integrate builders must NOT receive ATTACHED_PHASE1/ATTACHED_PHASE2
+# wholesale: those blocks assign the REVIEW and REVISE roles and their products
+# (a review artifact, a finding ledger, revised/), which directly contradicts the
+# rewrite/integrate contract (AGENTS rule 1). This stage-scoped brief carries the
+# master prompt's applicable STYLE, FORMAT and EVIDENCE rules, names only the
+# stage's own output directory, and assigns no review/revision artifact.
+ATTACHED_WRITE_STAGE_BRIEF = """## Master-prompt STYLE, FORMAT and EVIDENCE rules (for the @@STAGE@@ stage only)
+
+This is NOT the review and NOT the revision. The master prompt's identification and revision
+workflows are deliberately not attached to this stage: they assign another role's products and
+output directory. Do not run either workflow, do not build a review artifact or a finding ledger,
+and do not write a package under any directory other than @@OUTPUT_DIR@@/. Your ONE product is
+@@OUTPUT_DIR@@/ (see the stage directive above and the end-of-prompt reminder below).
+
+The master prompt's STYLE, FORMAT and EVIDENCE discipline does govern @@OUTPUT_DIR@@/:
+
+1. Formatting that violates best practice for manuscript preparation — including but not limited
+   to justified alignment of main text (use left alignment), fonts that are too small or too
+   large for their part of the manuscript, fancy styles in the cover letter, and the persuading
+   part of the cover letter less than 300 or more than 500 words — unless such formatting is
+   required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
+2. Micro-formatting and consistency defects, including but not limited to: acronym-related errors
+   (including but not limited to: repeating fully expanded long-forms after their first use;
+   presenting short-forms without their corresponding long-forms at initial mention; failing to
+   place the short-form parenthetically immediately after the long-form exactly at first use; and,
+   crucially, not accounting for hyphenated variants of the same long-form [e.g., “copy number” vs
+   “copy-number”] – i.e., either neglecting to define both forms in the acronym’s first definition,
+   or subsequently mixing the abbreviation with the un-abbreviated hyphenated/unhyphenated forms
+   inconsistently); spacing irregularities (including but not limited to: inconsistent
+   figure-to-legend spacing, uneven paragraph breaks, and improper use of hyphens, en dashes, or em
+   dashes [e.g., using a hyphen for a range instead of an en dash]); unit and style inconsistencies
+   (e.g., mixed unit styles for the same quantity, and inconsistent citation formatting); font
+   (size, normal, bold, italic, etc., properties) inconsistencies, and any other similar stylistic
+   or formatting discrepancies. The entire manuscript should be 1.5-spaced (except that figure
+   caption texts are single-spaced).
+
+Length rule (withdraws this master prompt's blanket preference): the "never flag abstract/main-text
+word limits" preference is WITHDRAWN here -- the M19 rule above governs the abstract and main text,
+the M18 caption suggestion governs figure legends, and the cover letter keeps its own M19 rule.
+Never make length-driven cuts outside those M18/M19 rules.
+
+Never invent content, citations, numbers, or accession IDs (unresolvable items become
+"manual verification required"). `base/` and `non_revised/` are READ-ONLY and hash-verified; never
+edit them. Report unfixable issues — for any problem that cannot be resolved due to technical
+limitations (e.g., unreadable Zotero live fields, ambiguous numbers visible only inside figures) or
+that requires subjective scientific judgment, never guess: report it clearly and give me precise,
+step-by-step manual instructions so I can intervene personally. These unfixable issues should be
+grouped by issue type.
+
+Zotero live fields: if you cannot properly read or handle a live field, ignore the field contents
+and add it to a manual-verification list for me to verify in Word. Zotero tooling, when this run
+enables it, is installed by this checkout's `install_dependencies.sh`: the Zotero helper is
+`$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
+`$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
+`zot` command from pyzotero-cli -- are available as needed.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+pyzotero-cli first when it is available; then the Zotero MCP service when your session
+exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
+both unavailable.
+"""
+
+
+def attached_write_stage_brief(stage: str, profile=None) -> str:
+    """The stage-scoped style/format brief for a WRITE stage (rewrite/integrate)."""
+    stage = str(stage).lower()
+    out_dir = {"rewrite": REWRITTEN_DIR, "integrate": INTEGRATED_DIR}[stage]
+    text = (ATTACHED_WRITE_STAGE_BRIEF
+            .replace("@@STAGE@@", stage.upper())
+            .replace("@@OUTPUT_DIR@@", out_dir))
+    return render_venue_tokens(text, profile)
+
+
 # The three ATTACHED_* blocks are TEMPLATES (they carry @@VENUE_*@@ tokens);
 # the masters below are the renderings a caller appends to a prompt.
 ATTACHED_FULL = ATTACHED_HEAD + "\n" + ATTACHED_PHASE1 + "\n" + ATTACHED_PHASE2
@@ -4331,8 +4403,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     # file. Transform the assembled text AND the block bodies the page step will
     # match, so both sides stay identical.
     text = apply_author_to_complete_prompt(
-        text + shared_blocks() + attached_phase1(prof)
-        + "\n" + ATTACHED_PHASE2 + INTEGRATE_TAIL + venue_norm,
+        text + shared_blocks() + "\n" + attached_write_stage_brief("integrate", prof)
+        + INTEGRATE_TAIL + venue_norm,
         author_to_complete)
     pageable = [(title, apply_author_to_complete_prompt(block, author_to_complete))
                 for title, block in pageable_rule_blocks(prof, author_to_complete)]
@@ -4394,8 +4466,8 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     # Restore the operator-supplied values only after every @@...@@ pass (F80).
     text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
     text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
-    text = page_stage_prompt(sandbox, text + shared_blocks() + attached_head(prof) + "\n"
-                             + attached_phase1(prof) + "\n" + ATTACHED_PHASE2
+    text = page_stage_prompt(sandbox, text + shared_blocks() + "\n"
+                             + attached_write_stage_brief("rewrite", prof)
                              + REWRITE_TAIL + journal_block + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete),
                              "rewrite", execution_profile)

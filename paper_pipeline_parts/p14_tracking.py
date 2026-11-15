@@ -152,7 +152,13 @@ def tracking_previous_baseline(ctx: Ctx, r: int, vid: str) -> tuple:
     arm = arm_of_vid(vid)
     if arm == "integrate":
         rec = ctx.run(rid_for_fresh(r, vid)) or {}
-        self_id = str(rec.get("self_id") or A1_ID)
+        self_id = str(rec.get("self_id") or "")
+        if not self_id:
+            # A pruned/corrupt integration record must not fall back to a1: that
+            # would label the comparison against the wrong version as valid.
+            return "", [], ("the integration record carries no self/ member id "
+                            f"(run {rid_for_fresh(r, vid)} is missing or corrupt): the "
+                            "comparison baseline is UNKNOWN and was skipped")
         return self_id, corpus_sources(ctx, r, self_id), (
             f"the integration's own base (self/{self_id}: the version this "
             f"integration reworked)")
@@ -454,8 +460,10 @@ def write_text_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
 
 def redline_index(manifest: dict) -> dict:
     """{(round, version, source, revised_rel): comparison} from a redlines manifest."""
+    if not isinstance(manifest, dict):
+        return {}
     out = {}
-    for v in (manifest or {}).get("versions") or []:
+    for v in manifest.get("versions") or []:
         for c in v.get("comparisons") or []:
             out[(int(v.get("round") or 0), str(v.get("version") or ""),
                  str(c.get("source") or ""), str(c.get("revised_rel") or ""))] = c
@@ -584,7 +592,7 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     """
     rounds = [int(r) for r in (rounds if rounds is not None
                                else range(1, ctx.rounds_count() + 1))]
-    versions = list(versions) if versions else None
+    versions = None if versions is None else list(versions)
     out_root = ensure_aux_output_root(ctx.root, TRACKING_DIRNAME)
     index = redline_index(redlines_manifest)
     manifest = tracking_manifest(ctx, tool)
@@ -604,6 +612,16 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
 
     def put_version(entry: dict) -> None:
         key = (str(entry.get("round")), str(entry.get("version")))
+        old = prev_versions.get(key)
+        if entry.get("status") == "not materialized" and old \
+                and (old.get("comparisons") or []):
+            # A version whose sources are temporarily absent must not REPLACE
+            # its accumulated rows with a placeholder: keep the real rows and
+            # record the missing source as a skip.
+            old.setdefault("skipped", []).append({
+                "source": "this invocation",
+                "reason": "the version's sources were not found; the earlier rows were kept"})
+            return
         if key not in prev_versions:
             version_order.append(key)
         prev_versions[key] = entry
@@ -1077,7 +1095,14 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
             if rel:
                 # Keyed by (baseline token, rel path): the tracked include/
                 # bibliography for a token is only valid for that token's copy.
-                tracked[(str(c.get("baseline") or ""), rel)] = ctx.root / str(c["in_package"])
+                # A row records the INTENDED in-package path even when writing
+                # the copy failed, so only an existing file may be rewired.
+                _p = ctx.root / str(c["in_package"])
+                if _p.is_file():
+                    tracked[(str(c.get("baseline") or ""), rel)] = _p
+                else:
+                    c["pdf_error"] = (f"the in-package tracking copy {c['in_package']} "
+                                      f"is missing; the include pointer was left untouched")
     memo = {}
     for c in rows:
         if not c.get("ok") or c.get("ext") != ".tex" or not c.get("tool"):
@@ -1220,6 +1245,14 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
         # `--tool none` asks for NO difference tool at all (the same contract as
         # `redline --tool none`): the row is reported as skipped and no copy --
         # not even a logging fallback -- is written for the pair.
+        # `tool=none` must also REMOVE an older real copy at this pair's
+        # destination: leaving it there makes the manifest's "skipped" row
+        # contradict a tracked copy that still sits beside the candidate.
+        for _stale in (persist_out, persist_fallback, in_pkg_out):
+            if _stale is not None:
+                for _p in (Path(_stale), Path(_stale).with_suffix(TRACKING_PDF_EXT)):
+                    with contextlib.suppress(OSError):
+                        _p.unlink(missing_ok=True)
         rec["skipped"] = True
         rec["reason"] = "tool=none: only the manifest/report was requested"
         return rec
@@ -1302,10 +1335,13 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
     # A failed re-track must not leave the PREVIOUS real tracking copy beside
     # the new document: its name says "tracked copy of this version", and the
     # fallback branch of the freshness gate only looked at the logging sibling.
+    # The PDF siblings of an earlier SUCCESSFUL run say "tracked copy" too; the
+    # fallback path used to leave them beside the document.
     for _stale in (persist_out, in_pkg_out):
         if _stale is not None:
-            with contextlib.suppress(OSError):
-                Path(_stale).unlink(missing_ok=True)
+            for _p in (Path(_stale), Path(_stale).with_suffix(TRACKING_PDF_EXT)):
+                with contextlib.suppress(OSError):
+                    _p.unlink(missing_ok=True)
     if ext == ".docx":
         fb = write_docx_logging_fallback(base, cand, persist_fallback, token, reason)
     else:

@@ -5,6 +5,8 @@
 # the single-file source.
 from __future__ import annotations
 
+import glob
+
 # =====================================================================
 # RETRY COMMAND
 # =====================================================================
@@ -46,13 +48,23 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
     try:
         keep_latest = int(args.keep_latest)
     except (TypeError, ValueError):
-        die(f"prune: --keep-latest must be an integer, got {args.keep_latest!r}")
+        die(f"prune: --keep-latest must be an integer, got {args.keep_latest!r}", code=2)
     if keep_latest < 0:
         # A negative value used to be clamped to 0, which means "keep no
         # completed round". A typo (`-1`) therefore deleted EVERY round's
         # sandboxes and attempt archives without warning.
-        die(f"prune: --keep-latest must be 0 or greater, got {keep_latest}")
-    keep_from = max(1, R - keep_latest + 1)
+        die(f"prune: --keep-latest must be 0 or greater, got {keep_latest}", code=2)
+    # Count COMPLETED rounds, not configured ones: a root whose later rounds
+    # never ran has R > the number of finished rounds, and the old
+    # `R - keep_latest + 1` window then named an empty range and pruned the
+    # only completed round's sandbox.
+    completed = [r for r in range(1, R + 1) if round_is_done(ctx, r)]
+    if keep_latest <= 0:
+        keep_from, kept_rounds = R + 1, []
+    elif len(completed) <= keep_latest:
+        keep_from, kept_rounds = 1, completed
+    else:
+        keep_from, kept_rounds = completed[-keep_latest], completed[-keep_latest:]
     # The journal-facing runs (the feedback/concerns ledger, the response
     # letter, and the scoped revision whose published winner they describe) are
     # what a later `run` re-reads to rebuild `journal_submission/`; they are
@@ -83,19 +95,20 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
             targets.append((rec["id"], r, sb, dir_size(sb)))
         # The renamed failed sandboxes of the same rounds are scratch too -- the
         # attempt RECORDS stay in state.json, so `status` keeps the history.
-        for arch in sorted(ctx.runs_dir.glob(f"{rec['id']}_try*_failed")):
+        # Escape the run id: it is a filename component from state.json, and a
+        # metacharacter in it (`*`, `?`, `[...]`) used to make this glob match
+        # OTHER runs' attempt archives and delete them as this run's.
+        for arch in sorted(ctx.runs_dir.glob(f"{glob.escape(str(rec['id']))}_try*_failed")):
             if arch.is_dir():
                 archives.append((rec["id"], r, arch, dir_size(arch)))
     total = sum(t[3] for t in targets) + sum(t[3] for t in archives)
     print(f"[prune] root: {ctx.root}")
-    if keep_from > R:
-        # `--keep-latest 0` is legal ("keep no completed round"), but
-        # `max(1, R - 0 + 1)` is R+1, and the old unconditional message printed
-        # the impossible range "(rounds 4..3)".
+    if not kept_rounds:
+        # `--keep-latest 0` is legal ("keep no completed round").
         _keep = (f"keeping NO completed round's sandbox (--keep-latest {args.keep_latest})")
     else:
-        _keep = (f"keeping sandboxes of the last {args.keep_latest} round(s) "
-                 f"(rounds {keep_from}..{R})")
+        _keep = (f"keeping sandboxes of the last {len(kept_rounds)} completed round(s) "
+                 f"(round(s) {', '.join(str(r) for r in kept_rounds)})")
     print(f"[prune] {_keep}; pins, published winners, reports, state.json, the "
           f"redlines/ and tracking/ copies and the persistent pdfs/ tree are never touched")
     if keep_ids:
@@ -177,7 +190,7 @@ def _order_retry_targets(ctx: Ctx, targets: list) -> list:
         if rid in visited:
             return
         if rid in visiting:
-            die(f"retry: selected runs have a dependency cycle at {rid!r}")
+            die(f"retry: selected runs have a dependency cycle at {rid!r}", code=2)
         visiting.add(rid)
         rec = by_id[rid]
         planned = plans[int(rec["round"])].get(rid, ())
@@ -211,13 +224,13 @@ def _judge_selection_for_retry(ctx: Ctx, r: int, spec: str):
                                        lambda rr: judgeable_ids(ctx, rr),
                                        lambda rr: round_judges(ctx, rr))
     except ValueError as e:
-        die(f"--runs: {e}")
+        die(f"--runs: {e}", code=2)
     picked = {(str(v), int(k)) for rr, v, k in triples if int(rr) == int(r)}
     if not picked:
         where = f"`agents --root {ctx.root}`" if getattr(ctx, "root", None) else "`agents`"
         die(f"--runs: the judge selection {spec!r} names no judge session of round {r} "
             f"(that round judges {', '.join(judgeable_ids(ctx, r)) or 'no version'}); run {where} "
-            f"to see the judge sessions that exist")
+            f"to see the judge sessions that exist", code=2)
     return picked
 
 
@@ -304,11 +317,11 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
              if on]
     if len(given) > 1:
         die(f"specify ONE of --run <ID>, --runs <SELECTION> or --all-failed (got "
-            f"{', '.join(given)})")
+            f"{', '.join(given)})", code=2)
     if args.run:
         rec = ctx.run(args.run)
         if rec is None:
-            die(f"unknown run id: {args.run}")
+            die(f"unknown run id: {args.run}", code=2)
         targets = [rec]
     elif getattr(args, "runs", None) is not None:
         # `--runs` takes the SAME selection grammar as `run --only` (rounds,
@@ -319,7 +332,7 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
         if only is None or not only:
             die("--runs: the selection names nothing; pass rounds, stages or sessions "
                 "(e.g. `--runs 1:review,1:feedback`; the grammar is the one documented for "
-                "`run --only`)")
+                "`run --only`)", code=2)
         only.validate(ctx.rounds_count(), flag="--runs")
         resolve_judge_run_ids(ctx, only, label="[retry]", flag="--runs")
         validate_only_selectors(ctx, only, flag="--runs")
@@ -341,7 +354,7 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
             return
         targets = _order_retry_targets(ctx, targets)
     else:
-        die("specify --run <ID>, --runs <SELECTION> or --all-failed")
+        die("specify --run <ID>, --runs <SELECTION> or --all-failed", code=2)
 
     # 1. Invalidate first and PERSIST it, before anything can fail. Invalidating
     #    a completed round archives its published winner and drops its pins; if
@@ -362,6 +375,7 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
     #    upstream output (revise/integrate/judge) is only REMATERIALIZED here when
     #    that upstream is still done; otherwise it stays stale and the staging
     #    loop rebuilds it, in dependency order, as soon as its upstream re-runs.
+    rebuild_failures = []
     for rec in targets:
         reset_run_record(rec)
         blocked = unmet_deps(ctx, rec)
@@ -369,6 +383,9 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
             rec["status"] = "stale"
             rec["stale_reason"] = f"operator reset {rec['id']}"
             ctx.log("retry-reset-pending", rec["id"])
+            # PERSIST the reset before claiming it: an in-memory mutation that
+            # is never saved leaves state.json reporting the old failed attempt.
+            ctx.save_state()
             print(f"[retry] {rec['id']}: reset; sandbox left for the staging loop "
                   f"(upstream not done yet: {', '.join(blocked)})")
             continue
@@ -380,9 +397,32 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
             print(f"[retry] {rec['id']}: reset; sandbox left for the staging loop ({e})")
             ctx.save_state()
             continue
+        except Exception as e:             # noqa: BLE001 -- materializers can fail any way
+            # `rebuild_sandbox` may already have MOVED the old sandbox to
+            # runs/<id>_try<N>_failed/. Letting the exception propagate as a raw
+            # traceback left state.json pointing at the now-missing live sandbox
+            # and the archive unreported. Persist a coherent stale record and
+            # surface a clean error instead.
+            rec["status"] = "stale"
+            rec["stale_reason"] = f"operator reset {rec['id']}: rebuild failed: {e}"
+            rec["last_error"] = f"{type(e).__name__}: {e}"
+            ctx.log("retry-rebuild-failed", rec["id"], str(e)[:200])
+            ctx.save_state()
+            archive = next((entry.get("archive") for entry in reversed(
+                rec.get("attempts_log") or []) if entry.get("archive")), None)
+            print(f"[retry] {rec['id']}: reset, but its sandbox could not be rebuilt "
+                  f"({type(e).__name__}: {e}); state saved"
+                  + (f"; the previous attempt is kept at {archive}/" if archive else "")
+                  + ". The staging loop will rebuild it when its inputs are available.",
+                  file=sys.stderr)
+            rebuild_failures.append(rec["id"])
+            continue
         if rec.get("kind") != "a1":
             rec["status"] = "pending"       # a1 is done by materialization itself
         ctx.log("retry-reset", rec["id"])
         print(f"[retry] reset {rec['id']} (sandbox rebuilt from current upstream content)")
         ctx.save_state()
+    if rebuild_failures:
+        die(f"retry: {len(rebuild_failures)} reset run(s) could not be rebuilt yet: "
+            f"{', '.join(rebuild_failures)}; state.json records them as stale (see last_error)")
     print(f"[retry] next: python {Path(sys.argv[0]).name} run --root {ctx.root}")

@@ -577,12 +577,21 @@ def test_f40_revision_ledger():
         {"id": "F-003", "verdict": "confirmed", "rationale": "source checked", "evidence": "main.md:3"}]}))
     errs, _warns = pp.revision_ledger_problems(pkg, ["F-001", "F-002", "F-003"], 3)
     check("rows with verdicts pass", errs == [], errs)
-    # The container name is not pinned: a plain ID LIST is the documented
-    # naming shape (test_llm_stochastic_failures A8b) and stays accepted.
+    # The container name is not pinned, but an ID LIST is naming only: it
+    # carries no verdict/rationale/evidence, so it is not a disposition (F007).
     (pkg / "revision_report.json").write_text(json.dumps(
         {"finding_ids": ["F-001", "F-002", "F-003"]}))
     errs, _warns = pp.revision_ledger_problems(pkg, ["F-001", "F-002", "F-003"], 3)
-    check("a plain id list is still accepted", errs == [], errs)
+    check("a plain id list names but does not dispose", 
+          any("without a VERDICT" in e for e in errs), errs)
+    # ... while an id list that accompanies real rows is still accepted.
+    (pkg / "revision_report.json").write_text(json.dumps(
+        {"finding_ids": ["F-001", "F-002", "F-003"], "rows": [
+            {"id": "F-001", "verdict": "confirmed", "rationale": "source checked", "evidence": "main.md:1"},
+            {"id": "F-002", "verdict": "false-positive", "rationale": "source checked", "evidence": "main.md:2"},
+            {"id": "F-003", "verdict": "confirmed", "rationale": "source checked", "evidence": "main.md:3"}]}))
+    errs, _warns = pp.revision_ledger_problems(pkg, ["F-001", "F-002", "F-003"], 3)
+    check("an id list alongside verdict rows is accepted", errs == [], errs)
 
 
 # ---------------------------------------------------------------- F41

@@ -157,7 +157,9 @@ CONFUSABLE_PAIRS = (
     ("validate", "verify"), ("validation", "verification"),
     ("correlation", "corroboration"), ("correlate", "corroborate"),
     ("quantitative", "qualitative"),
-    ("ranking", "score"), ("rank", "score"),
+    # `rank\w*` already matches "ranking"; keeping both pairs reported one
+    # ranking/score concept twice.
+    ("ranking", "score"),
     ("effective", "efficient"), ("comprise", "compose"),
     ("incidence", "prevalence"), ("mortality", "morbidity"),
     ("detection", "quantification"), ("limit of detection", "limit of quantification"),
@@ -861,6 +863,13 @@ def number_format_rows(paras: list) -> list:
         # NUMBER_RE it was read as `1` and `4` and never reached this check).
         # Only the NEW shape is excluded: a plain decimal (`1,234.5`) stays a
         # separator case exactly as it was before the exponent was accepted.
+        # NUMBER_RE also captures thin/NBSP/space separators and a leading
+        # sign; both are part of the quantity, so normalise them here.
+        n = str(n or "").strip()
+        if n[:1] in ("-", "+", "\u2212"):
+            n = n[1:]
+        n = (n.replace("\u2009", "").replace("\u202f", "")
+             .replace("\u00a0", "").replace(" ", ""))
         if not re.fullmatch(r"\d[\d,]*(?:\.\d+)?", n):
             return False
         # A comma is a THOUSANDS separator only when it groups three digits:
@@ -878,8 +887,13 @@ def number_format_rows(paras: list) -> list:
             return "," in n
         return True
     big = [n for n in nums if _is_quantity(n)]
-    sep = [n for n in big if "," in n]
-    plain = [n for n in big if "," not in n]
+
+    def _is_separated(x: str) -> bool:
+        body = str(x or "").lstrip("-+\u2212")
+        return bool(re.search(r"[,\u2009\u202f\u00a0 ]", body))
+
+    sep = [n for n in big if _is_separated(n)]
+    plain = [n for n in big if not _is_separated(n)]
     if sep and plain:
         rows.append({"rule": "FMT-T9h", "severity": "low",
                      "evidence": f"4+-digit numbers mix thousands separators "
@@ -2579,17 +2593,25 @@ def _fmt_number(value: float) -> str:
     return out or "0"
 
 
-def table_column_stats(tables: list) -> list:
+def table_column_stats(tables: list, coverage: dict = None) -> list:
     """One row per (shipped table, column): its size and numeric shape.
 
     This is the producer-side half of an M30 row: `n rows` is what a
     cohort-size claim must reconcile against, and min/max/mean/sum are what a
     rounded or aggregated written value can be checked against. `values` stays
     on the row for the seed's own exactness test (the artifact table prints the
-    other columns).
+    other columns), and it carries EVERY numeric cell of the column: a silent
+    `values[:200]` made a written value at data row 250 read as "no exact match
+    in column" although `reconcile_number_rows` proved it from the same table.
+
+    The 40-file cap is a budget, never a silent coverage cut (AGENTS rule 8):
+    when `coverage` (a caller's dict) is passed, it receives `total`,
+    `examined` and `omitted`, so `hierarchy_seed_rows` can record the INCOMPLETE
+    row instead of reporting "no shipped table column matches".
     """
     stats = []
-    for name, text in (tables or [])[:TABLE_STATS_FILE_LIMIT]:
+    all_tables = list(tables or [])
+    for name, text in all_tables[:TABLE_STATS_FILE_LIMIT]:
         header, body = _simple_table(text)
         if header is None:
             continue
@@ -2612,7 +2634,11 @@ def table_column_stats(tables: list) -> list:
                           "mean": _fmt_number(sum(values) / len(values)) if values else "",
                           "sum": _fmt_number(sum(values)) if values else "",
                           "examples": ", ".join(examples),
-                          "values": values[:200]})
+                          "values": values})
+    if coverage is not None:
+        coverage["total"] = len(all_tables)
+        coverage["examined"] = min(len(all_tables), TABLE_STATS_FILE_LIMIT)
+        coverage["omitted"] = max(0, len(all_tables) - TABLE_STATS_FILE_LIMIT)
     return stats
 
 
@@ -2834,20 +2860,31 @@ def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
             continue
         for m in NEGATIVE_CLAIM_RE.finditer(s):
             claims_seen += 1
-            sentence = s[max(0, m.start() - 200):m.end() + 200]
+            window_start = max(0, m.start() - 200)
+            sentence = s[window_start:m.end() + 200]
             lowered = sentence.lower()
             # The claim's SUBJECT, inferred from word order: only a token that
             # PRECEDES the negative phrase can be what the sentence says was
             # "not run" ("SCYN could not be run"). A token that merely follows
             # it ("... were excluded before the SCYN caller was applied") is
             # not the subject, and pairing it reported the opposite of the text.
-            claim_at = m.start() - max(0, m.start() - 200)
+            claim_at = m.start() - window_start
+            # The ±200-character window is NOT a sentence: a token from the
+            # PRECEDING sentence inside it was accepted as the subject of this
+            # one, so "We applied CHISEL. SCYN could not be run." filed a
+            # contradiction against CHISEL. The subject must sit in the same
+            # sentence as the negative phrase: start the token search after the
+            # last sentence boundary before the claim.
+            sent_start = 0
+            for boundary in re.finditer(r"[.!?][\"'\u201d\u2019)\]]*\s+", sentence[:claim_at]):
+                sent_start = boundary.end()
+            subject = lowered[sent_start:]
             method_only = NEGATIVE_SUBJECT_METHOD_ONLY_RE.search(m.group(0)) is not None
             hits = []
             for token, entries in tokens.items():
                 tm = re.search(r"(?<![A-Za-z0-9])" + re.escape(token)
-                               + r"(?![A-Za-z0-9])", lowered)
-                if tm is None or tm.start() >= claim_at:
+                               + r"(?![A-Za-z0-9])", subject)
+                if tm is None or sent_start + tm.start() >= claim_at:
                     continue
                 for tool_like, where, ctx in entries:
                     if method_only and not tool_like:
@@ -2937,7 +2974,8 @@ def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> li
     verdict column is left empty: the session reconciles, or records that the
     producer is not in the corpus.
     """
-    stats = table_column_stats(tables)
+    coverage = {}
+    stats = table_column_stats(tables, coverage=coverage)
     rows, seen = [], set()
     for r in number_rows or []:
         if str(r.get("source") or "").strip():
@@ -3037,6 +3075,23 @@ def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> li
                      "producer summary": "",
                      "seed check": ("the omitted written values were not compared against "
                                     "any producer; raise the cap or add the rows manually")})
+    if coverage.get("omitted"):
+        # The table-file cap hid every table after the 40th, so a value whose
+        # producer sits there was reported as "no shipped table column matches
+        # this sentence" (a producer-not-in-corpus hand-off) instead of being
+        # compared. Record the omission, like the row cap above.
+        rows.append({"document": "", "paragraph": None, "kind": "gap", "number": "",
+                     "unit": "",
+                     "sentence": (f"{coverage['omitted']} shipped table file(s) of "
+                                  f"{coverage['total']} were omitted by the "
+                                  f"{TABLE_STATS_FILE_LIMIT}-file M30 statistics cap and were "
+                                  f"NOT compared with any written value; this seed is "
+                                  f"INCOMPLETE -- raise the cap or record the gap"),
+                     "candidate producer": "(truncated — table-file cap reached)",
+                     "producer summary": "",
+                     "seed check": ("the omitted tables' columns were never examined; a value "
+                                    "whose producer sits there reads as absent from the "
+                                    "corpus -- record the gap or raise the cap")})
     return rows
 
 
@@ -3329,7 +3384,7 @@ def term_repetition_rows(paras: list, is_ref: list) -> list:
         if len(words) > 300 or len(words) < 40:
             continue                          # not a short passage
         low = [w.lower() for w in words]
-        hits = {}
+        hits, spans = {}, {}
         for n in (2, 3):
             for j in range(len(low) - n + 1):
                 if not all(w[:1].isupper() for w in words[j:j + n]):
@@ -3338,13 +3393,40 @@ def term_repetition_rows(paras: list, is_ref: list) -> list:
                 if any(w in REPETITION_STOPWORDS for w in gram.split()):
                     continue
                 hits[gram] = hits.get(gram, 0) + 1
+                spans.setdefault(gram, []).append((j, j + n))
         for w in sorted(set(low)):
             if len(w) >= 8 and w not in REPETITION_STOPWORDS:
                 hits[w] = low.count(w)
-        for term, count in sorted(hits.items(), key=lambda kv: (-kv[1], -len(kv[0])))[:3]:
+
+        def _qualifies(term: str, count: int) -> bool:
             if len(term.split()) >= 2:
-                if count < 3 or len(re.findall(rf"\b{re.escape(term)}", blob)) < 4:
-                    continue                  # a one-off list of names, not redundancy
+                return (count >= 3
+                        and len(re.findall(rf"\b{re.escape(term)}", blob)) >= 4)
+            return count >= 5
+
+        # A repeated proper name was counted once per overlapping n-gram:
+        # four repetitions of "The New York Times" emitted "new york times",
+        # "the new york" AND "york times" -- three descriptions of ONE repeated
+        # span, consuming the top-3 slots and hiding any other repeated term.
+        # Keep the maximal n-grams: a term every occurrence of which lies inside
+        # a LONGER qualifying term's occurrences describes the same repetition.
+        claimed, maximal = set(), set()
+        for term, count in sorted(
+                ((t, c) for t, c in hits.items()
+                 if len(t.split()) >= 2 and _qualifies(t, c)),
+                key=lambda kv: (-len(kv[0].split()), -kv[1], -len(kv[0]))):
+            occ = spans.get(term) or []
+            if occ and all(any(a < e and s < b for a, b in claimed) for s, e in occ):
+                continue                      # every occurrence is inside a longer one
+            maximal.add(term)
+            claimed.update(occ)
+        ordered = [(t, c) for t, c in sorted(hits.items(),
+                                             key=lambda kv: (-kv[1], -len(kv[0])))
+                   if len(t.split()) < 2 or t in maximal]
+        for term, count in ordered[:3]:
+            if len(term.split()) >= 2:
+                if not _qualifies(term, count):
+                    continue
             elif count < 5:
                 continue
             rows.append({"rule": "FMT-T8c", "severity": "medium",

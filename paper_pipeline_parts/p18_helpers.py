@@ -307,8 +307,17 @@ def _tex_include_path(base: Path, arg: str):
     return resolved if resolved.is_file() else None
 
 
+# An include DAG may legitimately repeat a child, so the expansion is not a
+# tree walk: a diamond doubles at every level. Cap the work rather than let a
+# 25-line manuscript-shaped file expand to tens of megabytes. An include left
+# unexpanded is reported by the caller as an unresolved include (a named gap).
+TEX_MAX_EXPANDED_CHARS = 8 * 1024 * 1024
+TEX_MAX_INCLUDE_EXPANSIONS = 2000
+TEX_MAX_INCLUDE_DEPTH = 32
+
+
 def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
-                         _stack=None):
+                         _stack=None, _budget=None):
     """Inline \\input/\\include/\\subfile children so a multi-file paper counts.
 
     The scan iterated each .tex file independently: the master's
@@ -337,9 +346,18 @@ def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
             pass
     stack = [] if _stack is None else _stack
     body = strip_tex_comment(text or "")
+    budget = _budget if _budget is not None else {
+        "chars": len(body), "expansions": 0}
+    if len(stack) >= TEX_MAX_INCLUDE_DEPTH:
+        # Too deep: leave this frame's includes as markup. The caller records
+        # each one as an unresolved include instead of expanding forever.
+        return body
     stack.append(body)
 
     def repl(match):
+        if (budget["expansions"] >= TEX_MAX_INCLUDE_EXPANSIONS
+                or budget["chars"] >= TEX_MAX_EXPANDED_CHARS):
+            return match.group(0)       # over budget: leave a named gap
         child = _tex_include_path(base, match.group(1))
         if child is None or child in seen:
             return match.group(0)
@@ -350,9 +368,11 @@ def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
             return match.group(0)
         if child_text in stack:
             return match.group(0)       # the same source text is already open
+        budget["expansions"] += 1
+        budget["chars"] += len(child_text)
         try:
             return _tex_expand_includes(child_text, base, seen, source=child,
-                                        _stack=stack)
+                                        _stack=stack, _budget=budget)
         finally:
             seen.discard(child)
 
@@ -442,6 +462,10 @@ def json_file_too_big(path: Path) -> bool:
 # expanded to 65,536 characters here, and a ZIP entry's declared size was never
 # checked at all (a small compressed entry can allocate gigabytes).
 MAX_DOCX_PART_BYTES = 64 * 1024 * 1024
+# A per-part cap does not bound the PACKAGE: many legal parts are still
+# decompressed together by the readers that materialize every member.
+MAX_DOCX_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_DOCX_ENTRIES = 4096
 
 
 def _docx_xml_part(z: zipfile.ZipFile, name: str):

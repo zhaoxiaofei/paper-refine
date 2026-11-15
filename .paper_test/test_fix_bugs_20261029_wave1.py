@@ -786,7 +786,11 @@ def test_f46() -> None:
     out.mkdir()
     rep = pf.repair_layout_package(src, out)
     check("F46 an unwritable --out is a report, not a traceback",
-          rep.get("ok") is False and "could not write/verify" in str(rep.get("error")),
+          rep.get("ok") is False
+          and ("could not write/verify" in str(rep.get("error"))
+               # C088: a directory destination is now refused BEFORE the write
+               # with a clearer message; it is still a report, never a traceback.
+               or "not a report file" in str(rep.get("error"))),
           str(rep)[:300])
 
 

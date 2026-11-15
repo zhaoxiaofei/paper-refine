@@ -1197,6 +1197,24 @@ def arm_of_vid(vid) -> str:
     return "integrate"
 
 
+# The hard upper bound on a round plan. The per-round lists are MATERIALIZED
+# to exactly `rounds` entries below, so `--rounds 100000000` used to allocate
+# proportional memory and die with a raw MemoryError traceback before setup had
+# validated anything (F242). No real plan approaches this bound; a larger value
+# is a usage error, not a resource decision.
+MAX_ROUNDS = 1000
+
+
+def _check_rounds_bound(rounds: int) -> int:
+    """Refuse a round count that would materialize an unbounded per-round plan."""
+    rounds = max(1, int(rounds))
+    if rounds > MAX_ROUNDS:
+        die(f"--rounds must be <= {MAX_ROUNDS} (got {rounds}): the per-round plan is "
+            f"materialized in full and a larger value is not a runnable schedule",
+            code=2)
+    return rounds
+
+
 def parse_round_counts(values, rounds: int, flag: str) -> list:
     """Normalize a per-round count list to exactly `rounds` entries.
 
@@ -1226,7 +1244,7 @@ def parse_round_counts(values, rounds: int, flag: str) -> list:
         die(f"{flag} needs at least one integer", code=2)
     if any(c < 0 for c in counts):
         die(f"{flag} values must be >= 0, got {counts}", code=2)
-    rounds = max(1, int(rounds))
+    rounds = _check_rounds_bound(rounds)
     if len(counts) < rounds:
         counts = counts + [counts[-1]] * (rounds - len(counts))
     return counts[:rounds]
@@ -1302,7 +1320,7 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
         masks.append(mask)
     if not masks:
         die(f"{flag} needs at least one bitmask", code=2)
-    rounds = max(1, int(rounds))
+    rounds = _check_rounds_bound(rounds)
     if len(masks) < rounds:
         masks = masks + [masks[-1]] * (rounds - len(masks))
     return masks[:rounds]
@@ -1418,6 +1436,13 @@ def round_counts(ctx, r: int) -> tuple:
     # the two counts must not discard the half it did record.
     recorded_m = plan.get("rewrites") if is_int(plan.get("rewrites")) else None
     recorded_n = plan.get("revises") if is_int(plan.get("revises")) else None
+    # A concern-scoped major/minor round runs NO rewrite arm. The guard must
+    # apply to the RECORDED pair too: the old early return handed a copied or
+    # hand-edited plan's rewrites=2 to round_run_plan, re-creating w1/w2 in a
+    # mode whose recorded plan must never carry them.
+    scoped_no_rewrite = journal_is_scoped(ctx) and not journal_rewrites_allowed(ctx)
+    if scoped_no_rewrite and recorded_m is not None:
+        recorded_m = 0
     if recorded_m is not None and recorded_n is not None:
         return max(0, int(recorded_m)), max(0, int(recorded_n))
     rounds = config_rounds(ctx)
@@ -1426,7 +1451,7 @@ def round_counts(ctx, r: int) -> tuple:
          int(counts_of(getattr(ctx, "cfg", None), "rewrites", rounds)[idx]))
     n = (int(recorded_n) if recorded_n is not None else
          int(counts_of(getattr(ctx, "cfg", None), "revises", rounds)[idx]))
-    if journal_is_scoped(ctx) and not journal_rewrites_allowed(ctx):
+    if scoped_no_rewrite:
         # major/minor are concern-scoped by definition: the round runs NO rewrite
         # arm. The guarantee is enforced HERE, at the single place both the run
         # plan and the decide re-derivation read M from, not only by setup's
@@ -2007,8 +2032,9 @@ def relaxation_note(profile=None) -> str:
         spec = limits[key]
         if spec.get("base") is None:
             continue
-        margin = int(round((float(spec["relaxation"]) - 1.0) * 100))
-        parts.append(f"+{margin}% on the {label} (<= {spec['cap']} words)")
+        margin = _relaxation_pct_text(spec)
+        if margin:
+            parts.append(f"+{margin}% on the {label} (<= {spec['cap']} words)")
     if not parts:
         return ("This venue profile sets no abstract/main-text cap: the counts are recorded "
                 "for the author to compare with the target journal's own guidelines")
@@ -2421,8 +2447,8 @@ def cover_letter_guidance(profile=None) -> dict:
     """The venue's RECORDED cover-letter guidance, in one shape every prompt reads.
 
     `preference` is the persuading-part range/one-sided bound ("" when the
-    profile states none), `total_max` the operator's total-content cap (None
-    when unset), and `source` the profile's own quoted basis -- the guideline
+    profile states none), `total_max` the venue profile's recorded TOTAL-content
+    cap (None when unset), and `source` the profile's own quoted basis -- the guideline
     text a cover letter falls back to when the venue ships no cover-letter
     template. Never invented: every field comes from the resolved profile.
     """
@@ -2444,7 +2470,7 @@ def cover_letter_guidance_clause(guide: dict) -> str:
         bits.append(f"the persuading part is {guide['preference']}")
     if guide.get("total_max") is not None:
         bits.append(f"its TOTAL content (salutation, body, disclosures and signature) "
-                    f"must stay within {guide['total_max']} words (the operator's cap)")
+                    f"must stay within {guide['total_max']} words (the venue profile's recorded TOTAL-content cap)")
     if guide.get("source"):
         bits.append(f"the recorded basis: {guide['source']}")
     return "; ".join(bits)
@@ -2458,6 +2484,12 @@ _NAMED_COUNTING_KINDS = (("abstract", "the abstract"), ("methods", "Methods"),
                          ("references", "references"),
                          ("figure-legends", "figure legends"),
                          ("table-captions", "table captions"))
+# Kinds that change the counted span only for a venue that EXCLUDES them (the
+# code-side counter honours `table-contents`). They are never named as INSIDE:
+# a profile that does not exclude them needs no sentence about them, and naming
+# them would bloat every prompt. Frontiers explicitly excludes them, and the
+# M19 renderer used to omit that exclusion from the stated span (F190).
+_OPTIONAL_COUNTING_KINDS = (("table-contents", "table contents"),)
 # Back-matter kinds are named separately: a venue whose ONLY exclusions are
 # these still leaves six sections out (the NBT Brief Communication), so the
 # renderer must not say "nothing EXCLUDED" for it.
@@ -2501,7 +2533,8 @@ def main_text_counting_text(profile=None) -> str:
     """
     prof = _as_profile(profile)
     excludes = set(prof.main_text_excludes())
-    left_out = [label for kind, label in _NAMED_COUNTING_KINDS if kind in excludes]
+    left_out = [label for kind, label in
+                (_NAMED_COUNTING_KINDS + _OPTIONAL_COUNTING_KINDS) if kind in excludes]
     inside = [label for kind, label in _NAMED_COUNTING_KINDS if kind not in excludes]
     back_out = _back_matter_counting_text(excludes)
     if not inside:
@@ -2523,7 +2556,8 @@ def _main_text_counting_short(profile=None) -> str:
     """
     prof = _as_profile(profile)
     excludes = set(prof.main_text_excludes())
-    left_out = [label for kind, label in _NAMED_COUNTING_KINDS if kind in excludes]
+    left_out = [label for kind, label in
+                (_NAMED_COUNTING_KINDS + _OPTIONAL_COUNTING_KINDS) if kind in excludes]
     inside = [label for kind, label in _NAMED_COUNTING_KINDS if kind not in excludes]
     back_out = [label for kind, label in _BACK_MATTER_COUNTING_KINDS if kind in excludes]
     parts = []
@@ -2534,6 +2568,45 @@ def _main_text_counting_short(profile=None) -> str:
     if back_out:
         parts.append(f"with {_join_words(back_out)} outside")
     return ", and ".join(parts) if parts else "with nothing excluded"
+
+
+def _relaxation_pct_text(spec) -> str:
+    """The exact relaxation margin as a percentage string (no false rounding).
+
+    `int(round(...))` printed 11.5% as 12%, so `base 100 +12% = 111` was a
+    false identity: the cap is floor(base*relaxation) = 111, not 112 (F189).
+    """
+    try:
+        pct = (float(spec.get("relaxation")) - 1.0) * 100.0
+    except (TypeError, ValueError):
+        return ""
+    if abs(pct - round(pct)) < 1e-9:
+        return str(int(round(pct)))
+    return f"{pct:.4f}".rstrip("0").rstrip(".")
+
+
+def _relaxed_cap_identity(spec) -> str:
+    """`base N +P% = cap` only when that identity is EXACT; else an explicit floor.
+
+    The cap is floor(base*factor), so a non-integral percentage can never be
+    written as an exact `+P%` equation. Keep the historical wording for the
+    shipped integer-percent profiles and state the floor otherwise (F189).
+    """
+    base, cap = spec.get("base"), spec.get("cap")
+    if base is None or cap is None:
+        return ""
+    pct = _relaxation_pct_text(spec)
+    if not pct or pct == "0":
+        return ""
+    try:
+        factor = float(spec.get("relaxation"))
+        exact = float(base) * factor
+    except (TypeError, ValueError):
+        return ""
+    if abs(exact - round(exact)) < 1e-9 and int(round(exact)) == int(cap):
+        return f"base {base} +{pct}% = {cap}"
+    return (f"base {base} +{pct}% -> {cap} "
+            f"(the cap is floor({base} x {factor:g}) = {cap})")
 
 
 def length_rule_text(profile=None) -> str:
@@ -2563,15 +2636,13 @@ def length_rule_text(profile=None) -> str:
     else:
         cap_bits = []
         if abstract["cap"] is not None:
-            margin = int(round((float(abstract["relaxation"]) - 1.0) * 100))
+            _identity = _relaxed_cap_identity(abstract)
             cap_bits.append(f"the abstract <= {abstract['cap']} words"
-                            + ("" if margin == 0 else
-                               f" (base {abstract.get('base')} +{margin}% = {abstract['cap']})"))
+                            + (f" ({_identity})" if _identity else ""))
         if main["cap"] is not None:
-            margin = int(round((float(main["relaxation"]) - 1.0) * 100))
+            _identity = _relaxed_cap_identity(main)
             cap_bits.append(f"the main text <= {main['cap']} words"
-                            + ("" if margin == 0 else
-                               f" (base {main.get('base')} +{margin}% = {main['cap']})"))
+                            + (f" ({_identity})" if _identity else ""))
         limits_para = (
             f"      carries): the limits below DO apply in their RELAXED form. For "
             f"{_article_phrase(prof)} the allowed\n"
@@ -2600,7 +2671,7 @@ def length_rule_text(profile=None) -> str:
                     "The preference recorded by the venue profile is therefore applied as written: ")
     cover_total = limits['cover letter'].get('total_max')
     cover_total_clause = (
-        f"is a SEPARATE cap of {cover_total} words (the operator's default): trim the "
+        f"is a SEPARATE cap of {cover_total} words (the venue profile's recorded TOTAL-content cap): trim the "
         f"non-persuading\n      boilerplate first, never a claim about the work."
         if cover_total is not None else
         "is counted and recorded, but this profile configures no TOTAL-content cap, so "
@@ -2698,13 +2769,12 @@ def standing_exemptions_text(profile=None) -> str:
     cover_clause = _cover_preference_clause(prof)
     cover_total = prof.length_limits()["cover letter"].get("total_max")
     total_pref = (
-        f"must stay within {cover_total} words (the operator's default cap; a profile may\n"
-        f"    override it)"
+        f"must stay within {cover_total} words (the venue profile's recorded TOTAL-content cap)"
         if cover_total is not None else
         "is counted and recorded, but this profile configures no TOTAL-content cap, so no\n"
         "    total-word limit is applied")
     total_plain = (
-        f"must stay within {cover_total} words (the operator's default cap)"
+        f"must stay within {cover_total} words (the venue profile's recorded TOTAL-content cap)"
         if cover_total is not None else
         "is counted and recorded with no total-word cap (this profile configures none)")
     # AGENTS rule 3: the page budget is a VENUE rule, so it is asserted only when
@@ -2732,8 +2802,9 @@ def standing_exemptions_text(profile=None) -> str:
         f"    the work, and the page count comes from a render, never from the cached document\n"
         f"    property."
         if cover_clause else
-        "  * This venue profile states no COVER-LETTER word rule: the letter's length is recorded\n"
-        f"    and reported, never gated and never cut. The LETTER itself {page_rule}, measured\n"
+        "  * This venue profile configures no COVER-LETTER persuading-part preference: the\n"
+        f"    letter's persuading length is recorded and reported, never gated and never cut. "
+        f"The LETTER itself {page_rule}, measured\n"
         f"    from a render, and its TOTAL content {total_plain}.")
     caption_source = (prof.captions.get("source")
                       or "this venue profile states no figure-legend length rule")
@@ -3018,7 +3089,8 @@ def m19_blocks(profile=None) -> dict:
                   f"and the venue "
                   f"profile publishes no cover-letter limit")
     if cover_total is not None:
-        cover_tail += f"; the {cover_total}-word TOTAL cap is the operator's budget"
+        cover_tail += (f"; the {cover_total}-word TOTAL cap is the venue profile's "
+                      f"recorded budget")
     cover_row = (
         (f"only when the persuading part falls outside the venue profile's recorded "
          f"limit ({cover_clause}) -- report it against that recorded basis, never as a "
@@ -3078,8 +3150,9 @@ def m19_blocks(profile=None) -> dict:
         _base, _cap = _spec.get("base"), _spec.get("cap")
         if _base is None or _cap is None or int(_cap) <= int(_base):
             continue
-        _margin = int(round((float(_spec["relaxation"]) - 1.0) * 100))
-        band_bits.append(f"{_label} base {_base} +{_margin}% = {_cap} words")
+        _identity = _relaxed_cap_identity(_spec)
+        if _identity:
+            band_bits.append(f"{_label} {_identity} words")
     band_clause = ""
     if band_bits:
         band_clause = (
@@ -3444,9 +3517,14 @@ def display_kind_rule_text(prof, kind: str, block: dict) -> str:
             "live in the legends area at the end, so no caption is required next to the image; "
             "the collect/keep-labels rule still applies (every legend carries its label).")
     else:
+        # No `caption` value (and `any`) means the venue pins NO caption rule:
+        # the code-side scan emits no caption row then. The old wording still
+        # claimed "no caption at all is FMT-TB1", inventing a requirement the
+        # profile never declared (F178).
         lines.append(
-            f"  * THE CAPTION: the venue does not pin the caption's side; a {kind} that carries "
-            f"no caption at all is still {r1}.")
+            f"  * THE CAPTION: this venue profile states no {kind} caption-side rule and no "
+            f"{kind} caption requirement; a {kind} that carries no caption at all is not "
+            f"{r1} on that ground.")
     specials = block.get("special") or []
     if specials:
         lines.append(
@@ -4314,7 +4392,12 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
                 f"{AUTHOR_TO_COMPLETE_README} could not be read (it is a symlink/non-regular "
                 f"file, unreadable, or over the byte budget); the hand-off item cannot be "
                 f"merged into it")
-    existing_rows, _row_problems = manual_todo_rows_from_text(existing)
+    existing_rows, row_problems = manual_todo_rows_from_text(existing)
+    if row_problems and warns is not None:
+        # The parser computed the exact problem and the caller discarded it, so
+        # a malformed existing row silently vanished from the merge (F185).
+        warns.extend(f"{AUTHOR_TO_COMPLETE_README}: existing hand-off row not usable: {p}"
+                     for p in row_problems)
     known = {re.sub(r"\s+", " ", re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", ln)
                       ).strip(" .;:").lower()
              for ln in existing.splitlines()
@@ -4326,6 +4409,11 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
         desc = re.sub(r"\s+", " ", str(row.get("description") or "")).strip().lower()
         if desc:
             known.add(desc)
+    # A refused row still NAMES an author item: seed `known` from every
+    # classified-table description (the parser accepted or refused), or the
+    # same item is appended as a fresh T-id beside its own malformed row.
+    for desc in _manual_todo_all_descriptions(existing):
+        known.add(desc)
     new = [it for it in items if it.lower() not in known]
     if not new:
         return {}
@@ -4524,6 +4612,35 @@ def manual_todo_rows_from_text(text: str) -> tuple:
             j += 1
         i = max(j, i + 1)
     return rows, problems
+
+
+def _manual_todo_all_descriptions(text: str) -> list:
+    """Descriptions of ALL classified-table rows, including rows the parser refused.
+
+    `manual_todo_rows_from_text` drops a row whose id/importance/action is
+    malformed, but its DESCRIPTION still names the same author item. The
+    hand-off merge reads this list so it cannot append that item again under a
+    new T-id (F185/F193).
+    """
+    lines = str(text or "").splitlines()
+    out, i = [], 0
+    while i + 1 < len(lines):
+        header = _manual_md_cells(lines[i]) if "|" in lines[i] else []
+        idx = _manual_header_columns(header) if header else {}
+        if not idx or not _manual_md_separator(lines[i + 1]):
+            i += 1
+            continue
+        j = i + 2
+        while j < len(lines) and "|" in lines[j]:
+            if not _manual_md_separator(lines[j]):
+                cells = _manual_md_cells(lines[j])
+                if len(cells) == max(idx.values()) + 1:
+                    desc = re.sub(r"\s+", " ", cells[idx["description"]]).strip().lower()
+                    if desc and desc not in out:
+                        out.append(desc)
+            j += 1
+        i = max(j, i + 1)
+    return out
 
 
 def _manual_has_table(text: str) -> bool:
@@ -4801,11 +4918,26 @@ def _handoff_description_key(description, payload_index: dict) -> tuple:
     # with a fresh T-id (F090).
     text = re.sub(r"^[a-z]-\d+\s*\[[^\]]*\]\s*", "", text)
     text = re.sub(r"^missing\s+", "", text)
+    known_keys = {k for pkeys in payload_index.values() for k in pkeys}
     match = _HANDOFF_LOC_PAYLOAD_RE.match(text)
     if match:
-        return _handoff_item_key(match.group("loc"), match.group("payload"))
+        key = _handoff_item_key(match.group("loc"), match.group("payload"))
+        if key in known_keys:
+            return key
     keys = payload_index.get(text) or ()
-    return next(iter(keys)) if len(keys) == 1 else ()
+    if len(keys) == 1:
+        return next(iter(keys))
+    # A hand-edited / older row can carry a non-canonical prefix the bracket
+    # strip above does not recognise (e.g. "F-001 manual-required M31: loc:
+    # payload"), so the location/payload match above produces an identity no
+    # known item carries. Fall back to the item's own PAYLOAD when exactly one
+    # known item carries it, so the malformed row still matches the ledger item
+    # and the same author work is not appended a second time (F193).
+    hits = set()
+    for payload, pkeys in payload_index.items():
+        if payload and len(payload) >= 12 and payload in text:
+            hits.update(pkeys)
+    return next(iter(hits)) if len(hits) == 1 else ()
 
 
 def _readme_action_rows(text: str) -> list:
@@ -5097,8 +5229,14 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     # publisher adds only the items the checklist does NOT cover. The row is
     # matched by ITEM identity (its description), never by the whole formatted
     # line, which cannot equal a ledger or marker row (F86).
-    ext_struct, _ext_problems = manual_todo_rows_from_text(external)
+    ext_struct, ext_problems = manual_todo_rows_from_text(external)
+    if ext_problems:
+        # The stage branch above REPORTS a refused table row; the external
+        # branch silently dropped it, so the same author item was appended
+        # under a new T-id beside its own malformed row (F193).
+        problems.extend(p for p in ext_problems if p not in problems)
     ext_descriptions = [str(er.get("description") or "") for er in ext_struct]
+    ext_descriptions += _manual_todo_all_descriptions(external)
     ext_descriptions += [
         m.group(1) for m in (re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$", ln)
                              for ln in str(external or "").splitlines()) if m

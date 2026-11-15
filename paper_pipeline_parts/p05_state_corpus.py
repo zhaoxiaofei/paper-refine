@@ -2719,7 +2719,17 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
             if oversized:
                 return data, [f"not stripped: part {oversized[0]!r} expands over the "
                               f"OOXML size budget; metadata left as is"]
-            items = [(i.filename, zin.read(i.filename)) for i in zin.infolist()]
+            infos = zin.infolist()
+            if len(infos) > MAX_DOCX_ENTRIES:
+                return data, [f"not stripped: package carries {len(infos)} parts, over the "
+                              f"OOXML entry-count budget ({MAX_DOCX_ENTRIES}); "
+                              f"metadata left as is"]
+            total = sum(i.file_size for i in infos)
+            if total > MAX_DOCX_TOTAL_BYTES:
+                return data, [f"not stripped: package expands to {total} bytes, over the "
+                              f"OOXML total size budget ({MAX_DOCX_TOTAL_BYTES}); "
+                              f"metadata left as is"]
+            items = [(i.filename, zin.read(i.filename)) for i in infos]
     except (zipfile.BadZipFile, OSError, KeyError, RuntimeError,
             NotImplementedError) as e:                            # noqa: BLE001
         return data, [f"not a readable OOXML zip ({e}); metadata left as is"]
@@ -4444,6 +4454,25 @@ def seed_cold_start_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
         ev = code_side_evidence(ctx, corpus, f"{rid_cold_start_review(r)}:probe")
     except Exception as e:                                        # noqa: BLE001
         ev = {"error": f"{type(e).__name__}: {e}"}
+    # A failed scan must not read as "the model found no claim": the cold-start
+    # review would then be told a clean empty list where the model never ran
+    # (a hidden coverage gap). Record the failure in the artifact itself.
+    claim_error = ""
+    if not isinstance(ev, dict):
+        claim_error = "the code-side evidence call returned no mapping"
+    else:
+        if ev.get("error"):
+            claim_error = str(ev["error"])
+        claims_ev = ev.get("claims")
+        if isinstance(claims_ev, dict) and claims_ev.get("error"):
+            claim_error = claim_error or str(claims_ev["error"])
+        if not isinstance(claims_ev, dict):
+            # The claim ledger shares the one guarded block with the number
+            # ledger; a failure there is recorded on `numbers`, never `claims`.
+            numbers_ev = ev.get("numbers")
+            if not claim_error and isinstance(numbers_ev, dict) and numbers_ev.get("error"):
+                claim_error = str(numbers_ev["error"])
+            claim_error = claim_error or "the code-side evidence carried no claim ledger"
     claim_rows = []
     for c in ((ev.get("claims") or {}).get("rows") or []):
         markers = c.get("markers")
@@ -4460,6 +4489,10 @@ def seed_cold_start_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
         "= a maximal claim, `under` = a hedge. This list is NOT the enumeration: read the surfaces "
         "themselves — the abstract, every figure legend, the cover letter, the Results and "
         "statistics paragraphs — and account for each surface in `coverage.md`.\n\n"
+        + (("> **COVERAGE GAP** — the code-side claim scan did not produce a ledger: "
+            + claim_error + ". An empty table below means the scan FAILED, not that the corpus "
+            "carries no claim. Enumerate the claim surfaces yourself and record this gap in "
+            "`coverage.md`.\n\n") if claim_error else "")
         + _evidence_artifact_table(
             claim_rows, ["document", "paragraph", "kind", "direction", "marker(s)", "sentence"],
             "no claim-bearing sentence was found by the code-side model")
@@ -4495,7 +4528,7 @@ def seed_cold_start_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
             ["family", "obligation", "resolves", "where"],
             "no obligation could be derived (no README declaration, no pointer, no display item)")
         + "\n"))
-    return {"claims": len(claim_rows)}
+    return {"claims": len(claim_rows), "error": claim_error}
 
 
 def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:

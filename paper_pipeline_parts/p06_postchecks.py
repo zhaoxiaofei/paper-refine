@@ -127,8 +127,17 @@ def relocate_stray_signal(ctx: Ctx, rec: dict) -> list:
         rel = found.relative_to(sb).as_posix()
         if not _signal_names_this_run(read_json(found, revive=False, lenient=True), rec, name):
             continue
+        dest = sb / name
+        if dest.exists() or dest.is_symlink():
+            # `shutil.move(src, dest_dir)` moves the file INSIDE a directory.
+            # A planted directory at the signal name therefore swallowed the
+            # valid stray marker while the note claimed it was ADOPTED.
+            notes.append(f"the `{name}` written to `{rel}` cannot be adopted: the sandbox "
+                         f"root already carries a non-file entry at `{name}`; remove it and "
+                         f"write the marker in the sandbox root")
+            continue
         try:
-            shutil.move(str(found), str(sb / name))
+            shutil.move(str(found), str(dest))
         except OSError as e:                                     # noqa: BLE001
             notes.append(f"the `{name}` written to `{rel}` could not be moved to the sandbox "
                          f"root ({type(e).__name__}: {e}); it will not be read from there")
@@ -504,10 +513,15 @@ def _copy_session_tools(sb: Path, stamp: float = None,
                 f"into {sb}: {type(e).__name__}: {e}") from e
     else:
         # A blinded sandbox gets no selfcheck/ at all: a stale bundle was just
-        # removed above, and an empty orchestrator-owned directory left behind
-        # would still be an orchestrator artifact beside the blinded packages.
-        with contextlib.suppress(OSError):
-            (sb / SELFCHECK_TOOL_DIR).rmdir()
+        # removed above, and ANY leftover orchestrator-owned entry beside the
+        # blinded packages is a leak. The old `rmdir()` (suppressing OSError)
+        # left every unknown file in place; remove the whole tree and fail
+        # staging if it cannot be emptied.
+        tool_dir = sb / SELFCHECK_TOOL_DIR
+        if not rmtree_force(tool_dir):
+            raise RuntimeError(
+                f"could not empty the orchestrator-owned {SELFCHECK_TOOL_DIR}/ beside a "
+                f"blinded sandbox: {tool_dir}")
     # Stamping is cosmetic (it keeps the copy from dating the sandbox): a
     # timestamp failure must not turn into a staging failure.
     if stamp is not None:
@@ -730,7 +744,10 @@ def _check_pristine_copy(ctx: Ctx, rec: dict, area: str, errs: list,
                 errs.append(f"{area}/ does not carry the pristine original's content any more "
                             f"(an anonymized view must keep the expected transformed content)")
         return
-    if not manifests_equal(hash_manifest(p, follow_dir_links=True), ctx.source_manifest):
+    # One unreadable file must be REPORTED as a mismatch, not raise
+    # PermissionError out of the whole postcheck.
+    if not manifests_equal(hash_manifest(p, follow_dir_links=True,
+                                         on_error="<unreadable>"), ctx.source_manifest):
         errs.append(f"{area}/ is not byte-identical to the setup-time pristine original")
 
 
@@ -1789,7 +1806,7 @@ def ledger_disposed_ids(ledger, wanted=()) -> set:
     ledgers have used an id list as their container. Such a list proves no id was
     dropped; it does not pretend to record a per-row verdict.
     """
-    return set(_ledger_verdict_map(ledger, wanted))
+    return {i for i, vs in _ledger_verdict_map(ledger, wanted).items() if vs}
 
 
 # ---------------------------------------------------------------------
@@ -1912,7 +1929,11 @@ COVERAGE_DISPOSITION_RE = re.compile(
 _COVERAGE_NEGATED_CHECK_RE = re.compile(
     r"(?i)\b(?:not|never|could\s+not|cannot|can['\u2019]t|wasn['\u2019]t|"
     r"weren['\u2019]t|isn['\u2019]t|didn['\u2019]t|did\s+not)\s+"
-    r"(?:be\s+)?(?:checked|verified|re-?derived|examined|reviewed|inspected)\b")
+    r"(?:be\s+)?(?:checked|verified|re-?derived|examin(?:e|ed)|reviewed|inspected)\b"
+    # `clean -- basis: no rows were checked` / `no row was examined`: the
+    # negated subject precedes the verb instead of following "not".
+    r"|\bno\s+[^.;\n]{0,40}?\b(?:was|were)\s+"
+    r"(?:checked|verified|re-?derived|examin(?:e|ed)|reviewed|inspected)\b")
 # A finding COUNT is not a reason-bearing form, so a count row whose tail says the
 # sweep never RAN contradicts its own "0 findings". This wider verb set is used
 # ONLY for the count form: `unable -- the pass was not performed` is a legitimate
@@ -1945,7 +1966,10 @@ def _coverage_reason_named(reason) -> bool:
     # named reason; the old length-only test counted its two letters and passed.
     if not reason or re.fullmatch(
             r"(?i)ok|okay|yes|y|done|checked|clean|good|fine|pass|passed|true|false|"
-            r"nil|null|no|none|n/?a|na|tbd|todo|unknown", reason):
+            r"nil|null|no|none|n/?a|na|tbd|todo|unknown|"
+            # `out of scope -- not applicable` / `unable -- not applicable` is a
+            # refusal, not a named reason: refuse it like every other filler.
+            r"not\s+applicable|not-applicable|inapplicable", reason):
         return False
     # A reason that negates the check's own verdict contradicts it.
     if _COVERAGE_NEGATED_CHECK_RE.search(reason) or _COVERAGE_NOWORK_RE.search(reason):
@@ -2069,7 +2093,10 @@ def _render_evidence_is_real(p: Path) -> bool:
         return False
     suf = p.suffix.lower()
     if suf == ".pdf":
-        return head.startswith(b"%PDF-")
+        # The header alone is not a render: a 9-byte `%PDF-1.7` file has no
+        # `%%EOF` trailer. Use the same complete-signature test as the
+        # renderer/cache path.
+        return pdf_signature_problem(p) == ""
     if suf == ".png":
         return head.startswith(b"\x89PNG\r\n\x1a\n")
     if suf in (".jpg", ".jpeg"):
@@ -2244,6 +2271,47 @@ def _toml_string_at(text: str, i: int):
     return None                                # unterminated
 
 
+def _toml_unquoted_mask(text: str) -> str:
+    """`text` with every string body and comment blanked out, offsets preserved.
+
+    A TOML key never lives inside a string or a comment, but the MCP entry
+    reader locates its keys with a line regex (`^command =`). An `args` value
+    carrying a multi-line string whose text contains `command = "evil"` was
+    therefore read as the executable, while TOML itself says `node` (F011).
+    Masking blanks those characters (to a NUL, never a space) and keeps every
+    newline and every offset, so a match end still indexes the ORIGINAL text
+    (the value readers are handed the unmasked body plus that offset).
+    """
+    src = str(text or "")
+    out = list(src)
+    # A string body becomes a NUL (never legal in a TOML document) rather than
+    # a space: the key readers' `[ \t]*` would otherwise swallow the blanked
+    # VALUE as trailing whitespace and hand the value reader the wrong offset.
+    # A COMMENT becomes spaces instead, so a legal trailing comment on a
+    # `[mcp_servers.x] # note` header still reads as a header line.
+    fill = "\x00"
+    i, n = 0, len(src)
+    while i < n:
+        ch = src[i]
+        if ch == "#":
+            nl = src.find("\n", i)
+            end = n if nl < 0 else nl
+            for k in range(i, end):
+                out[k] = " "
+            i = end
+            continue
+        if ch in "\"'":
+            got = _toml_string_at(src, i)
+            end = n if got is None else got[1]
+            for k in range(i, end):
+                if out[k] != "\n":
+                    out[k] = fill
+            i = end
+            continue
+        i += 1
+    return "".join(out)
+
+
 def _toml_array_values(raw: str):
     """The string values of a TOML array (`raw`), or None when unreadable.
 
@@ -2378,6 +2446,13 @@ def _toml_inline_table_values(raw: str):
                 return None
             value, i = m.group(0), i + len(m.group(0))
         out[str(key)] = str(value)
+        # TOML requires a comma between inline-table entries. The old loop
+        # treated comma/whitespace alike, so `{ A = "1" B = "2" }` (invalid)
+        # was accepted as two env entries.
+        while i < n and inner[i] in " \t":
+            i += 1
+        if i < n and inner[i] != ",":
+            return None
     return out
 
 
@@ -2398,13 +2473,24 @@ def mcp_server_spec(name: str) -> dict:
     # probed as absent.
     header = re.compile(r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
                         + quoted + r"'|" + quoted + r")\s*\]\s*(?:#.*)?$", re.MULTILINE)
-    m = header.search(text)
+    # The header itself is a line of TOML STRUCTURE: a `[mcp_servers.x]` line
+    # inside another entry's multi-line string does not configure a server. The
+    # mask keeps every offset, so the body slice still indexes the real text.
+    m = header.search(_toml_unquoted_mask(text))
     if not m:
         return {}
     rest = text[m.end():]
-    nxt = re.search(r"^\s*\[", rest, re.MULTILINE)
+    # The entry's body ends at the next table header, and its keys are found by
+    # a line regex -- but neither a header nor a key can legally live inside a
+    # TOML string or comment. Mask those bodies first (same length, same
+    # offsets) so an `args` value carrying a `command = "evil"` line is not
+    # read as the executable (F011), and a `[section]` line inside that string
+    # does not truncate the body and hide the real `command`.
+    masked_rest = _toml_unquoted_mask(rest)
+    nxt = re.search(r"^\s*\[", masked_rest, re.MULTILINE)
     body = rest[:nxt.start()] if nxt else rest
-    cm = re.search(r"^[ \t]*command[ \t]*=[ \t]*", body, re.MULTILINE)
+    keys = masked_rest[:nxt.start()] if nxt else masked_rest
+    cm = re.search(r"^[ \t]*command[ \t]*=[ \t]*", keys, re.MULTILINE)
     if not cm:
         return {}
     got = _toml_string_at(body, cm.end())
@@ -2415,7 +2501,7 @@ def mcp_server_spec(name: str) -> dict:
     # `C:\\Program Files\\node.exe` never started on Windows.
     command = os.path.expanduser(got[0])
     args = []
-    am = re.search(r"^\s*args\s*=\s*", body, re.MULTILINE)
+    am = re.search(r"^\s*args\s*=\s*", keys, re.MULTILINE)
     if am:
         raw = _toml_array_at(body, am.end())
         if raw is None:
@@ -2446,13 +2532,13 @@ def mcp_server_spec(name: str) -> dict:
     # fields in a Codex MCP entry. Dropping env/cwd launched the orchestrator's
     # server with the pipeline's environment and working directory instead of
     # the operator's configured one (F28).
-    wm = re.search(r"^[ \t]*cwd[ \t]*=[ \t]*", body, re.MULTILINE)
+    wm = re.search(r"^[ \t]*cwd[ \t]*=[ \t]*", keys, re.MULTILINE)
     if wm:
         cwd_got = _toml_string_at(body, wm.end())
         if cwd_got is None:
             return {}
         spec["cwd"] = os.path.expanduser(cwd_got[0])
-    em = re.search(r"^[ \t]*env[ \t]*=[ \t]*", body, re.MULTILINE)
+    em = re.search(r"^[ \t]*env[ \t]*=[ \t]*", keys, re.MULTILINE)
     if em:
         raw_env = _toml_inline_table_at(body, em.end())
         env_values = _toml_inline_table_values(raw_env) if raw_env is not None else None
@@ -3423,7 +3509,7 @@ def prior_proposal_ids(sb: Path) -> list:
     if text is None:
         return None
     out = []
-    for m in re.finditer(r"(?m)^#{2,3}\s*(M\d+)\b", text):
+    for m in re.finditer(r"(?m)^#{2,3}\s*(M\d+)\b", _mask_fenced_blocks(text)):
         if m.group(1) not in out:
             out.append(m.group(1))
     return out
@@ -3451,10 +3537,23 @@ def prior_proposal_dispositioned(pid: str, probe_blob: str, note_blob: str) -> b
         r"revisit(?:ed|ing)?|address(?:ed|ing)?|disposition(?:ed)?)\b"
         r"|\bno\s+(?:new\s+)?(?:re-?probe|probe|check|re-?run|examination|test)\b",
         re.I)
+    # A note that says the proposal is still AHEAD of this round is not a
+    # disposition either: `prior proposal M37: pending execution in the next
+    # round` and `... this round did nothing about it` both carry `prior` and
+    # no negation word, so the note route accepted them although they say the
+    # proposal was NOT dispositioned (F013). The pending vocabulary is refused
+    # on both routes.
+    _pending_re = re.compile(
+        r"(?i)\b(?:pending|deferred|postponed|outstanding|unaddressed|undone|"
+        r"not[\s-]+yet|still[\s-]+(?:pending|open|outstanding|to[\s-]+be)|"
+        r"to[\s-]+be[\s-]+(?:done|addressed|re-?probed|checked|examined)|"
+        r"next[\s-]+round|future[\s-]+round|later[\s-]+round|did\s+nothing|"
+        r"nothing\s+was\s+done|no\s+action|will\s+be\s+(?:done|addressed|"
+        r"re-?probed|checked)|not\s+addressed|left\s+undone|todo|tbd)\b")
     _probe_hit = None
     for _m in _pid_re.finditer(probe_blob):
         _window = probe_blob[max(0, _m.start() - 80):_m.end() + 80]
-        if _denial_re.search(_window):
+        if _denial_re.search(_window) or _pending_re.search(_window):
             continue          # "we did not re-probe M37" is not a re-probe
         _probe_hit = _m
         break
@@ -3463,7 +3562,8 @@ def prior_proposal_dispositioned(pid: str, probe_blob: str, note_blob: str) -> b
                              note_blob):
             window = note_blob[max(0, m.start() - 90):m.end() + 90]
             if re.search(r"\bprior\b", window.lower()) \
-                    and not _denial_re.search(window):
+                    and not _denial_re.search(window) \
+                    and not _pending_re.search(window):
                 # `M37 is a prior proposal that was NOT re-probed anywhere` used
                 # to pass the note route although the probe route refuses the same
                 # denial: the ±90-character window carried the word `prior` and
@@ -3880,6 +3980,7 @@ def parse_sweep_proposals(text: str) -> tuple:
     so the review contract and the `adopt-sweep` command share one reader.
     """
     proposals, problems = [], []
+    text = _mask_fenced_blocks(text)
     matches = list(re.finditer(r"(?m)^#{2,3}\s*(M\d+)\s*[—–-]\s*(.+?)\s*$", text))
     if not matches:
         return [], []
@@ -4187,7 +4288,12 @@ def _validate_llm_conflicts(conflicts: list, opinions: list) -> tuple:
                 if not run or run not in judges:
                     why = "a quote names no judge run of this conflict"
                     break
-                if text and text.lower() not in pair_text.get(
+                # An EMPTY quote used to skip the membership test (`if text`),
+                # so a conflict with no judge words passed as panel-backed.
+                if not text.strip():
+                    why = "an evidence quote is empty"
+                    break
+                if text.lower() not in pair_text.get(
                         (run, member, opponent), ""):
                     why = f"a quoted span is not in judge {run}'s sheet"
                     break
@@ -4723,6 +4829,9 @@ M1B_EMPTY_ROW_MARKER = "no long-form re-use detected"
 # The disposition columns of the artifact tables (`resolution` is the same
 # contract under the placeholder/ledger layouts' own name).
 M1B_DISPOSITION_COLUMNS = ("disposition", "resolution", "verdict")
+# ONE heading parser for the extractor and the missing-section gate: a heading
+# is `##`/`###` + M1b at the START of the line, never a prose mention of it.
+_M1B_HEADING_RE = re.compile(r"^(#{2,3})[ \t]*M1b\b")
 
 
 def _m1b_table(m1_md: str):
@@ -4740,13 +4849,19 @@ def _m1b_table(m1_md: str):
     carry the same parsing under other helper names.
     """
     lines = str(m1_md or "").splitlines()
-    start = next((i for i, ln in enumerate(lines) if ln.strip().startswith("## M1b")), None)
+    start, start_level = None, 0
+    for i, ln in enumerate(lines):
+        m = _M1B_HEADING_RE.match(ln.strip())
+        if m:
+            start, start_level = i, len(m.group(1))
+            break
     if start is None:
         return [], []
     header, rows = [], []
     for ln in lines[start + 1:]:
         s = ln.strip()
-        if s.startswith("## "):                 # the next section starts here
+        hm = re.match(r"^(#{2,6})[ \t]", s)
+        if hm and len(hm.group(1)) <= start_level:   # the next section starts here
             break
         if not s.startswith("|"):
             if rows:                            # the table is over
@@ -4805,12 +4920,16 @@ def m1b_audit_section_missing(m1_md: str) -> bool:
     sweep is clean), so its absence is a deleted audit, not a clean one.
     """
     text = str(m1_md or "")
-    if not text.strip() or "## M1b" in text:
+    if not text.strip():
         return False
     # Only the extractor's OWN inventory header identifies an artifact that
     # always carries the section. A hand-written minimal M1 table (a unit
     # fixture) is not evidence that the M1b audit was deleted.
-    return "ACRONYM INVENTORY" in text.upper()
+    if "ACRONYM INVENTORY" not in text.upper():
+        return False
+    # A level-3 `### M1b` IS the section; a prose sentence quoting "## M1b" is
+    # not. Parse headings exactly as `_m1b_table` does.
+    return not any(_M1B_HEADING_RE.match(ln.strip()) for ln in text.splitlines())
 
 
 def m1b_row_count(m1_md: str) -> int:
@@ -6549,6 +6668,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
     out_dir = output_dir_of(rec)
     cand_files = _candidate_corpus_files(sb, out_dir)
     cand_digests = set()
+    empty_cand = set()
     for key, p in cand_files:
         try:
             dig = sha256_file(p)
@@ -6559,6 +6679,8 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
         # scratch file happened to exist.
         if dig != EMPTY_SHA256:
             cand_digests.add(dig)
+        else:
+            empty_cand.add(p)
     # Rename-family bookkeeping (see the family skip in the main loop). A
     # candidate document can stand in for ONE base document whose name changed,
     # but only if it is not itself the exact-name survivor of another base
@@ -6583,7 +6705,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
     cand_free_keys: dict = {}
     for key, p in cand_files:
         if p.suffix.lower() in EDITABLE_DOC_EXTS and not is_bookkeeping_name(p.name) \
-                and key not in base_doc_names:
+                and p not in empty_cand and key not in base_doc_names:
             fam_key = _doc_key(key)
             cand_free_keys[fam_key] = cand_free_keys.get(fam_key, 0) + 1
     # Base-side digests, for the compiled-PDF twin test.
@@ -6950,7 +7072,7 @@ DISPOSITION_STRUCTURAL_EXEMPT_RE = re.compile(
 
 # The columns whose cells carry a disposition. `resolution` is the same
 # contract under the placeholder/ledger layouts' own name.
-DISPOSITION_COLUMNS = ("disposition", "resolution")
+DISPOSITION_COLUMNS = ("disposition", "resolution", "verdict")
 
 # The cover-letter stamp row (FMT-CL1): a letter formatted in the MANUSCRIPT
 # template is a defect the venue ships no cover-letter template to justify. An
@@ -7087,6 +7209,14 @@ def _disposition_table_problems(path: Path) -> list:
         return ["carries a `disposition` header but NO data row: a header alone disposes "
                 "nothing (every row must record its own verdict/reason)"]
     problems = []
+    # EVERY keyed block needs its own data rows (F066): one populated table
+    # used to excuse another, seeded table emptied to header+separator.
+    _empty_blocks = [b for b, _k in keyed if not b["rows"]]
+    if _empty_blocks:
+        problems.append(
+            f"carries {len(_empty_blocks)} disposition table(s) with a header but NO data "
+            f"row: a header alone disposes nothing (every row must record its own "
+            f"verdict/reason)")
     for block, key in data:
         empty = sum(1 for row in block["rows"]
                     if not str(row.get(key) or "").strip())
@@ -7099,6 +7229,29 @@ def _disposition_table_problems(path: Path) -> list:
     return problems
 
 
+def _mask_fenced_blocks(text: str) -> str:
+    """Blank every line inside a ``` / ~~~ fenced code block.
+
+    Examples inside a fence are ILLUSTRATIONS, not data: the markdown-table and
+    proposal scanners used to count them as real rows/proposals.
+    """
+    out, fence = [], None
+    for line in str(text or "").splitlines():
+        s = line.strip()
+        m = re.match(r"^(`{3,}|~{3,})", s)
+        if fence is not None:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+            out.append("")
+            continue
+        if m:
+            fence = m.group(1)
+            out.append("")
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def _markdown_blocks_from_text(text: str) -> list:
     """`parse_markdown_blocks` over already-read text (no path involved).
 
@@ -7106,6 +7259,7 @@ def _markdown_blocks_from_text(text: str) -> list:
     renderer and parses it back through this function, so the row identities it
     compares against are exactly the ones the session was given (R04).
     """
+    text = _mask_fenced_blocks(text)
     raw_blocks, cur = [], []
     for line in text.splitlines():
         if line.strip().startswith("|"):
@@ -7205,7 +7359,9 @@ _DISPOSITION_VERDICT_PREFIX_RE = re.compile(
     r"\s*[.!:,]?\s*(?:[—–-]+\s*)?")
 _DISPOSITION_FILLER_TAIL_RE = re.compile(
     r"(?i)^(?:x+|n/?a|none|nil|null|tbd|todo|yes|no|ok|okay|checked|done|"
-    r"pass|passed|tested|fine|good|clean|[-—–_.:;,\s]+)$")
+    r"pass|passed|tested|fine|good|clean|"
+    r"see(?:\s+(?:above|below|here|there|report|details?))?|"
+    r"[-—–_.:;,\s]+)$")
 
 
 def _disposition_filler_closure(cell: str) -> bool:
@@ -7435,7 +7591,8 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
 
 def artifact_quality_report(review_dir: Path, require_files: bool = False,
                            m20_seed_rows: list | None = None,
-                           seeded_row_counts: dict | None = None) -> dict:
+                           seeded_row_counts: dict | None = None,
+                           seeded_row_pins: dict | None = None) -> dict:
     """{artifact: [problems]} for every decision table under guided_review/.
 
     EVERY table block of the artifact is checked, each against its own header:
@@ -7448,6 +7605,12 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
     erase the seed. When it is omitted (the sandbox self-check preview), the
     sandbox's own scan file is read, and a missing/unreadable one is an
     unverified error whenever `require_files` marks this a gate.
+
+    `seeded_row_pins` is `{artifact rel: [{"columns", "count", "label"}, ...]}`,
+    one pin per SEEDED TABLE (M30 has three, never their sum) derived from the
+    read-only `base/` by `review_seeded_row_pins`. It makes a PARTIAL deletion
+    visible: `seeded_row_counts` alone is used only for the header-only case, so
+    deleting one seeded row out of three was never compared with the seed (F012).
     """
     report = {}
     seeded_row_counts = seeded_row_counts or {}
@@ -7462,6 +7625,7 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
             report.setdefault(rel, []).append(
                 f"{rel} carries no decision table (the seeded table was emptied)")
             continue
+        _empty_keyed = []
         _expected = int(seeded_row_counts.get(rel) or 0)
         if _expected > 0:
             # The seed for this artifact is non-empty in the read-only base, so
@@ -7478,6 +7642,43 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
                     f"the read-only seed has {_expected} row(s): every seeded row must be "
                     f"DISPOSED, not deleted -- re-emit it with its verdict in the "
                     f"`disposition` cell")
+        # A PARTIAL deletion is as much a deleted seed as a header-only table.
+        # Each seeded table is pinned SEPARATELY by its own header shape: M30's
+        # three tables sum to one count that no single table can ever reach, so
+        # a summed count reported a complete ledger as short (F012). A table
+        # whose header still matches the seed but has fewer rows is reported;
+        # so is a table whose shape was replaced (no matching header at all),
+        # because changing the columns cannot dispose the seeded rows.
+        for _pin in (seeded_row_pins or {}).get(rel) or []:
+            try:
+                _want = int((_pin or {}).get("count") or 0)
+            except (TypeError, ValueError):
+                _want = 0
+            if _want <= 0:
+                continue
+            _cols = [re.sub(r"\s+", " ", str(c or "").strip().lower())
+                     for c in ((_pin or {}).get("columns") or [])]
+            _cols = [c for c in _cols if c]
+            if not _cols:
+                continue
+            _matching = []
+            for _b in blocks:
+                _hdr = {re.sub(r"\s+", " ", str(h or "").strip().lower())
+                        for h in _b["header"]}
+                if all(c in _hdr for c in _cols):
+                    _matching.append(_b)
+            _present = sum(len(_b["rows"]) for _b in _matching)
+            if _present >= _want:
+                continue
+            if _present == 0 and _empty_keyed:
+                # The header-only branch above already names this deletion.
+                continue
+            _label = str((_pin or {}).get("label") or "").strip()
+            _named = f" for the `{_label}` table" if _label else ""
+            report.setdefault(rel, []).append(
+                f"carries only {_present} of the {_want} code-seeded row(s){_named} "
+                f"(columns: {', '.join(_cols)}): every seeded row must be DISPOSED, not "
+                f"deleted -- re-emit it with its verdict in the `disposition` cell")
         seeded_counts = Counter()
         if rel.endswith("M20_formatting.md"):
             # M20's seed is reproducible from the code-side scan the orchestrator
@@ -7506,8 +7707,19 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
                 if rule:
                     seeded_counts[rule] += 1
         if seeded_counts and path.is_file():
+            # Count only the SEEDED table's own rule rows: an unrelated note
+            # table carrying the same rule id restored a deleted seeded row's
+            # count. A table qualifies when it has a rule column and a
+            # disposition column (the seeded shape).
+            _seed_blocks = [b for b in blocks
+                            if any(h in ("rule", "rule id") for h in b["header"])
+                            and any(k in b["header"] for k in DISPOSITION_COLUMNS)]
+            # The FIRST such block is the seeded table; later tables are the
+            # session's own note/coverage tables and must not restore a deleted
+            # seeded row's count.
+            _seed_blocks = _seed_blocks[:1]
             present_counts = Counter(str(r.get("rule") or "").strip().upper()
-                                     for block in blocks for r in block["rows"])
+                                     for block in _seed_blocks for r in block["rows"])
             present_counts.pop("", None)
             lost = {rule: n - present_counts.get(rule, 0)
                     for rule, n in seeded_counts.items()
@@ -7536,12 +7748,25 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
                 f"{rel} carries no table with a `disposition` column: every seeded "
                 f"decision row must be disposed in its own last column")
             continue
+        # Every block that carries ROWS is a decision table the session had to
+        # dispose, so each needs its OWN disposition column. The check above
+        # only asked whether SOME block had one, so moving the seeded table to
+        # arbitrary columns and adding a tiny disposed dummy table satisfied the
+        # gate while the seeded rows were never disposed (F016).
+        for block in blocks:
+            if block["rows"] and not any(k in block["header"]
+                                         for k in DISPOSITION_COLUMNS):
+                report.setdefault(rel, []).append(
+                    f"{rel} carries a table with {len(block['rows'])} row(s) and no "
+                    f"`disposition` column: every decision row must be disposed in its own "
+                    f"last column (a separate dummy table does not dispose these rows)")
         for block in blocks:
             rows = block["rows"]
-            if not rows:
+            if not rows or not any(k in block["header"] for k in DISPOSITION_COLUMNS):
                 # A header-only seeded table is the documented "no rows" shape
                 # (the session may leave an empty table's header); the missing
-                # DISPOSITION COLUMN is the bypass this check closes.
+                # DISPOSITION COLUMN is the bypass this check closes, reported
+                # above for every block that actually carries rows.
                 continue
             problems = disposition_artifact_problems(rows, block.get("widths"),
                                                       len(block["header"]))
@@ -7660,39 +7885,77 @@ def artifact_quality_notes(review_dir: Path) -> dict:
     return notes
 
 
-def review_seeded_row_counts(ctx: Ctx, base: Path) -> dict:
-    """{artifact rel: code-seeded row count} re-derived from the read-only base.
+def review_seeded_row_pins(ctx: Ctx, base: Path) -> dict:
+    """{artifact rel: [pin, ...]} re-derived from the read-only base.
 
-    The counters mirror the seed builders in `code_side_evidence` plus M2's
-    reference-integrity rows. They are derived HERE, from `base/`, never from
-    the session-writable artifact, so deleting a seeded table cannot lower its
-    expected count (F170).
+    Each pin is `{"columns": [...], "count": n, "label": ...}` and describes ONE
+    seeded table: the header shape the seed rendered and the number of rows it
+    rendered. They are derived HERE, from `base/`, never from the
+    session-writable artifact, so deleting a seeded table cannot lower its
+    expected count (F170) and deleting one ROW out of several cannot hide behind
+    the rows that remain (F012).
+
+    M30 is THREE seeded tables (A written values, B code/config literals, C
+    negative claims) with three different header shapes. They are pinned
+    separately: a summed count can never be satisfied by one table and made a
+    complete ledger report short.
     """
-    counts = {}
+    pins = {}
+
+    def add(rel: str, columns: list, rows, label: str) -> None:
+        pins.setdefault(rel, []).append({"columns": list(columns),
+                                         "count": len(rows or []),
+                                         "label": label})
+
     try:
         ev = code_side_evidence(ctx, base, "review")
     except Exception:                                                 # noqa: BLE001
-        return counts
-    counts["artifacts/M18_caption_words.md"] = len(
-        (ev.get("captions") or {}).get("captions") or [])
-    counts["artifacts/M19_length.md"] = len((ev.get("lengths") or {}).get("rows") or [])
-    counts["artifacts/M8_terms.md"] = len((ev.get("terms") or {}).get("rows") or [])
-    counts["artifacts/OUTLINE.md"] = len((ev.get("outline") or {}).get("rows") or [])
-    counts["artifacts/PLACEHOLDERS.md"] = len(
-        (ev.get("placeholder_ledger") or {}).get("rows") or [])
-    counts["artifacts/CLAIM_STRENGTH.md"] = len((ev.get("claims") or {}).get("rows") or [])
-    counts["artifacts/M30_hierarchy_reconciliation.md"] = sum(
-        len((ev.get(k) or {}).get("rows") or [])
-        for k in ("hierarchy", "code_literals", "negative_claims"))
+        return pins
+    add("artifacts/M18_caption_words.md",
+        ["document", "caption", "words"],
+        (ev.get("captions") or {}).get("captions") or [], "M18")
+    add("artifacts/M19_length.md", ["document", "section", "words"],
+        (ev.get("lengths") or {}).get("rows") or [], "M19")
+    add("artifacts/M8_terms.md", ["document", "term", "count"],
+        (ev.get("terms") or {}).get("rows") or [], "M8")
+    add("artifacts/OUTLINE.md", ["document", "heading", "paragraph"],
+        (ev.get("outline") or {}).get("rows") or [], "OUTLINE")
+    add("artifacts/PLACEHOLDERS.md", ["document", "paragraph", "class", "payload"],
+        (ev.get("placeholder_ledger") or {}).get("rows") or [], "PLACEHOLDERS")
+    add("artifacts/CLAIM_STRENGTH.md", ["document", "paragraph", "kind", "direction"],
+        (ev.get("claims") or {}).get("rows") or [], "CLAIM_STRENGTH")
+    add("artifacts/M30_hierarchy_reconciliation.md",
+        ["document", "kind", "number", "sentence"],
+        (ev.get("hierarchy") or {}).get("rows") or [],
+        "A. written values with candidate producers")
+    add("artifacts/M30_hierarchy_reconciliation.md",
+        ["file", "line", "symbol", "value"],
+        (ev.get("code_literals") or {}).get("rows") or [],
+        "B. code/config literals")
+    add("artifacts/M30_hierarchy_reconciliation.md",
+        ["written claim", "method token"],
+        (ev.get("negative_claims") or {}).get("rows") or [],
+        "C. written negative claims")
     try:
         mod = _format_module()
         if mod is not None and hasattr(mod, "reference_integrity_rows"):
             refs = mod.reference_integrity_rows(
                 corpus_text_documents([(base, "", ())], raw_text=True, include_bib=True))
-            counts["artifacts/M2_references.md"] = len(refs or [])
+            add("artifacts/M2_references.md",
+                ["document", "entry", "identifier"], refs or [], "M2")
     except Exception:                                                 # noqa: BLE001
         pass
-    return counts
+    return pins
+
+
+def review_seeded_row_counts(ctx: Ctx, base: Path) -> dict:
+    """{artifact rel: code-seeded row count} (the sum of that artifact's pins).
+
+    Kept for the header-only check and for callers that only need a count; the
+    per-table pins above are what makes a partial deletion visible.
+    """
+    return {rel: sum(int(p.get("count") or 0) for p in pins)
+            for rel, pins in review_seeded_row_pins(ctx, base).items()}
 
 
 def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: list) -> dict:
@@ -7712,19 +7975,27 @@ def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: lis
             m20_seed_rows = [r for r in (info.get("rows") or []) if isinstance(r, dict)]
         except Exception as e:                                     # noqa: BLE001 -- never gate on scan
             m20_seed_error = f"the code-side M20 scan FAILED ({type(e).__name__}: {e})"
-    seeded_counts = review_seeded_row_counts(ctx, base) if base.is_dir() else {}
-    if base.is_dir() and not seeded_counts:
-        warns.append("the decision tables' code-seeded row counts could not be re-derived "
-                     "from base/; a deleted seeded row cannot be distinguished from an "
-                     "empty seed (the seeded-row pin is UNKNOWN, not clean)")
+    seeded_pins = review_seeded_row_pins(ctx, base) if base.is_dir() else {}
+    seeded_counts = {rel: sum(int(p.get("count") or 0) for p in pins)
+                     for rel, pins in seeded_pins.items()}
+    _seed_unknown = base.is_dir() and not seeded_pins
+    _seed_unknown_msg = (
+        "the decision tables' code-seeded row counts could not be re-derived from base/; "
+        "a deleted seeded row cannot be distinguished from an empty seed (the seeded-row "
+        "pin is UNKNOWN, not clean)")
     report = artifact_quality_report(sb / GUIDED_REVIEW_DIR, require_files=True,
                                      m20_seed_rows=m20_seed_rows,
-                                     seeded_row_counts=seeded_counts)
+                                     seeded_row_counts=seeded_counts,
+                                     seeded_row_pins=seeded_pins)
     if m20_seed_error:
         report.setdefault("artifacts/M20_formatting.md", []).append(
             f"M20 cannot be verified: {m20_seed_error}; the seeded-row state is UNKNOWN, "
             f"not clean")
     rec["artifact_quality"] = report
+    if _seed_unknown:
+        # Under --strict-artifacts UNKNOWN is a failure, exactly like the M20
+        # path above; warning only let arbitrary/deleted seeded rows pass.
+        (errs if strict_dispositions(ctx) else warns).append(_seed_unknown_msg)
     for rel, problems in sorted(report.items()):
         for p in problems:
             msg = f"decision artifact {rel}: {p}"
@@ -8368,14 +8639,28 @@ def repair_missing_deliverable(ctx: Ctx, rec: dict, problems: list) -> str:
         # so treating it as a deliverable made `any(...is_file())` true and the
         # genuinely absent marker was never reported (and the doomed scoped
         # repair was scheduled instead of the resume path).
-        cands = [c for c in REPAIR_FILE_RE.findall(str(err))
+        text = str(err)
+        m = REPAIR_MISSING_RE.search(text)
+        # The MISSING file is the one named immediately BEFORE "is missing";
+        # a file the same sentence merely suggests ("unresolved observations
+        # belong in audit/UNRESOLVED.md") is a prose alternative, not a second
+        # deliverable whose existence could excuse the first.
+        missing_cands = []
+        if m is not None:
+            pre = REPAIR_FILE_RE.findall(text[:m.start()])
+            if pre:
+                missing_cands = [pre[-1]]
+            else:
+                after = text[m.end():].split(";", 1)[0]
+                missing_cands = REPAIR_FILE_RE.findall(after) or REPAIR_FILE_RE.findall(text)
+        cands = [c for c in missing_cands
                  if Path(c).name not in ("PROMPT.md", REPAIR_PROMPT_FILE)]
         if not cands:
             # a content-level "… is missing" (a marker FIELD, say): the file
             # itself exists, so its content stays the repair's business
             continue
         if sb is not None and sb.is_dir() and cands \
-                and any(_resolve_in_sandbox(sb, rec, c).is_file() for c in cands):
+                and all(_resolve_in_sandbox(sb, rec, c).is_file() for c in cands):
             continue                       # present: its CONTENT is what the repair fixes
         return cands[0]
     return ""
@@ -8677,8 +8962,28 @@ def _repair_read_json(path: Path):
         return None
 
 
+def _repair_add_identity(row: dict) -> str:
+    """Canonical text of one auditor `adds` row: its whole evidence, pinned.
+
+    The guard used to keep only the add's ID, so a repair could rewrite the
+    auditor's own added finding's evidence/severity/location and still be
+    recorded as in scope (F014). Every field is part of the auditor's own
+    judgement, so the canonical JSON of the whole row is the identity.
+    """
+    return json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _repair_adds_map(rows) -> dict:
+    """{add id: canonical row text} of a guard's `adds` snapshot."""
+    out = {}
+    for item in rows or ():
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            out[str(item[0])] = str(item[1])
+    return out
+
+
 def _repair_audit_rows(sb: Path) -> dict:
-    """{frozen id: (verdict, reason, evidence)} of an audit sheet, plus its add ids."""
+    """{frozen id: (verdict, reason, evidence)} of an audit sheet, plus its adds."""
     audit = _repair_read_json(sb / "audit" / "audit.json")
     rows = {}
     if isinstance(audit, dict) and isinstance(audit.get("dispositions"), list):
@@ -8689,8 +8994,11 @@ def _repair_audit_rows(sb: Path) -> dict:
                                                 str(row.get("evidence") or "").strip())
     out = {"dispositions": rows, "adds": []}
     if isinstance(audit, dict) and isinstance(audit.get("adds"), list):
-        out["adds"] = sorted({str((r or {}).get("id") or "").strip() for r in audit["adds"]
-                              if isinstance(r, dict)})
+        # Every field of an added finding is pinned, not only its id: the row
+        # IS the auditor's own judgement (F014).
+        out["adds"] = sorted([str((r or {}).get("id") or "").strip(),
+                              _repair_add_identity(r)]
+                             for r in audit["adds"] if isinstance(r, dict))
     return out
 
 
@@ -8838,10 +9146,23 @@ def _repair_audit_problems(sb: Path, guard: dict) -> list:
             problems.append(f"it added a {row[0] or 'blank'!r} disposition for {fid}; a repair "
                             f"may only add `confirm` (dropping a finding is the auditor's own "
                             f"judgement and must keep its own reason and evidence)")
-    added = set(now.get("adds") or []) - set(before.get("adds") or [])
+    before_adds = _repair_adds_map(before.get("adds"))
+    now_adds = _repair_adds_map(now.get("adds"))
+    gone = sorted(set(before_adds) - set(now_adds))
+    if gone:
+        problems.append(f"it DELETED the auditor's added finding(s) {', '.join(gone[:4])} "
+                        f"from `adds`; an added finding is evidence and may not be removed")
+    added = sorted(set(now_adds) - set(before_adds))
     if added:
-        problems.append(f"it invented finding(s) {', '.join(sorted(added)[:4])} in `adds`; a "
+        problems.append(f"it invented finding(s) {', '.join(added[:4])} in `adds`; a "
                         f"repair may complete the sheet's dispositions, never add findings")
+    rewritten = sorted(fid for fid in set(before_adds) & set(now_adds)
+                       if now_adds[fid] != before_adds[fid])
+    if rewritten:
+        problems.append(
+            f"it rewrote the auditor's added finding(s) {', '.join(rewritten[:4])} in "
+            f"`adds` (its location/severity/evidence/explanation changed); an added "
+            f"finding's own cells are the auditor's judgement and may not be edited")
     return problems[:6]
 
 
@@ -9230,6 +9551,22 @@ def run_resume_session_now(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
     return True
 
 
+def _safe_remove_prompt(path: Path) -> None:
+    """Remove a seeded prompt that an agent may have replaced by a directory.
+
+    `Path.unlink(missing_ok=True)` raises IsADirectoryError on a directory, so a
+    crashed cleanup skipped the attempt accounting entirely. Never let prompt
+    cleanup crash it: unlink a file/symlink, remove a real directory.
+    """
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            rmtree_force(path, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     """Judge a continuation with the SAME postcheck and record the attempt."""
     sb = ctx.sandbox_of(rec)
@@ -9238,7 +9575,7 @@ def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     sid = capture_agent_session_id(ctx, rec)
     if sid:
         rec["agent_session_id"] = sid
-    (sb / RESUME_PROMPT_FILE).unlink(missing_ok=True)
+    _safe_remove_prompt(sb / RESUME_PROMPT_FILE)
     if res.get("error") or res.get("rc") not in (0,):
         rec["status"] = "failed"
         rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
@@ -9285,7 +9622,7 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     record["out_of_scope"] = problems
     changed = sorted(rel for rel in (guard_changed_paths(sb, flight["guard"])))
     record["changed"] = changed
-    (sb / REPAIR_PROMPT_FILE).unlink(missing_ok=True)
+    _safe_remove_prompt(sb / REPAIR_PROMPT_FILE)
     if res.get("error") or res.get("rc") not in (0,):
         record["ok"] = False
         record["error"] = res.get("error") or f"repair session exited rc={res.get('rc')}"

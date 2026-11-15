@@ -142,8 +142,11 @@ def test_submit_code_switch():
     rec = ctx.run("r1_response")
     map_path = ctx.sandbox_of(rec) / nb.JOURNAL_RESPONSE_MAP_REL
     data = json.loads(map_path.read_text(encoding="utf-8"))
-    data["rows"][0]["changes"] = [{"file": "code/analysis.py", "location": "stub",
-                                   "before": "a", "after": "b"}]
+    # A code citation is citeable like any other package file, so its quoted
+    # spans are verified too (F100): quote the file's real text. The analysis
+    # stub is `print('analysis')\\n`.
+    data["rows"][0]["changes"] = [{"file": "code/analysis.py", "location": "line 1",
+                                   "before": "print('analysis')", "after": "print"}]
     # A change citation belongs to an 'addressed' row; the stub now reports
     # 'planned' with no changes because it has no verified preimage (F083).
     data["rows"][0]["status"] = "addressed"

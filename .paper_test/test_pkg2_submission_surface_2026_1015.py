@@ -69,6 +69,7 @@ fmt = _load("paper_pkg2_format", WS / "paper_docx_format.py")
 FAILS = []
 TMPDIRS = []
 W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 
 
 def check(name, cond, detail=""):
@@ -341,8 +342,12 @@ def _make_linked_docx(path: Path) -> None:
             'Users\\hannah.eccles\\OneDrive%20-%20Frontiers%20Media%20SA\\Documents\\'
             'Latex%20work\\frontiers_template.dotx"/>'
             '</Relationships>')
+    # `r:id` uses the officeDocument relationships namespace; a package must
+    # DECLARE it (the old fixture omitted the declaration and was only accepted
+    # because the one element using the prefix was deleted before the parse).
     settings = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                f'<w:settings {W_NS}><w:attachedTemplate r:id="rId1"/></w:settings>')
+                f'<w:settings {W_NS} xmlns:r="{REL_NS}">'
+                '<w:attachedTemplate r:id="rId1"/></w:settings>')
     body = ("".join(f'<w:p><w:r><w:t xml:space="preserve">{t}</w:t></w:r></w:p>'
                     for t in ("Supplementary Material", "Figure S3 is described above.")))
     with zipfile.ZipFile(path, "w") as z:

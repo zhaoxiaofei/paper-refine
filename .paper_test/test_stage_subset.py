@@ -335,7 +335,7 @@ def test_retry_runs_selection():
           (bad.stdout + bad.stderr)[-200:])
     empty = retry_runs(root, "--runs", "")
     check("an empty selection is refused",
-          empty.returncode == 1 and "names nothing" in (empty.stdout + empty.stderr),
+          empty.returncode == 2 and "names nothing" in (empty.stdout + empty.stderr),
           (empty.stdout + empty.stderr)[-200:])
     beyond = retry_runs(root, "--runs", "1,2")
     check("a round this root does not have is refused",
@@ -361,7 +361,7 @@ def test_retry_runs_selection():
             nb._judge_selection_for_retry(cold_start_ctx, 1, "w2_j1")
             guarded = False
         except SystemExit as e:
-            guarded = e.code == 1
+            guarded = e.code == 2
     finally:
         nb.judgeable_ids, nb.round_judges, nb.config_rounds = real
     check("a judge selector resolves to the sessions it names",

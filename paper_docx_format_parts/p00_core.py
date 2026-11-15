@@ -285,7 +285,14 @@ class _FragOrBreakFinder:
 
 _FRAG_OR_BREAK_RE = _FragOrBreakFinder()
 RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
-FIELD_CHAR_RE = re.compile(r"<w:fldChar[^>]*w:fldCharType=\"(\w+)\"[^>]*/?>")
+FIELD_CHAR_RE = re.compile(
+    # OOXML is XML: `w:fldCharType = "end"` (spaces around `=`) and
+    # `w:fldCharType='end'` (single quotes) are legal spellings Word accepts.
+    # The double-quote-only, no-space pattern read neither, so `has_field()` was
+    # False for a lone closing-fldChar paragraph and the stray-empty rule
+    # deleted the bibliography field's terminator; `field_ranges()` and the
+    # Zotero inventory were blind to the same fields.
+    r"<w:fldChar\b[^>]*?w:fldCharType\s*=\s*[\"'](\w+)[\"'][^>]*?/?>")
 INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?(?<!/)>.*?</w:instrText>", re.S)
 # A paragraph can carry no text and still hold an anchor a reader needs: a
 # footnote/endnote/comment reference, a bookmark, a simple field or a content
@@ -424,6 +431,14 @@ def unesc(text: str) -> str:
 
 def load_policy(path) -> dict:
     pol = dict(POLICY_DEFAULTS)
+    # The keys the caller actually WROTE, not merely the ones the merged dict
+    # carries: POLICY_DEFAULTS seeds both scalars with 0, so the derivation
+    # below cannot tell a default 0 from an explicit "0 = not gated" unless the
+    # configured set is kept. `not pol.get(key)` made an explicit 0 look unset
+    # and overwrote it with the venue's number, so the documented disable
+    # switch was unusable whenever the profile also stated `image_dpi` /
+    # `figure_text`.
+    configured = set()
     if path:
         # Every other bad CLI input exits 2 with a message; a missing or
         # malformed --policy used to escape as a raw traceback.
@@ -437,17 +452,19 @@ def load_policy(path) -> dict:
                   f"{type(data).__name__}", file=sys.stderr)
             raise SystemExit(2)
         pol.update(data)
+        configured = set(data)
     # A venue profile writes the measured rules as `image_dpi`/`figure_text`;
     # the formatter's own scalars are what the scans read. Derive them here so a
     # profile passed with --policy behaves the same as the pipeline's
-    # format_policy (which does this derivation in format_policy_of).
-    if not pol.get("min_image_dpi"):
+    # format_policy (which does this derivation in format_policy_of, keyed on
+    # the configured key's PRESENCE too).
+    if "min_image_dpi" not in configured or pol.get("min_image_dpi") is None:
         _dpi_block = pol.get("image_dpi")
         _dpi = (_dpi_block.get("min_dpi")
                 if isinstance(_dpi_block, dict) else None)
         if _dpi:
             pol["min_image_dpi"] = float(_dpi)
-    if not pol.get("min_figure_text_pt"):
+    if "min_figure_text_pt" not in configured or pol.get("min_figure_text_pt") is None:
         _ft_block = pol.get("figure_text")
         _pt = (_ft_block.get("min_pt") if isinstance(_ft_block, dict) else None)
         if _pt:
@@ -845,8 +862,15 @@ def rpr_of(frag: str) -> str | None:
 def attr(frag: str | None, name: str) -> str | None:
     if not frag:
         return None
-    m = re.search(rf'w:{name}="([^"]*)"', frag)
-    return m.group(1) if m else None
+    # XML allows either quote character and whitespace around `=`; the old
+    # double-quote-only pattern returned None for `w:val='Heading1'`, so
+    # `elem_val` fell back to "1" and heading/style detection read the wrong
+    # value. Both spellings are accepted here (single quotes are the second
+    # alternative, never matched by the first).
+    m = re.search(rf"w:{name}\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", frag)
+    if not m:
+        return None
+    return m.group(1) if m.group(1) is not None else m.group(2)
 
 
 def elem(frag: str | None, tag: str) -> str | None:
@@ -862,8 +886,15 @@ def elem(frag: str | None, tag: str) -> str | None:
     if not frag:
         return None
     frag = re.sub(r"<w:(pPrChange|rPrChange)\b[^>]*>.*?</w:\1>", "", frag, flags=re.S)
-    m = re.search(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}>", frag, re.S)
-    return m.group(0) if m else None
+    # A comment/processing instruction inside the properties is not live
+    # formatting either: `<!-- <w:ind w:firstLine="720"/> -->` before the live
+    # `<w:ind w:firstLine="0"/>` was returned as the paragraph's indentation.
+    # Masking is length-preserving, so the returned slice is the live element's
+    # own bytes.
+    masked = _mask_noncontent(frag)
+    m = re.search(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}>",
+                  masked, re.S)
+    return frag[m.start():m.end()] if m else None
 
 
 _XML_MISC = r"<!--(?:[^-]|-(?!->))*-->|<\?(?:[^?]|\?(?!>))*\?>"
@@ -1182,7 +1213,14 @@ def field_ranges(xml: str) -> list:
             if simple_stack:
                 start, opening = simple_stack.pop()
                 out.append((start, m.end(), _fld_simple_instruction(opening)))
-        elif not tag.rstrip().endswith("/>"):
+        elif tag.rstrip().endswith("/>"):
+            # A legal EMPTY simple field (`<w:fldSimple w:instr="..."/>`) was
+            # skipped here although `has_field()` treats it as a field: the
+            # paragraph was protected from deletion while the field was absent
+            # from this inventory and from the live-field signature. Its result
+            # is empty, but the field itself must be accounted for.
+            out.append((m.start(), m.end(), _fld_simple_instruction(tag)))
+        else:
             simple_stack.append((m.start(), tag))
     out.sort(key=lambda r: r[0])
     return out
@@ -1307,12 +1345,17 @@ ZOTERO_FIELD_PARTS = ("word/document.xml", "word/footnotes.xml", "word/endnotes.
 ZOTERO_FIELD_AUX_PARTS_RE = re.compile(
     r"word/(?:header|footer)(?:\d+|[_-][A-Za-z0-9_\-]*)?\.xml$|word/comments\.xml$")
 ZOTERO_FIELD_TOKEN_RE = re.compile(
-    r"<w:fldChar\b[^>]*?w:fldCharType=\"(begin|separate|end)\"[^>]*?/?>"
+    r"<w:fldChar\b[^>]*?w:fldCharType\s*=\s*[\"'](begin|separate|end)[\"'][^>]*?/?>"
     # A self-closing `<w:t/>`/`<w:instrText/>` is an EMPTY element, never an
     # opening tag: without the `(?<!/)` guard the lazy body ran to the next
     # run's closing tag and fed markup into the field result.
     r"|<w:instrText\b[^>]*?(?<!/)>(.*?)</w:instrText>"
     r"|<w:t\b[^>]*?(?<!/)>(.*?)</w:t>"
+    # The SELF-CLOSING simple field must come FIRST: the paired alternative's
+    # `([^>]*)>` would otherwise swallow its closing `/>` as an attribute and
+    # run its lazy body to the NEXT simple field's closing tag (one field read
+    # as two, with the wrong instruction).
+    r"|<w:fldSimple\b([^>]*?)/>"
     r"|<w:fldSimple\b([^>]*)>(.*?)</w:fldSimple>"
     # A soft break/tab is a text delimiter in a field result too: `text_of()`
     # renders it as a newline, so the inventory must not join the words it
@@ -1394,7 +1437,12 @@ def zotero_field_report(xml: str) -> dict:
             # ATTRIBUTE and the element's own content is the result. Word can
             # rewrite a complex field as fldSimple, so it must be inventoried --
             # a Zotero field invisible here is a field the gate cannot protect.
-            attrs = m.group(4) or ""
+            # A self-closing element is the legal EMPTY form: it has the
+            # instruction and no result, and it must not be dropped from the
+            # inventory (group 4) nor read as opening a paired field.
+            self_closing = m.group(4) is not None
+            attrs = (m.group(4) if self_closing else m.group(5)) or ""
+            body = "" if self_closing else (m.group(6) or "")
             instr_m = re.search(r'w:instr="([^"]*)"', attrs)
             # An ATTRIBUTE also escapes the quote characters (`&quot;` around
             # every JSON key); `unesc` decodes text-node entities only.
@@ -1402,7 +1450,7 @@ def zotero_field_report(xml: str) -> dict:
                      if instr_m else "")
             fields.append({"begin": m.start(), "end": m.end(), "instr": [instr],
                            "separate": m.start(),
-                           "result": [text_of(m.group(5) or "")]})
+                           "result": [text_of(body)]})
         elif raw.startswith("<w:fldChar"):
             kind = m.group(1)
             if kind == "begin":
@@ -1846,6 +1894,37 @@ def docx_style_ids(path: Path) -> list:
     return sorted(set(re.findall(r'w:styleId="([^"]+)"', xml)))
 
 
+def docx_style_name_map(path: Path) -> dict:
+    """{style id: declared style name} from a DOCX's word/styles.xml ({} when unreadable).
+
+    Word style ids are arbitrary: a real Heading 1 may carry the id `H1` while
+    its declared name is `heading 1`, so the venue-template scan resolves the id
+    through this map. The package is UNTRUSTED submitted input, so the read goes
+    through the same per-part/total budget and DTD/entity refusal as
+    `docx_style_ids` (F75): `pkg.read` alone would decompress a small zip bomb
+    with no cap, and ElementTree would expand an entity declaration.
+    """
+    try:
+        with zipfile.ZipFile(path) as pkg:
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise OSError(problem)
+            raw = _docx_xml_part_guarded(pkg, "word/styles.xml")
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
+        return {}
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return {}
+    out = {}
+    for style_el in root.iter(W + "style"):
+        sid = style_el.get(W + "styleId") or ""
+        name_el = style_el.find(W + "name")
+        if sid and name_el is not None:
+            out[sid] = name_el.get(W + "val") or ""
+    return out
+
+
 def _template_uses_even_odd(template: Path) -> bool:
     """True when the template's furniture depends on page parity.
 
@@ -2091,6 +2170,12 @@ def effective_emphasis(styles: dict, para_style: str | None, run_style: str | No
         if st.get("iCs") is not None:
             ics_val = st["iCs"]
     if direct_rpr:
+        # The direct-property regexes below are token regexes, so they cannot
+        # tell live markup from markup a READER never sees: a commented-out
+        # `<w:i/>` inside the rPr was read as live italic and the fixer then
+        # wrote a `w:val="0"` override onto a run that was never italic.
+        # Masking is length-preserving, so the offsets still address the rPr.
+        direct_rpr = _mask_noncontent(direct_rpr)
         i_node = re.search(r"<w:i(?=[\s/>])[^>]*/?>", direct_rpr)
         ics_node = re.search(r"<w:iCs(?=[\s/>])[^>]*/?>", direct_rpr)
         if i_node:
@@ -2114,7 +2199,10 @@ def run_is_bold(styles: dict, para_style: str | None, run: str) -> bool:
 
     The same precedence as `effective_emphasis`, for the `w:b`/`w:bCs` pair.
     """
-    rpr = live_rpr(rpr_of(run))
+    # `live_rpr` removes the revision record, but a comment/PI inside the rPr is
+    # still there; mask it (length-preserving) so a commented-out `<w:b/>` is not
+    # read as live bold -- the same non-content rule the token walkers follow.
+    rpr = _mask_noncontent(live_rpr(rpr_of(run)))
     b_val = bcs_val = None
     defaults = styles.get("@docDefaults") or {}
     b_val = defaults.get("b") if b_val is None else b_val

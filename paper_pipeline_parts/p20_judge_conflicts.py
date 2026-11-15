@@ -47,6 +47,29 @@ _JUDGE_CONFLICT_TOKEN_RE = re.compile(r"[a-z][a-z0-9_.\-/]{2,}")
 # numeric token too, or `p = .05` vs `p = .50` stays invisible.
 _JUDGE_CONFLICT_NUMBER_RE = re.compile(
     r"(?<![\w.])([-\u2212]?(?:\d[\d,]*(?:\.\d+)?|\.\d+))")
+# A small integer is a COUNT when the text marks it as one: "n = 5", "5
+# samples", "12 patients". The magnitude floor below still drops a BARE small
+# integer (a figure/check id, a section number, "Table 2"), but no longer every
+# small sample size (wave-2 F261): "n = 5 samples" vs "n = 8 samples" is exactly
+# the same-claim/different-number contradiction this scanner exists to surface.
+_SMALL_COUNT_BEFORE_RE = re.compile(
+    r"(?:\b(?:n|N)\s*=\s*|"
+    r"\b(?:sample\s+size|count|number)\s*(?:=|is|of|:)?\s*|"
+    r"\b(?:n|N)\s*)$")
+_SMALL_COUNT_NOUN_RE = re.compile(
+    r"\s*(?:samples?|patients?|participants?|subjects?|cells?|mice|rats?|"
+    r"animals?|cases?|records?|observations?|sites?|replicates?|items?|units?|"
+    r"reads?|specimens?|isolates?|strains?|individuals?|volunteers?|"
+    r"respondents?|households?|events?|instances?)\b", re.I)
+
+
+def _small_integer_is_count(text: str, match) -> bool:
+    """True when a below-floor integer is marked as a count in its context."""
+    before = text[max(0, match.start() - 24):match.start()]
+    after = text[match.end():match.end() + 24]
+    return bool(_SMALL_COUNT_BEFORE_RE.search(before)
+                or _SMALL_COUNT_NOUN_RE.match(after))
+
 
 def _conflict_numbers(text, floor: float = 10.0) -> set:
     """Quantitative numbers in a claim/message; ids and panel letters are skipped.
@@ -74,6 +97,8 @@ def _conflict_numbers(text, floor: float = 10.0) -> set:
         # Allow the space some manuscripts put before the sign.
         is_percent = bool(re.match(r"\s*%", text[m.end():]))
         if abs(v) >= float(floor) or is_decimal or is_percent:
+            out.add(v if v != int(v) else int(v))
+        elif _small_integer_is_count(text, m):
             out.add(v if v != int(v) else int(v))
     return out
 
@@ -227,9 +252,17 @@ def detect_round_judge_conflicts(opinions: list) -> list:
                     for ij in b.get("introduced") or []:
                         if not _conflict_items_similar(ri, ij):
                             continue
-                        tier = str(ri.get("tier") or ij.get("tier") or "").lower()
+                        # EITHER side's tier decides: the mechanical severity
+                        # must match the audit prompt, which makes a
+                        # correctness- OR preservation-level inversion a
+                        # blocker. Reading only the resolved row downgraded a
+                        # preservation contradiction (and a mixed pair whose
+                        # introduced row was the correctness one) to major.
+                        tiers = {str(ri.get("tier") or "").lower(),
+                                 str(ij.get("tier") or "").lower()}
                         hi = max(_conflict_item_severity(ri), _conflict_item_severity(ij))
-                        severity = ("blocker" if tier == "correctness" and hi >= 2
+                        severity = ("blocker"
+                                    if (tiers & {"correctness", "preservation"}) and hi >= 2
                                     else "major" if hi >= 2 else "minor")
                         add("claim_inversion", member, opponent,
                             [a.get("judge_run"), b.get("judge_run")], severity,
@@ -1145,8 +1178,14 @@ def dedup_audit_payload(ctx: Ctx, r: int, agg: dict) -> dict:
     merges = []
     for vid in agg.get("field") or []:
         merges.extend(list((census.get(str(vid)) or {}).get("dedup_audit") or []))
+    # The AGGREGATION's own mode, not today's config: a round decided (or
+    # re-decided) under an earlier `--dedup-mode` must keep the policy that
+    # produced the merges this file documents. `agg` carries it from
+    # aggregate_round; fall back to the live config only for a legacy payload
+    # with no recorded mode.
+    mode = agg.get("dedup_mode") or dedup_mode_of(ctx)
     return {"run": ctx.root.name, "round": int(r),
-            "mode": dedup_mode_of(ctx),
+            "mode": mode,
             "min_words": DEDUP_MIN_WORDS,
             "fuzzy_threshold": DEDUP_FUZZY_THRESHOLD,
             "merged_rows": len(merges),

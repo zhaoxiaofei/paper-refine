@@ -131,15 +131,42 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
             (sb / "guided_review/artifacts/VIS_visual.md").write_text("# vis\n", encoding="utf-8")
         # Every seeded decision artifact is part of the review contract: a
         # deleted/emptied one must fail the postcheck (the session may leave its
-        # table header-only when it has no rows).
+        # table header-only when it has no rows). The fixture DISPOSES the rows
+        # the read-only base seeds rather than replacing a seeded table with a
+        # generic one: C012's seeded-row pin compares each seeded table's own
+        # header shape and row count, so a generic replacement is a deleted seed.
+        pin_ctx = make_ctx(tmp)
+        pins = np.review_seeded_row_pins(pin_ctx, sb / "base")
         for rel in np.DECISION_ARTIFACTS:
             p = sb / "guided_review" / rel
-            if not p.is_file():
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(
-                    "| row | disposition |\n|---|---|\n"
-                    "| fixture row | OK — fixture row is inside its bar |\n",
-                    encoding="utf-8")
+            if p.is_file():
+                continue
+            p.parent.mkdir(parents=True, exist_ok=True)
+            blocks = []
+            for pin in pins.get(rel) or []:
+                cols = [str(c) for c in (pin.get("columns") or [])]
+                count = int(pin.get("count") or 0)
+                if not cols or count <= 0:
+                    continue
+                header = "| # | " + " | ".join(cols) + " | disposition |"
+                sep = "|---|" + "---|" * (len(cols) + 1)
+                rows = []
+                for i in range(1, count + 1):
+                    values = []
+                    for col in cols:
+                        key = col.strip().lower()
+                        # Keep `summary` distinct from `first sentence`: an echo
+                        # of the first sentence is a separately reported defect.
+                        values.append("" if key == "first sentence" else
+                                      ("fixture summary: the paragraph's claim"
+                                       if key == "summary" else "fixture"))
+                    rows.append("| " + " | ".join(
+                        [str(i)] + values + ["OK — fixture row is inside its bar"]) + " |")
+                blocks.append("\n".join([header, sep] + rows))
+            p.write_text(("\n\n".join(blocks) if blocks else
+                          "| row | disposition |\n|---|---|\n"
+                          "| fixture row | OK — fixture row is inside its bar |")
+                         + "\n", encoding="utf-8")
     np.write_json_atomic(sb / np.MARKER_FILE, {"stage": "guided_review", "run_id": "r1_a2_review",
                                                "round": 1, "status": "complete"})
     return sb

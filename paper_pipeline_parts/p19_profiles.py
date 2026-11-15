@@ -173,6 +173,47 @@ PROFILE_POINTER_TMPL = (
     "Read it in {rel} (section `{section}`) with `grep -n '^## '` then "
     "`sed -n`, in a slice of at most ~200 lines, before the work it governs.]")
 
+#: The literal marker a pointer is recognized by.  Operator/profile data is
+#: inlined verbatim into the prompt, so the same bytes in a note would forge a
+#: pointer to a section the pager never wrote (wave-2 F187).  Inline text gets
+#: the marker rewritten; the paged rule blocks keep it byte-for-byte.
+_PROFILE_POINTER_MARK = "[PROFILE RULES — "
+_PROFILE_POINTER_LITERAL = "[PROFILE RULES (literal) — "
+
+
+def _neutralize_pointer_markers(text: str, blocks) -> str:
+    """Make the pointer syntax inert in prompt text that is not a rule block.
+
+    `page_stage_prompt` recognizes a pointer by `_PROFILE_POINTER_MARK`.  Only
+    the blocks it MOVES may carry that syntax (they become the real pointers);
+    everywhere else -- a venue profile's per-limit note, a source line -- the
+    marker is literal data and must not read as a mandatory-read instruction.
+    Block bodies are located by their exact text so they stay byte-identical.
+    """
+    spans = []
+    for _title, body in blocks or ():
+        if not isinstance(body, str) or not body:
+            continue
+        start = 0
+        while True:
+            i = text.find(body, start)
+            if i < 0:
+                break
+            spans.append((i, i + len(body)))
+            start = i + 1
+    if not spans:
+        return text.replace(_PROFILE_POINTER_MARK, _PROFILE_POINTER_LITERAL)
+    spans.sort()
+    out, pos = [], 0
+    for m in re.finditer(re.escape(_PROFILE_POINTER_MARK), text):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        out.append(text[pos:m.start()])
+        out.append(_PROFILE_POINTER_LITERAL)
+        pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)
+
 #: The named gap a round records when `--no-guided-review` skipped the
 #: guided review.  It is written into the frozen review view, so every
 #: downstream session reads the same statement instead of an empty directory.
@@ -335,6 +376,10 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     blocks = [(title, restore_venue_literals(body)) for title, body in blocks]
     if profile != PROFILE_MEDIUM:
         return ensure_external_content_rule(CONTRADICTION_RULE + text)
+    # Profile notes/source lines are inlined into this prompt.  A note that
+    # carries the pointer syntax must NOT become a pointer (F187): neutralize
+    # the marker everywhere except inside the blocks this function moves.
+    text = _neutralize_pointer_markers(text, blocks)
     from pathlib import Path
 
     sb = Path(sandbox)
