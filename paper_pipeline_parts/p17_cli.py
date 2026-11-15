@@ -244,8 +244,9 @@ USAGE_EXAMPLES = """usage:
           exit codes: 2 nothing to decide | 4 incomplete (--require-complete) |
           5 broken evidence / recomputed champion differs from the stored one /
           an incomplete judge panel (never certified).
-  retry   --root <dir> --run <ID> [--all-failed]
+  retry   --root <dir> --run <ID>
   retry   --root <dir> --runs <SELECTION>              (same grammar as --only)
+  retry   --root <dir> --all-failed
           reset one run (the failed attempt's artifacts are archived under
           runs/<run>_try<N>_failed/ keeps its whole sandbox -- deliverables,
           transcript and record.json -- and the attempt's record stays in
@@ -1825,6 +1826,37 @@ def format_trend(round_rows: list, run_rows: list) -> str:
     return "\n".join(L)
 
 
+def _trend_output_path(label: str, dest, roots: list) -> Path:
+    """Resolve a `trend` output path, refusing anything inside a pipeline root.
+
+    `trend` is documented as READ-ONLY (no lock, no writes into any root). The
+    old writer happily replaced `<root>/state.json` with the markdown report,
+    destroying the root.
+    """
+    q = Path(dest).expanduser().resolve()
+    for r in roots:
+        try:
+            q.relative_to(Path(r).resolve())
+        except ValueError:
+            continue
+        die(f"[trend] {label} {str(dest)!r} is inside the pipeline root {r} that trend just "
+            f"read; trend is READ-ONLY and never writes into a root. Pick a destination "
+            f"outside every root.", code=2)
+    # Also refuse a destination inside ANY pipeline root, even one not named on
+    # this invocation: an ancestor carrying pipeline_config.json/state.json is a
+    # root whose state must never be overwritten.
+    cur = q.parent
+    while True:
+        if (cur / "pipeline_config.json").is_file() or (cur / "state.json").is_file():
+            die(f"[trend] {label} {str(dest)!r} is inside pipeline root {cur}; trend is "
+                f"READ-ONLY and never writes into a root. Pick a destination outside every "
+                f"root.", code=2)
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return q
+
+
 def cmd_trend(args) -> None:
     """`trend`: read several roots' decision.json files and print the chain."""
     roots = list(getattr(args, "roots", None) or [])
@@ -1840,12 +1872,14 @@ def cmd_trend(args) -> None:
     print(text)
     out = getattr(args, "out", None)
     if out:
-        write_text_atomic(Path(out), text)
-        print(f"[trend] written: {Path(out)}")
+        out_path = _trend_output_path("--out", out, roots)
+        write_text_atomic(out_path, text)
+        print(f"[trend] written: {out_path}")
     csvp = getattr(args, "csv", None)
     if csvp:
+        csv_path = _trend_output_path("--csv", csvp, roots)
         p = write_csv_atomic(
-            Path(csvp), TREND_ROUND_FIELDS,
+            csv_path, TREND_ROUND_FIELDS,
             [{k: r.get(k) for k in TREND_ROUND_FIELDS} for r in round_rows])
         print(f"[trend] written: {p}")
 
@@ -1871,37 +1905,36 @@ def agent_session_plan(ctx: Ctx, only=None) -> list:
     rule drive_round applies at run time.
     """
     rows = []
+    # The template-first session runs ONCE, before any round, and only in the
+    # transfer/init modes (`run` calls _ensure_template_stage_for_run for those
+    # modes regardless of --only). A continue root must never list it, and a
+    # `--only 2` preview on init/transfer must list it even though round 1 is
+    # filtered out -- the old per-round block got both wrong.
+    _tpl_entry = None
+    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT) \
+            and not template_stage_record(ctx):
+        _tpl_templates = venue_word_templates(ctx)
+        _tpl_mode = journal_mode_of(ctx)
+        _tpl_has_docx = any(p.suffix.lower() == ".docx"
+                            for p in template_package_files(ctx.pristine))
+        if _tpl_has_docx and (_tpl_templates or _tpl_mode == JOURNAL_MODE_INIT):
+            _tpl_entry = {
+                "id": TEMPLATE_REWRITE_DIRNAME,
+                "session": "conform",
+                "stage": "conform",
+                "label": "template-first stage",
+                "agent": True,
+                "status": (ctx.run(TEMPLATE_REWRITE_DIRNAME) or {}).get(
+                    "status") or "planned",
+                "deps": [],
+            }
     for r in range(1, ctx.rounds_count() + 1):
         rec = ctx.round_rec(r)
         if only is not None and (not only.covers_round(r) or not only.selects_round(ctx, r)):
             continue
         producing = []
-        # F146: the template-first session (INIT/TRANSFER modes) runs BEFORE
-        # round 1 and is a full agent session. It was absent from this plan, so
-        # `agents --only conform` budgeted zero sessions.
-        if int(r) == 1 and not template_stage_record(ctx):
-            _tpl_entry = {"id": TEMPLATE_REWRITE_DIRNAME, "vid": "conform",
-                          "stage": "conform", "round": 0, "deps": []}
-            _tpl_selected = (only is None
-                             or only.stage_selected(r, "conform")
-                             or only.entry_selected(r, _tpl_entry))
-            _tpl_templates = venue_word_templates(ctx)
-            _tpl_mode = journal_mode_of(ctx)
-            _tpl_has_docx = any(
-                p.suffix.lower() == ".docx"
-                for p in template_package_files(ctx.pristine))
-            if _tpl_selected and _tpl_has_docx and (
-                    _tpl_templates or _tpl_mode == JOURNAL_MODE_INIT):
-                producing.append({
-                    "id": TEMPLATE_REWRITE_DIRNAME,
-                    "session": "conform",
-                    "stage": "conform",
-                    "label": "template-first stage",
-                    "agent": True,
-                    "status": (ctx.run(TEMPLATE_REWRITE_DIRNAME) or {}).get(
-                        "status") or "planned",
-                    "deps": [],
-                })
+        if int(r) == 1 and _tpl_entry is not None:
+            producing.append(dict(_tpl_entry))
         # The round's base copy (a1) is not an agent session -- it is the
         # orchestrator's copy of the previous round's pin -- but the run table
         # carries it, so list it first and label it.
@@ -1970,6 +2003,13 @@ def agent_session_plan(ctx: Ctx, only=None) -> list:
             "producing": producing,
             "judge": judges,
         })
+    # Round 1 filtered out by --only (e.g. `--only 2`), but `run` still starts
+    # the template-first stage first: attach the session to the first listed
+    # round so the preview's session count is truthful.
+    if _tpl_entry is not None and rows \
+            and not any(s.get("id") == TEMPLATE_REWRITE_DIRNAME
+                        for s in rows[0]["producing"]):
+        rows[0]["producing"].insert(0, dict(_tpl_entry))
     return rows
 
 

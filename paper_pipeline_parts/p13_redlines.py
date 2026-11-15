@@ -759,6 +759,14 @@ def _whole_paragraph_change(bp, rp, counter: list, ts: str):
     return wrapper
 
 
+# The built-in redline holds every part of BOTH packages in memory. Cap the
+# decompressed bytes per part and in total (the same idea as
+# MEDIA_PART_MAX_BYTES/MEDIA_TOTAL_MAX_BYTES for embedded media) so a crafted
+# DOCX is a recorded backend failure instead of an out-of-memory kill.
+REDLINE_PART_MAX_BYTES = 64 * 1024 * 1024
+REDLINE_TOTAL_MAX_BYTES = 256 * 1024 * 1024
+
+
 def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path) -> dict:
     """Write a tracked-changes .docx using the standard library only.
 
@@ -984,8 +992,30 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     # warning. Carry the revised bytes and report that their internal changes are
     # not marked (F167).
     def _parts(path) -> dict:
+        """Every ZIP part's bytes, under a decompressed-size budget.
+
+        A DOCX is a ZIP: a few-megabyte file can inflate to gigabytes of
+        highly-compressible parts, and this last-resort backend read BOTH
+        packages whole and kept the two dicts alive while serialising the output
+        (a DOCX bomb). The embedded-media reader already caps per-part and total
+        bytes; do the same here and REFUSE an over-budget package, which the
+        caller records as a failed backend attempt instead of an OOM kill.
+        """
+        out, total = {}, 0
         with zipfile.ZipFile(path) as z:
-            return {i.filename: z.read(i.filename) for i in z.infolist()}
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                size = int(info.file_size)
+                if size > REDLINE_PART_MAX_BYTES \
+                        or total + size > REDLINE_TOTAL_MAX_BYTES:
+                    raise OSError(
+                        f"refusing {Path(path).name}: its decompressed parts exceed the "
+                        f"redline byte budget ({info.filename} claims {size} bytes; "
+                        f"{total} already read)")
+                out[info.filename] = z.read(info.filename)
+                total += size
+        return out
 
     base_parts, rev_parts = _parts(base_docx), _parts(revised_docx)
     changed_parts = []
@@ -1143,11 +1173,22 @@ def redline_fidelity(base: Path, revised: Path, out: Path) -> dict:
     marked = redline_markup_weight(out)
     minimal = redline_minimal_weight(base, revised)
     marked_w = marked["ins"] + marked["del"]
+    # A BASE document may already carry LIVE tracked changes (an earlier
+    # revision round). The built-in writer copies an unchanged paragraph
+    # verbatim -- with its `w:ins`/`w:del` -- so counting every word of the
+    # OUTPUT charged the backend for markup it never wrote: a 300-word inherited
+    # insertion beside a two-word edit scored 302 marked against 2 minimal and
+    # rejected the backend as over-marking (F167). Only the markup BEYOND what
+    # the inputs already carried is the backend's own.
+    base_marked = redline_markup_weight(base)
+    base_w = base_marked["ins"] + base_marked["del"]
+    own_w = max(0, marked_w - base_w)
     minimal_w = minimal["ins"] + minimal["del"]
-    over = bool(minimal_w) and marked_w > max(3 * minimal_w, minimal_w + 200)
+    over = bool(minimal_w) and own_w > max(3 * minimal_w, minimal_w + 200)
     return {"marked_words": marked_w, "minimal_words": minimal_w,
             "marked_ins": marked["ins"], "marked_del": marked["del"],
             "minimal_ins": minimal["ins"], "minimal_del": minimal["del"],
+            "base_marked_words": base_w, "own_marked_words": own_w,
             "over_marked": over}
 
 
@@ -1177,6 +1218,19 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         _refuse_symlinked_parent(out)
     except NameError:                                        # pragma: no cover
         pass
+    except OSError as e:
+        # This function's contract is "returns the attempt log (never raises)".
+        # The guard raises OSError for a symlinked ancestor (or a path blocked by
+        # a file); the old `except NameError` let it escape, and `track_one_pair`
+        # calls this with no try -- one symlinked `tracking/` directory aborted
+        # the whole tracking pass (F168). Report it as a failed backend attempt.
+        # The documented return is the attempt LOG OBJECT (the same shape the
+        # normal path returns), not a bare list: every caller reads `res["ok"]`.
+        return {"ok": False, "tool": None,
+                "attempts": [{"backend": "output-guard", "cmd": [], "rc": None,
+                              "ok": False, "detail": str(e)[:300]}],
+                "validated_ooxml": False, "validation_detail": "no output",
+                "warning": None}
     out.parent.mkdir(parents=True, exist_ok=True)      # external tools need the directory
 
     # OUT must never be one of the INPUTS: drop_stale_out() unlinks it before
@@ -1329,8 +1383,10 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         fidelity = redline_fidelity(base, revised, out)
         last["fidelity"] = fidelity
         if fidelity["over_marked"]:
-            _over = (f"over-marked redline: {fidelity['marked_words']} marked word(s) "
-                     f"for {fidelity['minimal_words']} word(s) of real change (the "
+            _over = (f"over-marked redline: "
+                     f"{fidelity.get('own_marked_words', fidelity['marked_words'])} "
+                     f"marked word(s) written by this backend for "
+                     f"{fidelity['minimal_words']} word(s) of real change (the "
                      f"backend rewrites whole paragraphs when a run is not plain "
                      f"text)")
             # APPEND: the structural caveat recorded by the writer (e.g. an
@@ -1493,7 +1549,7 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
     """
     rounds = [int(r) for r in (rounds if rounds is not None
                                else range(1, ctx.rounds_count() + 1))]
-    versions = list(versions) if versions else None
+    versions = None if versions is None else list(versions)
     out_root = ensure_aux_output_root(ctx.root, REDLINE_DIRNAME)
     src_setup = Path(ctx.state.get("source") or ".")
     # The setup source is only a trustworthy baseline while it still matches the
@@ -1651,8 +1707,23 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
         _prev = read_json(out_root / "manifest.json") or {}
     except (OSError, ValueError):
         _prev = {}
+    _prev_versions = ((_prev.get("versions") if isinstance(_prev, dict) else None) or [])
+    _prev_map = {(v.get("round"), v.get("version")): v for v in _prev_versions
+                 if isinstance(v, dict)}
+    # A "not materialized" placeholder must not REPLACE a stored entry whose
+    # comparisons were really produced (a temporarily absent source dir).
+    _drop = set()
+    for _v in manifest["versions"]:
+        _key = (_v.get("round"), _v.get("version"))
+        _old = _prev_map.get(_key)
+        if str(_v.get("status") or "") == "not materialized" and _old \
+                and (_old.get("comparisons") or []):
+            _drop.add(_key)
+    if _drop:
+        manifest["versions"] = [v for v in manifest["versions"]
+                                if (v.get("round"), v.get("version")) not in _drop]
     _new_keys = {(v.get("round"), v.get("version")) for v in manifest["versions"]}
-    _kept = [v for v in (_prev.get("versions") or [])
+    _kept = [v for v in _prev_versions
              if (v.get("round"), v.get("version")) not in _new_keys]
     if _kept:
         manifest["versions"] = _kept + manifest["versions"]

@@ -2024,6 +2024,12 @@ def _validated_official_requirements(official: dict, struct_path) -> dict:
         for stmt in statements:
             if not isinstance(stmt, dict) or not isinstance(stmt.get("label"), str):
                 bad("statements", "a list of objects with a string label", repr(stmt))
+    documentclass = official.get("documentclass")
+    if documentclass is not None and not isinstance(documentclass, str):
+        # A list/int here survived validation and scan_template_conformance
+        # stringified it, making the class row impossible to satisfy (F256).
+        bad("documentclass", "a string class name ('' when the template declares none)",
+            repr(documentclass))
     return official
 
 
@@ -2086,7 +2092,12 @@ def official_template_requirements(venue_id, root=None) -> dict:
             f"{struct_path}: the venue template pack carries no 'official' object; "
             f"regenerate it with `build-venue-templates`")
     official = _validated_official_requirements(official, struct_path)
-    if not official.get("sections") and not official.get("mandatory_sections"):
+    # A pack that pins ONLY declarations or ONLY a class file is still an
+    # authoritative requirement set: discarding it dropped the venue's rule
+    # instead of enforcing or reporting it (wave-2 F181).
+    if not (official.get("sections") or official.get("mandatory_sections")
+            or official.get("statements")
+            or str(official.get("documentclass") or "").strip()):
         return {}
     norm = (data or {}).get("norm") or {}
     advisory = [str(s.get("title") or "") for s in (norm.get("sections") or [])
@@ -2117,6 +2128,37 @@ def _docx_style_ids(path: Path) -> list:
     mod = _format_module()
     fn = getattr(mod, "docx_style_ids", None)
     return fn(path) if fn is not None else []
+
+
+def _docx_style_name_map(path: Path) -> dict:
+    """{style id: declared style name} from a DOCX's word/styles.xml.
+
+    Word style ids are arbitrary: a real Heading 1 may carry the id `H1` while
+    its declared name is `heading 1`. The live `w:pStyle` value alone therefore
+    cannot tell a heading from prose (wave-2 F174); this map resolves it. `{}`
+    when styles.xml is absent/unreadable.
+
+    The formatter's reader applies the untrusted-DOCX part/total budget and the
+    DTD/entity refusal (the same guard as `docx_style_ids`); this wrapper must
+    never bypass it with a direct `zipfile.read` on a submitted package.
+    """
+    mod = _format_module()
+    fn = getattr(mod, "docx_style_name_map", None)
+    return fn(path) if fn is not None else {}
+
+
+_DOCX_HEADING_NAME_RE = re.compile(r"(?i)^heading\s*[1-9]$")
+
+
+def _docx_heading_style(style_id, style_names=None) -> bool:
+    """True when a paragraph's `w:pStyle` id/declared name denotes a heading."""
+    sid = str(style_id or "").strip()
+    if not sid:
+        return False
+    if sid.startswith("Heading"):
+        return True
+    name = str((style_names or {}).get(sid) or "").strip()
+    return bool(name and _DOCX_HEADING_NAME_RE.match(name))
 
 
 def _docx_front_matter_report(path: Path, template: Path = None, containers=()) -> dict:
@@ -2251,6 +2293,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                 if role == "main":
                     texts.append("\n".join(text for text, _style in pairs))
                 seen = set()
+                style_names = _docx_style_name_map(p)
                 for para, style in pairs:
                     line = para.strip()
                     # A required section must be a SECTION: a plain body
@@ -2258,7 +2301,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                     # heading. Word marks a heading with its paragraph style
                     # (the codebase's `Heading*` convention); the MD/TEX
                     # branches use their own heading regexes further down.
-                    if style and style.startswith("Heading"):
+                    if _docx_heading_style(style, style_names):
                         skey = _section_key(line)
                         if skey and role == "main":
                             seen_section_keys.add(skey)
@@ -2277,6 +2320,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                 if text is None:
                     unparsed.append(doc)
                     continue
+                text = _strip_source_markup(text, ".tex")
                 if role == "cover":
                     continue
                 docs.add(doc)
@@ -2304,6 +2348,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                 if text is None:
                     unparsed.append(doc)
                     continue
+                text = _strip_source_markup(text, ".md")
                 if role == "cover":
                     continue
                 docs.add(doc)
@@ -2478,11 +2523,29 @@ def venue_profiles_write_dir(root=None) -> Path:
     return dirs[0] if dirs else Path(VENUE_PROFILES_DIRNAME)
 
 
+#: Names that document a downloaded corpus, not a published manuscript or a
+#: journal template. A README's headings must not become an advisory norm or an
+#: authoritative mandatory section (wave-2 F188); the corpus-wide README rule
+#: (`is_non_manuscript_rel`) cannot see a bare `LICENSE.md`/`NOTICE.txt`.
+_EXEMPLAR_METADATA_STEMS = frozenset({
+    "readme", "license", "licence", "copying", "notice", "manifest",
+    "changelog", "contributing", "code_of_conduct",
+})
+
+
+def _is_exemplar_metadata_file(p: Path) -> bool:
+    """True for a corpus documentation/metadata file, never a manuscript."""
+    return p.stem.strip().lower() in _EXEMPLAR_METADATA_STEMS
+
+
 def _exemplar_files(dirp: Path) -> list:
-    """Every supported exemplar file under one corpus dir, sorted."""
+    """Every supported MANUSCRIPT/TEMPLATE exemplar file under one corpus dir."""
     out = []
     for p in sorted(dirp.rglob("*")):
         if not p.is_file():
+            continue
+        rel = p.relative_to(dirp).as_posix()
+        if is_non_manuscript_rel(rel) or _is_exemplar_metadata_file(p):
             continue
         suf = p.suffix.lower()
         if suf in VENUE_EXEMPLAR_TEXT_SUFFIXES or suf in VENUE_EXEMPLAR_DOCX_SUFFIXES:
@@ -2490,8 +2553,45 @@ def _exemplar_files(dirp: Path) -> list:
     return out
 
 
+_MD_FENCE_OPEN_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
+def _strip_markdown_fences(text: str) -> str:
+    """`text` without its fenced code blocks (line structure kept).
+
+    A fenced `## Results` is CODE, not a heading: leaving it in the raw text
+    satisfied a mandatory-section requirement the live manuscript did not
+    contain (wave-2 F183).
+    """
+    out = []
+    fence = ""
+    for line in (text or "").splitlines(keepends=True):
+        m = _MD_FENCE_OPEN_RE.match(line)
+        if not fence:
+            if m:
+                fence = m.group(1)[0]
+                out.append("\n" if line.endswith("\n") else "")
+                continue
+            out.append(line)
+            continue
+        if m and m.group(1)[0] == fence:
+            fence = ""
+        out.append("\n" if line.endswith("\n") else "")
+    return "".join(out)
+
+
+def _strip_source_markup(text: str, suffix: str) -> str:
+    """A source document without TeX comments / Markdown fenced code."""
+    if suffix == ".tex":
+        return strip_tex_comment(text)
+    if suffix in (".md", ".markdown", ".txt"):
+        return _strip_markdown_fences(text)
+    return text
+
+
 def _sections_from_text(text: str, suffix: str) -> list:
     """[(level, title)] in reading order, from a .tex or markdown/text body."""
+    text = _strip_source_markup(text, suffix)
     if suffix == ".tex":
         return [(_TEX_LEVELS.get(kind, 1), title.strip())
                 for kind, title in TEX_SECTION_RE.findall(text) if title.strip()]
@@ -2526,15 +2626,21 @@ def _docx_exemplar_text(path: Path):
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return None
     sections, lines = [], []
+    style_names = _docx_style_name_map(path)
     for _s, _e, frag in mod.paragraphs(xml):
         text = mod.text_of(frag).strip()
         if not text:
             continue
         lines.append(text)
         style = mod.elem_val(mod.ppr_of(frag), "pStyle") or ""
-        m = re.match(r"(?i)^heading\s*([1-4])$", style.replace("-", "").replace(" ", ""))
+        # Resolve an arbitrary style id through styles.xml (F174): a real
+        # Heading 1 may carry the id `H1` and declare the name `heading 1`.
+        style_name = style if style.startswith("Heading") \
+            else (style_names.get(style) or style)
+        m = re.match(r"(?i)^heading\s*([1-4])$",
+                     style_name.replace("-", "").replace(" ", ""))
         if not m:
-            m = re.match(r"(?i)^heading([1-4])$", style)
+            m = re.match(r"(?i)^heading([1-4])$", style_name)
         if m:
             sections.append((int(m.group(1)), text))
     return sections, "\n".join(lines)
@@ -2553,6 +2659,7 @@ def extract_manuscript_structure(path: Path) -> dict:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return {"skipped": "unreadable"}
+        text = _strip_source_markup(text, suffix)
         sections = _sections_from_text(text, suffix)
         if not sections:
             # An exemplar that yields no sections is not a structure record: it
@@ -2694,6 +2801,12 @@ def render_architecture_summary(venue_id: str, norm: dict, official: dict = None
     return "\n".join(L)
 
 
+def _skeleton_key(title) -> str:
+    """The agreement key two skeleton titles are the same requirement by."""
+    words = re.findall(r"[a-z0-9]+", str(title).lower())
+    return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words)
+
+
 def _skeleton_titles(norm: dict, official: dict = None) -> list:
     """The skeleton order: the OFFICIAL sections as the backbone, completed by
     the advisory norm's sections (inserted at their modal positions).
@@ -2707,9 +2820,7 @@ def _skeleton_titles(norm: dict, official: dict = None) -> list:
     off = list((official or {}).get("sections") or [])
     adv = list(norm.get("sections") or [])
 
-    def key(title):
-        words = re.findall(r"[a-z0-9]+", str(title).lower())
-        return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words)
+    key = _skeleton_key
 
     pinned = [str(m).strip() for m in ((official or {}).get("mandatory_sections") or [])
               if str(m).strip()]
@@ -2791,7 +2902,12 @@ def render_word_template(venue_id: str, norm: dict, official: dict = None) -> st
               "exemplar manuscripts carries a usable section heading, so this skeleton "
               "asserts NO body-section order. Follow the venue's author guidelines for "
               "the section set; never invent one. -->", ""]
-    statement_labels = _skeleton_statements(norm, off)
+    # A statement label that is already a skeleton title is the SAME
+    # requirement: emitting it again duplicated a pinned statement section in
+    # the generated skeleton (wave-2 F177).
+    title_keys = {_skeleton_key(t) for t in titles}
+    statement_labels = [l for l in _skeleton_statements(norm, off)
+                        if _skeleton_key(l) not in title_keys]
     for title in titles:
         mark = " [MANDATORY]" if title.strip().lower() in mandatory else ""
         if title.strip().lower() in ("abstract",):
@@ -2828,7 +2944,9 @@ def render_latex_template(venue_id: str, norm: dict, official: dict = None) -> s
     """A LaTeX skeleton: the journal's class/section order when one is known."""
     off = official or {}
     titles = _skeleton_titles(norm, off)
-    statement_labels = _skeleton_statements(norm, off)
+    title_keys = {_skeleton_key(t) for t in titles}
+    statement_labels = [l for l in _skeleton_statements(norm, off)
+                        if _skeleton_key(l) not in title_keys]
     docclass = str(off.get("documentclass") or "").strip()
     L = ["% LaTeX template skeleton for venue '" + venue_id + "'.",
          "% Structure only: replace the placeholders with the manuscript's own content."]
@@ -3371,8 +3489,18 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None, problems: list = None
     The M19 counting convention inherits the same way, INCLUDING each article
     type's own block when that type counts differently from the venue default.
     """
+    if "venue_profile" not in cfg:
+        # Only an ABSENT key means "no snapshot" (a root created before the
+        # key existed). A present value of any other type is a broken recorded
+        # rule set, never a reason to adopt the mutable profile file (F176).
+        return None
     snapshot = cfg.get("venue_profile")
     if not isinstance(snapshot, dict):
+        if problems is not None:
+            problems.append(
+                f"the recorded venue profile snapshot in pipeline_config.json is not a "
+                f"JSON object (got {type(snapshot).__name__}); re-record it with "
+                f"`set-venue {venue_id}`")
         return None
     missing = tuple(k for k in ("tables", "figures", "references", "numbering",
                                 "leftover_phrases", "counting", "figure_text",
@@ -4003,6 +4131,20 @@ def without_raw_data(m: dict) -> dict:
     Used to compare a published winner with its pin: the raw-data area is an
     INPUT (byte-verified against the pristine copy), not content the stage wrote,
     so a normalised copy of it must not read as "the champion changed".
+
+    ONLY raw data leaves this manifest. The feedback areas are also evidence
+    inputs, but they are not this function's exclusion: dropping them too made
+    an edit to a winner's `human_review_feedback/` or `llm_review_feedback/`
+    invisible to `pinned_integrity` (F103). The inert `<raw-data>.disabled`
+    spellings stay out with it.
     """
-    files = {k: v for k, v in (m or {}).get("files", {}).items() if not is_evidence_rel(k)}
+    def _raw_data_only(rel) -> bool:
+        norm = str(rel or "").replace("\\", "/")
+        if is_raw_data_rel(norm):
+            return True
+        return (is_disabled_evidence_rel(norm)
+                and norm.split("/", 1)[0].startswith(RAW_DATA_DIR))
+
+    files = {k: v for k, v in (m or {}).get("files", {}).items()
+             if not _raw_data_only(k)}
     return {"files": files, "count": len(files)}

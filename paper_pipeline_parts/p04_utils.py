@@ -197,8 +197,17 @@ def redact_secrets(text: str) -> str:
     # run-log `argv:` header cannot capture it.
     text = re.sub(r"(--(?:judge-)?agent-model-api-key)([ =])(\S+)",
                   r"\1\2[REDACTED]", text)
-    # URL userinfo / credential query parameters, in case a transcript carries one.
-    text = re.sub(r"(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@", text)
+    # ANY credential-NAMED option and its value, not only the two model-key
+    # spellings: the malformed `--agent-cmd` fallback comes through here, and a
+    # generic `--api-key VALUE` pair used to survive into the run log (F059).
+    text = re.sub(
+        r"(?i)(--(?:[a-z0-9]+[-_])*(?:api[-_]?key|apikey|token|access[-_]?token|auth|"
+        r"authorization|password|passwd|secret))([ =])(\S+)",
+        r"\1\2[REDACTED]", text)
+    # URL userinfo / credential query parameters, in case a transcript carries
+    # one. The scheme is matched case-insensitively: an upper-case `HTTPS://`
+    # used to keep its userinfo (F059).
+    text = re.sub(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@", text)
     text = re.sub(
         r"(?i)([?&](?:api[_-]?key|apikey|key|token|access[_-]?token|auth|"
         r"authorization|password|secret)=)[^&\s'\"]+",
@@ -514,6 +523,29 @@ def pipeline_identity_note(ctx: Ctx) -> str:
             f"created with).")
 
 
+def _read_pipeline_registry(path: Path) -> dict:
+    """The pipeline's OWN registry, read through the STATE reader.
+
+    `read_json` applies MAX_JSON_BYTES (64 MiB), the cap for AGENT-written
+    files. The registry has its own, larger cap (`load_state_file` /
+    MAX_STATE_BYTES) and its own messages, so reading it with the agent cap made
+    a valid large `state.json` look absent and silently dropped the recorded
+    origin (F201). Falls back to the agent reader only when the state reader is
+    not present in this build.
+    """
+    reader = globals().get("load_state_file")
+    if reader is not None:
+        try:
+            rec, _problem = reader(Path(path))
+            return rec if isinstance(rec, dict) else {}
+        except Exception:                                             # noqa: BLE001
+            return {}
+    try:
+        return read_json(Path(path)) or {}
+    except Exception:                                                 # noqa: BLE001
+        return {}
+
+
 def frozen_snapshot_root(path=None) -> dict:
     """The pipeline ROOT that holds the running script as its frozen copy ({} = none).
 
@@ -543,10 +575,7 @@ def frozen_snapshot_root(path=None) -> dict:
     holder = here.parent
     if not ((holder / "state.json").is_file() or (holder / "pipeline_config.json").is_file()):
         return {}
-    try:
-        rec = read_json(holder / "state.json") or {}
-    except Exception:                                                 # noqa: BLE001
-        rec = {}
+    rec = _read_pipeline_registry(holder / "state.json")
     origin = rec.get("pipeline") or {}
     frozen_at = ""
     try:
@@ -652,10 +681,7 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
             except OSError:                                           # pragma: no cover
                 out["maintained_sha256"] = None
             break
-        try:
-            rec = read_json(Path(cursor).parent / "state.json") or {}
-        except Exception:                                             # noqa: BLE001
-            rec = {}
+        rec = _read_pipeline_registry(Path(cursor).parent / "state.json")
         cursor = str((rec.get("pipeline") or {}).get("path") or "")
     out["maintained_differs"] = bool(out["maintained_sha256"] and out["frozen_sha256"]
                                      and out["maintained_sha256"] != out["frozen_sha256"])
@@ -1693,6 +1719,25 @@ def _refuse_symlinked_read_parent(path: Path) -> Path:
     return path
 
 
+# The inode each reserved temporary was CREATED with: `_open_reserved_tmp` can
+# otherwise prove only "regular file, one link", not "still the file this
+# process reserved". A racing writer that unlinks the temp and plants a regular
+# single-link file of the same name passed that weaker check, and (with no
+# O_TRUNC) a shorter write left the planted tail in place (F060).
+_RESERVED_TMP_INODES = {}
+_RESERVED_TMP_MAX = 4096
+
+
+def _remember_reserved_tmp(tmp: Path, st) -> None:
+    if len(_RESERVED_TMP_INODES) >= _RESERVED_TMP_MAX:
+        # A caller may reserve a temp and write it by path (the DOCX fixer), so
+        # an entry can outlive the write. Clearing at the cap keeps this map
+        # bounded; an outstanding ENTRY is a best-effort hardening, never a
+        # correctness dependency.
+        _RESERVED_TMP_INODES.clear()
+    _RESERVED_TMP_INODES[str(tmp)] = (st.st_dev, st.st_ino)
+
+
 def tmp_path_for(path: Path) -> Path:
     """A UNIQUE, exclusively-created temporary sibling for `path`.
 
@@ -1719,7 +1764,10 @@ def tmp_path_for(path: Path) -> Path:
                           | getattr(os, "O_NOFOLLOW", 0), 0o666)
         except FileExistsError:
             continue
-        os.close(fd)
+        try:
+            _remember_reserved_tmp(tmp, os.fstat(fd))
+        finally:
+            os.close(fd)
         return tmp
     raise OSError(f"could not create a unique temporary for {path}")
 
@@ -1730,15 +1778,26 @@ def _open_reserved_tmp(tmp: Path, mode: str = "wb", encoding: str = "utf-8",
 
     tmp_path_for reserves the name, but the writer reopens it: an attacker can
     unlink it and plant a symlink in between (F01). O_NOFOLLOW makes that open
-    fail, and fstat rejects anything but a regular single-link file. The writer
+    fail, and fstat rejects anything but a regular single-link file. O_TRUNC
+    makes the write the WHOLE file even when the reopened path is a planted
+    regular file, and the recorded (st_dev, st_ino) proves it is still the inode
+    tmp_path_for created -- the weaker check alone let a planted file keep its
+    trailing bytes and then be renamed over the destination (F060). The writer
     gets this file object only, so no reopen-by-path can undo the check.
     """
-    flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_CLOEXEC", 0))
     fd = os.open(tmp, flags)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
             raise OSError(f"refusing to write through an unsafe temporary: {tmp}")
+        expected = _RESERVED_TMP_INODES.pop(str(tmp), None)
+        if expected is not None and (st.st_dev, st.st_ino) != expected:
+            raise OSError(
+                f"refusing to write through a REPLACED temporary: {tmp} "
+                f"(reserved inode {expected[0]}:{expected[1]}, "
+                f"opened inode {st.st_dev}:{st.st_ino})")
     except BaseException:
         os.close(fd)
         raise
@@ -1961,6 +2020,9 @@ def write_csv_atomic(path, fields, rows) -> Path:
     return path
 
 
+JSON_MAX_NESTING = 1000
+
+
 def _json_from_text(text: str, lenient: bool):
     """Parse `text` as JSON, optionally recovering JSON embedded in prose.
 
@@ -2009,6 +2071,14 @@ def _json_from_text(text: str, lenient: bool):
             in_string = True
         elif ch in "{[":
             stack.append(("}" if ch == "{" else "]", i))
+            if len(stack) > JSON_MAX_NESTING:
+                # The input byte cap bounds the FILE, not this scanner's
+                # auxiliary stack: one tuple per unmatched opener made a 64 MiB
+                # brace file allocate several GB during a lenient parse (F056).
+                # Nothing this pipeline can parse nests this deep -- json.loads
+                # itself raises RecursionError around the interpreter limit --
+                # so a deeper stack is malformed agent input, not a document.
+                return None
         elif ch in "}]":
             if stack and stack[-1][0] == ch:
                 _closer, start = stack.pop()
@@ -2200,9 +2270,11 @@ def read_text_bounded(path: Path, errors: str = "replace"):
     with an unbounded `read_text()`, so the documented cap applied to JSON only
     and a runaway session could still make the orchestrator allocate gigabytes
     (the 2026-10-28 audit's F06). lstat/`S_ISREG` plus O_NOFOLLOW also refuse a
-    planted FIFO/symlink at the path.
+    planted FIFO/symlink at the path, and the OPEN descriptor is fstat'ed too so
+    a swap between the lstat and the open cannot turn a FIFO into empty text.
     """
     path = Path(path)
+    fd = None
     try:
         _refuse_symlinked_read_parent(path)
         st = path.lstat()
@@ -2212,19 +2284,31 @@ def read_text_bounded(path: Path, errors: str = "replace"):
             return None
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
                      | getattr(os, "O_NONBLOCK", 0))
-        try:
-            chunks, remaining = [], MAX_JSON_BYTES + 1
-            while remaining > 0:
-                chunk = os.read(fd, min(remaining, 1 << 20))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-        finally:
-            os.close(fd)
+        # lstat() and open() are two syscalls: the path can be swapped for a
+        # FIFO between them. O_NOFOLLOW does not reject a FIFO, and O_NONBLOCK
+        # makes that open SUCCEED, so os.read() returned EOF and the artifact
+        # was handed back as EMPTY text instead of refused (F204). The OPEN
+        # descriptor is the only thing the reader can trust, so check it exactly
+        # as read_json does.
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_size > MAX_JSON_BYTES:
+            return None
+        chunks, remaining = [], MAX_JSON_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
         raw = b"".join(chunks)
     except OSError:
         return None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     if len(raw) > MAX_JSON_BYTES:
         return None
     return _decode_text_source(raw, errors)
@@ -2594,10 +2678,12 @@ def scan_captions_in_sources(sources: list, limit=None) -> dict:
     limit = DEFAULT_CAPTION_LIMIT if limit is None else max(0, int(limit))
     overrides = corpus_source_overrides(sources)
     captions, unparsed, docs, suspects = [], [], set(), []
+    unreadable = []
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for p in _iter_tree_files(src, follow_dir_links=True):
+        src_gaps = []
+        for p in _iter_tree_files(src, follow_dir_links=True, gaps=src_gaps):
             if not p.is_file():
                 continue
             if is_non_document_name(p.name):
@@ -2674,12 +2760,16 @@ def scan_captions_in_sources(sources: list, limit=None) -> dict:
                 captions.append({"document": doc, "caption": label, "words": w,
                                  "over_limit": bool(limit) and w > limit,
                                  "excerpt": re.sub(r"\s+", " ", text)[:80]})
+        # An unreadable subdirectory hides its documents from the walk; name it
+        # so the caller can tell "no captions" from "nothing readable" (F049).
+        unreadable.extend(prefix + g for g in src_gaps)
     over = [c for c in captions if c["over_limit"]]
     return {"limit": limit, "rule_enabled": bool(limit),
             "captions": captions, "count": len(captions),
             "over_limit": over, "unparsed": sorted(set(unparsed)),
             "suspected": suspects[:50], "suspected_count": len(suspects),
-            "files_with_captions": sorted(docs), "checked": bool(captions)}
+            "files_with_captions": sorted(docs), "checked": bool(captions),
+            "unreadable_dirs": sorted(set(unreadable))}
 
 
 def scan_version_captions(ctx: Ctx, r: int, vid: str) -> dict:
@@ -2709,6 +2799,17 @@ def caption_gate(info) -> tuple:
     """
     if not info:
         return True, "captions: not verified (no scan recorded)"
+
+    def with_gaps(text: str) -> str:
+        """Name an unreadable subtree: "no captions" is not "nothing readable"."""
+        gaps = info.get("unreadable_dirs") or []
+        if gaps:
+            text += (f"; {len(gaps)} directory(ies) could not be read, so captions under them "
+                     f"were NOT verified: " + ", ".join(str(g) for g in gaps[:4])
+                     + ("..." if len(gaps) > 4 else "")
+                     + " (make them readable and re-run)")
+        return text
+
     limit = int(info.get("limit", DEFAULT_CAPTION_LIMIT) or 0)
     if not info.get("rule_enabled", bool(limit)):
         n = int(info.get("count") or 0)
@@ -2717,13 +2818,13 @@ def caption_gate(info) -> tuple:
         if info.get("unparsed"):
             note += (f"; {len(info['unparsed'])} file(s) could not be parsed (legend length not "
                      f"verified there -- manual item)")
-        return True, note
+        return True, with_gaps(note)
     n_over = len(info.get("over_limit") or [])
     if n_over:
         note = (f"captions: {n_over} caption(s) over the suggested {limit} words "
                 f"(advisory only -- a reporting rule of this pipeline, never a gate; "
                 f"report/compress by removing redundancy only)")
-        return False, note
+        return False, with_gaps(note)
     elif not info.get("checked"):
         note = "captions: no extractable captions found"
     else:
@@ -2732,7 +2833,7 @@ def caption_gate(info) -> tuple:
     if n_susp:
         note += (f"; {n_susp} figure-like line(s) were NOT recognised as captions "
                  f"(verify M18 manually)")
-    return True, note
+    return True, with_gaps(note)
 
 
 # ---------------------------------------------------------------------
@@ -3007,31 +3108,41 @@ def _tex_length_scan(text: str):
         if m:
             out.append(m.group(1).strip())
             continue
-        cap = TEX_CAPTION_TOKEN_RE.search(line)
-        if cap:
-            # Text before the caption stays prose; the caption's own group
-            # (which may wrap over several source lines) becomes one line, so
-            # subtracting its span never removes a neighbouring word.
-            before = _tex_line_text(line[:cap.start()])
-            if before:
-                out.append(before)
-            group = line[cap.end():]
-            depth = 1 + _tex_brace_delta(group)
-            while depth > 0 and i < n:
-                nxt = strip_tex_comment(raw_lines[i]).strip()
-                i += 1
-                group = f"{group}\n{nxt}"
-                depth += _tex_brace_delta(nxt)
-            cap_text, after = _tex_split_group(group)
-            # Carry the caption KIND: a profile that excludes only figure
-            # legends must not subtract this table's caption as well (F03).
-            cap_kind = _tex_float_env_after(line[:cap.start()], env_at_start)
-            of = re.match(r"\\captionof\*?\s*\{([^{}]*)\}", line[cap.start():])
-            if of:
-                cap_kind = of.group(1).strip().lower()
-            captions.append((len(out), len(out) + 1, cap_kind))
-            out.append(_strip_latex(cap_text))
-            after = _tex_line_text(after)
+        if TEX_CAPTION_TOKEN_RE.search(line):
+            # Parse EVERY caption group on the line: `\caption{...}\caption{...}`
+            # is legal, and consuming only the first left the second legend's
+            # words in the prose (charged to the main text) while the M18
+            # inventory found both legends (F203). Text before/between captions
+            # stays prose; each caption's own group (which may wrap over several
+            # source lines) becomes one line, so subtracting its span never
+            # removes a neighbouring word.
+            rest = line
+            while True:
+                cap = TEX_CAPTION_TOKEN_RE.search(rest)
+                if cap is None:
+                    break
+                prefix = rest[:cap.start()]
+                at_token = rest[cap.start():]
+                before = _tex_line_text(prefix)
+                if before:
+                    out.append(before)
+                group = rest[cap.end():]
+                depth = 1 + _tex_brace_delta(group)
+                while depth > 0 and i < n:
+                    nxt = strip_tex_comment(raw_lines[i]).strip()
+                    i += 1
+                    group = f"{group}\n{nxt}"
+                    depth += _tex_brace_delta(nxt)
+                cap_text, rest = _tex_split_group(group)
+                # Carry the caption KIND: a profile that excludes only figure
+                # legends must not subtract this table's caption as well (F03).
+                cap_kind = _tex_float_env_after(prefix, env_at_start)
+                of = re.match(r"\\captionof\*?\s*\{([^{}]*)\}", at_token)
+                if of:
+                    cap_kind = of.group(1).strip().lower()
+                captions.append((len(out), len(out) + 1, cap_kind))
+                out.append(_strip_latex(cap_text))
+            after = _tex_line_text(rest)
             if after:
                 out.append(after)
             continue
@@ -3265,6 +3376,7 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
         if section in _excludes)
     overrides = corpus_source_overrides(sources)
     rows, unparsed, skipped, rendered, docs = [], [], [], [], set()
+    unreadable = []
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
@@ -3273,7 +3385,8 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
         # files are INCLUDED by another, so the master counts the expanded text
         # and a child is not counted a second time on its own (F36).
         tex_cache, tex_included = {}, set()
-        for q in _iter_tree_files(src):
+        src_gaps = []
+        for q in _iter_tree_files(src, gaps=src_gaps):
             if q.suffix.lower() not in LENGTH_TEX_EXTS:
                 continue
             qtext = read_text_bounded(q)
@@ -3284,7 +3397,7 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 child = _tex_include_path(q.parent, inc.group(1))
                 if child is not None and child != q.resolve():
                     tex_included.add(child)
-        for p in _iter_tree_files(src):
+        for p in _iter_tree_files(src, gaps=src_gaps):
             # `_iter_tree_files` is the corpus walker: a file symlink is not
             # package content (copy_into refuses it), so a scan that followed
             # one verified a corpus the materializer never produced.
@@ -3380,6 +3493,9 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 continue
             docs.add(doc)
             rows.extend(found)
+        # An unreadable subdirectory hides its documents from the walk; name it
+        # so the note can tell "no manuscript" from "nothing readable" (F049).
+        unreadable.extend(prefix + g for g in src_gaps)
     over = [r for r in rows if r["over_limit"]]
     return {"limits": limits, "counting": prof.counting, "source": source,
             "venue": prof.id,
@@ -3387,7 +3503,8 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
             "unparsed": sorted(set(unparsed)), "skipped": sorted(set(skipped)),
             "rendered": sorted(set(rendered)),
             "needs_manual": sorted(set(rendered)) if not rows else [],
-            "documents": sorted(docs), "checked": bool(rows)}
+            "documents": sorted(docs), "checked": bool(rows),
+            "unreadable_dirs": sorted(set(unreadable))}
 
 
 def length_note(info) -> str:
@@ -3404,11 +3521,25 @@ def length_note(info) -> str:
         return f"not verified -- the length scan failed ({info['error']})"
     rows = info.get("rows") or []
     limits = info.get("limits") or length_limits()
+    # Every source the scan could NOT measure: a legacy .doc/.rtf or unreadable
+    # file (`unparsed`), a rendering/supplementary document (`skipped`, which
+    # includes `rendered`), and a directory the walk could not list. Naming them
+    # is the difference between "this is the count" and "this is part of the
+    # count" -- the M19 note used to print "all within the relaxed caps" while a
+    # document was never measured (F055).
+    unmeasured = sorted(set((info.get("unparsed") or []) + (info.get("skipped") or [])
+                            + (info.get("unreadable_dirs") or [])))
     if not rows:
         if info.get("needs_manual"):
             return ("not verified -- no editable manuscript or cover letter was found; the text "
                     "lives in non-editable file(s): " + ", ".join(info["needs_manual"][:4])
                     + " (the author must convert/count it; the agents' M19 sweep is authoritative)")
+        if unmeasured:
+            return ("not verified -- no measurable manuscript-shaped document was found, and "
+                    f"{len(unmeasured)} file(s) could not be measured: "
+                    + ", ".join(unmeasured[:4]) + ("..." if len(unmeasured) > 4 else "")
+                    + " (the author must provide/count them; the agents' M19 sweep is "
+                      "authoritative)")
         return ("no manuscript-shaped document found to count "
                 "(the agents' M19 sweep is authoritative)")
     parts = []
@@ -3428,12 +3559,21 @@ def length_note(info) -> str:
     caps_text = (f"caps: abstract {abs_cap if abs_cap is not None else 'none'}, "
                  f"main text {main_cap if main_cap is not None else 'none'}"
                  + (f", cover letter TOTAL {cover_cap}" if cover_cap is not None else ""))
-    if abs_cap is None and main_cap is None and cover_cap is None:
+    _no_caps = abs_cap is None and main_cap is None and cover_cap is None
+    if _no_caps:
         caps_text = ("no venue cap configured: the counts are recorded for the author to compare "
                      "with the target journal's own guidelines")
-    tail = (f"; {over_n} over the cap (advisory for ranking -- never a word-count gate; "
-            f"an over-cap FINAL package is NOT submission-ready; compress by removing "
-            f"redundancy only)" if over_n else "; all within the relaxed caps")
+    if _no_caps:
+        tail = "; counts only (no venue cap configured, so nothing was 'within' a cap)"
+    elif over_n:
+        tail = (f"; {over_n} over the cap (advisory for ranking -- never a word-count gate; "
+                f"an over-cap FINAL package is NOT submission-ready; compress by removing "
+                f"redundancy only)")
+    elif unmeasured:
+        # Do NOT print a clean line over a count that skipped sources.
+        tail = "; no measured section is over the cap (not all sources were counted -- see below)"
+    else:
+        tail = "; all within the relaxed caps"
     cover_min = limits["cover letter"].get("min")
     cover_max = limits["cover letter"].get("max")
     if pref_n:
@@ -3455,6 +3595,12 @@ def length_note(info) -> str:
                           f"({_cover_bound_text(cover_min, cover_max)})")
         tail += (f"; {pref_n} cover letter(s) outside {pref_label} (the user's preference, "
                  f"not {preference_owner}, never a gate)")
+    if unmeasured:
+        tail += (f"; NOT counted in these figures: {len(unmeasured)} source(s) that could not be "
+                 "measured: " + ", ".join(unmeasured[:4])
+                 + ("..." if len(unmeasured) > 4 else "")
+                 + " (the count covers the measured sections only; the agents' M19 sweep is "
+                   "authoritative)")
     return (f"{len(rows)} section(s) "
             f"[{', '.join(parts[:6])}] ({caps_text}{tail})")
 
@@ -3519,6 +3665,12 @@ def format_policy_of(ctx: Ctx) -> dict:
     policy = dict(getattr(mod, "POLICY_DEFAULTS", {}) or {}) if mod else {}
     configured = (ctx.cfg or {}).get("format_policy") or {}
     policy.update(configured)
+    if "unlink_zotero_fields" in configured:
+        # Normalise the documented off spellings ONCE, here: the formatter's
+        # field-continuity fence reads this key with raw truthiness, so the
+        # string "off" used to unlink fields and skip the fence.
+        policy["unlink_zotero_fields"] = _policy_flag(
+            configured, "unlink_zotero_fields", False)
     for key, block in _venue_display_blocks(ctx).items():
         if key not in configured:
             policy[key] = copy.deepcopy(block)
@@ -3894,6 +4046,11 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue                      # a later source provides this path
             if excluded and excluded_corpus_component(rel, excluded):
                 continue
+            if is_code_rel(prefix + rel):
+                # `code/` is revision content, never submission prose: the
+                # caption/length scans already skip it, and scanning it here
+                # filed M20 rows against the analysis code (F050).
+                continue
             if is_non_manuscript_rel(rel):
                 # Evidence areas and feedback/response documents are inputs: a
                 # reviewer's .docx report is not a submission file whose OOXML
@@ -3937,6 +4094,8 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue                      # a later source provides this path
             if excluded and excluded_corpus_component(rel, excluded):
                 continue
+            if is_code_rel(prefix + rel):
+                continue        # `code/` is revision content, not submission prose
             if is_non_manuscript_rel(rel):
                 continue        # evidence area, not submission prose (see above)
             if "work" in rel.split("/")[:-1]:
@@ -4001,6 +4160,8 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue
             if excluded and excluded_corpus_component(rel, excluded):
                 continue
+            if is_code_rel(prefix + rel):
+                continue        # `code/` is revision content, not a submission PDF
             if is_non_manuscript_rel(rel):
                 continue
             if "work" in rel.split("/")[:-1]:
@@ -4629,10 +4790,16 @@ def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
         # field-checked while one was never opened (F107).
         for _side, _gaps in (("base", base_gaps), ("output", out_gaps)):
             for _gap in sorted(set(_gaps)):
-                warns.append(f"ZOTERO FIELD CONTINUITY: the {_side} directory {_gap!r} "
-                             f"could not be read; its DOCX documents were NOT "
-                             f"field-checked")
+                _msg = (f"ZOTERO FIELD CONTINUITY: the {_side} directory {_gap!r} "
+                        f"could not be read; its DOCX documents were NOT "
+                        f"field-checked")
+                warns.append(_msg)
                 rep["warnings"] += 1
+                # A skipped subsection is NOT a clean check: this gate fails only
+                # on rep["errors"], so a warning alone let an unreadable base
+                # directory pass the hard field gate with 0 errors (F063).
+                errs.append(_msg)
+                rep["errors"] += 1
     for side, clashes in (("base", base_clash), ("output", out_clash)):
         for key, paths in sorted(clashes.items()):
             warns.append(f"ZOTERO FIELD CONTINUITY: two {side} documents pair to one key "
@@ -4641,7 +4808,13 @@ def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
                          f"rename them so their names differ by more than a version token")
             rep["warnings"] += 1
     if not base_docs:
-        rep["skipped"] = "the base carries no DOCX"
+        if base_gaps:
+            # Do not report "carries no DOCX" for a tree whose DOCX documents
+            # were merely unreadable: that misstates the cause (F063).
+            rep["skipped"] = ("the base's DOCX documents could not be read: "
+                              + ", ".join(sorted(set(base_gaps))))
+        else:
+            rep["skipped"] = "the base carries no DOCX"
         return rep
     pairs = [(base_docs[k], out_docs[k]) for k in sorted(set(base_docs) & set(out_docs))]
     # A pairing-key collision (`appendix-a.docx` / `appendix-b.docx`) leaves one
@@ -5151,7 +5324,7 @@ EMAIL_ADDRESS_RE = re.compile(
     r"(?<![A-Za-z0-9._%+\-])"
     r"([A-Za-z0-9][A-Za-z0-9._%+\-]*@"
     r"[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?\.[A-Za-z]{2,})"
-    r"(?![A-Za-z0-9.\-])")
+    r"(?![A-Za-z0-9\-])")
 EMAIL_FULL_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._%+\-]*@"
     r"[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?\.[A-Za-z]{2,}")
@@ -5223,10 +5396,15 @@ def _email_texts_in_file(path: Path) -> tuple:
         for _name, xml in parts:
             texts.extend(part_texts(xml))
         return texts, ""
-    try:
-        return [path.read_text("utf-8", "replace")], ""
-    except OSError as e:
-        return [], f"unreadable ({type(e).__name__}: {e})"
+    text = read_text_bounded(path)
+    if text is None:
+        # A blocking read_text() here let a file swapped for a FIFO wedge the
+        # whole e-mail/identifier postcheck (and a symlink swap read outside
+        # content). The bounded reader refuses a FIFO/symlink/oversize file and
+        # reports the named gap the caller already surfaces (F045).
+        return [], ("unreadable (not a regular, within-budget file: "
+                    "symlink/FIFO/oversize refused)")
+    return [text], ""
 
 
 def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
@@ -5240,7 +5418,7 @@ def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
     found, gaps = {}, []
     suffixes = EMAIL_EVIDENCE_SUFFIXES if evidence else EMAIL_DOC_SUFFIXES
 
-    def skipped(rel: str, name: str, excluded) -> bool:
+    def skipped(rel: str, name: str, excluded, prefix: str = "") -> bool:
         parts = rel.split("/")
         if excluded and parts and parts[0] in excluded:
             return True
@@ -5256,7 +5434,13 @@ def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
                 return True
             return bool(is_journal_feedback_name(name)
                         or authored_reply_name(name))
-        return bool(is_non_manuscript_rel(rel) or parts[0] == CODE_DIR)
+        # The corpus passes the analysis code as its own source
+        # `(code_dir, "code/", ())`, so `rel` is relative to code_dir and carries
+        # no `code/` component: testing `parts[0]` alone missed it and an address
+        # in a code note became a manuscript contact fact. The caption/length
+        # scans already key on the PREFIXED path (F050).
+        return bool(is_non_manuscript_rel(rel)
+                    or is_code_rel(prefix + rel) or parts[0] == CODE_DIR)
 
     for src, prefix, excluded in sources or []:
         try:
@@ -5274,7 +5458,7 @@ def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
                 rel = path.relative_to(src).as_posix()
             except ValueError:                                     # pragma: no cover
                 continue
-            if skipped(rel, path.name, excluded):
+            if skipped(rel, path.name, excluded, prefix):
                 continue
             try:
                 if path.stat().st_size > EMAIL_MAX_FILE_BYTES:
@@ -5303,7 +5487,7 @@ def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
                 rel = path.relative_to(src).as_posix()
             except ValueError:                                     # pragma: no cover
                 continue
-            if skipped(rel, path.name, excluded):
+            if skipped(rel, path.name, excluded, prefix):
                 continue
             gaps.append(f"{prefix + rel}: unsupported editable format "
                         f"({path.suffix.lower()}); not scanned for e-mail addresses")
@@ -5376,8 +5560,16 @@ def _email_verification_rows(pkg: Path) -> tuple:
         bad = []
         if not after or not EMAIL_FULL_RE.fullmatch(after):
             bad.append("no valid `after` address")
+        elif _is_placeholder_email(after):
+            # The record must not launder a reserved/example address into a
+            # "verified" contact fact: only the SOURCE host used to be checked,
+            # so after='fake@example.com' with a real source_url entered
+            # verified_after and the added-address gate accepted it (F046).
+            bad.append("`after` is a reserved/example address, never a real contact address")
         if before and not EMAIL_FULL_RE.fullmatch(before):
             bad.append("`before` is not a valid address")
+        elif before and _is_placeholder_email(before):
+            bad.append("`before` is a reserved/example address, not a real address")
         if not re.match(r"https?://", source_url, re.I):
             bad.append("`source_url` must be an http(s) URL")
         else:
@@ -5598,6 +5790,20 @@ def _defined_styles(docx: Path) -> set:
     return set(re.findall(r'w:styleId="([^"]+)"', styles))
 
 
+def _zip_part_too_big(z, name: str) -> bool:
+    """True when a DOCX part declares more decompressed bytes than the budget.
+
+    `_docx_xml_part` refuses an over-budget part, but the part-HASHING helpers
+    called `z.read(name)` directly and would decompress a small compressed entry
+    into gigabytes (F062). A part that declares more than
+    MAX_DOCX_PART_BYTES is unverifiable, never silently decompressed.
+    """
+    try:
+        return int(z.getinfo(name).file_size) > MAX_DOCX_PART_BYTES
+    except (KeyError, OSError, RuntimeError, NotImplementedError):
+        return True
+
+
 def _protected_template_parts(tpl: Path) -> dict:
     """{part name: sha256} of the template parts a template-DERIVED copy must keep.
 
@@ -5611,6 +5817,10 @@ def _protected_template_parts(tpl: Path) -> dict:
         with zipfile.ZipFile(tpl) as z:
             for name in z.namelist():
                 low = name.lower()
+                if _zip_part_too_big(z, name):
+                    # Never decompress an over-budget furniture part: skip it
+                    # rather than allocate gigabytes (F062).
+                    continue
                 if low.startswith("word/theme/") or low in ("word/fonttable.xml",
                                                             "word/numbering.xml"):
                     out[name] = hashlib.sha256(z.read(name)).hexdigest()
@@ -5644,6 +5854,10 @@ def _out_part_hashes(docx: Path) -> set:
         with zipfile.ZipFile(docx) as z:
             for name in z.namelist():
                 if name.endswith((".xml", ".rels", ".jpeg", ".jpg", ".png", ".emf", ".wmf")):
+                    if _zip_part_too_big(z, name):
+                        # An agent-delivered part declaring more than the budget
+                        # is unverifiable, never decompressed (F062).
+                        continue
                     hashes.add(hashlib.sha256(z.read(name)).hexdigest())
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
@@ -5949,8 +6163,11 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
     # 0" -> a valid package was refused).
     ledgers = [p for p in sorted(out.iterdir())
                if p.is_file() and p.match("*[Ll][Ee][Dd][Gg][Ee][Rr]*.md")]
+    # The deliverable is REPLACEMENT_LEDGER.md (case-insensitive). Falling back
+    # to any other `*ledger*.md` let an unrelated DIFF_LEDGER.md satisfy the
+    # required deliverable and silently contribute zero exceptions.
     ledger = next((p for p in ledgers if p.name.lower() == "replacement_ledger.md"),
-                  ledgers[0] if ledgers else None)
+                  None)
     exceptions, exception_problems = _template_ledger_exceptions(
         ledger if ledger is not None else out / "REPLACEMENT_LEDGER.md")
     mapping, _used_out, map_errs = _match_source_output_docs(src_docs, out_docs,
@@ -6067,14 +6284,47 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
     # the declared exceptions must use the SAME key or a re-wrap whose source
     # differs only in case/spacing excuses nothing (and the superscript check
     # above could not recognize it).
-    declared_rewrap_sources = Counter(
-        _template_norm_para(e["source"]) for e in rewraps if e["source"])
-    declared_rewrap_outputs = Counter(
-        _template_norm_para(e["output"]) for e in rewraps if e["output"])
     declared_additions = Counter(
         _template_norm_para(e["output"]) for e in additions if e["output"])
     declared_drops = Counter(
         _template_norm_para(e["source"]) for e in drops if e["source"])
+    # A re-wrap excuses exactly ONE vanished source occurrence by pointing at
+    # exactly ONE new output occurrence. Counting the declarations alone let two
+    # identical {source, output} declarations excuse two missing source
+    # occurrences while the output carried the replacement once (and discount
+    # that one output occurrence twice), so the exact-parity gate reported
+    # covered=N ratio=1.0 with a paragraph lost. Allocate every declaration a
+    # real vanished source occurrence and a real NEW output occurrence, and
+    # report a declaration that cannot be backed instead of trusting it.
+    available_sources = Counter()
+    for text, want_n in src_counter.items():
+        avail = want_n - out_counter.get(text, 0)
+        if avail > 0:
+            available_sources[text] = avail
+    for text, n in declared_drops.items():
+        if text in available_sources:
+            available_sources[text] = max(0, available_sources[text] - n)
+    available_outputs = Counter()
+    for text in {_template_norm_para(e["output"]) for e in rewraps if e["output"]}:
+        avail = out_counter.get(text, 0) - src_counter.get(text, 0)
+        if avail > 0:
+            available_outputs[text] = avail
+    declared_rewrap_sources = Counter()
+    declared_rewrap_outputs = Counter()
+    unbacked_rewraps = []
+    for e in rewraps:
+        source_key = _template_norm_para(e["source"]) if e["source"] else ""
+        output_key = _template_norm_para(e["output"]) if e["output"] else ""
+        if not (source_key and output_key):
+            continue
+        if (available_sources.get(source_key, 0) <= 0
+                or available_outputs.get(output_key, 0) <= 0):
+            unbacked_rewraps.append(e)
+            continue
+        available_sources[source_key] -= 1
+        available_outputs[output_key] -= 1
+        declared_rewrap_sources[source_key] += 1
+        declared_rewrap_outputs[output_key] += 1
     missing = []
     for text in sorted(src_counter):
         want_n = src_counter[text]
@@ -6120,6 +6370,11 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
         warns.append(f"{short_additions} short output line(s) (< "
                      f"{TEMPLATE_LEDGER_ADD_MIN_WORDS} words) have no source counterpart: "
                      f"template labels/headings are fine, content-bearing additions are not")
+    for e in unbacked_rewraps:
+        exception_problems.append(
+            f"a declared re-wrap is not backed by one vanished source occurrence and one NEW "
+            f"output occurrence: {_template_norm_para(e['source'])[:50]!r} -> "
+            f"{_template_norm_para(e['output'])[:50]!r}")
     if exception_problems:
         errs.extend(f"REPLACEMENT_LEDGER.md: {p}" for p in exception_problems)
     style_gap = []
@@ -6453,6 +6708,11 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
                              f"the root, or <root>/{TEMPLATE_PACKAGE_DIRNAME})"}
     if is_within(dest, src) or is_within(src, dest):
         return {"ok": False, "error": "the source and the destination must not be nested"}
+    if dest.is_symlink():
+        # A symlink (including a DANGLING one, where exists() is false) is not
+        # a package directory: writing through it reaches outside the root.
+        return {"ok": False, "error": f"{dest} is a symbolic link; refusing to write the "
+                                      f"rebuilt package through it"}
     if dest.exists() and not dest.is_dir():
         return {"ok": False, "error": f"{dest} exists and is not a directory"}
     if dest.is_dir():
@@ -6545,8 +6805,8 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
               "warnings": [f"{f['file']}: {f['warning']}" for f in files if f.get("warning")],
               "files": files}
     write_json_atomic(dest.parent / (dest.name + ".template_report.json"), report)
-    (dest.parent / (dest.name + ".template_report.md")).write_text(
-        template_package_md(report), encoding="utf-8")
+    write_text_atomic(dest.parent / (dest.name + ".template_report.md"),
+                      template_package_md(report))
     return report
 
 
@@ -7269,7 +7529,12 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             # M30's seed: the written values no shipped table PROVES, paired with
             # their candidate producer columns, and the code/config literals that
             # are the producer side of a Methods parameter.
-            tables = data_table_texts(sources)
+            # The producer inventory is CAPPED. Report the cap in the payload
+            # the M30 artifact is rendered from: without it the hierarchy seed
+            # presented the first N producer files as the complete inventory and
+            # a real producer beyond the cap was never compared (F057).
+            table_coverage = {}
+            tables = data_table_texts(sources, coverage=table_coverage)
             seed_rows = mod.hierarchy_seed_rows(numbers, tables)
             code_rows = mod.code_literal_rows(sources, skip_name=is_bookkeeping_name)
             # M30's NON-numeric half: a written "not run / no output" claim the
@@ -7277,8 +7542,12 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             # an older companion module degrades to no rows instead of failing.
             neg_fn = getattr(mod, "negative_claim_rows", None)
             neg_rows = neg_fn(all_texts, tables) if neg_fn is not None else []
-            evidence["hierarchy"] = {"rows": seed_rows, "count": len(seed_rows),
-                                     "tables_read": len(tables)}
+            evidence["hierarchy"] = {
+                "rows": seed_rows, "count": len(seed_rows),
+                "tables_read": len(tables),
+                "table_inventory_cap": table_coverage.get("cap"),
+                "table_inventory_truncated": bool(table_coverage.get("truncated")),
+                "producers_omitted": list(table_coverage.get("omitted") or [])}
             evidence["code_literals"] = {"rows": code_rows, "count": len(code_rows)}
             evidence["negative_claims"] = {"rows": neg_rows, "count": len(neg_rows)}
         except Exception as e:                                        # noqa: BLE001
@@ -7438,6 +7707,11 @@ def evidence_pack_summary(ev: dict) -> str:
             + f"; M30 hierarchy rows "
               f"{(ev.get('hierarchy') or {}).get('count', '?')}"
               f" (+{(ev.get('code_literals') or {}).get('count', '?')} literal(s))"
+            + (f"; {len((ev.get('hierarchy') or {}).get('producers_omitted') or [])} "
+               f"producer file(s) OMITTED by the data-table inventory cap -- "
+               f"M30 table A is PARTIAL"
+               if (ev.get('hierarchy') or {}).get('table_inventory_truncated')
+               or (ev.get('hierarchy') or {}).get('producers_omitted') else "")
             + f"; digest {str(ident.get('digest'))[:12]}")
 
 
@@ -7989,21 +8263,30 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
           "definition": "", "authoritative term": "", "forbidden synonyms": ""}
          for r in glossary_rows],
         "no concept to decide")
-    # Plain write (no fsync): the provenance pack is a SEEDED INPUT -- a crash
-    # just re-materializes the sandbox -- and the atomic writer's fsync costs
+    # No fsync: the provenance pack is a SEEDED INPUT -- a crash just
+    # re-materializes the sandbox -- and the atomic writer's fsync costs
     # ~80 ms per file on a drvfs root, which the round's dependency timing is
     # sensitive to (a revise must start the moment the review finishes).
+    # ATOMIC all the same: work/ is agent-writable, and a planted symlink at
+    # work/PROVENANCE.json made a plain write_text follow it and overwrite an
+    # outside file (F003). tmp_path_for reserves a random O_EXCL|O_NOFOLLOW
+    # temporary and os.replace() installs it, so the destination ENTRY is
+    # replaced and a link is never written through.
+    payload = _json_safe({"numbers": num_rows, "identifiers": ident_rows,
+                          "references": ref_rows,
+                          "lookups": lookups, "glossary": glossary_rows,
+                          "genes": gene_rows,
+                          "concepts": concept_rows})
+
+    def _write_provenance(f) -> None:
+        f.write(json.dumps(payload, indent=2, ensure_ascii=False))
+        f.flush()
+
     try:
-        (work / "PROVENANCE.json").write_text(
-            json.dumps(_json_safe({"numbers": num_rows, "identifiers": ident_rows,
-                       "references": ref_rows,
-                       "lookups": lookups, "glossary": glossary_rows,
-                       "genes": gene_rows,
-                                   "concepts": concept_rows}),
-                       indent=2, ensure_ascii=False),
-            encoding="utf-8")
-    except OSError:
-        pass
+        _atomic_write_bytes(tmp_path_for(work / "PROVENANCE.json"),
+                            work / "PROVENANCE.json", _write_provenance, fsync=False)
+    except OSError as e:
+        result["provenance_write_failed"] = f"{type(e).__name__}: {e}"
     return result
 
 
@@ -8342,6 +8625,23 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     hrows = (ev.get("hierarchy") or {}).get("rows") or []
     crows = (ev.get("code_literals") or {}).get("rows") or []
     nrows = (ev.get("negative_claims") or {}).get("rows") or []
+    # A capped producer inventory is REAL coverage loss: name it in the artifact
+    # the M30 session disposes, or every "no shipped producer" row reads as a
+    # complete comparison against a truncated producer set (F057).
+    _h_info = ev.get("hierarchy") or {}
+    _h_omitted = list(_h_info.get("producers_omitted") or [])
+    inventory_note = ""
+    if _h_info.get("table_inventory_truncated") or _h_omitted:
+        inventory_note = (
+            "PRODUCER INVENTORY IS TRUNCATED: the shipped-table inventory cap ("
+            f"{_h_info.get('table_inventory_cap') or '?'} file(s)) was reached, so Table A was "
+            f"computed against {_h_info.get('tables_read', '?')} producer file(s) and "
+            f"{len(_h_omitted)} eligible producer file(s) were NOT read: "
+            + ", ".join(str(x) for x in _h_omitted[:10])
+            + ("..." if len(_h_omitted) > 10 else "")
+            + ". Every `unable — no shipped producer` / empty disposition is therefore PARTIAL: "
+              "check those files by hand (or raise the cap and re-seed) and record the gap; do "
+              "not report M30 clean.\n\n")
 
     h_rows = [{"document": r.get("document"), "kind": r.get("kind"),
                "number": r.get("number"), "unit": r.get("unit") or "",
@@ -8386,7 +8686,8 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         "while Fig. 2 drew eight row labels -- breakpoint precision and recall included -- and "
         "15 blocks, while the deposited MCB table keeps 16 because intCN_modal_frac is repeated "
         "under both scenario labels).\n\n"
-        "## A. written values with candidate producers\n\n"
+        + inventory_note
+        + "## A. written values with candidate producers\n\n"
         + _evidence_artifact_table(
             h_rows,
             ["document", "kind", "number", "unit", "sentence", "candidate producer",
@@ -8779,6 +9080,8 @@ def scan_placeholders_in_sources(sources: list) -> dict:
                 continue
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
+            if is_code_rel(prefix + rel):
+                continue        # `code/` is revision content, never submission prose
             if is_non_manuscript_rel(rel):
                 continue        # evidence area: a hand-off marker can only be a
                                 # submission document's marker, never evidence's
@@ -9552,8 +9855,10 @@ def is_canonical_evidence_link(link: Path, root: Path = None) -> bool:
     evidence by itself: following it would copy whatever local directory or file
     it points at into the pristine root, every judge view and the published
     package. The name alone never authorizes the follow; the resolved target must
-    be the canonical store of the root that owns the copy (`root`). Without a
-    root there is nothing to prove containment against, so the link is refused.
+    be the canonical store of the root that owns the copy (`root`) AND be
+    contained in that root -- an equality between two links that both point
+    outside proves nothing (F002). Without a root there is nothing to prove
+    containment against, so the link is refused.
     """
     if root is None:
         return False
@@ -9568,6 +9873,14 @@ def is_canonical_evidence_link(link: Path, root: Path = None) -> bool:
     if not target.is_dir():
         return False
     if target.name != link.name or not is_evidence_rel(link.name):
+        return False
+    # The comparison below proves the link and `<root>/non_revised/<area>` point
+    # at the SAME directory, not that the directory belongs to THIS root. A
+    # planted tree could make `<root>/non_revised/<area>` a symlink to the very
+    # outside directory its own `<area>` link names, so the equality held while
+    # the walker hashed files outside the run root (F002). The canonical store
+    # is inside the root by construction; anything else is refused.
+    if not is_within(target, root):
         return False
     for dirname in PRISTINE_DIRNAMES:
         try:

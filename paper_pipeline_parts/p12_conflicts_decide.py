@@ -1234,9 +1234,26 @@ def embedded_media_digests(root: Path, rel_files) -> dict:
     return out
 
 
-def area_reference_exceptions(root: Path, areas, submitted_files) -> dict:
-    """The PKG-10 exception set for one package (see the block above)."""
+def area_reference_exceptions(root: Path, areas, submitted_files,
+                             extra_roots=None) -> dict:
+    """The PKG-10 exception set for one package (see the block above).
+
+    `extra_roots` are additional trees the same package is derived from (the
+    stage's `base/` copy). A stage output can be missing the read-only areas the
+    base still carries -- the revise prompt copies editable documents only and
+    `backfill_missing_files` restores the areas afterwards -- so the closure must
+    also be computed from that base, or the "a parent .tex inputs this file"
+    exemption is empty and a sentence the completed package carries is deleted
+    for good (F038).
+    """
     closure, tex_sources = tex_input_closure(root, areas)
+    for extra in (extra_roots or ()):
+        try:
+            _closure, _sources = tex_input_closure(Path(extra), areas)
+        except (OSError, ValueError):
+            continue
+        closure |= _closure
+        tex_sources.extend(s for s in _sources if s not in tex_sources)
     media = embedded_media_digests(root, submitted_files)
     return {"closure": closure, "tex_sources": tex_sources, "media": media,
             "media_truncated": list(getattr(media, "truncated", []))}
@@ -1380,8 +1397,16 @@ def _read_delimited_table(path: Path, max_bytes: int = 8 * 1024 * 1024,
                         f"the shared byte budget)")
         return None, []
     sample = text[:4096]
-    delim = "\t" if path.suffix.lower() in (".tsv", ".tab") else \
-        ("," if sample.count(",") >= sample.count("\t") else "\t")
+    if path.suffix.lower() in (".tsv", ".tab"):
+        delim = "\t"
+    else:
+        # A .csv may be comma- or semicolon-delimited (many Excel locales).
+        # Sniff it; fall back to the old comma-vs-tab guess only when the
+        # sample has no consistent delimiter.
+        try:
+            delim = csv.Sniffer().sniff(sample, delimiters=",;\t").delimiter
+        except csv.Error:
+            delim = ("," if sample.count(",") >= sample.count("\t") else "\t")
     try:
         rows = list(csv.reader(io.StringIO(text), delimiter=delim))
     except csv.Error as e:
@@ -1415,49 +1440,55 @@ def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
         except ValueError:
             continue
         headers.append((rel, [str(x).strip() for x in header]))
-    # Every distinct spelling of one normalized name, with the files carrying it.
+    # Every distinct spelling in one directory, with the files carrying it. The
+    # old key was the NORMALIZED name, so a one-character typo
+    # (`concentration`/`concentraton`) landed in a different bucket and was
+    # never compared: only case/punctuation variants, whose norms coincide,
+    # could ever be reported, although the rule exists for the one-letter
+    # `MixMHCpred_aff`/`MixMHCPred_aff` class (F164).
     spellings = {}
     for rel, header in headers:
         parent = Path(rel).parent.as_posix()
         for name in header:
-            norm = _norm_header(name)
-            if len(norm) < NEAR_MISS_MIN_LEN:
+            if len(_norm_header(name)) < NEAR_MISS_MIN_LEN:
                 continue
-            spellings.setdefault(parent, {}).setdefault(norm, {}) \
-                .setdefault(name, set()).add(rel)
+            spellings.setdefault(parent, {}).setdefault(name, set()).add(rel)
     rows = []
-    for _parent, by_norm in sorted(spellings.items()):
-        for norm, variants in sorted(by_norm.items()):
-            if len(variants) < 2:
-                continue
-            names = sorted(variants)
-            # Pair each spelling with its nearest other spelling in the SAME
-            # directory. Tables in unrelated directories are not a family, and
-            # ordinary header capitalization there is not a silent join.
-            for i, a in enumerate(names):
-                for b in names[i + 1:]:
-                    ratio = difflib.SequenceMatcher(None, a, b).ratio()
-                    if a == b or (a.lower() != b.lower() and ratio < NEAR_MISS_RATIO):
-                        continue
-                    if variants[a] == variants[b]:
-                        continue
-                    fa = sorted(variants[a])[0]
-                    fb = sorted(variants[b])[0]
-                    rows.append({
-                        "rule": "PKG-11", "severity": "medium", "fix": "manual",
-                        "file": fa, "line": 1, "reference": a,
-                        "detail": (f"these sibling tables spell one column differently: {a!r} in "
-                                   f"{fa} but {b!r} in {fb}. A consumer that requires the exact "
-                                   f"header name therefore drops one of them silently (the "
-                                   f"2026-10-17 audit: a `MixMHCPred_aff`/`MixMHCpred_aff` "
-                                   f"difference can silently exclude a whole antigen from the "
-                                   f"aggregation and change a headline). Rename the odd header to "
-                                   f"the family's own spelling, or make the consumer accept both "
-                                   f"and REPORT every skipped input"),
-                        "counterpart": {"file": fb, "column": b},
-                    })
-                    if len(rows) >= limit:
-                        return _with_table_gaps(rows, gaps, "PKG-11", limit)
+    for _parent, by_name in sorted(spellings.items()):
+        names = sorted(by_name)
+        # Pair each spelling with its nearest other spelling in the SAME
+        # directory. Tables in unrelated directories are not a family, and
+        # ordinary header capitalization there is not a silent join. Nearness is
+        # measured AFTER normalization so a case/punctuation variant (norm ratio
+        # 1.0) and a one-character typo both qualify while two unrelated names
+        # do not.
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                if a == b:
+                    continue
+                norm_ratio = difflib.SequenceMatcher(
+                    None, _norm_header(a), _norm_header(b)).ratio()
+                if norm_ratio < NEAR_MISS_RATIO:
+                    continue
+                if by_name[a] == by_name[b]:
+                    continue
+                fa = sorted(by_name[a])[0]
+                fb = sorted(by_name[b])[0]
+                rows.append({
+                    "rule": "PKG-11", "severity": "medium", "fix": "manual",
+                    "file": fa, "line": 1, "reference": a,
+                    "detail": (f"these sibling tables spell one column differently: {a!r} in "
+                               f"{fa} but {b!r} in {fb}. A consumer that requires the exact "
+                               f"header name therefore drops one of them silently (the "
+                               f"2026-10-17 audit: a `MixMHCPred_aff`/`MixMHCpred_aff` "
+                               f"difference can silently exclude a whole antigen from the "
+                               f"aggregation and change a headline). Rename the odd header to "
+                               f"the family's own spelling, or make the consumer accept both "
+                               f"and REPORT every skipped input"),
+                    "counterpart": {"file": fb, "column": b},
+                })
+                if len(rows) >= limit:
+                    return _with_table_gaps(rows, gaps, "PKG-11", limit)
     return _with_table_gaps(rows, gaps, "PKG-11", limit)
 
 
@@ -2974,7 +3005,8 @@ def _pdf_text(path: Path) -> str:
     return _pdf_text_info(path)[0]
 
 
-def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
+def non_submitted_reference_rows(root: Path, areas, limit: int = 40,
+                                extra_roots=None) -> list:
     """PKG-2: shipped text files that refer at what the submission does not carry.
 
     `areas` names the areas THIS package does not carry (the caller derives it
@@ -3042,7 +3074,8 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     except Exception:                                                 # noqa: BLE001
         submitted_now = []
     try:
-        pkg10_exc = area_reference_exceptions(root, names, submitted_now)
+        pkg10_exc = area_reference_exceptions(root, names, submitted_now,
+                                              extra_roots=extra_roots)
     except Exception:                                                 # noqa: BLE001
         pkg10_exc = {"closure": set(), "tex_sources": [], "media": {}}
 
@@ -3734,6 +3767,15 @@ def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
     out, removed, pos = [], [], 0
     for a, b in windows:
         out.append(text[pos:a])
+        # Removing a sentence from the MIDDLE of a line must not glue its
+        # neighbours together: taking the pointer sentence out of "... the
+        # supplement. The command is in code/x.py. Done." used to ship
+        # "... the supplement.Done." because the separating space belonged to
+        # the removed window (F169). The leading-space trim above is what keeps
+        # the END of a line clean; a mid-line removal needs one space back.
+        if a > 0 and b < len(text) and not text[a - 1].isspace() \
+                and not text[b].isspace():
+            out.append(" ")
         removed.append(text[a:b].strip())
         pos = b
     out.append(text[pos:])
@@ -3787,11 +3829,31 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
     # PKG-10: the references the operator's raw-area rule treats as carried are
     # never stripped (the reader can reach them), so the mechanical layer and the
     # report agree on what a dangling pointer is.
+    _extra_roots = []
     try:
+        _area_names = [str(a) for a in (areas or ())]
+        # The stage's own output copy can be missing the read-only areas its
+        # input BASE still carries (`sb/base` is the sandbox's hash-verified
+        # input; `sb/revised` receives the editable documents first and the
+        # areas only later, from backfill). The closure computed from the
+        # incomplete copy has no area directory, so the PKG-10 "a parent .tex
+        # inputs this file" exemption is empty and the mechanical layer deletes
+        # a sentence the COMPLETED package carries (F038). Merge the base's
+        # closure when it carries an area the package does not: a published or
+        # assembled tree has no `base` sibling, so its scan is unchanged.
+        _base_root = dirp.parent / "base"
+        try:
+            if _base_root.is_dir() \
+                    and _base_root.resolve() != dirp.resolve() \
+                    and any((_base_root / str(a)).is_dir() for a in _area_names):
+                _extra_roots.append(_base_root)
+        except OSError:
+            _extra_roots = []
         pkg10_exc = area_reference_exceptions(
-            dirp, [str(a) for a in (areas or ())],
+            dirp, _area_names,
             [q.relative_to(dirp).as_posix() for q in _iter_tree_files(dirp)
-             if q.is_file() and _is_sub(q.relative_to(dirp).as_posix())])
+             if q.is_file() and _is_sub(q.relative_to(dirp).as_posix())],
+            extra_roots=_extra_roots)
     except Exception:                                                 # noqa: BLE001
         _is_sub = lambda _rel: True                                   # noqa: E731
         pkg10_exc = {"closure": set(), "tex_sources": [], "media": {}}
@@ -3962,7 +4024,8 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
     # an advisory name would have failed a stage that had nothing to fix). They
     # travel in their own key, and the publish-time package scan + readiness
     # report them as advisory rows.
-    _scan = non_submitted_reference_rows(dirp, report["areas"])
+    _scan = non_submitted_reference_rows(dirp, report["areas"],
+                                         extra_roots=_extra_roots)
     report["remaining"] = [r for r in _scan if (r.get("rule") or "PKG-2") == "PKG-2"]
     report["advisory"] = [r for r in _scan if (r.get("rule") or "PKG-2") != "PKG-2"]
     # A submitted file that could not be READ for repair (too large, a
@@ -4265,6 +4328,7 @@ def package_document_texts(root: Path, limit_files: int = 25) -> list:
     """
     out = []
     gaps = []
+    _unread = []
     root = Path(root)
     if not root.is_dir():
         return _DocumentTexts()
@@ -4284,6 +4348,13 @@ def package_document_texts(root: Path, limit_files: int = 25) -> list:
         if suffix not in (".docx", ".pdf", ".tex", ".ltx", ".md", ".markdown", ".txt",
                           ".bib", ".rst"):
             continue
+        if len(out) >= limit_files:
+            # The cap must be a NAMED gap, never a silent truncation: a 26th
+            # submitted document was never examined, and the package's own
+            # readiness block then reported a clean scan for prose it never read
+            # (F162). One line per document still ahead, and it is not read.
+            _unread.append(rel)
+            continue
         # `_pkg_text_of_doc` returns "" for BOTH an empty document and an
         # unparseable one; distinguish them so a corrupt submitted DOCX is a
         # named gap, not a clean package (F14).
@@ -4298,8 +4369,9 @@ def package_document_texts(root: Path, limit_files: int = 25) -> list:
         text = _pkg_text_of_doc(p)
         if text.strip():
             out.append((rel, text))
-        if len(out) >= limit_files:
-            break
+    for _rel in _unread:
+        gaps.append(f"{_rel}: NOT read, so its prose was NOT checked (the package scan is "
+                    f"capped at {limit_files} documents)")
     return _DocumentTexts(out, gaps)
 
 
@@ -4344,6 +4416,27 @@ AI_USE_RE = re.compile(
     r"[^.;\n]{0,40}?\b(?:to|for)\s+(?:refine|revise|draft|edit|rewrite|polish)\b")
 
 
+def _pkg_same_sentence(text: str, a: int, b: int) -> bool:
+    """True when two character offsets lie inside ONE sentence of `text`.
+
+    A raw 40-character distance is not a clause boundary: "We drafted this
+    manuscript without generative AI. Later we used ChatGPT to refine the text."
+    starts the AI-use clause 32 characters after the denial, so the two
+    statements were treated as one clause and the contradiction was dropped
+    (F165). The repo's own sentence splitter is used when it is available, with
+    a terminator test as the fallback, so a use inside the denial's own sentence
+    (a negated "did not use ChatGPT to draft") is still skipped.
+    """
+    lo, hi = (a, b) if a <= b else (b, a)
+    mod = _format_module()
+    if mod is not None and hasattr(mod, "sentence_spans"):
+        try:
+            return any(s <= lo and hi <= e for s, e in mod.sentence_spans(text))
+        except Exception:                                             # noqa: BLE001
+            pass
+    return not re.search(r"[.!?][\"')\]]?\s", text[lo:hi])
+
+
 def ai_disclosure_contradiction_rows(texts, limit: int = 6) -> list:
     """PKG-6: one text both denies and describes generative-AI use."""
     rows = []
@@ -4358,7 +4451,7 @@ def ai_disclosure_contradiction_rows(texts, limit: int = 6) -> list:
         if nonuse is None:
             continue
         for m in AI_USE_RE.finditer(text):
-            if abs(m.start() - nonuse[0].start()) < 40:
+            if _pkg_same_sentence(text, nonuse[0].start(), m.start()):
                 continue                      # the denying sentence's own clause
             use = (m, " ".join(text[max(0, m.start() - 10):m.end() + 10].split()))
             break
@@ -5191,9 +5284,16 @@ def package_pdf_rows(root: Path, limit: int = 40, areas=None) -> list:
                     pages = text.count("\f")
             found = mod.pdf_artifact_rows(p, text=text, pages=pages)
         except Exception as e:                                        # noqa: BLE001
-            found = [{"rule": "FMT-PDF3", "severity": "medium", "document": rel,
+            # A TOOL-side failure (a pdftotext crash, an unreadable file) is not
+            # a defect of the package: reporting it as a blocking FMT-PDF3
+            # finding called an empty export what is really a coverage gap, and
+            # gated `--require-ready` on a scan that never ran (F163). Record it
+            # the way `_with_table_gaps` does.
+            found = [{"rule": "FMT-PDF3", "severity": "low", "document": rel,
                       "location": "-", "evidence": f"{type(e).__name__}: {e}",
-                      "detail": "the PDF could not be inspected", "fix": "manual",
+                      "detail": ("the PDF could not be inspected, so FMT-PDF1..3 were "
+                                 f"NOT evaluated on it ({type(e).__name__}: {e})"),
+                      "fix": "none", "gap": True, "advisory": True,
                       "protected": False}]
         for r in found:
             rows.append(dict(r, document=rel))
@@ -5213,11 +5313,19 @@ def write_final_clean_zip(dirp: Path, zip_path: Path) -> dict:
     """
     ztmp = tmp_path_for(zip_path)
     n_files = 0
+    skipped_links = []
     try:
         with _open_reserved_tmp(ztmp, "wb") as zf_raw:
             with zipfile.ZipFile(zf_raw, "w", zipfile.ZIP_DEFLATED) as zf:
                 for q in sorted(dirp.rglob("*")):
                     rel = f"{dirp.name}/{q.relative_to(dirp).as_posix()}"
+                    if q.is_symlink():
+                        # A link is never package content (copy_into and
+                        # tracking_force_writable refuse one). `rglob` follows a
+                        # link and `open(q)` archived the OUTSIDE file's bytes
+                        # into the delivered zip, silently (F173).
+                        skipped_links.append(rel)
+                        continue
                     info = zipfile.ZipInfo(rel + "/" if q.is_dir() else rel,
                                            date_time=(1980, 1, 1, 0, 0, 0))
                     info.compress_type = zipfile.ZIP_DEFLATED
@@ -5226,7 +5334,10 @@ def write_final_clean_zip(dirp: Path, zip_path: Path) -> dict:
                         zf.writestr(info, b"")
                         continue
                     n_files += 1
-                    with open(q, "rb") as fsrc, zf.open(info, "w") as fdst:
+                    # O_NOFOLLOW closes the walk/open race the symlink test
+                    # above cannot: the final component is opened by descriptor.
+                    with _open_regular_no_follow(q) as fsrc, \
+                            zf.open(info, "w") as fdst:
                         shutil.copyfileobj(fsrc, fdst, 1 << 20)
         if zip_path.is_file() and sha256_file(zip_path) == sha256_file(ztmp):
             ztmp.unlink()
@@ -5241,9 +5352,9 @@ def write_final_clean_zip(dirp: Path, zip_path: Path) -> dict:
             pass
         return {"path": str(zip_path), "files": 0, "bytes": 0,
                 "error": f"could not write the package archive: {type(e).__name__}: {e}",
-                "ok": False}
+                "skipped_links": skipped_links, "ok": False}
     return {"path": str(zip_path), "files": n_files, "bytes": zip_path.stat().st_size,
-            "ok": True}
+            "skipped_links": skipped_links, "ok": True}
 
 
 def _stage_dangling_report(ctx: Ctx, final: dict):
@@ -5327,17 +5438,35 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         if d.is_dir():
             src = d
     _meta = {"certified": bool(certified), "certification_note": reason or None}
-    if flatten_zotero:
-        return dict(_meta, skipped=(
-            "post-pin Zotero-field flattening is disabled: publication must serve the "
-            "judged bytes. Set format_policy.unlink_zotero_fields before `run`, or "
-            "leave the live fields for the author."))
-    if src is None:
-        return dict(_meta, skipped="neither the published winner nor the pin is present on disk")
     fc_name = final_clean_dirname(ctx.root)
     dst = ctx.root / fc_name
     tmp = ctx.root / (fc_name + ".tmp")
     zip_path = ctx.root / (fc_name + ".zip")
+
+    def _skip(msg: str) -> dict:
+        """The skipped record, naming any PREVIOUS package still on disk.
+
+        A skipped publication never touches `dst`, so an older
+        `final_clean_version_<root>/` can survive beside a status readme that
+        said no package existed. The readme cannot claim the directory is gone:
+        naming it (and saying it is NOT this decision's) is what keeps the
+        operator from starting the next run from stale, unverified bytes (F039).
+        """
+        _out = dict(_meta, skipped=msg)
+        try:
+            if dst.is_dir():
+                _out["stale_dir"] = str(dst)
+        except OSError:
+            pass
+        return _out
+
+    if flatten_zotero:
+        return _skip(
+            "post-pin Zotero-field flattening is disabled: publication must serve the "
+            "judged bytes. Set format_policy.unlink_zotero_fields before `run`, or "
+            "leave the live fields for the author.")
+    if src is None:
+        return _skip("neither the published winner nor the pin is present on disk")
     if tmp.exists():
         rmtree_force(tmp)
     copy_into(src, tmp, exclude_top=CORPUS_EXCLUDE_TOP, skip_aux=True,
@@ -5351,13 +5480,13 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     manifest = corpus_dir_manifest(tmp)
     if not manifest["count"]:
         rmtree_force(tmp, ignore_errors=True)
-        return dict(_meta, skipped="the champion corpus is empty")
+        return _skip("the champion corpus is empty")
     digest = manifest_digest(manifest)
     pin_digest = pin.get("digest")
     if pin_digest and digest != pin_digest:
         rmtree_force(tmp, ignore_errors=True)
-        return dict(_meta, skipped=f"the clean copy hashes to {digest[:12]} but the pin "
-                                   f"recorded {str(pin.get('digest'))[:12]}")
+        return _skip(f"the clean copy hashes to {digest[:12]} but the pin "
+                     f"recorded {str(pin.get('digest'))[:12]}")
     if not pin_digest:
         # There was no pin digest to compare against; returning the COPY's own
         # digest as `pin_digest` made the report claim an unverified identity.
@@ -5702,10 +5831,13 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"{fc.get('files', '?')} file(s), digest `{str(fc.get('digest'))[:12]}`"
                  + f", {fc.get('raw_data_untouched', 0)} raw-data file(s) untouched")
         _zip = fc.get("zip") or {}
-        if _zip.get("path"):
+        if _zip.get("ok") and _zip.get("path"):
             L.append(f"- the same package is compressed at `{_zip['path']}` "
                      f"({_zip.get('files', '?')} file(s), {_zip.get('bytes', '?')} bytes); "
                      f"the directory is kept in place.")
+        elif _zip.get("path") and not _zip.get("ok"):
+            L.append(f"- NO package archive was written ({_zip.get('error') or 'unknown error'})"
+                     f"; the directory is kept in place.")
     hygiene = fc.get("hygiene") or {}
     stripped = hygiene.get("stripped_bookkeeping") or []
     if stripped:
@@ -5741,8 +5873,19 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  + ", ".join(f"`{n}`" for n in bytecode[:8])
                  + (" …" if len(bytecode) > 8 else ""))
     dangling = hygiene.get("non_submitted_references") or []
-    _pkg2 = [r for r in dangling if str(r.get("rule") or "PKG-2") != "PKG-3"]
-    _pkg3 = [r for r in dangling if str(r.get("rule") or "") == "PKG-3"]
+    # A coverage gap is NOT a dangling reference: the file could not be read, so
+    # the PKG-2 scan never ran on it. Printing it under "the author must repair
+    # these" with a `None` reference reported a defect nobody found (F247).
+    _pkg2_gap = [r for r in dangling if r.get("coverage_gap") or r.get("gap")]
+    _measured = [r for r in dangling
+                 if not (r.get("coverage_gap") or r.get("gap"))]
+    _pkg2 = [r for r in _measured if str(r.get("rule") or "PKG-2") != "PKG-3"]
+    _pkg3 = [r for r in _measured if str(r.get("rule") or "") == "PKG-3"]
+    if _pkg2_gap:
+        L.append(f"- {len(_pkg2_gap)} document(s) could NOT be scanned for dangling "
+                 f"references (coverage gap, advisory -- PKG-2 was not evaluated on them):")
+        for _row in _pkg2_gap[:8]:
+            L.append(f"  - `{_row.get('file')}`: {_row.get('detail')}")
     if _pkg2:
         L.append(f"- **{len(_pkg2)} dangling reference(s) (PKG-2) remain in the judged "
                  f"bytes** -- publication preserves the scored digest, so the author must "
@@ -5855,7 +5998,12 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
             L.append(f"  - `{it.get('id')}` [DISCARDED by the reviser, auditor verdict "
                      f"`{it.get('audit_verdict') or 'none'}`] "
                      + (f"-- {str(it.get('location'))[:160]}" if it.get("location") else ""))
-    pdfs = hygiene.get("pdf_artifacts") or []
+    _all_pdfs = hygiene.get("pdf_artifacts") or []
+    # A coverage gap (the inspector failed) is not an artifact finding: it says
+    # FMT-PDF1..3 were NOT evaluated, and printing it under "an unreadable
+    # export" accused the package of a defect nobody measured (F163).
+    pdfs = [r for r in _all_pdfs if not (r.get("gap") or r.get("advisory"))]
+    pdf_gaps = [r for r in _all_pdfs if r.get("gap") or r.get("advisory")]
     prov = hygiene.get("display_provenance") or []
     if prov:
         L.append("")
@@ -5881,6 +6029,12 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
             L.append(f"  - `{r.get('document')}` [{r.get('rule')}]: {r.get('detail')}")
         if len(pdfs) > 12:
             L.append(f"  - … and {len(pdfs) - 12} more (see reports/decision.json)")
+    if pdf_gaps:
+        L.append("")
+        L.append(f"- {len(pdf_gaps)} PDF(s) could NOT be inspected (coverage gap, advisory -- "
+                 f"FMT-PDF1..3 were not evaluated on them):")
+        for r in pdf_gaps[:8]:
+            L.append(f"  - `{r.get('document')}`: {r.get('detail')}")
     xfa_exports = hygiene.get("xfa_exports") or []
     if xfa_exports:
         L.append("")
@@ -5953,9 +6107,20 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
     if not (final_clean or {}).get("files"):
         L.append("> **final_clean_version/ was NOT published.** "
                  + (f"The reason: {final_clean.get('skipped')}. " if final_clean and
-                    final_clean.get("skipped") else "")
-                 + "There is no champion directory to start the next run from; the decision "
-                   "and its blockers above are the record of this run.")
+                    final_clean.get("skipped") else ""))
+        _stale = str((final_clean or {}).get("stale_dir") or "")
+        if _stale:
+            # The skip branches never touch `dst`, so an OLDER package can still
+            # be on disk. Saying "there is no champion directory" beside it was
+            # false, and the stale bytes are the obvious `setup --source` target
+            # (F039): name it and say it is not this decision's.
+            L.append(f"> A directory from an EARLIER decision is still on disk at "
+                     f"`{_stale}`. It is NOT this decision's output, its bytes were not "
+                     f"verified here, and it must not be used as the next run's "
+                     f"`--source`.")
+        else:
+            L.append("There is no champion directory to start the next run from; the decision "
+                     "and its blockers above are the record of this run.")
     elif cert.get("certified"):
         if cert.get("submission_ready") is False:
             L.append("This directory is the champion corpus. The panel completed and signed "
@@ -6205,20 +6370,26 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
     return info
 
 
-def open_items_text(open_items: dict, limit: int = 40) -> str:
-    """The hand-off list as one text block (the MANUAL_STEPS file, else the rows)."""
+def open_items_text(open_items: dict, limit: int = None) -> str:
+    """The hand-off list as one text block (the MANUAL_STEPS file, else the rows).
+
+    The sibling file is a STATUS document, not a console excerpt: it carries
+    EVERY open item. A fixed 40-item cap silently dropped the tail while the
+    header still reported the full count.
+    """
     oi = open_items or {}
     if oi.get("manual_steps_text"):
         return oi["manual_steps_text"].rstrip() + "\n"
     L = []
-    for it in (oi.get("items") or [])[:limit]:
+    for it in ((oi.get("items") or [])[:limit] if limit else (oi.get("items") or [])):
         L.append(f"* {it.get('id')} [{it.get('status')}] "
                  f"{it.get('check') or ''} {it.get('severity') or ''}".rstrip())
         if it.get("location"):
             L.append(f"  *Where*: {it['location']}")
         if it.get("evidence"):
             L.append(f"  *Evidence*: {it['evidence']}")
-    for it in (oi.get("discarded") or [])[:limit]:
+    for it in ((oi.get("discarded") or [])[:limit] if limit else
+               (oi.get("discarded") or [])):
         L.append(f"* {it.get('id')} [DISCARDED, not supported by the round's auditor] "
                  f"{it.get('check') or ''} {it.get('severity') or ''}".rstrip())
         if it.get("location"):
@@ -6244,6 +6415,7 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
     # The package CSV is the merged inventory (manual list + hand-off README).
     # Fall back to the table inside the carried manual-steps text.
     csv_rows = []
+    csv_problems = []
     if oi.get("manual_todo_csv"):
         src = ctx.root / str(oi.get("manual_todo_csv"))
         try:
@@ -6252,18 +6424,45 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
             with open(src, "r", encoding="utf-8-sig", newline="") as f:
                 table = [r for r in csv.reader(f) if r]
             if table and table[0] == list(MANUAL_TODO_COLUMNS):
-                csv_rows = [dict(zip(MANUAL_TODO_COLUMNS, r)) for r in table[1:]
-                            if len(r) == len(MANUAL_TODO_COLUMNS)]
-                ids = [r.get(MANUAL_TODO_COLUMNS[0]) for r in csv_rows]
-                if not all(r.get(MANUAL_TODO_COLUMNS[0])
-                           and r.get("importance") in MANUAL_IMPORTANCES
-                           and r.get("author_action") in MANUAL_ACTIONS
-                           and str(r.get("description") or "").strip()
-                           for r in csv_rows) or len(set(ids)) != len(ids):
-                    csv_rows = []
-        except (OSError, csv.Error):
+                # Validate ROW BY ROW: one malformed row used to empty the whole
+                # inventory, so the valid classified rows vanished from the
+                # delivered sibling with no problem recorded anywhere (F161).
+                _seen_ids = set()
+                for r in table[1:]:
+                    if len(r) != len(MANUAL_TODO_COLUMNS):
+                        csv_problems.append(
+                            f"{r[0] if r else '<empty>'}: expected "
+                            f"{len(MANUAL_TODO_COLUMNS)} columns, got {len(r)}")
+                        continue
+                    row = dict(zip(MANUAL_TODO_COLUMNS, r))
+                    rid = str(row.get(MANUAL_TODO_COLUMNS[0]) or "").strip()
+                    if not rid:
+                        csv_problems.append(f"{r}: no {MANUAL_TODO_COLUMNS[0]}")
+                        continue
+                    if str(row.get("importance") or "") not in MANUAL_IMPORTANCES:
+                        csv_problems.append(
+                            f"{rid}: unknown importance {row.get('importance')!r}")
+                        continue
+                    if str(row.get("author_action") or "") not in MANUAL_ACTIONS:
+                        csv_problems.append(
+                            f"{rid}: unknown author_action {row.get('author_action')!r}")
+                        continue
+                    if not str(row.get("description") or "").strip():
+                        csv_problems.append(f"{rid}: empty description")
+                        continue
+                    if rid in _seen_ids:
+                        csv_problems.append(f"{rid}: duplicate id")
+                        continue
+                    _seen_ids.add(rid)
+                    csv_rows.append(row)
+            elif table:
+                csv_problems.append(
+                    f"the header is not {list(MANUAL_TODO_COLUMNS)}: {table[0]}")
+        except (OSError, csv.Error) as e:
             csv_rows = []
+            csv_problems.append(f"the package CSV could not be read: {e}")
     body_rows, body_problems = manual_todo_rows_from_text(body)
+    csv_problems = list(dict.fromkeys(csv_problems))
     # Union: the package CSV may carry the hand-off README rows while the
     # carried text carries MANUAL_STEPS.md; on a shared id the markdown wins.
     body_dicts = manual_todo_row_dicts(body_rows) if body_rows else []
@@ -6294,7 +6493,8 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
         c = ctx.root / FINAL_CLEAN_TODO_CSV_NAME
         if c.is_file():
             c.unlink()
-        return {"path": None, "items": 0, "todo_csv": None}
+        return {"path": None, "items": 0, "todo_csv": None,
+                "problems": list(body_problems) + csv_problems}
     # The ledger rows, the MANUAL_STEPS count and the classified table are three
     # views of the same hand-off list; the header must not say 0 when the table
     # carries rows.
@@ -6317,12 +6517,15 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
             + (f"; {n_items - len(csv_rows)} open item(s) have no classified TODO row -- add "
                f"them to the table/MANUAL_TODO.csv" if n_items > len(csv_rows) else ""),
             ]
-    if body_problems:
-        # A malformed classified row was dropped from the CSV index; the header
-        # used to claim the count without naming the row (F246).
-        head.append(f"Parser warning(s) -- {len(body_problems)} classified row(s) could not "
+    all_problems = list(body_problems) + csv_problems
+    if all_problems:
+        # A malformed classified row was dropped from the CSV index (from the
+        # carried text OR the package CSV); the header used to claim the count
+        # without naming the row, and one bad CSV row silently emptied the whole
+        # inventory (F161/F246).
+        head.append(f"Parser warning(s) -- {len(all_problems)} classified row(s) could not "
                     f"be carried into the CSV index:")
-        head.extend(f"  - {p}" for p in list(body_problems)[:6])
+        head.extend(f"  - {p}" for p in list(all_problems)[:8])
         head.append("")
     head += [
             "This file is a SIBLING of the published directory on purpose: the directory must "
@@ -6345,7 +6548,7 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
             c.unlink()
         todo_csv = None
     return {"path": str(p), "items": n_items, "todo_csv": todo_csv,
-            "problems": list(body_problems)}
+            "problems": all_problems}
 
 
 def _handoff_readme_items(final_clean: dict) -> dict:
@@ -6551,17 +6754,25 @@ def package_readiness(final_clean: dict, residuals: dict = None,
     # could not gate on the very rows the scan exists for.
     for r in hyg.get("non_submitted_references") or []:
         rule = r.get("rule") or "PKG-2"
-        detail = (f"line {r.get('line')}: {r.get('reference')} -- {r.get('detail')}")
+        _gap = bool(r.get("coverage_gap") or r.get("gap"))
+        # A coverage gap (the DOCX/PDF could not be read) has no line or
+        # reference; formatting it as one printed "line 1: None" and counted it
+        # as a must-repair dangling reference (F247).
+        detail = (str(r.get("detail") or "") if _gap else
+                  f"line {r.get('line')}: {r.get('reference')} -- {r.get('detail')}")
         row = {"rule": rule, "document": r.get("file"), "detail": detail}
-        if str(r.get("severity") or "").lower() == "advisory" or rule == "PKG-3":
+        if _gap or str(r.get("severity") or "").lower() == "advisory" or rule == "PKG-3":
             # A name the package carries NOWHERE is reported for the author to
             # resolve, never gated: the pipeline cannot know whether the sentence
             # should ship the file, name a locator, or drop the pointer.
             row["advisory"] = True
         findings.append(row)
     for r in hyg.get("pdf_artifacts") or []:
+        # A coverage-gap row (the inspector itself failed) is advisory: the
+        # package is not accused of the defect the scan could not look for.
         findings.append({"rule": r.get("rule"), "document": r.get("document"),
-                         "detail": r.get("detail")})
+                         "detail": r.get("detail"),
+                         "advisory": bool(r.get("advisory") or r.get("gap"))})
     for r in hyg.get("front_matter_glue") or []:
         # The shapes the mechanical repair cannot split. Advisory: the space is
         # the author's (only they know where the name ends), but the delivered
@@ -6896,10 +7107,13 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                  f"status and provenance are in the SIBLING `{FINAL_CLEAN_README_NAME}` "
                  f"(the directory itself stays byte-clean manuscript content).")
         _zip = final_clean.get("zip") or {}
-        if _zip.get("path"):
+        if _zip.get("ok") and _zip.get("path"):
             L.append(f"It is also compressed, the directory KEPT, as `{_zip['path']}` "
                      f"({_zip.get('files', '?')} file(s), {_zip.get('bytes', '?')} bytes) "
                      f"for handing the package over.")
+        elif _zip.get("path") and not _zip.get("ok"):
+            L.append(f"NO package archive was written ({_zip.get('error') or 'unknown error'}); "
+                     f"the directory is kept for handing the package over.")
         L.append("")
         L.append(f"```\npython paper_pipeline.py setup --source {final_clean['path']} "
                  f"--root <new-root>\n```")
@@ -8471,7 +8685,10 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             tmp = ctx.root / "final.tmp"
             if tmp.exists():
                 rmtree_force(tmp)
-            copy_into(src, tmp, root=ctx.root)
+            # The published copy and `publish_final_clean` use the SAME hygiene
+            # rules: tracking auxiliaries and pipeline bookkeeping are not
+            # submission content.
+            copy_into(src, tmp, root=ctx.root, skip_aux=True, strip_bookkeeping=True)
             dst = ctx.root / "final"
             if dst.exists():
                 stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -8521,16 +8738,21 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     else:
         print(f"[decide] final clean version: NOT (re)built -- {final_clean.get('skipped')}")
     _zip = final_clean.get("zip") or {}
-    if _zip.get("path"):
+    if _zip.get("ok") and _zip.get("path"):
         print(f"[decide] final clean zip: {_zip['path']} "
               f"({_zip.get('files', '?')} file(s), {_zip.get('bytes', '?')} bytes); "
+              f"the directory is kept")
+    elif _zip.get("path") and not _zip.get("ok"):
+        print(f"[decide] final clean zip: NOT written ({_zip.get('error') or 'unknown error'}); "
               f"the directory is kept")
     _hyg = final_clean.get("hygiene") or {}
     for r in (_hyg.get("internal_artifacts") or [])[:5]:
         print(f"[decide] PACKAGE HYGIENE (PKG-1, author action required): "
               f"{r.get('file')} line {r.get('line')} -- {r.get('evidence')}")
     for r in (_hyg.get("pdf_artifacts") or [])[:5]:
-        print(f"[decide] PDF ARTIFACT ({r.get('rule')}, author action required): "
+        _kind = ("coverage gap, NOT a package defect" if (r.get("gap") or r.get("advisory"))
+                 else "author action required")
+        print(f"[decide] PDF ARTIFACT ({r.get('rule')}, {_kind}): "
               f"{r.get('document')} -- {r.get('detail')}")
     for r in (_hyg.get("contradictions") or [])[:5]:
         print(f"[decide] PACKAGE CONTRADICTION ({r.get('rule')}, author action required): "

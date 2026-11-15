@@ -210,53 +210,62 @@ def fill_seeded_tables(dirp: Path) -> None:
             lines = p.read_text(encoding="utf-8").splitlines()
         except OSError:
             continue
-        head_i = next((i for i, l in enumerate(lines) if l.strip().startswith("|")), None)
-        if head_i is None:
-            continue
-        header = [c.lower() for c in table_cells(lines[head_i])]
-
-        def cell(cells, key, default=""):
-            i = header.index(key) if key in header else None
-            return cells[i] if i is not None and i < len(cells) else default
-
         filled, changed_any = list(lines), False
-        for j in range(head_i + 1, len(lines)):
-            line = lines[j]
-            if not line.strip().startswith("|"):
+        i = 0
+        while i < len(lines):
+            if not lines[i].strip().startswith("|"):
+                i += 1
                 continue
-            cells = table_cells(line)
-            if all("-" in c and set(c) <= set("-: ") for c in cells):
+            start = i
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                i += 1
+            raw = lines[start:i]
+            # Each table block is read against ITS OWN header. M30 seeds three
+            # tables with different columns; the old single-header walk read the
+            # later blocks positionally against table A and mis-filled them.
+            header = [c.lower() for c in table_cells(raw[0])]
+            if not header:
                 continue
-            if len(cells) < len(header):
-                cells += [""] * (len(header) - len(cells))
-            elif len(cells) > len(header):
-                # A wider row would shift the disposition index: trim stray empty
-                # cells first, then read positionally like the pipeline does.
-                while len(cells) > len(header) and not cells[0]:
-                    cells = cells[1:]
-                while len(cells) > len(header) and not cells[-1]:
-                    cells = cells[:-1]
-            row_no = j - head_i
-            rule = cell(cells, "rule")
-            reason = (f"OK — {rule or 'row ' + str(row_no)}: reviewed against its own bar "
-                      f"({p.stem} row {row_no})")
-            changed = False
-            for i, key in enumerate(header):
-                if i >= len(cells):
-                    break
-                if key in ("disposition", "resolution") and not cells[i]:
-                    cells[i] = reason
-                    changed = True
-                elif key == "summary" and not cells[i]:
-                    heading = cell(cells, "heading") or "the section"
-                    cells[i] = f"stub summary {row_no}: the paragraph's claim under {heading}"
-                    changed = True
-                elif key in ("decision", "authoritative term") and not cells[i]:
-                    cells[i] = f"stub decision {row_no}: one meaning, used consistently"
-                    changed = True
-            if changed:
-                filled[j] = "| " + " | ".join(cells) + " |"
-                changed_any = True
+
+            def cell(cells, key, default=""):
+                k = header.index(key) if key in header else None
+                return cells[k] if k is not None and k < len(cells) else default
+
+            for j in range(start + 1, i):
+                cells = table_cells(lines[j])
+                if all("-" in c and set(c) <= set("-: ") for c in cells):
+                    continue
+                if len(cells) < len(header):
+                    cells += [""] * (len(header) - len(cells))
+                elif len(cells) > len(header):
+                    # A wider row would shift the disposition index: trim stray
+                    # empty cells first, then read positionally like the pipeline.
+                    while len(cells) > len(header) and not cells[0]:
+                        cells = cells[1:]
+                    while len(cells) > len(header) and not cells[-1]:
+                        cells = cells[:-1]
+                row_no = j - start
+                rule = cell(cells, "rule")
+                reason = (f"OK — {rule or 'row ' + str(row_no)}: reviewed against its own bar "
+                          f"({p.stem} row {row_no})")
+                changed = False
+                for k, key in enumerate(header):
+                    if k >= len(cells):
+                        break
+                    if key in ("disposition", "resolution") and not cells[k]:
+                        cells[k] = reason
+                        changed = True
+                    elif key == "summary" and not cells[k]:
+                        heading = cell(cells, "heading") or "the section"
+                        cells[k] = (f"stub summary {row_no}: the paragraph's claim under "
+                                    f"{heading}")
+                        changed = True
+                    elif key in ("decision", "authoritative term") and not cells[k]:
+                        cells[k] = f"stub decision {row_no}: one meaning, used consistently"
+                        changed = True
+                if changed:
+                    filled[j] = "| " + " | ".join(cells) + " |"
+                    changed_any = True
         if changed_any:
             p.write_text("\n".join(filled) + "\n", encoding="utf-8")
 
@@ -370,7 +379,9 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                        ("M27_evidence_coverage.md", "M27"),
                        ("M28_symmetry.md", "M28"),
                        ("M29_caption_schema.md", "M29"),
-                       ("M30_hierarchy_reconciliation.md", "M30"),
+                       # M30 keeps its THREE-table code-side seed: the seeded-
+                       # row gate pins each table, and a generic one-row stub
+                       # table would be a deleted seed, not a disposed one.
                        ("M31_artwork_legend.md", "M31"),
                        ("M32_statistics.md", "M32"),
                        ("M33_availability.md", "M33"),
@@ -379,7 +390,14 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                        ("M36_zotero_parity.md", "M36"),
                        ("M2_references.md", "M2"),
                        ("M2_citations.md", "M2")):
-        (out / "artifacts" / fname).write_text(
+        target = out / "artifacts" / fname
+        if target.is_file():
+            # A seeded decision artifact is DISPOSED in place by
+            # `fill_seeded_tables` below. Replacing its header and rows with a
+            # generic table DELETES the code-seeded rows the C012 row pin
+            # requires (M2_references is seeded from the base's own DOIs).
+            continue
+        target.write_text(
             f"# {cid} (stub)\n\n| row | disposition |\n|---|---|\n"
             f"| stub | OK - stub: nothing found |\n", encoding="utf-8")
     (out / "ARCHITECTURE.md").write_text(
@@ -389,10 +407,9 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "|---|---|---|---|---|---|---|---|---|\n"
         "| base | all | 1 | stub | none | none | writing | Minor | "
         "OK - stub: no scope needs work |\n", encoding="utf-8")
-    (out / "artifacts" / "M19_length.md").write_text(
-        "# M19 (stub)\n\n| document | section | words | cap | disposition |\n|---|---|---|---|---|\n"
-        "| base | abstract | 0 | 165 | OK — inside the 165-word cap |\n| base | main text | 0 | 3750 | OK — inside the 3750-word limit |\n",
-        encoding="utf-8")
+    # M19 is a SEEDED table (one row per code-side length measurement). Do not
+    # replace it with a generic two-row table: `fill_seeded_tables` disposes the
+    # seeded rows, and the C012 pin requires every one of them to remain.
     (out / "artifacts" / "VIS_visual.md").write_text(
         "# visual inspection (stub)\n\nstub: pages NOT visually verified (no renderer used); "
         "the rendering step is handed to the author\n",

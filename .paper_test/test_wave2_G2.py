@@ -452,8 +452,7 @@ def c158() -> None:
         body = []
         for i in range(1, 6):
             body.append(f"| {i} | class {i} | "
-                        + (f"finding - X-{i:03d} (category 2, Major): p{i}: `evidence`"
-                           if i == 1 and mark_first
+                        + (f"finding - X-{i:03d}: side evidence" if i == 1 and mark_first
                            else f"clean - checked: p{i}")
                         + " |")
         return head + "\n".join(body) + "\n"

@@ -177,10 +177,10 @@ def main() -> int:
         cleanup(tmp)
 
     # A8b: the row list named the way the revise skill names it ("coverage
-    # table"), as a mapping keyed by finding id, or as an id list -> accepted.
-    # Observed failure this pins: r1_a2_revise (42/42) and r2_a2_revise (28/28)
-    # wrote complete ledgers under `coverage` / `coverage_table`, were told they
-    # named no finding id, and failed every attempt of the stage.
+    # table") or as a mapping keyed by finding id -> accepted. Observed failure
+    # this pins: r1_a2_revise (42/42) and r2_a2_revise (28/28) wrote complete
+    # ledgers under `coverage` / `coverage_table`, were told they named no
+    # finding id, and failed every attempt of the stage.
     for label, payload in (
             ("coverage key", {"coverage": [{"id": "F-001", "verdict": "confirmed", "final_status": "fixed", "rationale": "source checked", "evidence": "A7 hunk"}]}),
             ("coverage_table key",
@@ -191,14 +191,25 @@ def main() -> int:
                                   "evidence": "A7 hunk 2"}]}),
             ("mapping keyed by finding id",
              {"F-001": {"verdict": "confirmed", "final_status": "fixed",
-                        "rationale": "source checked", "evidence": "A7 hunk 2"}}),
-            ("id list", {"findings_total": 1, "finding_ids": ["F-001"]})):
+                        "rationale": "source checked", "evidence": "A7 hunk 2"}})):
         tmp, ctx, rec, sb = new_case()
         (sb / "revised" / "revision_report.json").write_text(json.dumps(payload))
         ok, errs, warns, crash = run_postcheck(ctx, rec)
         check(f"A8b a ledger naming the id via the {label} is accepted",
               crash is None and ok is True, str(errs[:1]))
         cleanup(tmp)
+
+    # A8b2: an id list alone only NAMES the id; it carries no verdict, rationale
+    # or evidence, so it is not a disposition (F007). A list that accompanies
+    # real rows is still fine (the mapping/coverage cases above).
+    tmp, ctx, rec, sb = new_case()
+    (sb / "revised" / "revision_report.json").write_text(json.dumps(
+        {"findings_total": 1, "finding_ids": ["F-001"]}))
+    ok, errs, warns, crash = run_postcheck(ctx, rec)
+    check("A8b2 an id list with no verdict is rejected",
+          crash is None and ok is False and any("without a VERDICT" in e for e in errs),
+          str(errs[:1]))
+    cleanup(tmp)
 
     # A8c: an id that only appears inside prose is not structured naming -> the
     # ledger still fails (the gate must stay a gate).

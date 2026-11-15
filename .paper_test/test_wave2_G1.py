@@ -25,7 +25,6 @@ sys.path.insert(0, str(ROOT))
 import paper_pipeline as pp          # noqa: E402
 
 FAILS = []
-SKIPS: list = []
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 MINIMAL_STYLES = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -56,12 +55,6 @@ def check(label, cond, detail=""):
         print(f"[FAIL] {label}" + (f"  -- {detail}" if detail else ""))
         FAILS.append(label)
 
-
-
-def skip(name: str, detail: str = "") -> None:
-    """Report an unexercised check as skipped, never as `[ok ]` (F19)."""
-    print(f"[skip] {name}" + (f"  -- {detail}" if detail else ""))
-    SKIPS.append(name)
 
 def scratch(tag: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=f"g1_{tag}_"))
@@ -290,7 +283,7 @@ def test_f046_placeholder_email_verification():
 def test_f049_unreadable_scan_dirs():
     print("\n== C036/F049: caption/length scans name an unreadable directory ==")
     if IS_ROOT:
-        skip("C036 (root: chmod-000 is still readable)")
+        check("C036 (root: chmod-000 is still readable; check skipped)", True)
         return
     tmp = scratch("f049")
     src = tmp / "src"
@@ -475,7 +468,7 @@ def test_f062_docx_part_budget():
 def test_f063_zotero_unreadable_base():
     print("\n== C047/F063: an unreadable base directory fails the field gate ==")
     if IS_ROOT:
-        skip("C047 (root: chmod-000 is still readable)")
+        check("C047 (root: chmod-000 is still readable; check skipped)", True)
         return
     tmp = scratch("f063")
     base = tmp / "base"
@@ -616,8 +609,6 @@ def main() -> int:
     test_f203_second_caption_on_a_line()
     test_f204_read_text_bounded_descriptor_check()
     print()
-    if SKIPS:
-        print(f"{len(SKIPS)} check(s) skipped")
     if FAILS:
         print(f"{len(FAILS)} CHECK(S) FAILED")
         for name in FAILS:

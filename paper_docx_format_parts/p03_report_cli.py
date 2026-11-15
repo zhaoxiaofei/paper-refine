@@ -74,6 +74,14 @@ def _output_path_problem(out, protected=()) -> str:
     except OSError:
         pass
     try:
+        if o.is_dir():
+            # write_json() publishes through os.replace(tmp, out); a directory
+            # destination raised an uncaught IsADirectoryError and every --json
+            # command died with a traceback instead of its documented exit 2.
+            return "it is a directory, not a report file"
+    except OSError:
+        pass
+    try:
         o_real = o.resolve()
     except OSError:
         return ""
@@ -122,7 +130,13 @@ def _write_report(path, obj, protected=()) -> str:
     problem = _output_path_problem(path, protected)
     if problem:
         return problem
-    write_json(path, obj)
+    try:
+        write_json(path, obj)
+    except OSError as exc:
+        # A destination that becomes unwritable between the check and the write
+        # (a directory, a read-only parent) is an input/output error the CLI
+        # reports with exit 2, not a traceback out of main().
+        return f"{type(exc).__name__}: {exc}"
     return ""
 
 
@@ -418,7 +432,12 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
         ital = [text_of(r[2]) for r in runs(p)
                 if text_of(r[2]).strip() and run_is_italic(styles, style, r[2])]
         field = in_field(franges, p0)
-        if re.search(r"\(\d{4}[a-z]?\)", text) and not ital:
+        # "No italic run" is not "no italic JOURNAL TITLE": a book/report/thesis
+        # entry has no journal title to italicize. Only an ARTICLE-like entry --
+        # one whose remaining text carries a volume/page locator (a digit that
+        # is not the parenthetical year) -- is asked for an italic journal title.
+        entry_tail = re.sub(r"\(\d{4}[a-z]?\)", "", text, count=1)
+        if re.search(r"\d", entry_tail) and not ital:
             row("FMT-T6d", "medium", f"p{i}", f"reference with no italic journal title: {text[:60]!r}",
                 "an article reference must italicize the journal title"
                 + (f" (Zotero field: {field})" if field else ""), protected=bool(field))
@@ -1801,9 +1820,14 @@ def fix_document(xml: str, styles: dict, policy: dict,
             if "w:anchor=" in opening or "w:docLocation=" in opening:
                 continue
             inner = block[block.find(">") + 1:block.rfind("</w:hyperlink>")]
-            inner = re.sub(r"<w:rStyle[^>]*/>", "", inner)
-            inner = re.sub(r"<w:color[^>]*/>", "", inner)
-            inner = re.sub(r"<w:u[^>]*/>", "", inner)
+            # Strip only the LIVE rPr segments: `w:rPrChange` is the tracked
+            # change's formatting HISTORY and must stay byte-identical (the run
+            # loop below splits on it for exactly this reason).
+            _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange>)", inner, flags=re.S)
+            for _si in range(0, len(_segs), 2):
+                for _pat in (r"<w:rStyle[^>]*/>", r"<w:color[^>]*/>", r"<w:u[^>]*/>"):
+                    _segs[_si] = re.sub(_pat, "", _segs[_si])
+            inner = "".join(_segs)
             edits.append((m.start(), m.end(), inner))
             n += 1
         if edits:
@@ -2215,7 +2239,12 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
                                 "added, removed or left unterminated); the formatter must carry "
                                 "every field over unchanged")
     parts_new = dict(parts)
-    parts_new["word/document.xml"] = xml_after.encode("utf-8")
+    # Re-encode each rewritten part in the FORM IT ARRIVED IN: a legal UTF-16
+    # main part decoded by ooxml_part_text and then written as UTF-8 under its
+    # own `encoding="UTF-16"` declaration is unreadable, while the string-based
+    # verification (ET.fromstring on the str) still reported `xml_wellformed`.
+    doc_encode = _ooxml_part_codec(parts["word/document.xml"])[1]
+    parts_new["word/document.xml"] = doc_encode(xml_after)
     for name, (axml, arels) in aux.items():
         if name not in referenced_aux:
             # An orphan part is not printed and the scanner ignores it by design;
@@ -2235,7 +2264,7 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         if _pf:
             axml_fixed = apply_edits(axml_fixed, _pf)
         if afixes or _pf:
-            parts_new[name] = axml_fixed.encode("utf-8")
+            parts_new[name] = _ooxml_part_codec(parts.get(name, b""))[1](axml_fixed)
         if afixes:
             changes.append(f"restored the aspect ratio of {len(afixes)} embedded "
                            f"image extent(s) in {posixpath.basename(name)}")
@@ -2515,6 +2544,19 @@ _SIMPLE_PAGE_FOOTER = (
     '</w:p></w:ftr>')
 
 
+def _xml_attr_value(value) -> str:
+    """One XML attribute value, escaped for splicing into `w:val="..."`.
+
+    Style ids are read from untrusted XML: `ElementTree` hands them back
+    UNESCAPED (`A&amp;B` -> `A&B`), and interpolating that raw turned a legal
+    style id into malformed OOXML (`w:val="A"B"`). A caller may also hand in the
+    still-escaped textual form seen in the source (`_para_style` returns the raw
+    attribute text), so decode once first: both spellings produce one escaped
+    attribute value, and neither is double-escaped.
+    """
+    return xml_escape(unesc(str(value or ""))).replace('"', "&quot;")
+
+
 def _set_para_style(para: str, style: str) -> str:
     """Force `w:pStyle` on a paragraph fragment (insert or replace).
 
@@ -2523,6 +2565,7 @@ def _set_para_style(para: str, style: str) -> str:
     reader so an identical commented element before the live one cannot be
     spliced by `str.find`.
     """
+    style = _xml_attr_value(style)
     span = _property_element_span(para, "pPr")
     if span is None:
         # No pPr: `insert_into_ppr` owns the self-closing `<w:p .../>` expansion
@@ -2584,7 +2627,8 @@ def _remap_style_refs(xml: str, mapping: dict) -> tuple:
         if not new or new == m.group(2):
             return m.group(0)
         count[0] += 1
-        return m.group(0).replace(f'w:val="{m.group(2)}"', f'w:val="{new}"')
+        return m.group(0).replace(f'w:val="{m.group(2)}"',
+                                  f'w:val="{_xml_attr_value(new)}"')
 
     return _STYLE_REF_RE.sub(sub, xml), count[0]
 
@@ -2681,9 +2725,12 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         # Word writes `w:type` before or after `r:id` depending on the
         # producer; an order-sensitive pattern silently copied no furniture.
         for m in ref_re.finditer(xml):
-            attrs = dict(re.findall(r'([A-Za-z:]+)="([^"]*)"', m.group(0)))
-            rtype = attrs.get("w:type") or attrs.get("type") or ""
-            rid = attrs.get("r:id") or attrs.get("id") or ""
+            # Attribute values may carry either quote character; a
+            # double-quote-only reader treated a legal single-quoted template
+            # as having no furniture at all.
+            tag = m.group(0)
+            rtype = attr_of(tag, "w:type") or attr_of(tag, "type") or ""
+            rid = attr_of(tag, "r:id") or attr_of(tag, "id") or ""
             if rtype in roles and rtype not in refs[m.group(1)] and rid:
                 refs[m.group(1)][rtype] = rid
 
@@ -2728,7 +2775,13 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
                 if dest_media not in parts and src_media in tnames:
                     parts[dest_media] = tpkg.read(src_media)
                 rel_target = posixpath.relpath(dest_media, "word")
-                rxml = rxml.replace(f'Target="{media}"', f'Target="{rel_target}"')
+                # The relationship may use either quote character: a
+                # double-quote-only replace left the copied part pointing at the
+                # OLD target (a part that was not copied), so the logo vanished.
+                rxml = re.sub(
+                    r"(Target\s*=\s*)([\"'])" + re.escape(media) + r"\2",
+                    lambda mm: mm.group(1) + mm.group(2) + rel_target + mm.group(2),
+                    rxml)
             parts[f"word/_rels/{dest_name}.rels"] = rxml.encode("utf-8")
         hdr = tpkg.read(full).decode("utf-8", "replace")
         issued[dest_name] = bool(re.search(r"<w:drawing|<w:pict|<v:imagedata|<a:blip", hdr))
@@ -3067,7 +3120,7 @@ def _ppr_extra(ppr_xml: str) -> str:
     return "".join(keep)
 
 
-def _template_front_layout(tpl_doc: str) -> dict:
+def _template_front_layout(tpl_doc: str, roles: dict = None) -> dict:
     """The TEMPLATE's own paragraph properties for the first-page block.
 
     The title/author/keywords/abstract roles come from style ids, but a Word
@@ -3078,7 +3131,20 @@ def _template_front_layout(tpl_doc: str) -> dict:
     exactly the "line spacing between the affiliation/correspondence lines is
     wrong" deviation. Returns {role: pPr-snippet} for affiliation (first and
     rest), correspondence, keywords, abstract_head and abstract_body.
+
+    The front-matter style ids are the template's OWN (`roles`): comparing the
+    literal `AuthorList`/`Heading1`/`Heading2` ids missed a template whose
+    resolved ids differ, so its layout was never harvested.
     """
+    legacy = roles is None
+    roles = roles or {}
+    if legacy:
+        # A caller that resolved no roles (the pre-pass report) keeps the ids
+        # this function historically keyed on.
+        front_ids, heading_ids = {"AuthorList"}, {"Heading1", "Heading2"}
+    else:
+        front_ids = {sid for sid in (roles.get("author"),) if sid}
+        heading_ids = {sid for sid in (roles.get("headings") or {}).values() if sid}
     out = {}
     paras = list(paragraphs(tpl_doc))
     affil = 0
@@ -3092,12 +3158,12 @@ def _template_front_layout(tpl_doc: str) -> dict:
         style = ppr_style(ppr)
         if _CORRESP_RE.match(text):
             out.setdefault("correspondence", extra)
-        elif style == "AuthorList" and text.lower().startswith("keywords"):
+        elif style in front_ids and text.lower().startswith("keywords"):
             out.setdefault("keywords", extra)
-        elif style == "AuthorList" and text.lower() == "abstract":
+        elif style in front_ids and text.lower() == "abstract":
             out.setdefault("abstract_head", extra)
             abstract_seen = True
-        elif abstract_seen and "abstract_body" not in out and style not in ("Heading1", "Heading2"):
+        elif abstract_seen and "abstract_body" not in out and style not in heading_ids:
             out["abstract_body"] = extra
         elif re.match(r"^\d+[A-Z]", text) and "correspondence" not in text.lower():
             affil += 1
@@ -3291,6 +3357,23 @@ def _apply_ppr_extra(frag: str, extra: str) -> str:
     return frag[:s] + _insert_ppr_extra(head + change, extra) + frag[e:]
 
 
+def _looks_like_keyword_list(text: str) -> bool:
+    """Whether the line after a bare `Keywords` heading IS the keyword list.
+
+    The template uses ONE `Keywords: ...` line; when the heading is separate,
+    the list is the single line under it. A list line is short and separated by
+    commas/semicolons (or a middle dot/pipe), never a sentence: an Abstract
+    body or a section's first paragraph that happens to follow the heading must
+    keep its own style (F105).
+    """
+    t = str(text or "").strip()
+    if not t or len(t.split()) > 40:
+        return False
+    if re.search(r"[.;!?]\s*$", t):
+        return False
+    return bool(re.search(r"[,;\u00b7|]", t))
+
+
 def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
     """(xml, info): template front matter + the template's heading depth.
 
@@ -3304,7 +3387,7 @@ def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
     author_id = roles.get("author") or ""
     headings = dict(roles.get("headings") or {})
     depth = int(roles.get("max_heading_level") or 2)
-    layout = _template_front_layout(tpl_doc) if tpl_doc else {}
+    layout = _template_front_layout(tpl_doc, roles) if tpl_doc else {}
     info = {"title": False, "authors": False, "abstract": False, "keywords": False,
             "correspondence": False, "deep_headings_demoted": 0}
     if not (title_id or author_id or headings):
@@ -3348,24 +3431,31 @@ def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
         t = text_of(p[2]).strip()
         low = t.lower()
         if low == "abstract":
+            kw_pending = False
             if front_style:
                 style_para(idx, front_style, "abstract_head")
                 info["abstract"] = True
         elif low == "keywords":
             kw_heading = idx
+            kw_pending = False
             if front_style:
                 style_para(idx, front_style)
                 kw_pending = True
         elif low.startswith("keywords:") or low.startswith("keywords :"):
+            kw_pending = False
             if front_style:
                 style_para(idx, front_style)
                 info["keywords"] = True
         elif kw_pending:
             # The template uses ONE "Keywords: ..." line; styling the heading and
             # the list keeps the TEXT byte-identical (the merge itself is a
-            # content edit the review/rewrite sessions are told to make).
-            style_para(idx, front_style)
-            info["keywords"] = True
+            # content edit the review/rewrite sessions are told to make). Only
+            # the IMMEDIATE list line is styled: the Abstract body (or any other
+            # body paragraph) that follows the heading keeps its own style and
+            # is not reported as a keyword list.
+            if front_style and _looks_like_keyword_list(t):
+                style_para(idx, front_style)
+                info["keywords"] = True
             kw_pending = False
     # The FIRST page's block order and its direct spacing come from the template:
     # the affiliation lines (before=240/after=0) and the correspondence block
@@ -3480,6 +3570,7 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
     if not sects:
         return doc_xml, False
     refs_all, refs_body = "", ""
+    replaced = set()
     for key, tag, typ in (("header_default_rid", "headerReference", "default"),
                           ("header_first_rid", "headerReference", "first"),
                           ("header_even_rid", "headerReference", "even"),
@@ -3489,12 +3580,27 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
         if front.get(key):
             ref = f'<w:{tag} w:type="{typ}" r:id="{front[key]}"/>'
             refs_all += ref
+            replaced.add((tag, typ))
             if typ != "first":
                 refs_body += ref
     out = doc_xml
     for idx in range(len(sects) - 1, -1, -1):       # backwards: offsets stay valid
         m = sects[idx]
-        body = re.sub(r"<w:(?:header|footer)Reference[^>]*/>", "", m.group(0))
+
+        def keep_source_ref(rm):
+            """Drop a reference only where the template supplies that role.
+
+            The old blanket strip deleted the manuscript's running head when the
+            template carried only a footer (or only a default header): no
+            replacement was inserted and the header part was left orphaned while
+            the caller was told the headers/footers were preserved.
+            """
+            tag = rm.group(1) + "Reference"
+            typ = attr_of(rm.group(0), "w:type") or "default"
+            return "" if (tag, typ) in replaced else rm.group(0)
+
+        body = re.sub(r"<w:(header|footer)Reference(?=[\s/>])[^>]*/>",
+                      keep_source_ref, m.group(0))
         body = re.sub(r"<w:titlePg[^>]*/>", "", body)
         # The OPENING tag only: `[^>]*` greedily consumed the `/` of a legal
         # `<w:sectPr att="x"/>`, so the references were inserted AFTER the
@@ -3567,15 +3673,15 @@ def _with_even_odd_headers(parts: dict) -> bool:
                 f"</Relationships>")
             parts["word/_rels/document.xml.rels"] = rels.encode("utf-8")
         return True
-    text = settings.decode("utf-8", "replace")
+    text, settings_encode = _ooxml_part_codec(settings)
     if is_on(text, "evenAndOddHeaders"):
         return False
     live = elem(text, "evenAndOddHeaders")
     if live is not None:
         # Present but explicitly OFF (`w:val="0"`): flip it on in place; adding
         # a second element would be invalid and the original would still win.
-        parts["word/settings.xml"] = text.replace(
-            live, "<w:evenAndOddHeaders/>", 1).encode("utf-8")
+        parts["word/settings.xml"] = settings_encode(
+            text.replace(live, "<w:evenAndOddHeaders/>", 1))
         return True
     element = "<w:evenAndOddHeaders/>"
     anchors = [i for i in (text.find("<w:characterSpacingControl"),
@@ -3594,7 +3700,7 @@ def _with_even_odd_headers(parts: dict) -> bool:
             text = text[:j + 2] + element + text[j + 2:]
         else:
             text = text.replace("</w:settings>", element + "</w:settings>", 1)
-    parts["word/settings.xml"] = text.encode("utf-8")
+    parts["word/settings.xml"] = settings_encode(text)
     return True
 
 
@@ -3790,17 +3896,46 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                     if problem:
                         return {"file": str(src), "ok": False,
                                 "error": f"unreadable DOCX package: {problem}"}
-            src_styles = parts.get("word/styles.xml", b"").decode("utf-8", "replace")
-            src_numbering = parts.get("word/numbering.xml", b"").decode("utf-8", "replace")
-            tpl_styles = tpkg.read("word/styles.xml").decode("utf-8", "replace")
+            # The TEMPLATE is untrusted input too: its parts must be refused
+            # before the first ET.parse, not only in the later guarded reader.
+            # The template's styles.xml used to reach _style_index (which
+            # expands internal entities) before any DTD/entity check ran.
+            for name in sorted(tnames):
+                if name.lower().endswith((".xml", ".rels")):
+                    problem = _docx_entity_problem(tpkg.read(name), name)
+                    if problem:
+                        return {"file": str(src), "ok": False,
+                                "error": f"unreadable DOCX template: {problem}"}
+            src_styles = ooxml_part_text(parts.get("word/styles.xml", b""))
+            src_numbering = ooxml_part_text(parts.get("word/numbering.xml", b""))
+            tpl_styles = ooxml_part_text(tpkg.read("word/styles.xml"))
             s_by_id, _s_names = _style_index(src_styles)
             t_by_id, t_by_name = _style_index(tpl_styles)
             mapping = {}
+            collided = {}
             for sid, (typ, key) in s_by_id.items():
-                if sid in t_by_id:
-                    mapping[sid] = sid
-                elif (typ, key) in t_by_name:
+                # Name first: style ids are document-local, so the same id in two
+                # packages can name unrelated styles. The old id-first branch
+                # silently restyled a body paragraph as the template's Title when
+                # the ids happened to coincide.
+                if (typ, key) in t_by_name:
                     mapping[sid] = t_by_name[(typ, key)]
+                elif sid in t_by_id:
+                    if t_by_id[sid][1] == key:
+                        mapping[sid] = sid
+                    else:
+                        # Same id, different NAME = a different style that only
+                        # shares the identifier. Carry the manuscript's own
+                        # definition under a fresh id and point its references
+                        # there, instead of silently applying the template's
+                        # unrelated style.
+                        used = set(t_by_id) | set(t_by_name.values()) | set(mapping.values())
+                        fresh, n = f"{sid}_ms", 1
+                        while fresh in used:
+                            n += 1
+                            fresh = f"{sid}_ms{n}"
+                        mapping[sid] = fresh
+                        collided[sid] = fresh
             mapped_ids = set(mapping.values())
             copied = []
             for name in ("word/styles.xml", "word/fontTable.xml", "word/numbering.xml"):
@@ -3811,27 +3946,38 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                 if name.startswith("word/theme/"):
                     parts[name] = tpkg.read(name)
                     copied.append(name)
-            tpl_doc = tpkg.read("word/document.xml").decode("utf-8", "replace")
+            tpl_doc = ooxml_part_text(tpkg.read("word/document.xml"))
 
             # A manuscript-only style the document still references must survive
             # the styles.xml replacement (otherwise its pStyle/rStyle points at
-            # a definition that no longer exists).
-            doc_part_re = re.compile(r"word/(?:document|header\d*|footer\d*|footnotes|endnotes)\.xml")
+            # a definition that no longer exists). COMMENTS carry pStyle too and
+            # are copied verbatim, so they belong to the same inventory: a style
+            # used only by a comment was dropped and the comment then pointed at
+            # an undefined style while the report claimed success.
+            doc_part_re = re.compile(
+                r"word/(?:document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml")
             ref_ids = set()
             for name in sorted(parts):
                 if doc_part_re.fullmatch(name):
-                    xml = parts[name].decode("utf-8", "replace")
+                    xml = ooxml_part_text(parts[name])
                     ref_ids |= {m.group(2) for m in _STYLE_REF_RE.finditer(xml)}
             kept_styles = []
-            for sid in sorted(ref_ids - set(t_by_id) - set(mapping)):
+            for sid in sorted((ref_ids - set(t_by_id) - set(mapping)) | set(collided)):
                 m = re.search(rf'<w:style\b[^>]*w:styleId="{re.escape(sid)}"[\s\S]*?</w:style>',
                               src_styles)
                 if m:
-                    kept_styles.append(m.group(0))
+                    block = m.group(0)
+                    if sid in collided:
+                        block = re.sub(
+                            rf'w:styleId="{re.escape(sid)}"',
+                            f'w:styleId="{_xml_attr_value(collided[sid])}"',
+                            block, count=1)
+                    kept_styles.append(block)
             if kept_styles:
                 tpl_styles = tpl_styles.replace("</w:styles>",
                                                 "".join(kept_styles) + "</w:styles>")
-                parts["word/styles.xml"] = tpl_styles.encode("utf-8")
+                parts["word/styles.xml"] = _ooxml_part_codec(
+                    parts["word/styles.xml"])[1](tpl_styles)
 
             remapped = stripped = carried_lists = 0
             page_ok = False
@@ -3841,7 +3987,8 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             for name in sorted(parts):
                 if not doc_part_re.fullmatch(name):
                     continue
-                xml = parts[name].decode("utf-8", "replace")
+                original = parts[name]
+                xml = ooxml_part_text(original)
                 new_xml, n = _remap_style_refs(xml, mapping)
                 remapped += n
                 retag_styles = set()
@@ -3874,15 +4021,18 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                     new_xml, page_ok = _adopt_page_geometry(new_xml, tpl_doc)
                     new_xml, front_info = _front_matter_styles(new_xml, roles, tpl_doc)
                 if new_xml != xml:
-                    parts[name] = new_xml.encode("utf-8")
+                    # Keep the part's own encoding: UTF-8 bytes under an
+                    # `encoding="UTF-16"` declaration are an unreadable part.
+                    parts[name] = _ooxml_part_codec(original)[1](new_xml)
             if "word/numbering.xml" in copied and src_numbering:
                 carried_lists = len(_merge_source_lists(parts, src_numbering, doc_part_re))
             front_parts = _template_front_parts(tpkg, parts, tnames)
             if front_parts:
-                doc_xml = parts["word/document.xml"].decode("utf-8", "replace")
+                doc_xml = ooxml_part_text(parts["word/document.xml"])
                 doc_xml, refs_ok = _apply_front_refs(doc_xml, front_parts)
                 if refs_ok:
-                    parts["word/document.xml"] = doc_xml.encode("utf-8")
+                    parts["word/document.xml"] = _ooxml_part_codec(
+                        parts["word/document.xml"])[1](doc_xml)
                 if front_parts.get("even_odd"):
                     _with_even_odd_headers(parts)
             _write_zip_parts_atomic(out, parts)
@@ -3892,13 +4042,17 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
     def _text(p: Path) -> str:
         with zipfile.ZipFile(p) as z:
             raw = _docx_xml_part_guarded(z, "word/document.xml")
-        xml = raw.decode("utf-8", "replace")
+        xml = ooxml_part_text(raw)
         return "\n".join(t for t in (text_of(par[2]) for par in paragraphs(xml)) if t.strip())
 
     try:
         text_ok = _text(src) == _text(out)
         with zipfile.ZipFile(out) as z:
             check_parts = ["word/document.xml", "word/styles.xml"]
+            if "word/settings.xml" in z.namelist():
+                # The parity setting is spliced into this part; parse it too, or
+                # an encoding mistake there ships inside an ok:true report.
+                check_parts.append("word/settings.xml")
             if "word/numbering.xml" in copied or carried_lists:
                 check_parts.append("word/numbering.xml")
             for name in check_parts:
@@ -3931,6 +4085,11 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
     if headings_retagged:
         changes.append(f"tagged {len(headings_retagged)} directly-formatted heading(s) with the "
                        f"template's heading styles")
+    if collided:
+        changes.append(
+            "kept the manuscript's own definition for " + str(len(collided))
+            + " style id(s) the template reuses for a differently named style ("
+            + ", ".join(sorted(collided)) + ")")
     if front_parts:
         # Describe what was actually copied: a template with no logo header
         # still made the old line claim "first-page header (logo)".
@@ -3953,6 +4112,7 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
     return {"file": str(src), "template": str(template), "ok": bool(text_ok),
             "text_unchanged": bool(text_ok), "changes": changes,
             "styles_copied": copied, "style_refs_remapped": remapped,
+            "style_id_collisions": dict(collided),
             "direct_format_removed": stripped, "page_geometry": page_ok,
             "headings_retagged": headings_retagged,
             "front_matter": front_info,
@@ -3986,21 +4146,28 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
     name, argv = engine
     scratch = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="paper_tex_check_"))
     owns_scratch = workdir is None
+    target_dir = None
     try:
         try:
-            # `path.parent.name` is "" for a bare relative `main.tex` (parent
-            # is ".") and ".." for `../main.tex`: the old expression selected
-            # the already-existing scratch (so the copy was skipped) or the
-            # scratch's PARENT. A fixed subdirectory keeps the compile inside
-            # the scratch and always copies the source tree into it.
-            target_dir = (scratch / "src") if not workdir else scratch
-            if not target_dir.is_dir():
-                # A name-based ignore callback (not glob patterns): the tracking
-                # token space is open (a1/w2/a3/winner1/...), so only the shared
-                # `_is_aux_name()` rule can decide what to leave out.
-                shutil.copytree(path.parent, target_dir,
-                                ignore=lambda _d, names: [n for n in names
-                                                          if n == "work" or _is_aux_name(n)])
+            scratch.mkdir(parents=True, exist_ok=True)
+            # ALWAYS compile in a copy this call owns, even when the caller
+            # supplied a workdir: the old branch used the existing workdir as
+            # the compile root and never copied the source tree, so the engine
+            # ran `path.name` in a directory that did not contain it and a valid
+            # document was reported as a failed compile (or stale files were
+            # compiled instead).
+            target_dir = Path(tempfile.mkdtemp(prefix="src_", dir=str(scratch)))
+            # A name-based ignore callback (not glob patterns): the tracking
+            # token space is open (a1/w2/a3/winner1/...), so only the shared
+            # `_is_aux_name()` rule can decide what to leave out. The compile
+            # copy itself is skipped, so a workdir that IS the document's
+            # directory cannot copy the copy into itself.
+            shutil.copytree(
+                path.parent, target_dir, dirs_exist_ok=True,
+                ignore=lambda d, names: [
+                    n for n in names
+                    if n == "work" or _is_aux_name(n)
+                    or (Path(d) == path.parent and n == target_dir.name)])
             proc = subprocess.run(argv + [path.name], cwd=str(target_dir),
                                   capture_output=True, text=True, timeout=timeout)
         except (OSError, subprocess.SubprocessError, shutil.Error) as e:
@@ -4015,7 +4182,10 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
                                               else f"engine exited {proc.returncode}"))}
     finally:
         # A validation pass over N .tex files must not leak N full project
-        # copies; an operator-supplied workdir is not ours to remove.
+        # copies. Only the compile copy this call created is removed from an
+        # operator-supplied workdir; the workdir itself is not ours to remove.
+        if target_dir is not None:
+            shutil.rmtree(target_dir, ignore_errors=True)
         if owns_scratch:
             shutil.rmtree(scratch, ignore_errors=True)
 
@@ -4081,7 +4251,10 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
     # false-clean the zero-file branch already refuses.
     report = {"files": len(results), "failed": len(bad), "passed": len(passed),
               "skipped": len(results) - len(bad) - len(passed),
-              "results": results, "ok": (not bad) and (bool(passed) or not results)}
+              # A run that checked NOTHING is not a pass, even though it has no
+              # failures: `not results` used to make ok True for an empty
+              # directory, the "0 files, 0 failures" false-clean.
+              "results": results, "ok": (not bad) and bool(passed)}
     if json_out:
         # A report path that RESOLVES to a validated input document used to be
         # replaced by the report (write_json's atomic replace) while the command
@@ -4177,7 +4350,7 @@ def _xfa_dataset_packets(data: bytes) -> list:
     publish-time scanner.
     """
     packets = []
-    for m in re.finditer(rb"(?<!end)stream\r?\n", data):
+    for m in re.finditer(rb"(?<!end)stream(?:\r\n|\r|\n)", data):
         start = m.end()
         end = data.find(b"endstream", start)
         if end < 0:
@@ -4275,7 +4448,7 @@ def _xfa_dataset_report(path: Path):
             if em.group(2).strip():
                 non_empty += 1
     if not is_shell:
-        for m in re.finditer(rb"(?<!end)stream\r?\n", data):
+        for m in re.finditer(rb"(?<!end)stream(?:\r\n|\r|\n)", data):
             start = m.end()
             end = data.find(b"endstream", start)
             if end < 0:
@@ -4325,7 +4498,7 @@ def _pdf_object_bodies(data: bytes) -> dict:
         body = objs[num]
         if b"/ObjStm" not in body[:400]:
             continue
-        sm = re.search(rb"(?<!end)stream\r?\n", body)
+        sm = re.search(rb"(?<!end)stream(?:\r\n|\r|\n)", body)
         if not sm:
             continue
         raw = body[sm.end():]
@@ -4361,7 +4534,7 @@ def _pdf_object_bodies(data: bytes) -> dict:
 
 def _obj_stream_text(body: bytes):
     """The decompressed (or plain) stream of one object body, or None."""
-    sm = re.search(rb"(?<!end)stream\r?\n", body)
+    sm = re.search(rb"(?<!end)stream(?:\r\n|\r|\n)", body)
     if not sm:
         return None
     raw = body[sm.end():]
@@ -4543,7 +4716,7 @@ def _pdf_carries_an_image(path: Path) -> bool:
         return False
     if re.search(rb"/Subtype\s*/Image", data):
         return True
-    for m in re.finditer(rb"(?<!end)stream\r?\n", data):
+    for m in re.finditer(rb"(?<!end)stream(?:\r\n|\r|\n)", data):
         start = m.end()
         end = data.find(b"endstream", start)
         if end < 0:
@@ -4721,6 +4894,8 @@ def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
                                    "venue's own form where one was requested), or keep the "
                                    "explanatory note outside the submission.",
                          "fix": "manual", "protected": False})
+    # The FORMAT_SCAN row contract: EVERY row carries a `tier`.
+    _fill_missing_row_tiers(rows)
     return rows
 
 
@@ -4776,7 +4951,7 @@ def check_pdf(path: Path, policy: dict) -> dict:
                 "rows": [{"rule": "FMT-S2", "severity": "low", "document": path.name,
                           "location": "-", "evidence": "pdftotext not available",
                           "detail": "cannot check pages for blankness", "fix": "manual",
-                          "protected": False}]}
+                          "protected": False, "tier": tier_of("FMT-S2")}]}
     try:
         rc, stdout, stderr = _run_text_tool(["pdftotext", "-layout", str(path), "-"], 60)
     except (OSError, subprocess.SubprocessError) as e:
@@ -4790,7 +4965,8 @@ def check_pdf(path: Path, policy: dict) -> dict:
                                       + (f": {e}" if str(e) else ""),
                           "detail": "the PDF could not be read (pdftotext did not finish); "
                                     "no blank-page verdict is possible",
-                          "fix": "manual", "protected": False}]}
+                          "fix": "manual", "protected": False,
+                          "tier": tier_of("FMT-S2")}]}
     if rc != 0:
         # An unreadable/missing PDF yields empty text, which parses as 0 pages
         # and 0 blank pages: reporting that as clean is a false pass on the one
@@ -4803,7 +4979,8 @@ def check_pdf(path: Path, policy: dict) -> dict:
                                       + (f": {detail}" if detail else ""),
                           "detail": "the PDF could not be read; no blank-page verdict "
                                     "is possible",
-                          "fix": "manual", "protected": False}]}
+                          "fix": "manual", "protected": False,
+                          "tier": tier_of("FMT-S2")}]}
     txt = stdout
     res = blank_pages_in_text(txt)
     blank = res["blank_pages"]
@@ -4851,6 +5028,7 @@ def check_pdf(path: Path, policy: dict) -> dict:
     # The artifact checks (FMT-PDF1..3) run on the SAME extraction: a form shell
     # has one non-blank page and would otherwise pass as clean.
     rows.extend(pdf_artifact_rows(path, text=txt, pages=res["pages"]))
+    _fill_missing_row_tiers(rows)
     only_gap = bool(image_gap is not None and len(rows) == 1)
     return {"file": str(path), "pages": res["pages"], "blank_pages": blank,
             "furniture": res["furniture"][:5], "rows": rows,
@@ -4966,7 +5144,19 @@ def _table_grid_widths(tbl: str) -> list:
     grid = re.search(r"<w:tblGrid(?=[\s/>]).*?</w:tblGrid>", tbl, re.S)
     if not grid:
         return []
-    return [int(x) for x in re.findall(r'<w:gridCol[^>]*w:w="(\d+)"', grid.group(0))]
+    # Bounded parse: a well-formed document may carry a 5000-digit width and
+    # Python 3.11+ refuses `int()` on it (the caller's try/except has already
+    # ended, so the whole package scan crashed). An unparseable grid means the
+    # table cannot be laid out: return [] so the caller skips it.
+    widths = []
+    for x in re.findall(r'<w:gridCol[^>]*w:w="(\d+)"', grid.group(0)):
+        if len(x) > 6:
+            return []
+        try:
+            widths.append(int(x))
+        except ValueError:
+            return []
+    return widths
 
 
 def _table_cell_widths(row: str) -> list:
@@ -5543,8 +5733,9 @@ def availability_claim_rows(para_texts: list, doc: str) -> list:
         for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
             if not AVAILABILITY_CLAIM_RE.search(sentence):
                 continue
-            if len(sentence.split()) < 6:
-                continue                      # a heading/group label ("Deposited data")
+            # No fixed word-count floor: "Data were deposited." is a complete
+            # claim with no locator. A bare group label ("Deposited data") does
+            # not match the auxiliary-verb pattern above, so it is not a claim.
             if re.search(r"\bshipped\s+with\b", sentence, re.I):
                 continue                      # "shipped with the tool" is a distribution fact
             if "from the corresponding author" in sentence.lower():
@@ -5565,6 +5756,26 @@ def availability_claim_rows(para_texts: list, doc: str) -> list:
     return rows
 
 
+def _page_field_range(text: str) -> bool:
+    """True when a digits-hyphen-digits span in `text` sits in the PAGE field.
+
+    A bold reference TITLE can legitimately contain a numeric range ("2-3
+    doses"); only a range in the bibliographic page field (after the journal /
+    volume punctuation, e.g. `12: 345-367`, `12(3), 45-67`) is the rendered-
+    bibliography defect FMT-T6h reports.
+    """
+    stripped = (text or "").strip()
+    # A run that IS the page field (`1-9`, `pp. 345-367`): the range carries no
+    # title words at all.
+    if re.fullmatch(r"(?:pp?\.\s*)?\d+\s*[-\u2013]\s*\d+", stripped, re.I):
+        return True
+    for m in re.finditer(r"\d+\s*[-\u2013]\s*\d+", text or ""):
+        before = text[:m.start()]
+        if re.search(r"[;:,]\s*(?:[A-Za-z]+\s+)?\d{0,4}\s*[:(]?\s*$", before):
+            return True
+    return False
+
+
 def reference_bold_rows(xml: str, styles: dict, doc: str) -> list:
     """FMT-T6h: a bibliography bold run covers a year or a page range."""
     rows = []
@@ -5578,7 +5789,7 @@ def reference_bold_rows(xml: str, styles: dict, doc: str) -> list:
             text = text_of(r[2]).strip()
             if not text or not run_is_bold(styles, style, r[2]):
                 continue
-            if re.search(r"\(\d{4}[a-z]?\)", text) or re.search(r"\d+\s*[-\u2013]\s*\d+", text):
+            if re.search(r"\(\d{4}[a-z]?\)", text) or _page_field_range(text):
                 rows.append({
                     "rule": "FMT-T6h", "severity": "medium", "document": doc,
                     "location": f"p{idx}",
@@ -5764,7 +5975,8 @@ _LOGIC_PATTERNS = (
      "a test whose 'because' clause asserts the premise it is supposed to test"),
     (r"\binvert(?:ing|s|ed)?\s+the\s+downsampling\b", "FMT-T9L",
      "the method downsamples and merges; it does not invert a downsampling"),
-    (r"\bwill\s+be\s+flagged\s+as\b", "FMT-T9L",
+    (r"\b(?:benchmark|callers?|scores?)\b[^.]{0,120}\bwill\s+be\s+flagged\s+as\b"
+     r"|\bwill\s+be\s+flagged\s+as\b[^.]{0,120}\b(?:benchmark|callers?|scores?)\b", "FMT-T9L",
      "'flagged' by what? the benchmark scores callers; it has no flag mechanism"),
     (r"\bwhich\s+it\s+needs\b", "FMT-T9L",
      "'which' has more than one possible antecedent"),
@@ -5911,16 +6123,19 @@ def stats_floor_rows(paras: list) -> list:
     rows = []
     parsed = []
     for line in text.splitlines():
-        if not re.search(r"\b(?:10|none)\b", line):
+        if not re.search(r"\b\d{1,3}\b|\bnone\b", line):
             continue
-        # PDF layout: Method ... 10 9 0.030 1.00 [...]
+        # PDF layout: Method ... 19 9 0.030 1.00 [...]
+        # The family/test-count column is any number (the old literal 10|none
+        # skipped a 19-test family entirely); the value itself is not used --
+        # the caption's stated family size drives the floor.
         m = re.search(
-            r"\b(?P<cap>10|none)\s+(?P<n>\d{1,3})\s+"
+            r"\b(?P<cap>\d{1,3}|none)\s+(?P<n>\d{1,3})\s+"
             r"(?P<p>\d+(?:\.\d+)?(?:\s*[×x]\s*10\s*[+−-]?\s*\d+|[eE][+−-]?\d+)?)\b", line)
         if not m:
-            # LaTeX: Method & 10 & 9 & \textbf{0.030} & ...
+            # LaTeX: Method & 19 & 9 & \textbf{0.030} & ...
             m2 = re.search(
-                r"&\s*(?P<cap>10|none)\s*&\s*(?P<n>\d{1,3})\s*&\s*"
+                r"&\s*(?P<cap>\d{1,3}|none)\s*&\s*(?P<n>\d{1,3})\s*&\s*"
                 r"(?:\\textbf\{)?(?P<p>\d+(?:\.\d+)?(?:\s*\\times\s*10\^\{?[+−-]?\d+\}?|[eE][+−-]?\d+)?)",
                 line)
             if not m2:

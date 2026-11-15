@@ -34,12 +34,16 @@ _TEX_INLINE_VERB_RE = re.compile(
     r"\\(?:verb|lstinline)\*?(?:\[[^\]]*\])?(?P<delim>[^\sA-Za-z]).*?(?P=delim)")
 
 
-def latex_root_documents(dirp: Path) -> list:
+def latex_root_documents(dirp: Path, gaps: list = None) -> list:
     """Relative paths of the `.tex`/`.ltx` files that are a COMPILE ROOT.
 
     A root carries `\\documentclass`; a fragment that is only `\\input`-ed by
     the root is not compiled on its own (it would fail without the preamble),
     and neither is an auxiliary or a `work/` scratch file.
+
+    `gaps` (optional) receives one line per `.tex` that could not be examined:
+    the read is bounded, so a runaway package file cannot make `decide` load a
+    multi-gigabyte document whole, and the caller records what it skipped.
     """
     out = []
     if not dirp.is_dir():
@@ -55,9 +59,15 @@ def latex_root_documents(dirp: Path) -> list:
                 or any(part == "work" for part in rel.parts[:-1]) \
                 or is_evidence_rel(rel.as_posix()):
             continue
-        try:
-            head = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        # BOUNDED: this runs at `decide` time on agent-written packages, and a
+        # 10 GiB `.tex` must not be loaded whole (the same rule every other
+        # package read follows). `read_text_bounded` also refuses a symlink/FIFO
+        # swapped in after the walk.
+        head = read_text_bounded(p)
+        if head is None:
+            if gaps is not None:
+                gaps.append(f"{rel.as_posix()}: over the byte budget or unreadable; "
+                            f"its `\\documentclass` was NOT examined")
             continue
         # Comments and verbatim bodies are not compiled source; a
         # `% \documentclass` or a sample inside verbatim is not a root (F74).
@@ -138,15 +148,16 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
     the stage sandboxes link them for the same reason. They are read-only
     inputs, never written through.
     """
+    # A failed re-render must not leave the PREVIOUS run's PDF at the recorded
+    # path: the manifest says ok=False, but the persistent tree would still
+    # serve stale bytes (F260). This must run BEFORE the tool check too: with no
+    # latexmk the old PDF used to stay at the recorded render path.
+    with contextlib.suppress(OSError):
+        Path(out_pdf).unlink()
     exe = shutil.which("latexmk")
     if not exe:
         return {"ok": False, "tool": None,
                 "error": "latexmk is not on PATH; the LaTeX sources were not compiled"}
-    # A failed re-render must not leave the PREVIOUS run's PDF at the recorded
-    # path: the manifest says ok=False, but the persistent tree would still
-    # serve stale bytes (F260).
-    with contextlib.suppress(OSError):
-        Path(out_pdf).unlink()
     src = pkg / rel
     links = _package_symlink_problems(pkg)
     if links:
@@ -281,8 +292,10 @@ def convert_docx_to_pdf_persistent(docx: Path, out_dir: Path,
 
 def _pdf_previous_records(stored: dict) -> dict:
     """{(label, rel): record} of a stored PDF manifest (for idempotent reuse)."""
+    if not isinstance(stored, dict):
+        return {}
     out = {}
-    for s in (stored or {}).get("sets") or []:
+    for s in stored.get("sets") or []:
         for d in s.get("documents") or []:
             out[(str(s.get("label") or ""), str(d.get("rel") or ""))] = d
     return out
@@ -316,6 +329,7 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
                    previous: dict = None) -> list:
     """Compile/convert every document of ONE (label, sources) set; never raises."""
     docs, previous = [], previous or {}
+    latex_gaps = []
     pkg_sources = [s for s in sources if not s[1]]
     latex_targets = set()
     latex_jobs = []
@@ -323,7 +337,7 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
     for src, _prefix, _excluded in pkg_sources:
         if not src.is_dir():
             continue
-        for rel in latex_root_documents(src):
+        for rel in latex_root_documents(src, gaps=latex_gaps):
             out_pdf = Path(out_root) / Path(rel).with_suffix(".pdf")
             # `main.tex` and `main.ltx` both want `main.pdf`. Give the later
             # root a path that names its source extension instead of silently
@@ -392,26 +406,36 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
         if rec is None:
             with contextlib.suppress(OSError):
                 out_pdf.unlink()          # never leave a stale PDF (F260)
-            if out_pdf.name == docx.stem + ".pdf":
-                res = convert_docx_to_pdf_persistent(docx, out_dir)
-            else:
-                # The renderer always writes `<out_dir>/<stem>.pdf`, so give
-                # the colliding DOCX its own directory and move the result
-                # to the distinct name; the LaTeX render is never touched.
-                # `out_dir` exists only when the LaTeX compile above
-                # succeeded (or the caller pre-created it), so create it
-                # before mkdtemp: a failed LaTeX render must still leave the
-                # DOCX attempt recorded, never raise out of render_pdf_set.
-                out_dir.mkdir(parents=True, exist_ok=True)
-                _tmp = Path(tempfile.mkdtemp(prefix=".docx-pdf-", dir=str(out_dir)))
-                try:
-                    res = convert_docx_to_pdf_persistent(docx, _tmp)
-                    _made = _tmp / (docx.stem + ".pdf")
-                    if res.get("ok") and _made.is_file():
-                        out_dir.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(_made), str(out_pdf))
-                finally:
-                    shutil.rmtree(_tmp, ignore_errors=True)
+            try:
+                if out_pdf.name == docx.stem + ".pdf":
+                    res = convert_docx_to_pdf_persistent(docx, out_dir)
+                else:
+                    # The renderer always writes `<out_dir>/<stem>.pdf`, so give
+                    # the colliding DOCX its own directory and move the result
+                    # to the distinct name; the LaTeX render is never touched.
+                    # `out_dir` exists only when the LaTeX compile above
+                    # succeeded (or the caller pre-created it), so create it
+                    # before mkdtemp: a failed LaTeX render must still leave the
+                    # DOCX attempt recorded, never raise out of render_pdf_set.
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    _tmp = Path(tempfile.mkdtemp(prefix=".docx-pdf-", dir=str(out_dir)))
+                    try:
+                        res = convert_docx_to_pdf_persistent(docx, _tmp)
+                        _made = _tmp / (docx.stem + ".pdf")
+                        if res.get("ok") and _made.is_file():
+                            out_dir.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(_made), str(out_pdf))
+                    finally:
+                        shutil.rmtree(_tmp, ignore_errors=True)
+            except OSError as e:
+                # The set directory can be blocked by a FILE (or a parent that is
+                # not a directory): `out_dir.mkdir` raised FileExistsError and
+                # aborted the whole persistent-PDF pass, although this function
+                # promises "never raises" and every other failure here is a
+                # recorded WARNING (F170). Record this document and continue.
+                res = {"ok": False,
+                       "error": f"the render directory could not be created: "
+                                f"{type(e).__name__}: {e}"}
             rec = {"rel": rel, "kind": "docx",
                    "out": out_pdf.relative_to(ctx.root).as_posix(),
                    "sha256": f["digest"],
@@ -421,6 +445,13 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
                    "tool": res.get("tool"), "pages": res.get("pages") or 0,
                    "error": res.get("error"), "fallbacks": res.get("fallbacks")}
         docs.append(rec)
+    # A `.tex` the bounded reader refused is not a compile root, but it is also
+    # not "a package with no such document": record the failed row so the
+    # manifest says what was NOT examined (F159).
+    for _line in dict.fromkeys(latex_gaps):
+        docs.append({"rel": _line.split(":", 1)[0], "kind": "latex", "out": "",
+                     "sha256": "", "out_sha256": "", "ok": False, "tool": None,
+                     "pages": 0, "error": _line})
     return docs
 
 
@@ -453,7 +484,7 @@ def run_pdf_conversion(ctx: Ctx, rounds=None, versions=None, include_original: b
     # collapse it and render the whole run.
     rounds = [int(r) for r in (rounds if rounds is not None
                                else range(1, ctx.rounds_count() + 1))]
-    versions = list(versions) if versions else None
+    versions = None if versions is None else list(versions)
     out_root = ensure_aux_output_root(ctx.root, PDF_DIRNAME)
     stored = read_json(out_root / PDF_MANIFEST) or {}
     previous = _pdf_previous_records(stored)
