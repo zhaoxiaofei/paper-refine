@@ -53,12 +53,12 @@ FAILS = []
 # and paste the hashes here in the SAME commit that changes the prompts.
 GOLDEN = {
     "review": "536ecfa9f4d7ef79",
-    "review_split_a": "de1d783689b3d63b",
-    "review_scoped": "8f1e9b8f475c387c",
+    "review_split_a": "42027b42dcf429eb",
+    "review_scoped": "66d420d8f5a610a8",
     "cold_start_review": "1a9849c7d324ed8b",
     "audit": "787918e54ccb537a",
-    "revise": "008f5f109314fbbf",
-    "integrate": "44108c92051ea45a",
+    "revise": "0f21a43df6331629",
+    "integrate": "3ecf98c3b1a1c328",
     "rewrite": "ff0e20f5ccea54e0",
     "judge": "31bf4858dd98210e",
     "revision_audit": "538751ae210515f5",

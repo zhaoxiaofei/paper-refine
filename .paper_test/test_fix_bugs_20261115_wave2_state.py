@@ -437,8 +437,12 @@ def test_f140() -> None:
         got2, raised2 = None, exc
     check("F140 a planted file symlink does not raise",
           raised2 is None, f"{type(raised2).__name__}: {raised2}" if raised2 else "")
-    check("F140 the planted symlink is not part of the view identity",
-          got2 == [("a.tex", pp.sha256_file(view2 / "a.tex"))], str(got2))
+    # The current contract (F162 of the 2026-11-15 08:17 run) is the opposite:
+    # a planted symlink must make the derived view compare UNEQUAL so it is
+    # rebuilt, and it is named by a sentinel rather than followed.
+    check("F162 the planted symlink is a non-matching sentinel",
+          got2 == [("a.tex", pp.sha256_file(view2 / "a.tex")),
+                   ("b.tex", "<symlink>")], str(got2))
 
 
 # ---------------------------------------------------------------------------

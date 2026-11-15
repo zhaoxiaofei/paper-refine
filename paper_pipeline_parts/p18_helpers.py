@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 18/20 of the pipeline -- executed by the loader AFTER the command
+# Part 18/21 of the pipeline -- executed by the loader AFTER the command
 # functions, in the loader's own module globals. These are pure helpers
 # (no module-level side effects): the lower-numbered parts call them at
 # runtime, so they may live after the CLI definitions. Split out of
@@ -497,8 +497,14 @@ def _docx_paragraphs_with_styles(path: Path, include_tables: bool = True,
     try:
         with zipfile.ZipFile(path) as z:
             data = _docx_xml_part(z, "word/document.xml")
+            _hf_names = [n for n in z.namelist()
+                         if re.match(r"word/(?:header|footer)[A-Za-z0-9_\-]*\.xml$", n)]
             note_data = [_docx_xml_part(z, name) for name in
                          ("word/footnotes.xml", "word/endnotes.xml")]
+            # F202: header/footer prose was invisible to the content and fact
+            # gates; read the parts too (the visible-paragraph walker skips
+            # Fallback branches).
+            note_data += [_docx_xml_part(z, name) for name in _hf_names]
         if data is None:
             return None
         root = ET.fromstring(data)
@@ -552,6 +558,12 @@ def _docx_paragraphs_with_styles(path: Path, include_tables: bool = True,
     if not include_notes:
         return out
     for note_root in note_roots:
+        # A header/footer root's children ARE the visible paragraphs (w:hdr /
+        # w:ftr); feeding it through the footnote record filter skipped every
+        # one of them, so the F202 addition changed nothing observable.
+        if note_root.tag in (ns + "hdr", ns + "ftr"):
+            out.extend(_paragraph_pairs(note_root))
+            continue
         for note in list(note_root):
             if note.tag not in (ns + "footnote", ns + "endnote"):
                 continue

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 13/20 of the pipeline -- executed by the
+# Part 13/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -388,12 +388,29 @@ def _track_change(tag: str, counter: list, ts: str):
     return el
 
 
+def _mark_paragraph(ppr, tag: str, counter: list, ts: str) -> None:
+    """Mark the PARAGRAPH MARK as inserted/deleted (`w:pPr/w:rPr/w:ins|del`).
+
+    Wrapping only the runs leaves the paragraph mark live: accept-all keeps an
+    empty paragraph where a deleted one was, and reject-all keeps an empty
+    paragraph where an inserted one was.
+    """
+    rpr = ppr.find(_w("rPr"))
+    if rpr is None:
+        rpr = ET.SubElement(ppr, _w("rPr"))
+    for existing in rpr.findall(_w(tag)):
+        rpr.remove(existing)
+    # CT_ParaRPr puts ins/del FIRST, before the character properties.
+    rpr.insert(0, _track_change(tag, counter, ts))
+
+
 def _wrap_para(p, tag: str, del_text: bool, counter: list, ts: str):
     """Copy one paragraph, wrapping its run content in w:ins / w:del."""
     new_p = ET.Element(_w("p"))
     pr = p.find(_w("pPr"))
-    if pr is not None:
-        new_p.append(copy.deepcopy(pr))
+    new_pr = copy.deepcopy(pr) if pr is not None else ET.Element(_w("pPr"))
+    _mark_paragraph(new_pr, tag, counter, ts)
+    new_p.append(new_pr)
     tc = _track_change(tag, counter, ts)
     for child in list(p):
         if child is not pr:
@@ -612,6 +629,11 @@ def _pPr_for(bp, rp, counter: list, ts: str):
         old_pr = ET.SubElement(change, _w("pPr"))
         if old is not None:
             for child in list(old):
+                # CT_PPrChange's pPr is CT_PPrBase: rPr, sectPr and a nested
+                # pPrChange are CT_PPr-only extensions and are schema-invalid
+                # inside the recorded change.
+                if str(child.tag).rsplit("}", 1)[-1] in ("rPr", "sectPr", "pPrChange"):
+                    continue
                 old_pr.append(copy.deepcopy(child))
         pr.append(change)
     return pr
@@ -655,14 +677,23 @@ def _replace_para(bp, rp, counter: list, ts: str):
     # drops a paragraph's leading whitespace, so the cumulative-length offsets
     # below started at 0 and every later slice was shifted by that prefix:
     # accepting "  Hello world" -> "  Hello there" produced "  Hello the".
-    base_tok = [(m.start(), m.end(), m.group(0))
-                for m in re.finditer(r"\S+\s*", base_text)]
-    rev_tok = [(m.start(), m.end(), m.group(0))
-               for m in re.finditer(r"\S+\s*", rev_text)]
+    def _tokens(text: str) -> list:
+        toks = [(m.start(), m.end(), m.group(0))
+                for m in re.finditer(r"\S+\s*", text)]
+        # `\S+\s*` drops leading whitespace, so a leading-space-only edit was
+        # outside every token range and could neither be marked nor rejected.
+        # Emit the prefix as its own atom.
+        lead = re.match(r"\s*", text).group(0)
+        if lead:
+            toks.insert(0, (0, len(lead), lead))
+        return toks
+
+    base_tok = _tokens(base_text)
+    rev_tok = _tokens(rev_text)
     base_words = [t[2] for t in base_tok]
     rev_words = [t[2] for t in rev_tok]
-    base_off = ([0] + [t[0] for t in base_tok[1:]] + [len(base_text)])
-    rev_off = ([0] + [t[0] for t in rev_tok[1:]] + [len(rev_text)])
+    base_off = [t[0] for t in base_tok] + [len(base_text)]
+    rev_off = [t[0] for t in rev_tok] + [len(rev_text)]
 
     out = []
     try:
@@ -1139,6 +1170,13 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         order = (["redline-cmd"] if cmd_template else []) + ["builtin"]
     else:
         order = [tool] + (["redline-cmd"] if cmd_template else [])
+    # F165: an external backend writes `out` itself, so a planted symlink at a
+    # `redlines/r<N>_<vid>/` directory would redirect that write outside --root.
+    # Validate the whole parent chain before the first backend.
+    try:
+        _refuse_symlinked_parent(out)
+    except NameError:                                        # pragma: no cover
+        pass
     out.parent.mkdir(parents=True, exist_ok=True)      # external tools need the directory
 
     # OUT must never be one of the INPUTS: drop_stale_out() unlinks it before
@@ -1259,10 +1297,18 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         else:
             try:
                 info = builtin_tracked_changes(base, revised, out)
+                # The README's contract for `ok` is "the backend exited 0 AND
+                # the file it wrote is a readable OOXML package"; the builtin
+                # branch alone recorded ok=True without that check.
+                _readable, _why = docx_is_readable(out)
                 attempts.append({"backend": "builtin-ooxml", "cmd": ["builtin"], "rc": 0,
-                                 "ok": True,
+                                 "ok": bool(_readable),
                                  "detail": f"w:ins paragraphs={info['paragraphs_inserted']} "
-                                           f"w:del paragraphs={info['paragraphs_deleted']}",
+                                           f"w:del paragraphs={info['paragraphs_deleted']}"
+                                           + ("" if _readable else
+                                              ("; could not be saved (OUT is missing)"
+                                               if not out.exists() else
+                                               f"; output is not readable OOXML: {_why}")),
                                  "non_paragraph_changed": info.get("non_paragraph_changed"),
                                  "non_document_parts_changed":
                                      info.get("non_document_parts_changed"),
@@ -1355,7 +1401,8 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         except OSError:
             pass
     validated, validation_detail = (docx_is_readable(out) if winner else (False, "no output"))
-    return {"ok": bool(winner), "tool": (winner or {}).get("backend", tool),
+    return {"ok": bool(winner) and bool(validated),
+            "tool": (winner or {}).get("backend", tool),
             "attempts": attempts, "validated_ooxml": bool(validated),
             "validation_detail": validation_detail,
             "warning": (winner or {}).get("warning")}
@@ -1542,9 +1589,21 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
                 for pair in pairs:
                     out = out_root / f"r{r}_{vid}" / label / pair["cand_rel"]
                     if tool == "none":
+                        # A redline from an EARLIER invocation may still sit at
+                        # OUT; publication copies that directory with no manifest
+                        # check, so a skipped row must not leave it behind.
+                        try:
+                            out.unlink()
+                        except OSError:
+                            pass
                         entry["comparisons"].append({
                             "source": label, "base_rel": pair["base_rel"],
                             "revised_rel": pair["cand_rel"], "basis": pair["basis"],
+                            # A skipped row is never reusable as a difference
+                            # track; record the pair digests and say so.
+                            "base_digest": pair.get("base_digest"),
+                            "cand_digest": pair.get("cand_digest"),
+                            "reusable": False,
                             "out": out.relative_to(ctx.root).as_posix(),
                             "tool": None, "ok": False, "skipped": True,
                             "reason": "tool=none: only the manifest/report was requested",

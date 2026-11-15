@@ -331,22 +331,37 @@ def test_strip_latex():
 
 def test_strip_reference_sentences_encoding():
     print()
-    print("== D7: a non-UTF-8 document.xml returns a record, never a crash ==")
+    print("== D7: a malformed part is reported; a legal UTF-16 part is read ==")
     tmp = scratch("paper_strip_enc_")
+    # Genuinely invalid XML (not a legal OOXML encoding): the record must carry
+    # ok=False instead of raising.
     src = tmp / "src.docx"
     with zipfile.ZipFile(src, "w") as z:
         z.writestr("word/document.xml",
                    f'<w:document {W_NS}><w:body><w:p><w:r><w:t>See base.tsv</w:t>'
-                   f'</w:r></w:p></w:body></w:document>'.encode("utf-16"))
+                   f'</w:r></w:p></w:body>')
     out = tmp / "out.docx"
     try:
         res = fmt.strip_reference_sentences(src, out, lambda text: [(0, 4)])
     except Exception as e:                                          # noqa: BLE001
-        check("D7 a non-UTF-8 document.xml is reported, not raised", False,
+        check("D7 a malformed document.xml is reported, not raised", False,
               f"{type(e).__name__}: {e}")
         return
-    check("D7 the record carries ok=False and an error naming the decode failure",
-          res.get("ok") is False and "error" in res, json.dumps(res)[:200])
+    check("D7 the malformed record carries ok=False and an error",
+          res.get("ok") is False and bool(res.get("error")), json.dumps(res)[:200])
+
+    # F006: a legal BOM-bearing UTF-16 document.xml must be READ. The old D7
+    # asserted ok=False for this fixture, which contradicted the F006 fix.
+    src16 = tmp / "src16.docx"
+    with zipfile.ZipFile(src16, "w") as z:
+        z.writestr("word/document.xml",
+                   f'<w:document {W_NS}><w:body><w:p><w:r><w:t>See base.tsv</w:t>'
+                   f'</w:r></w:p></w:body></w:document>'.encode("utf-16"))
+    out16 = tmp / "out16.docx"
+    res16 = fmt.strip_reference_sentences(src16, out16, lambda text: [(0, 4)])
+    check("D7 a legal UTF-16 document.xml is read, not a decode error",
+          res16.get("ok") is True and bool(res16.get("removed")),
+          json.dumps(res16)[:200])
 
 
 # =====================================================================

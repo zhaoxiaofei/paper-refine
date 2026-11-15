@@ -186,8 +186,10 @@ def test_text_rules():
     check("S-014 NUMBER_RE does not swallow a trailing comma",
           [m.group(1) for m in fmt.NUMBER_RE.finditer("1, 2")] == ["1", "2"],
           str([m.group(1) for m in fmt.NUMBER_RE.finditer("1, 2")]))
-    check("S-014 '2,019' is not a separated quantity",
-          fmt.number_format_rows(["We saw 2,019 and 12000 samples."]) == [])
+    # F187 (2026-11-15 08:17 run): a comma-grouped four-digit value is a
+    # QUANTITY, not a year; it participates in the separator convention.
+    check("S-014 '2,019' is a separated quantity",
+          bool(fmt.number_format_rows(["We saw 2,019 and 12000 samples."])))
     check("S-014 a real decimal with a separator is still a case",
           bool(fmt.number_format_rows(["We saw 1,234.5 and 12000 cells."])))
     cands = fmt._num_candidates(4e-7)

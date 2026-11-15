@@ -21,7 +21,8 @@ it executes is a real Python file (each carries
 | `p09_setup.py` | `setup` and the `set-*` commands |
 | `p10_reports.py` | raw scores, issue census, defect list writers |
 | `p11_defect_audit.py` | the diagnostic LLM defect audit |
-| `p12_conflicts_decide.py` | judge-conflict audit, decision report, `decide`, `status`, `trend` |
+| `p12_conflicts_decide.py` | package-hygiene scans, PKG-2 repair, decision report, `decide`, `status`, `trend` |
+| `p20_judge_conflicts.py` | the cross-judge conflict audit (split from `p12` to keep every part under 10,000 lines) |
 | `p13_redlines.py` | tracked-changes generation |
 | `p14_tracking.py` | difference-tracking copies and persistent renders |
 | `p15_pdf.py` | PDF rendering |

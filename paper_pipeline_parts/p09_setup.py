@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/20 of the pipeline -- executed by the
+# Part 09/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -570,7 +570,8 @@ def cmd_setup(args) -> None:
                   f"state.json yet); starting over from the source")
             rmtree_force(root)
         else:
-            die(f"--root exists and is not empty: {root} (choose a fresh --root or delete it)")
+            die(f"--root exists and is not empty: {root} (choose a fresh --root or delete it)",
+                code=2)
     if is_within(root, source) or is_within(source, root):
         die("--root and --source must not be nested inside each other", code=2)
     # A new root must not freeze an OLD ROOT's pipeline snapshot by accident
@@ -3561,18 +3562,42 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     print(f"[run] pristine original: {detail}")
 
     _only_cold_start = parse_only_spec(getattr(args, "only", None))
-    if only_is_template_stage_only(_only_cold_start):
+    _template_stage_only = only_is_template_stage_only(_only_cold_start)
+    if _template_stage_only:
         if journal_mode_of(ctx) not in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
             die("--only conform is the "
                 f"template-first stage of the transfer and init revision modes: this root's "
-                f"revision mode is {journal_mode_of(ctx)!r}")
-        _ensure_template_stage_for_run(ctx, args)
-        die(f"the template-first stage is {'done' if template_stage_record(ctx) else 'pending'}; "
-            f"the round(s) are still pending -- run a plain `run` (or another --only selection) "
-            f"to continue the chain", code=3)
-    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
-        _ensure_template_stage_for_run(ctx, args)
+                f"revision mode is {journal_mode_of(ctx)!r}", code=2)
+        only = _only_cold_start
+    else:
+        only = _only_cold_start
+        if only is not None and only.is_everything():
+            only = None                 # `--only all`: exactly a plain `run`
+        if only is not None:
+            if journal_has_feedback(ctx):
+                # The journal chain's stages are selectable exactly like the round
+                # model's (feedback, concerns, review, audit, revise, integrate,
+                # response). The safety rule is preserved at the SINK, not by
+                # refusing the selection: the response letter and the
+                # journal_submission/ package are assembled only by a plain `run`
+                # once every stage of the chain is done.
+                print(f"[run] --only {getattr(args, 'only', None)!r} in revision mode "
+                      f"{journal_mode_of(ctx)!r}: the journal stages are selectable; the response "
+                      f"letter and journal_submission/ are assembled only by a plain `run` once "
+                      f"every stage of the chain is done.")
+            resolve_judge_run_ids(ctx, only)    # `--only judge_t497f106d_j1`
+            only.validate(ctx.rounds_count())
+            validate_only_selectors(ctx, only)
+            print(f"[run] --only {getattr(args, 'only', None)!r}: {only.describe()}; this invocation "
+                  f"drives only the selected round(s), stage type(s) and session(s); a round whose "
+                  f"other stages are still pending stays incomplete (resume with `run`, `--only …`, "
+                  f"or `retry --run <ID>`)")
 
+    # Prerequisite CHECKS come before any expensive session. The template-first
+    # stage can launch an editing agent, so a broken pin, changed input or an
+    # invalid/unknown --only selection must be refused first: `run --only 2:judge`
+    # on a one-round root used to start the template agent and only then reject
+    # the selection, and a broken pin was detected after the agent had run.
     perrs = pinned_integrity(ctx)
     if perrs:
         die("pinned champion content changed after it was registered:\n  - "
@@ -3592,6 +3617,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         print(f"[run] {len(stale)} run(s) marked stale by the content check: {', '.join(stale)}")
         ctx.save_state()
     backfill_round_raw_scores(ctx)
+
+    # Only now may the template-first stage run (and start its agent).
+    if _template_stage_only:
+        _ensure_template_stage_for_run(ctx, args)
+        die(f"the template-first stage is {'done' if template_stage_record(ctx) else 'pending'}; "
+            f"the round(s) are still pending -- run a plain `run` (or another --only selection) "
+            f"to continue the chain", code=3)
+    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
+        _ensure_template_stage_for_run(ctx, args)
     # --- producer selection: the model/harness pair (the --agent shortcut is gone) ----
     _cli_harness = getattr(args, "agent_harness", None)
     _cli_model = getattr(args, "agent_model", None)
@@ -3647,28 +3681,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             model_name=_new_model_name if agent_model_is_endpoint(agent_model) else None,
             prep_json=(json.dumps(_new_prep) if _new_prep
                        and agent_model_is_endpoint(agent_model) else None))
-    only = parse_only_spec(getattr(args, "only", None))
-    if only is not None and only.is_everything():
-        only = None                     # `--only all`: exactly a plain `run`
-    if only is not None:
-        if journal_has_feedback(ctx):
-            # The journal chain's stages are selectable exactly like the round
-            # model's (feedback, concerns, review, audit, revise, integrate,
-            # response). The safety rule is preserved at the SINK, not by
-            # refusing the selection: the response letter and the
-            # journal_submission/ package are assembled only by a plain `run`
-            # once every stage of the chain is done.
-            print(f"[run] --only {getattr(args, 'only', None)!r} in revision mode "
-                  f"{journal_mode_of(ctx)!r}: the journal stages are selectable; the response "
-                  f"letter and journal_submission/ are assembled only by a plain `run` once "
-                  f"every stage of the chain is done.")
-        resolve_judge_run_ids(ctx, only)    # `--only judge_t497f106d_j1`
-        only.validate(ctx.rounds_count())
-        validate_only_selectors(ctx, only)
-        print(f"[run] --only {getattr(args, 'only', None)!r}: {only.describe()}; this invocation "
-              f"drives only the selected round(s), stage type(s) and session(s); a round whose "
-              f"other stages are still pending stays incomplete (resume with `run`, `--only …`, "
-              f"or `retry --run <ID>`)")
+    # `only` was parsed and fully validated BEFORE the template-first stage (see
+    # above); nothing in the producer-selection block changes the selection.
     # A no-judge mode must be possible in EVERY pending round this invocation may
     # decide. Validate the target arms BEFORE the first expensive session, so an
     # existing root whose later round's mask is clear cannot fail after rounds of

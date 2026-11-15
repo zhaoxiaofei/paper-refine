@@ -207,6 +207,14 @@ def _tex_include_path(base: Path, arg: str):
     # `.txt` fallback an included chapter is never found in the corpus and the
     # root alone is counted.
     candidates = [cand] + [Path(str(cand) + ".txt")]
+    # A CONVERTED corpus flattens a subdirectory child into
+    # `sub__chapter.tex.txt`; the written `\input{sub/chapter}` has to resolve
+    # to that flattened name too (F019).
+    flat = arg.replace("/", "__").replace("\\", "__")
+    stem = flat[:-4] if flat.lower().endswith(TEX_EXTS) else flat
+    candidates += [Path(stem + ".tex.txt"), Path(stem + ".ltx.txt"),
+                   Path(stem + ".tex"), Path(stem + ".ltx"),
+                   Path(stem + ".txt")]
     for candidate in candidates:
         path = candidate if candidate.is_absolute() else (base / candidate)
         try:

@@ -137,7 +137,8 @@ def hyphen_attributive_re(split: str):
     followers = "|".join(re.escape(w) for w in
                          tuple(HYPHEN_NOUN_FOLLOWERS) + tuple(sorted(HYPHEN_VERB_FOLLOWERS)))
     return re.compile(
-        rf"\b{re.escape(split)}(?=\s+(?!(?:(?:{followers})\b|[A-Za-z]+ed\b))[A-Za-z])")
+        rf"\b{re.escape(split)}(?=\s+(?!(?:(?:{followers})\b|[A-Za-z]+ed\b))[A-Za-z])",
+        re.IGNORECASE)
 
 
 # Words that make a repeated phrase part of the document scaffolding rather than
@@ -868,8 +869,10 @@ def number_format_rows(paras: list) -> list:
             return False
         digits = n.replace(",", "")
         # The 4-digit year test must run BEFORE the <=4 return, which otherwise
-        # made it unreachable ("2,019" was read as a separated quantity).
-        if len(digits) == 4 and digits[:2] in ("19", "20"):
+        # made it unreachable ("2,019" was read as a separated quantity). It
+        # must NOT run on a comma-grouped value: "1,999 cells" is a quantity,
+        # not the year 1999.
+        if "," not in n and len(digits) == 4 and digits[:2] in ("19", "20"):
             return False
         if len(digits) <= 4:
             return "," in n
@@ -2633,7 +2636,8 @@ def code_literal_rows(sources: list, limit: int = 200, skip_name=None) -> list:
         if not src.is_dir():
             continue
         for p in sorted(src.rglob("*")):
-            if not p.is_file() or p.suffix.lower() not in CODE_SOURCE_EXTS:
+            if p.is_symlink() or not p.is_file() \
+                    or p.suffix.lower() not in CODE_SOURCE_EXTS:
                 continue
             try:
                 if p.stat().st_size > CODE_FILE_BYTES_LIMIT:

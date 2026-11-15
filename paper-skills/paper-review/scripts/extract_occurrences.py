@@ -102,6 +102,41 @@ def is_reference_file(name: str) -> bool:
                 or re.search(r"\.bib(\.|$)", raw))
 
 
+BULLET_ENTRY_RE = re.compile(r"^\s*[-*\u2022]\s+\S")
+_YEAR_RE = re.compile(r"\b(?:1[5-9]|20)\d{2}[a-z]?\b")
+_ENTRY_AUTHOR_RE = re.compile(
+    r"^\s*[A-Z][A-Za-z'\-]+(?:\s+[A-Z]{1,3}[,.]|\s+[A-Z]\.|\s*,\s*(?:[A-Z]\.|[A-Z][a-z]+))")
+_AUTHOR_START_RE = re.compile(r"^\s*[A-Z][A-Za-z'\-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)")
+
+
+def looks_like_reference_entry(s):
+    """The siblings' reference-entry test (ported for the F092 region end)."""
+    if NUM_ENTRY_RE.match(s) or BULLET_ENTRY_RE.match(s):
+        return True
+    if _ENTRY_AUTHOR_RE.match(s) or _AUTHOR_START_RE.match(s):
+        return True
+    if re.search(r"\bdoi\b|https?://", s, re.I):
+        return True
+    if _YEAR_RE.search(s) and re.search(r"\b\d+\s*[:(]\s*\d+", s):
+        return True
+    if re.match(r"^\s*(?:[A-Z][\w'\u2019\-&.]+\s+){2,}\(?(?:19|20)\d{2}\)?\s*[.;:,)]", s):
+        return True
+    return False
+
+
+_TEX_VERBATIM_RE = re.compile(
+    r"\\begin\{(verbatim\*?|lstlisting|minted|Verbatim\*?)\}"
+    r".*?\\end\{\1\}", re.S)
+_TEX_COMMENT_RE = re.compile(r"(?<!\\)%.*$", re.M)
+
+
+def latex_source_text(text):
+    """LaTeX text with comments and verbatim/listing bodies blanked in place."""
+    def blank(m):
+        return re.sub(r"[^\n]", " ", m.group(0))
+    return _TEX_COMMENT_RE.sub(blank, _TEX_VERBATIM_RE.sub(blank, text or ""))
+
+
 def find_reference_region(lines):
     """(start, end) line indices of a reference list, or None."""
     start = None
@@ -113,13 +148,25 @@ def find_reference_region(lines):
     if start is None:
         return None
     end = len(lines)
+    prev_blank = False
     for j in range(start, len(lines)):
         s = lines[j].strip()
-        if not s or NUM_ENTRY_RE.match(s):
+        if not s:
+            prev_blank = True
             continue  # blank lines and numbered entries are inside the list
+        if NUM_ENTRY_RE.match(s):
+            prev_blank = False
+            continue
         if REF_END_RE.match(s):
             end = j
             break
+        # F092: a plain paragraph of 5+ words after a blank line that does not
+        # look like a reference entry ends the list; otherwise prose after the
+        # bibliography was skipped by the propagation pass.
+        if prev_blank and len(s.split()) >= 5 and not looks_like_reference_entry(s):
+            end = j
+            break
+        prev_blank = False
     return start, end
 
 
@@ -395,8 +442,11 @@ def main():
                 if is_reference_file(fname):
                     continue  # a bibliography file is quoted text, not prose
                 try:
-                    lines = open(os.path.join(corpus, fname), encoding="utf-8",
-                                 errors="replace").read().split("\n")
+                    _text = open(os.path.join(corpus, fname), encoding="utf-8",
+                                 errors="replace").read()
+                    if fname.lower().endswith((".tex", ".tex.txt", ".ltx", ".ltx.txt")):
+                        _text = latex_source_text(_text)
+                    lines = _text.split("\n")
                 except OSError as e:
                     print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
                     continue

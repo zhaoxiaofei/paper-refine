@@ -399,6 +399,18 @@ def _caption_line(raw, pattern):
     return not _CAPTION_BODY_PRONOUN_RE.match(rest)
 
 
+_TEX_VERBATIM_RE = re.compile(
+    r"\\begin\{(verbatim\*?|lstlisting|minted|Verbatim\*?)\}"
+    r".*?\\end\{\1\}", re.S)
+
+
+def blank_tex_verbatim(text):
+    """Blank verbatim/listing/minted bodies in place (line count preserved)."""
+    def blank(m):
+        return re.sub(r"[^\n]", " ", m.group(0))
+    return _TEX_VERBATIM_RE.sub(blank, text or "")
+
+
 def section_label(raw):
     """In-file section heading or display-item caption, else None."""
     s = raw.strip()
@@ -410,7 +422,16 @@ def section_label(raw):
         return "table"
     if len(s) > 60:
         return None
-    s = re.sub(r"^#{1,6}\s*", "", s).rstrip(":.").strip()
+    # F101: LaTeX sectioning and emphasized Markdown headings are contexts too.
+    _tex = re.match(r"^\\(?:section|subsection|subsubsection|chapter)\*?\s*\{([^{}]*)\}", s)
+    if _tex:
+        s = _tex.group(1)
+    elif re.match(r"^\\begin\{abstract\}", s):
+        return "abstract"
+    s = re.sub(r"^#{1,6}\s*", "", s)
+    s = re.sub(r"^(?:\*{1,2}|_{1,2})\s*", "", s)
+    s = re.sub(r"\s*(?:\*{1,2}|_{1,2})$", "", s)
+    s = s.rstrip(":.").strip()
     for label, pat in SECTION_PATTERNS:
         if pat.match(s):
             return label
@@ -917,6 +938,7 @@ def main():
         except OSError as e:
             print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
             continue
+        text = blank_tex_verbatim(text)
         lines = text.split("\n")
         if fname.lower().endswith((".tex.txt", ".ltx.txt")):
             # A commented-out sentence is not the authors' prose and must not

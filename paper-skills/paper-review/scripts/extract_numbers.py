@@ -99,7 +99,11 @@ LABEL_PATTERNS = [
         r"((?:\d+\.?\d*|\.\d+)(?:[eE][+\-\u2212]?\d+)?"
         r"(?:\s*(?:[×x]|\\times)\s*10\s*"
         r"(?:\^\s*\{?\s*[+\-\u2212]?\d+\s*\}?"
-        r"|[\u2070\u00b9\u00b2\u00b3\u2074-\u2079\u207b]+))?)")),
+        r"|[\u2070\u00b9\u00b2\u00b3\u2074-\u2079\u207b]+"
+        # The ordinary "10−8" spelling (U+2212, no caret/superscript) is the
+        # most common journal rendering; without this branch only "5" was
+        # captured, so a p = 5 × 10−8 was inventoried as p = 5.
+        r"|\s*[+\-\u2212]\s*\d+))?)")),
     # `n = 1,234` is one count and `n = 12.5` is not a count at all; the old
     # `(\d+)\b` read them as 1 and 12, inventing a conflict with `n = 1234`.
     ("n", re.compile(
@@ -170,7 +174,8 @@ def _metric_key(label: str, val) -> str:
         # capturing only the coefficient made it look like p = 5.
         _sup = str.maketrans("\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076"
                              "\u2077\u2078\u2079\u207b", "0123456789-")
-        _raw = text.replace("\\times", "×").replace("{", "").replace("}", "")
+        _raw = (text.replace("\\times", "×").replace("{", "").replace("}", "")
+                .replace("\u2212", "-"))
         _raw = _raw.translate(_sup)
         m = re.fullmatch(r"\s*([+\-]?\d+(?:\.\d+)?)\s*[×x]\s*10\s*\^?\s*"
                          r"([+\-]?\d+)\s*", _raw)
@@ -220,11 +225,13 @@ RANGE_RE = re.compile(
     # No leading `\b`: a word boundary cannot sit between the space and the
     # minus of "-80 C", so the old pattern started at the digit and dropped the
     # sign, turning an ascending -80..-60 range into a false descending one.
-    r"(?<![A-Za-z0-9])(?:from\s+)?(?P<low>-?\d+(?:\.\d+)?)\s*(?P<u1>" + _RANGE_UNIT + r")"
+    r"(?<![A-Za-z0-9])(?:from\s+)?(?P<low>[+\-\u2212]?\d+(?:\.\d+)?)\s*"
+    r"(?P<u1>" + _RANGE_UNIT + r")"
     r"\s+(?:to|through)\s+"
     # `%` is a non-word character, so a trailing `\b` can never match after it;
     # reject a word character instead, which allows "90% to 10%".
-    r"(?P<high>-?\d+(?:\.\d+)?)\s*(?P<u2>" + _RANGE_UNIT + r")(?![A-Za-z0-9])"
+    r"(?P<high>[+\-\u2212]?\d+(?:\.\d+)?)\s*(?P<u2>" + _RANGE_UNIT + r")"
+    r"(?![A-Za-z0-9])"
 )
 ACCESSION_RE = re.compile(r"\b(GSE\d+|PRJNA\d+|SR[APRX]\d+|E-MTAB-\d+|zenodo\.\d+)\b", re.I)
 VERSION_RE = re.compile(r"\b(?:v(?:er(?:sion)?)?\.?\s?)(\d+(?:\.\d+)+)\b", re.I)
@@ -399,6 +406,18 @@ def classify_context(fname):
     return "main text"
 
 
+_TEX_VERBATIM_RE = re.compile(
+    r"\\begin\{(verbatim\*?|lstlisting|minted|Verbatim\*?)\}"
+    r".*?\\end\{\1\}", re.S)
+
+
+def blank_tex_verbatim(text):
+    """Blank verbatim/listing/minted bodies in place (line count preserved)."""
+    def blank(m):
+        return re.sub(r"[^\n]", " ", m.group(0))
+    return _TEX_VERBATIM_RE.sub(blank, text or "")
+
+
 def section_label(raw):
     """In-file section heading or display-item caption, else None."""
     s = raw.strip()
@@ -408,7 +427,16 @@ def section_label(raw):
         return "figure legend"
     if TABLE_CAPTION_RE.match(raw):
         return "table"
-    s = re.sub(r"^#{1,6}\s*", "", s).rstrip(":.").strip()
+    # F101: LaTeX sectioning and emphasized Markdown headings are contexts too.
+    _tex = re.match(r"^\\(?:section|subsection|subsubsection|chapter)\*?\s*\{([^{}]*)\}", s)
+    if _tex:
+        s = _tex.group(1)
+    elif re.match(r"^\\begin\{abstract\}", s):
+        return "abstract"
+    s = re.sub(r"^#{1,6}\s*", "", s)
+    s = re.sub(r"^(?:\*{1,2}|_{1,2})\s*", "", s)
+    s = re.sub(r"\s*(?:\*{1,2}|_{1,2})$", "", s)
+    s = s.rstrip(":.").strip()
     for label, pat in SECTION_PATTERNS:
         if pat.match(s):
             return label
@@ -463,8 +491,9 @@ def main():
         if role == "references":
             continue  # a reference list is not the authors' own metric source
         try:
-            lines = open(os.path.join(corpus, fname), encoding="utf-8",
-                         errors="replace").read().split("\n")
+            _text = open(os.path.join(corpus, fname), encoding="utf-8",
+                         errors="replace").read()
+            lines = blank_tex_verbatim(_text).split("\n")
         except OSError as e:
             print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
             continue
@@ -543,7 +572,8 @@ def main():
                 if u1 != u2:
                     continue
                 try:
-                    low, high = float(m.group("low")), float(m.group("high"))
+                    low = float(m.group("low").replace("\u2212", "-"))
+                    high = float(m.group("high").replace("\u2212", "-"))
                 except ValueError:
                     continue
                 if low > high:

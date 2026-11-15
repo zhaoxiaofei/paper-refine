@@ -233,8 +233,8 @@ def test_docs():
     for p in parts:
         head = "\n".join(p.read_text(encoding="utf-8").splitlines()[:2])
         heads.append((p.name, head))
-    check("C15 all 20 part headers carry the real bundle count",
-          len(parts) == 20 and all(f"/20 of the pipeline" in h for _n, h in heads),
+    check("C15 all 21 part headers carry the real bundle count",
+          len(parts) == 21 and all(f"/21 of the pipeline" in h for _n, h in heads),
           str([n for n, h in heads if "/20 of the pipeline" not in h]))
     parts_readme = (WS / "paper_pipeline_parts/README.md").read_text(encoding="utf-8")
     check("C16 the parts README describes the guided-review switch, not TARGETED-REVIEW",

@@ -203,7 +203,7 @@ def test_keep_list_and_ledgers():
 
 
 def test_pdf_and_encoding_defects():
-    print("\n== check-pdf fails loudly; a UTF-16 document.xml is reported, not a crash ==")
+    print("\n== check-pdf fails loudly; a UTF-16 document.xml is read, not a crash ==")
     tmp = scratch("audit_fmt_pdf_")
     bad = tmp / "not-a.pdf"
     bad.write_text("this is not a pdf")
@@ -222,8 +222,8 @@ def test_pdf_and_encoding_defects():
         rules = [r["rule"] for r in info["rows"]]
     except Exception as exc:                                       # noqa: BLE001
         rules = [f"raised {type(exc).__name__}"]
-    check("a UTF-16 word/document.xml becomes an FMT-X1 row, not a crash",
-          rules == ["FMT-X1"], str(rules))
+    check("a legal UTF-16 word/document.xml is read, not reported FMT-X1",
+          "FMT-X1" not in rules, str(rules))
 
 
 def test_italic_and_size_boundaries():

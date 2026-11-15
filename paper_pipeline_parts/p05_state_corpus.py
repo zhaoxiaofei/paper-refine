@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 05/20 of the pipeline -- executed by the
+# Part 05/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -643,6 +643,16 @@ class Ctx:
                       "pinned": [], "log": []}
 
     # ---- lifecycle ----
+    def _root_is_populated(self) -> bool:
+        """A run/pin directory with content means this is not a fresh root."""
+        for d in (self.runs_dir, self.pins_dir):
+            try:
+                if d.is_dir() and any(d.iterdir()):
+                    return True
+            except OSError:
+                continue
+        return False
+
     def load(self, need_cfg: bool = True) -> None:
         if not self.root.is_dir():
             die(f"pipeline root not found: {self.root}  (run `setup` first)")
@@ -699,7 +709,10 @@ class Ctx:
                     f"       {self.cfg_path}\n"
                     f"       A round with no judge can never be certified; edit the config "
                     f"or re-run `setup` with --judges N (N >= 1).")
-        if self.state_path.exists():
+        if os.path.lexists(self.state_path):
+            # `Path.exists()` is FALSE for a dangling symlink, so the deliberate
+            # symlink/FIFO refusal in load_state_file was never reached and the
+            # empty default registry survived (F007).
             st, problem = load_state_file(self.state_path)
             if st is None:
                 prev = state_prev_path(self.state_path)
@@ -841,6 +854,11 @@ class Ctx:
             note = pipeline_identity_note(self)
             if note:
                 print(note)
+        elif self._root_is_populated():
+            die(f"state.json is missing from a populated root: {self.state_path}\n"
+                f"       The run/pin registry is gone; this is not a fresh root. "
+                f"Restore state.json (or state.json.prev) from a backup, or start a "
+                f"fresh --root: existing sandboxes are never auto-adopted.")
         # The venue and the journal are configuration, not content: a root whose
         # venue id resolves to nothing, whose recorded profile snapshot
         # disagrees with the config, or whose journal does not belong to the
@@ -1030,6 +1048,17 @@ class Ctx:
             _pid_n = int(pid) if pid is not None else None
         except (TypeError, ValueError):
             _pid_n = None
+        if _pid_n is None:
+            # No owner identity after the grace wait: the creator may still be
+            # between O_EXCL-create and its JSON write. Never declare that lock
+            # stale on age zero -- only a lock old enough that no initializing
+            # writer can still own it is reclaimable.
+            try:
+                _age = time.time() - lock_path.stat().st_mtime
+            except OSError:
+                return False
+            if _age < 30:
+                return False
         if _pid_n is not None and pid_alive(_pid_n):
             die(f"another pipeline process is already working on this root "
                 f"(pid {pid}, {holder.get('what')!r} since {holder.get('since')}).\n"
@@ -1418,7 +1447,7 @@ def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
     `<root>/non_revised/<area>` link (F27). Callers that hold the run root
     (`corpus_manifest`, `code_side_evidence`) pass it.
     """
-    entries = []
+    entries, gaps = [], []
     for src, prefix, excluded in sources:
         if not src.is_dir() or _symlinked_source_root_refused(src, owner_root):
             continue
@@ -1427,7 +1456,8 @@ def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
         # root's canonical copy (see ensure_pristine_input). The digest a run
         # records must see the SAME files the pin materializes, or pin_champion
         # dies on its own "internal inconsistency" check.
-        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root):
+        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root,
+                                  gaps=gaps):
             if not p.is_file() or _is_aux_doc(p.name):
                 continue
             if is_bookkeeping_name(p.name):
@@ -1442,7 +1472,14 @@ def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
     # as changed via the sentinel instead of raising PermissionError (F22).
     digs = sha256_files([p for _k, p in entries], on_error="<unreadable>")
     files = {k: d for (k, _p), d in zip(entries, digs)}
-    return {"files": files, "count": len(files)}
+    # Unreadable directories are part of the IDENTITY: a partial corpus must not
+    # share a digest with one that never contained the subtree (F059). The key
+    # is added ONLY when there is a gap, so an undamaged manifest keeps exactly
+    # the shape every recorded digest/`dir_matches` comparison already uses.
+    out = {"files": files, "count": len(files)}
+    if gaps:
+        out["unreadable_dirs"] = sorted(set(gaps))
+    return out
 
 
 def corpus_manifest(ctx: Ctx, r: int, vid: str) -> dict:
@@ -1477,10 +1514,12 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
     overrides = corpus_source_overrides(sources)
     paths = []
     names = []
+    gaps = []
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir() or _symlinked_source_root_refused(src, owner_root):
             continue
-        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root):
+        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root,
+                                  gaps=gaps):
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
@@ -1495,7 +1534,7 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
                 continue                      # a later source provides this path
             paths.append(p)
             names.append(prefix + rel)
-    if not paths:
+    if not paths and not gaps:
         # No files at all: the corpus is MISSING (a pruned or unmaterialized
         # sandbox), not empty. Returning "" lets the callers fall back to the
         # recorded integrity digest instead of treating every missing corpus as
@@ -1514,6 +1553,8 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
             # the same corpus still reproduces the same fingerprint; it is a
             # path-qualified marker, never a content-independent digest.
             digs.append("unreadable:" + name)
+    # An unreadable DIRECTORY changes the identity too (F059).
+    digs.extend("unreadable-dir:" + g for g in sorted(set(gaps)))
     return hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()
 
 
@@ -1835,7 +1876,16 @@ def corpus_dir_view_files(dirp: Path, owner_root: Path = None) -> list:
     out = []
     if _symlinked_source_root_refused(dirp, owner_root):
         return out
-    entries = _iter_tree_files(dirp, follow_dir_links=True, owner_root=owner_root)
+    gaps = []
+    entries = _iter_tree_files(dirp, follow_dir_links=True, owner_root=owner_root,
+                               gaps=gaps)
+    if gaps:
+        # Fail closed for judge materialization: a partial view must never be
+        # built and scored as if the unreadable subtree did not exist (F059).
+        raise RuntimeError(
+            f"cannot materialize a judge view of {dirp}: {len(set(gaps))} "
+            f"unreadable director{'y' if len(set(gaps)) == 1 else 'ies'} "
+            f"({', '.join(sorted(set(gaps))[:4])})")
     siblings = {}
     for p in entries:
         siblings.setdefault(p.parent, []).append(p.name)
@@ -1875,14 +1925,24 @@ def judge_view_digest(judge_view: Path) -> list:
     relative path is part of the identity.
     """
     out = []
-    if not judge_view.is_dir() or judge_view.is_symlink():
+    if judge_view.is_symlink():
+        # A symlinked view root is not a materialized view; a sentinel keeps it
+        # from comparing EQUAL to an empty real view.
+        return [(".", "<symlink-view>")]
+    if not judge_view.is_dir():
         return out
     for p in sorted(judge_view.rglob("*")):
         # A derived view is disposable: a planted file symlink or a chmod-000
         # entry must make the view compare UNEQUAL (so ensure_judge_view rebuilds
         # it), never raise out of run/decide/retry (F140). The sentinel is
         # impossible as a real hex digest, so a damaged entry can never match.
-        if p.is_symlink() or not p.is_file():
+        if p.is_symlink():
+            out.append((p.relative_to(judge_view).as_posix(), "<symlink>"))
+            continue
+        if p.is_dir():
+            continue                      # a real directory is view structure
+        if not p.is_file():
+            out.append((p.relative_to(judge_view).as_posix(), "<non-regular>"))
             continue
         out.append((p.relative_to(judge_view).as_posix(),
                     sha256_files([p], on_error="<unreadable>")[0]))
@@ -2984,6 +3044,27 @@ def _sanitize_rtf_bytes(data: bytes) -> tuple:
     return data, []
 
 
+_SVG_METADATA_RE = re.compile(rb"(?is)<metadata\b[^>]*>.*?</metadata>")
+_SVG_COMMENT_RE = re.compile(rb"(?s)<!--.*?-->")
+_SVG_TOOL_ATTR_RE = re.compile(
+    rb"(?i)\s+(?:inkscape|sodipodi|adobe|dc|cc|rdf|i):[\w:-]+\s*=\s*"
+    rb"(?:\"[^\"]*\"|'[^']*')")
+
+
+def _sanitize_svg_bytes(raw: bytes) -> tuple:
+    """Strip SVG metadata/comments/tool attributes; record an unparsable gap.
+
+    An SVG is XML and can carry dc:creator/date, RDF metadata and
+    inkscape/sodipodi tool attributes into a judge view byte-for-byte (F164).
+    """
+    if b"</svg" not in raw.lower():
+        return raw, ["not a readable SVG document; metadata left as is"]
+    out = _SVG_METADATA_RE.sub(b"", raw)
+    out = _SVG_COMMENT_RE.sub(b"", out)
+    out = _SVG_TOOL_ATTR_RE.sub(b"", out)
+    return out, []
+
+
 def _transform_view_file(old_rel: str, src: Path, file_map: dict):
     """(transformed bytes | None, notes) for one view file (None = copy as is)."""
     ext = src.suffix.lower()
@@ -2996,6 +3077,20 @@ def _transform_view_file(old_rel: str, src: Path, file_map: dict):
             # (F105): the caller omits it and records a named gap.
             return None, [f"unreadable source ({e}); the file is omitted from the view"]
 
+    if ext == ".svg":
+        raw, _bad = _read()
+        if raw is None:
+            return None, _bad
+        return _sanitize_svg_bytes(raw)
+    if ext == ".eps":
+        raw, _bad = _read()
+        if raw is None:
+            return None, _bad
+        # EPS is PostScript, not XML: its %%Creator/%%CreationDate/
+        # %%DocumentData comments cannot be stripped safely here. The bytes are
+        # copied as-is and the gap is named (F164).
+        return None, ["EPS vector metadata (creator/date/document data) is not "
+                      "sanitized; metadata left as is in the judge view"]
     if _view_is_text(old_rel):
         raw, _bad = _read()
         if raw is None:
@@ -3154,7 +3249,16 @@ def build_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
                 f"{file_map[rel]}: unreadable source; omitted from the judge view"[:400])
             continue
         if data is None:
-            shutil.copyfile(src, out)                 # content only: no metadata
+            try:
+                shutil.copyfile(src, out)             # content only: no metadata
+            except OSError as e:
+                # An unreadable image/other copy-as-is payload must be an
+                # omitted, named gap -- never a PermissionError escaping the
+                # whole judge materialization (F079).
+                _transform_warnings.append(
+                    f"{file_map[rel]}: unreadable source ({type(e).__name__}: {e}); "
+                    f"omitted from the judge view"[:400])
+                continue
             _suffix = Path(rel).suffix.lower()
             if _suffix in VIEW_IMAGE_EXTS:
                 _transform_warnings.append(
@@ -3772,15 +3876,25 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
                                f"champion though it is marked done (the pin record is missing; "
                                f"restore it from a state.json backup)")
         src_id, src_dir = pin["id"], pinned_docs_dir(ctx, pin)
+    if not src_dir.is_dir():
+        # A recorded digest is not a source: accepting an existing base without
+        # the bytes it must match silently certifies whatever is there (F110).
+        raise RuntimeError(
+            f"cannot materialize round {r} base: the source corpus {src_dir} is "
+            f"missing, so base/ cannot be verified against it")
     want = (working_original_digest(ctx) if src_id == ORIGINAL_ID
             else (find_pin(ctx, src_id) or {}).get("digest"))
-    if not want and src_dir.is_dir():
+    if not want:
         # A legacy/damaged registry (or a pin with no recorded digest) used to
         # make BOTH the stale-base guard and the post-copy check no-ops, so an
         # existing base/ was trusted even when it was not the source. Derive
         # the source digest from the SOURCE so the guard compares against what
         # the round must start from, and record a real verified digest.
         want = manifest_digest(manifest_for_sources([(src_dir, "", ())]))
+    if not want:
+        raise RuntimeError(
+            f"cannot materialize round {r} base: the source {src_dir} has no "
+            f"verifiable digest, so base/ identity cannot be checked")
     if (base.exists() and want
             and manifest_digest(manifest_for_sources([(base, "", ())])) != want):
         # An earlier round was re-run and its champion changed: a stale base copy
@@ -4061,6 +4175,33 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     return rec
 
 
+def _frozen_review_copy_problem(dirp: Path) -> str:
+    """Why a materialized frozen-review copy cannot be trusted ("" when fine).
+
+    A symlinked/absent/empty copy used to read as an empty finding list for the
+    audit and revise stages, silently disabling their finding gates (F011).
+    """
+    if dirp.is_symlink():
+        return f"{dirp} is a symlink"
+    if not dirp.is_dir():
+        return f"{dirp} is missing"
+    found = False
+    for rel in ("findings.json", "round2/findings_extra.json"):
+        p = dirp / rel
+        if p.is_symlink():
+            return f"{rel} is a symlink"
+        if not p.exists():
+            continue
+        found = True
+        doc = read_json(p, revive=False, lenient=True)
+        # The frozen review's own postcheck owns the row contract; this copy
+        # check must only refuse a symlinked/absent/EMPTY file, not a shape the
+        # consumers already handle (a bare list or a metadata object).
+        if not isinstance(doc, (dict, list)):
+            return f"{rel} is not a readable finding document"
+    return "" if found else "it carries no findings.json/findings_extra.json"
+
+
 def materialize_audit(ctx: Ctx, r: int) -> dict:
     """The AUDITOR sandbox: base/ + non_revised/ + the FROZEN guided_review/, read-only.
 
@@ -4089,6 +4230,11 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
         ensure_copy(_stage_frozen_review, sb / GUIDED_REVIEW_DIR)
     else:
         synthesize_frozen_review(ctx, r, sb)
+    _frozen_problem = _frozen_review_copy_problem(sb / GUIDED_REVIEW_DIR)
+    if _frozen_problem:
+        raise RuntimeError(f"cannot materialize {rid}: the frozen review copy is not "
+                           f"usable ({_frozen_problem}); the audit cannot dispose an "
+                           f"unknown finding list")
     # The COLD-START REVIEW session is an independent producer of X-9xx rows: merge them
     # into THIS sandbox's frozen review copy (never into the source review), so
     # the auditor disposes them beside every other frozen id.
@@ -4371,6 +4517,13 @@ def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     (sb / COLD_START_DIR).mkdir(exist_ok=True)
+    # The cold-start prompt tells the session to check the structure the venue's
+    # own recorded rule set requires, and the prompt appends `venue_norm_for(ctx)`
+    # like every other role. Both are actionable only when the venue template is
+    # actually inside the sandbox: this materializer was the one producer that
+    # never staged `venue_template/`, so the class it was told to inspect was
+    # uninspectable (and the omission was not recorded as a gap).
+    stage_venue_template(ctx, sb)
     seed_cold_start_surfaces(ctx, sb, r)
     note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / PROMPT_FILE
@@ -4383,6 +4536,7 @@ def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
         _copy_session_tools(sb)
         write_text_atomic(prompt, cold_start_review_prompt(sb, rid, r, prior_failure=note,
                                                venue=venue_profile_of(ctx),
+                                               venue_norm=venue_norm_for(ctx),
                                                author_to_complete=author_to_complete_mode_of(ctx),
                                                execution_profile=execution_profile_of(ctx),
                                                guided_review_off=not guided_review_enabled(ctx)))
@@ -5127,6 +5281,11 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
         synthesize_frozen_review(ctx, r, sb)
     else:
         ensure_copy(src_sb / GUIDED_REVIEW_DIR, sb / GUIDED_REVIEW_DIR)
+    _frozen_problem = _frozen_review_copy_problem(sb / GUIDED_REVIEW_DIR)
+    if _frozen_problem:
+        raise RuntimeError(f"cannot materialize {rid}: the frozen review copy is not "
+                           f"usable ({_frozen_problem}); the revision cannot resolve an "
+                           f"unknown finding list")
     # The COLD-START REVIEW session's X-9xx findings are part of the frozen list this
     # reviser must resolve: merge them into THIS sandbox's review copy (the
     # source review sandbox is never touched; every consumer gets the same

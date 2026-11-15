@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 15/20 of the pipeline -- executed by the
+# Part 15/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -259,7 +259,12 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         return {"ok": False, "tool": "latexmk", "error": f"{type(e).__name__}: {e}",
                 "skipped_links": skipped_links}
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        # latexmk/aux files and a copied read-only directory can defeat plain
+        # rmtree; the pipeline owns this tree, so force the write bits back and
+        # report a tree that still survives instead of leaking it silently.
+        if not rmtree_force(work, ignore_errors=True):
+            print(f"warning: could not remove the temporary LaTeX build tree {work}",
+                  file=sys.stderr)
 
 
 def convert_docx_to_pdf_persistent(docx: Path, out_dir: Path,

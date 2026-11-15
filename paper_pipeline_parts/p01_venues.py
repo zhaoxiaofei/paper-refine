@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 01/20 of the pipeline -- executed by the
+# Part 01/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -430,12 +430,20 @@ def _clean_length_limits(limits, prefix: str, problems: list):
             continue
         pairing_error = (base is None) != (relaxation is None)
         base = _profile_int(base, f"{prefix}.{key}.base", problems, minimum=1)
-        try:
-            relaxation = float(relaxation) if relaxation is not None else None
-        except (TypeError, ValueError):
+        if relaxation is not None and (isinstance(relaxation, bool)
+                                       or not isinstance(relaxation, (int, float))):
+            # float(True) is 1.0 and float("1.1") is 1.1: a bool or a numeric
+            # string silently changed the enforced rule.
             problems.append(f"{prefix}.{key}.relaxation must be a number >= 1.0 "
                             f"(got {relaxation!r})")
             relaxation = None
+        else:
+            try:
+                relaxation = float(relaxation) if relaxation is not None else None
+            except (TypeError, ValueError):
+                problems.append(f"{prefix}.{key}.relaxation must be a number >= 1.0 "
+                                f"(got {relaxation!r})")
+                relaxation = None
         if relaxation is not None and not math.isfinite(relaxation):
             # JSON's NaN/Infinity are accepted by json.loads and compare as
             # neither < 1.0 nor > 0, so they slipped through every range check
@@ -840,12 +848,18 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     if image_dpi_raw is not None:
         if not isinstance(image_dpi_raw, dict):
             problems.append("'image_dpi' must be an object")
-        elif image_dpi_raw:
-            try:
-                min_dpi = float(image_dpi_raw.get("min_dpi") or 0)
-            except (TypeError, ValueError):
+        else:
+            # A present block DECLARES the rule: min_dpi is required even when
+            # the object is empty (an empty one used to mean "no rule").
+            _dpi = image_dpi_raw.get("min_dpi")
+            if _dpi is None:
+                problems.append("image_dpi.min_dpi is required when the block is present")
+                min_dpi = 0
+            elif isinstance(_dpi, bool) or not isinstance(_dpi, (int, float)):
                 problems.append("image_dpi.min_dpi must be a number")
                 min_dpi = 0
+            else:
+                min_dpi = float(_dpi)
             if not math.isfinite(min_dpi) or min_dpi <= 0:
                 problems.append("image_dpi.min_dpi must be a finite number > 0 when the "
                                 "block is present")
@@ -860,12 +874,16 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     if figure_text_raw is not None:
         if not isinstance(figure_text_raw, dict):
             problems.append("'figure_text' must be an object")
-        elif figure_text_raw:
-            try:
-                min_pt = float(figure_text_raw.get("min_pt") or 0)
-            except (TypeError, ValueError):
+        else:
+            _pt = figure_text_raw.get("min_pt")
+            if _pt is None:
+                problems.append("figure_text.min_pt is required when the block is present")
+                min_pt = 0
+            elif isinstance(_pt, bool) or not isinstance(_pt, (int, float)):
                 problems.append("figure_text.min_pt must be a number")
                 min_pt = 0
+            else:
+                min_pt = float(_pt)
             if not math.isfinite(min_pt) or min_pt <= 0:
                 problems.append("figure_text.min_pt must be a finite number > 0 when the "
                                 "block is present")
@@ -903,12 +921,13 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
                                 f"section kind (front/abstract/body/methods/legend/"
                                 f"refs/heading)")
                             continue
-                        try:
-                            words = int(value)
-                        except (TypeError, ValueError):
+                        # A real integer, not bool/float/str: int(True) is 1
+                        # word, int('40') is 40 and int(40.9) silently truncates.
+                        if isinstance(value, bool) or not isinstance(value, int):
                             problems.append(
-                                f"style_limits.sentence_words.{kind} must be a number")
+                                f"style_limits.sentence_words.{kind} must be an integer")
                             continue
+                        words = value
                         if words <= 0:
                             problems.append(
                                 f"style_limits.sentence_words.{kind} must be > 0")
@@ -920,12 +939,11 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
             cap_raw = style_limits_raw.get("paragraph_words")
             cap = 0
             if cap_raw is not None:
-                try:
-                    cap = int(cap_raw)
-                except (TypeError, ValueError):
-                    problems.append("style_limits.paragraph_words must be a number")
+                if isinstance(cap_raw, bool) or not isinstance(cap_raw, int):
+                    problems.append("style_limits.paragraph_words must be an integer")
                     cap = 0
                 else:
+                    cap = cap_raw
                     if cap <= 0:
                         problems.append(
                             "style_limits.paragraph_words must be > 0 when the block "
@@ -959,7 +977,7 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # profile through VenueProfile.data could not name the guideline it used.
     clean_sources = ({str(k): str(v) for k, v in raw_sources.items()}
                      if isinstance(raw_sources, dict) else {})
-    return {
+    result = {
         "id": venue_id,
         "label": label,
         "short": short,
@@ -984,8 +1002,6 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "leftover_phrases": leftover,
         "numbering": numbering,
         "references": clean_references,
-        "figure_text": clean_figure_text,
-        "image_dpi": clean_image_dpi,
         "style_limits": clean_style_limits,
         "submission": {
             "pdf_accepted": pdf_accepted,
@@ -994,6 +1010,14 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         },
         "prompt": clean_prompt,
     }
+    # A profile that states no measured rule omits the key entirely. Emitting
+    # `{}` made a re-validation (set-venue --profile, archive inheritance) see a
+    # PRESENT-but-empty block, which F116 now correctly rejects.
+    if clean_figure_text:
+        result["figure_text"] = clean_figure_text
+    if clean_image_dpi:
+        result["image_dpi"] = clean_image_dpi
+    return result
 
 
 class VenueProfile:
@@ -1868,10 +1892,15 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
     sample document, plus any the operator lists explicitly in
     `<venue-id>.official/requirements.json` (`{"mandatory_sections": [...]}`).
     """
-    n = len(records)
+    # F114: every derived field (sections, class, statements) comes from the
+    # MAIN samples only. A supplementary template's headings/class must not
+    # become the venue's authoritative skeleton.
+    main_records = [r for r in records
+                    if str(r.get("role") or "main") == "main"]
+    n = len(main_records)
     positions, spellings, counts = {}, {}, {}
     st_positions, st_spellings = {}, {}
-    for rec in records:
+    for rec in main_records:
         # A section is present in a SAMPLE at most once: counting every heading
         # occurrence made a template that repeats "Results" look like two
         # samples carrying it, and `present` then satisfied the every-sample
@@ -1905,10 +1934,10 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
                  "mean_position": round(sum(positions[k]) / len(positions[k]), 2)}
                 for k in order]
     mandatory = [s["title"] for s in sections if n and s["present"] == n]
-    classes = [r.get("documentclass") for r in records if r.get("documentclass")]
+    classes = [r.get("documentclass") for r in main_records if r.get("documentclass")]
     statements = []
     for label, _pat in VENUE_STATEMENT_PATTERNS:
-        c = sum(1 for r in records if label in (r.get("statements") or []))
+        c = sum(1 for r in main_records if label in (r.get("statements") or []))
         if c:
             statements.append({"label": label, "present": c, "n_samples": n})
     st_order = sorted(st_positions, key=lambda k: (sum(st_positions[k]) / len(st_positions[k]), k))
@@ -1926,9 +1955,7 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
     # file name (`docx_document_role`); a record built by a caller that carries no
     # role is a main sample (the pre-F67 shape).
     main_counts, body_samples = {}, 0
-    for rec in records:
-        if str(rec.get("role") or "main") != "main":
-            continue
+    for rec in main_records:
         body_keys = set()
         for sec in (rec.get("sections") or []):
             if int(sec.get("level") or 0) != 1:
@@ -2147,7 +2174,45 @@ def scan_template_conformance(sources: list, requirements: dict,
     doc_headings = []           # (doc, title) in document order
     caption_rows = []           # (doc, is_table, number)
     docx_paths = {}             # doc -> Path
-    seen_section_keys = set()   # every heading label met anywhere in the corpus
+    seen_section_keys = set()   # every heading label in the MAIN manuscript(s)
+    main_heading_texts = []     # main-role heading text, for statement blocks
+    main_statement_texts = []   # main-role statement-block lead paragraphs
+
+    def _statement_lead_label(line) -> str:
+        """The label a statement-block lead paragraph starts with, else "".
+
+        A required statement is often a block with a bold lead label
+        ("**Funding.** This work ...") rather than a heading. Only the
+        paragraph's LEAD label counts: a body sentence that merely contains
+        the word is still prose (F050/F121).
+        """
+        s = str(line or "").strip()
+        s = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", s)
+        s = re.sub(r"^(?:\*{1,3}|_{1,3})", "", s)
+        s = re.sub(r"^\\?(?:textbf|textit|emph)\{", "", s)
+
+        def _separated(rest: str) -> bool:
+            rest = re.sub(r"^(?:\*{1,3}|_{1,3})", "", rest)
+            rest = re.sub(r"^\}", "", rest)
+            return bool(re.match(r"\s*[.:]", rest))
+
+        # The requested label itself. Its own pattern may match only a prefix
+        # ("ethic" / "acknowledg"), so a separator test after the pattern end
+        # would reject the common "Ethics." / "Acknowledgements." lead.
+        for _label in statements:
+            lab = str(_label or "").strip()
+            if lab and s.lower().startswith(lab.lower()) \
+                    and _separated(s[len(lab):]):
+                return lab
+        # A synonym form from the pattern table ("Conflict of interest." for
+        # "Competing interests"), with the match required to end a word.
+        for _label, _pat in VENUE_STATEMENT_PATTERNS:
+            m = _pat.match(s)
+            if not m or (m.end() < len(s) and s[m.end()].isalnum()):
+                continue
+            if _separated(s[m.end():]):
+                return _label
+        return ""
 
     for src, prefix, excluded in sources:
         if not src.is_dir():
@@ -2180,8 +2245,11 @@ def scan_template_conformance(sources: list, requirements: dict,
                 docx_paths[doc] = p
                 if role == "cover":
                     continue
-                texts.append("\n".join(text for text, _style in pairs))
+                # F050: a supplementary document's headings/statements/class
+                # must not satisfy the MAIN manuscript's requirements.
                 docs.add(doc)
+                if role == "main":
+                    texts.append("\n".join(text for text, _style in pairs))
                 seen = set()
                 for para, style in pairs:
                     line = para.strip()
@@ -2192,11 +2260,14 @@ def scan_template_conformance(sources: list, requirements: dict,
                     # branches use their own heading regexes further down.
                     if style and style.startswith("Heading"):
                         skey = _section_key(line)
-                        if skey:
+                        if skey and role == "main":
                             seen_section_keys.add(skey)
+                            main_heading_texts.append(line)
                         if skey in order_index and skey not in seen:
                             seen.add(skey)
                             doc_headings.append((doc, order_titles[order_index[skey]]))
+                    if role == "main" and _statement_lead_label(line):
+                        main_statement_texts.append(line)
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
@@ -2208,21 +2279,25 @@ def scan_template_conformance(sources: list, requirements: dict,
                     continue
                 if role == "cover":
                     continue
-                texts.append(text)
                 docs.add(doc)
+                if role == "main":
+                    texts.append(text)
                 for m in TEX_SECTION_RE.finditer(text):
                     skey = _section_key(m.group(2))
-                    if skey:
+                    if skey and role == "main":
                         seen_section_keys.add(skey)
+                        main_heading_texts.append(m.group(2))
                     if skey in order_index:
                         doc_headings.append((doc, order_titles[order_index[skey]]))
                 for line in text.splitlines():
+                    if role == "main" and _statement_lead_label(line):
+                        main_statement_texts.append(line)
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
                                              int(m.group(2))))
                 m = TEX_DOCCLASS_RE.search(text)
-                if m:
+                if m and role == "main":
                     tex_classes.setdefault(doc, m.group(1).strip())
             elif ext in LENGTH_TEXT_EXTS:
                 text = read_text_bounded(p)
@@ -2231,15 +2306,19 @@ def scan_template_conformance(sources: list, requirements: dict,
                     continue
                 if role == "cover":
                     continue
-                texts.append(text)
                 docs.add(doc)
+                if role == "main":
+                    texts.append(text)
                 for m in MD_HEADING_RE.finditer(text):
                     skey = _section_key(m.group(2))
-                    if skey:
+                    if skey and role == "main":
                         seen_section_keys.add(skey)
+                        main_heading_texts.append(m.group(2))
                     if skey in order_index:
                         doc_headings.append((doc, order_titles[order_index[skey]]))
                 for line in text.splitlines():
+                    if role == "main" and _statement_lead_label(line):
+                        main_statement_texts.append(line)
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
@@ -2254,6 +2333,12 @@ def scan_template_conformance(sources: list, requirements: dict,
         have_class = tex_classes[(mains or list(tex_classes))[0]]
     blob = "\n".join(texts)
     low = blob.lower()
+    # A required STATEMENT is a section/block of its own, not any prose sentence
+    # that happens to contain the word: match its pattern against the main-role
+    # HEADINGS (a "Funding" / "Data availability" heading) and statement-block
+    # LEAD PARAGRAPHS ("**Funding.** This work ..."), never the body.
+    statement_blob = "\n".join(main_heading_texts + main_statement_texts)
+    statement_low = statement_blob.lower()
     # A required section must be a SECTION: its label may not be satisfied by
     # the word appearing in a Results sentence somewhere in the corpus. Section
     # numbering is dropped, so "## 2. Materials and Methods" matches the
@@ -2267,8 +2352,8 @@ def scan_template_conformance(sources: list, requirements: dict,
     pats = {label: pat for label, pat in VENUE_STATEMENT_PATTERNS}
     missing_statements = [
         s for s in statements
-        if not ((pats[s].search(blob) if s in pats else None)
-                or s.strip().lower() in low)]
+        if not ((pats[s].search(statement_blob) if s in pats else None)
+                or s.strip().lower() in statement_low)]
     # A required class cannot be satisfied by a corpus with NO LaTeX: `have_class`
     # stays "" for a Word-only submission, and treating that as "no check needed"
     # made the requirement silently disappear from both the evidence table and
@@ -2990,8 +3075,8 @@ and statement placement; no prose was copied). Two tiers, with different authori
     The template's first-page header (logo) and its page-number footer are part of the
     deliverable, not decoration.
   * THE FIRST-PAGE BLOCK IS THE TEMPLATE'S OWN, IN ITS ORDER AND SPACING: one title line, ONE
-    author-list line, the affiliation lines the template spaces with before=240/after=0, then ONE
-    correspondence block -- the BOLD label "* Correspondence:" followed by a line break, the
+    author-list line, the affiliation lines in the spacing the template itself uses, then ONE
+    correspondence block -- the label "* Correspondence:" in the weight the template uses, followed by a line break, the
     corresponding author's name (when the source marks a lead contact or a
     corresponding author), another line break and the email -- then ONE "Keywords: ..." line and
     the unnumbered "Abstract" heading with its paragraph. Fold a separate "Lead contact" /

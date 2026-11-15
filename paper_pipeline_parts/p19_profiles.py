@@ -1,4 +1,4 @@
-# Part 19/20 of the pipeline -- executed by the loader, in order, in the
+# Part 19/21 of the pipeline -- executed by the loader, in order, in the
 # loader's own module globals.
 # This part carries NO module docstring on purpose: the loader executes every
 # part in the paper_pipeline module's own globals, and a module-level string
@@ -441,6 +441,56 @@ def _frozen_review_doc(r: int) -> dict:
     }
 
 
+def _cold_start_findings_md(rows: list, level: int = 3) -> str:
+    """Render schema-valid cold-start X-9xx rows for the readable deliverables.
+
+    The cold-start finding schema has no `title` (p03's COLD_START_DIRECTIVES
+    defines id/location/category/check/severity/evidence/explanation/status/
+    verifier), so the old `r.get('title') or '(untitled)'` renderer discarded
+    every field a reader needs. The machine-readable JSON always carried the
+    row; these two markdown files are the human-readable copy, so they must
+    carry the row's own identity, location, check, severity and evidence.
+    """
+    if not rows:
+        return "- (none)"
+    blocks = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        rid = str(row.get("id") or "").strip()
+        if not rid:
+            continue
+        severity = str(row.get("severity") or "").strip()
+        check = str(row.get("check") or "").strip()
+        location = str(row.get("location") or "").strip()
+        evidence = " ".join(str(row.get("evidence") or "").split())
+        explanation = " ".join(str(row.get("explanation") or "").split())
+        status = str(row.get("status") or "").strip()
+        title = " ".join(str(row.get("title") or "").split())
+        label_bits = [b for b in (severity, check) if b]
+        # The cold-start schema has no title; a row that carries one anyway (a
+        # caller-supplied/frozen row) still displays it, and a schema-valid row
+        # displays its severity/check instead of the old "(untitled)".
+        headline = title or (" / ".join(label_bits) if label_bits else "finding")
+        lines = [f"- {rid} — {headline}", ""]
+        if title and label_bits:
+            lines.append(f"  - Check: {' / '.join(label_bits)}")
+        if location:
+            lines.append(f"  - Location: {location}")
+        if evidence:
+            lines.append(f"  - Evidence: {evidence}")
+        if explanation:
+            lines.append(f"  - Explanation: {explanation}")
+        if status:
+            lines.append(f"  - Status: {status}")
+        verifier = row.get("verifier")
+        if isinstance(verifier, dict) and verifier.get("computed"):
+            lines.append(f"- Verifier: `{verifier.get('script')}` -> "
+                         f"`{verifier.get('computed')}`")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) if blocks else "- (none)"
+
+
 def synthesize_frozen_review(ctx, r: int, sb) -> dict:
     """Write the round's frozen review view into `sb` from the COLD-START review's findings.
 
@@ -463,8 +513,7 @@ def synthesize_frozen_review(ctx, r: int, sb) -> dict:
     target.mkdir(parents=True, exist_ok=True)
     (target / "round2").mkdir(parents=True, exist_ok=True)
     write_json_atomic(sb / FINDINGS_REL, _frozen_review_doc(r))
-    rows_md = "\n".join(
-        f"- {r.get('id')} — {r.get('title') or '(untitled)'}" for r in rows) or "- (none)"
+    rows_md = _cold_start_findings_md(rows, level=3)
     write_text_atomic(sb / GUIDED_REVIEW_DIR / "findings.md",
                       "# Frozen finding list — cold-start review only\n\n"
                       f"{GUIDED_REVIEW_GAP}\n\n"
@@ -477,7 +526,8 @@ def synthesize_frozen_review(ctx, r: int, sb) -> dict:
                       {"findings": rows, "source": "cold_start_review",
                        "guided_review": "off", "named_gap": GUIDED_REVIEW_GAP})
     write_text_atomic(sb / f"{GUIDED_REVIEW_DIR}/round2/findings_extra.md",
-                      "# Discovery list (cold-start review)\n\n" + GUIDED_REVIEW_GAP + "\n")
+                      "# Discovery list (cold-start review)\n\n" + GUIDED_REVIEW_GAP
+                      + "\n\n" + rows_md + "\n")
     return {"rows": len(rows), "named_gap": GUIDED_REVIEW_GAP}
 
 

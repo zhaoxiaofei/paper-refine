@@ -25,7 +25,9 @@ from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
 from xml.sax.saxutils import unescape as xml_unescape
 
-W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+W = "{" + W_NS + "}"
 
 # A corpus's read-only EVIDENCE areas (`raw_data/`,
 # and the human/LLM editors'-reviewers' feedback -- keep in step with
@@ -76,10 +78,20 @@ def ooxml_part_text(data: bytes) -> str:
     turned such a part into NUL-interleaved text, so the regex readers matched
     nothing and returned an EMPTY, error-free inventory. Reuse the DTD guard's
     encoding picker; a plain UTF-8 part keeps the previous `replace` behaviour.
+
+    The decoded part is then canonicalised: the WordprocessingML and
+    Markup-Compatibility namespaces may be bound to ANY prefix in legal OOXML
+    (`xmlns:word=...`, `xmlns:x=...`), while every reader in this module matches
+    the conventional `w:`/`mc:` spellings. Canonicalising at the package-read
+    boundary gives every reader one spelling, so an aliased package is read (and
+    reported) instead of being silently certified clean. A part already using
+    `w:`/`mc:` is returned byte-for-byte unchanged.
     """
     if data[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in data[:400]:
-        return xml_guard_text(data)
-    return data.decode("utf-8", "replace")
+        text = xml_guard_text(data)
+    else:
+        text = data.decode("utf-8", "replace")
+    return canonicalize_ooxml_prefixes(text)
 
 
 POLICY_DEFAULTS = {
@@ -713,13 +725,14 @@ def has_field(frag: str) -> bool:
     next heading -- exactly the shape the stray-empty-paragraph rule used to
     delete, leaving the bibliography field unterminated.
     """
+    frag = _mask_noncontent(str(frag or ""))
     return bool(FIELD_CHAR_RE.search(frag) or INSTR_RE.search(frag)
                 or re.search(r"<w:fldSimple(?=[\s/>])", frag))
 
 
 def has_anchor(frag: str) -> bool:
     """True when a no-text paragraph still carries a footnote/comment/bookmark."""
-    return bool(ANCHOR_RE.search(frag))
+    return bool(ANCHOR_RE.search(_mask_noncontent(str(frag or ""))))
 
 
 def has_math(frag: str) -> bool:
@@ -857,6 +870,218 @@ _XML_MISC = r"<!--(?:[^-]|-(?!->))*-->|<\?(?:[^?]|\?(?!>))*\?>"
 _XML_ATTRIBUTES = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
 _CHILD_TAG_RE = re.compile(rf"{_XML_MISC}|<(/?)([A-Za-z0-9:_.-]+)(?=[\s/>])({_XML_ATTRIBUTES})>")
 
+# Namespace declarations and QName-valued mc: attributes. `_CANON_TAG_RE` is
+# deliberately wider than `_CHILD_TAG_RE`: it must also capture a self-closing
+# tag with no attributes (`<w:p/>`) so its name can be canonicalised.
+_CANON_TAG_RE = re.compile(
+    rf"{_XML_MISC}|<(/?)([A-Za-z_][\w.\-]*(?::[A-Za-z_][\w.\-]*)?)({_XML_ATTRIBUTES})>", re.S)
+_MC_QNAME_ATTRS = {"Ignorable", "MustUnderstand", "ProcessContent",
+                   "PreserveElements", "PreserveAttributes", "Requires"}
+
+
+def _iter_attrs(attrs: str):
+    """Yield (name, value) for one tag's attribute text.
+
+    A quoted value is consumed as a unit, so an `=` or a name-shaped fragment
+    INSIDE a value (`w:instr="a b='c'"`) can never be read as another attribute.
+    A self-closing tag's trailing `/` is not an attribute and ends the walk.
+    """
+    i, n = 0, len(attrs or "")
+    while i < n:
+        while i < n and attrs[i].isspace():
+            i += 1
+        if i >= n or attrs[i] == "/":
+            break
+        start = i
+        while i < n and attrs[i] not in " \t\r\n=/>":
+            i += 1
+        name = attrs[start:i]
+        if not name:                       # malformed: never loop forever
+            i += 1
+            continue
+        while i < n and attrs[i].isspace():
+            i += 1
+        value = None
+        if i < n and attrs[i] == "=":
+            i += 1
+            while i < n and attrs[i].isspace():
+                i += 1
+            if i < n and attrs[i] in "\"'":
+                quote = attrs[i]
+                i += 1
+                vstart = i
+                while i < n and attrs[i] != quote:
+                    i += 1
+                value = attrs[vstart:i]
+                if i < n:
+                    i += 1
+            else:
+                vstart = i
+                while i < n and attrs[i] not in " \t\r\n/":
+                    i += 1
+                value = attrs[vstart:i]
+        yield name, value
+
+
+def _ooxml_ns_bindings(xml: str) -> dict:
+    """prefix -> namespace URI from a part's own xmlns declarations.
+
+    Comments and processing instructions are skipped by `_CANON_TAG_RE`, so a
+    commented-out declaration is never read as live. The first binding of a
+    prefix wins; a later re-binding of the same prefix is non-conforming OOXML
+    and is not guessed at.
+    """
+    bindings = {}
+    for m in _CANON_TAG_RE.finditer(xml):
+        if m.group(2) is None:                 # comment / processing instruction
+            continue
+        for name, value in _iter_attrs(m.group(3)):
+            if name == "xmlns":
+                prefix = ""
+            elif name.startswith("xmlns:"):
+                prefix = name[len("xmlns:"):]
+            else:
+                continue
+            bindings.setdefault(prefix, value or "")
+    return bindings
+
+
+def _canonical_name(name: str, renames: dict) -> str:
+    """Canonical spelling of one element/attribute name."""
+    if ":" in name:
+        prefix, local = name.split(":", 1)
+        return f"{renames.get(prefix, prefix)}:{local}"
+    target = renames.get("")
+    # The default namespace applies to ELEMENT names only; attribute handling
+    # never passes an unprefixed name here (see `_canon_attr`).
+    return f"{target}:{name}" if target else name
+
+
+def _rename_qname_list(value: str, renames: dict) -> str:
+    """Rename the prefixes inside one mc: QName/prefix-list attribute value."""
+    out = []
+    for token in str(value or "").split():
+        if ":" in token:
+            prefix, local = token.split(":", 1)
+            out.append(f"{renames.get(prefix, prefix)}:{local}")
+        else:
+            out.append(renames.get(token, token))
+    return " ".join(out)
+
+
+def canonicalize_ooxml_prefixes(xml: str) -> str:
+    """Spell the WordprocessingML/markup-compatibility namespaces as `w:`/`mc:`.
+
+    Namespace prefixes are arbitrary in legal OOXML: a producer may declare
+    `xmlns:word=<WordprocessingML>` and write `<word:p>`, or bind the markup
+    compatibility namespace to `x:`. Every reader in this module matches the
+    conventional `w:`/`mc:` tokens, so such a package was read as zero
+    paragraphs / empty text and reported clean -- a false negative, not a
+    documented Word-only assumption. Rewriting the prefixes ONCE at the part-read
+    boundary (`ooxml_part_text`) gives every reader (and every offset-taking
+    fixer) one coordinate space.
+
+    Only bindings to those two namespaces are touched; a part already using the
+    conventional spelling is returned unchanged. Canonical declarations are
+    added when an alias/default binding was the only declaration, and QName-list
+    values (`mc:Ignorable`, `mc:ProcessContent`, ...) are updated so no value
+    names a prefix that no longer exists.
+    """
+    if not xml or "xmlns" not in xml:
+        return xml
+    bindings = _ooxml_ns_bindings(xml)
+    if not bindings:
+        return xml
+    renames, rename_decls, drop_decls, add_decls = {}, {}, set(), {}
+    for target, uri in (("w", W_NS), ("mc", MC_NS)):
+        current = bindings.get(target)
+        if current is not None and current != uri:
+            # The canonical spelling is taken by a different namespace; do not
+            # invent a second declaration for the same prefix.
+            continue
+        canonical_is = current == uri
+        default_is = bindings.get("") == uri
+        aliases = [p for p, u in bindings.items()
+                   if u == uri and p not in ("", target)]
+        if default_is:
+            renames[""] = target
+        if canonical_is:
+            for prefix in aliases:
+                drop_decls.add(prefix)
+                renames[prefix] = target
+        elif aliases:
+            first = aliases[0]
+            rename_decls[first] = target
+            renames[first] = target
+            for prefix in aliases[1:]:
+                drop_decls.add(prefix)
+                renames[prefix] = target
+        elif default_is:
+            add_decls[target] = uri
+    if not renames and not drop_decls:
+        return xml
+
+    def attr_value(value):
+        # The walker re-emits values in double quotes. A value that arrived in
+        # single quotes may legally contain a raw `"`; escape it so the rewrite
+        # cannot produce malformed XML.
+        return str(value).replace('"', "&quot;")
+
+    def rewrite_attrs(attrs):
+        trimmed = attrs.strip()
+        self_closing = trimmed.endswith("/")
+        body = trimmed[:-1] if self_closing else trimmed
+        parts = []
+        for name, value in _iter_attrs(body):
+            if name == "xmlns":
+                parts.append(f'xmlns="{attr_value(value)}"')
+                continue
+            if name.startswith("xmlns:"):
+                alias = name[len("xmlns:"):]
+                if alias in drop_decls:
+                    continue
+                if alias in rename_decls:
+                    parts.append(f'xmlns:{rename_decls[alias]}="{attr_value(value)}"')
+                else:
+                    parts.append(f'{name}="{attr_value(value)}"')
+                continue
+            target = _canonical_name(name, {p: t for p, t in renames.items() if p})
+            if target.startswith("mc:") and target.split(":", 1)[1] in _MC_QNAME_ATTRS:
+                value = _rename_qname_list(value, renames)
+            if value is None:
+                parts.append(target)
+            else:
+                parts.append(f'{target}="{attr_value(value)}"')
+        out = (" " + " ".join(parts)) if parts else ""
+        if self_closing:
+            out += " /"
+        return out
+
+    def canon_tag(m):
+        if m.group(2) is None:             # comment / processing instruction
+            return m.group(0)
+        closing, name, attrs = m.group(1), m.group(2), m.group(3)
+        new_name = _canonical_name(name, renames)
+        new_attrs = rewrite_attrs(attrs)
+        return f"<{closing}{new_name}{new_attrs}>"
+
+    out = _CANON_TAG_RE.sub(canon_tag, xml)
+    missing = {p: u for p, u in add_decls.items()
+               if not re.search(rf"\bxmlns:{re.escape(p)}\s*=", out)}
+    if missing:
+        insert = "".join(f' xmlns:{p}="{esc(u)}"' for p, u in sorted(missing.items()))
+        # The first tag-shaped match can be the XML declaration or a comment;
+        # a namespace declaration belongs on the first ELEMENT start tag. Doing
+        # this with `count=1` stopped at the declaration and left every `w:`
+        # name unbound, so a legal default-namespace part failed to parse.
+        for m in _CANON_TAG_RE.finditer(out):
+            if m.group(2) is None or m.group(1):
+                continue
+            out = (f"{out[:m.start()]}<{m.group(2)}{insert}{m.group(3)}>"
+                   f"{out[m.end():]}")
+            break
+    return out
+
 
 def _child_element_span(frag: str | None, tag: str) -> tuple[int, int] | None:
     """Offsets of the direct child named tag."""
@@ -939,18 +1164,19 @@ def field_ranges(xml: str) -> list:
     already protects it.
     """
     out, stack = [], []
-    for m in FIELD_CHAR_RE.finditer(xml):
+    scan = _mask_noncontent(xml)
+    for m in FIELD_CHAR_RE.finditer(scan):
         kind = m.group(1)
         if kind == "begin":
             stack.append(m.start())
         elif kind == "end" and stack:
             start = stack.pop()
-            instr = INSTR_RE.search(xml, start, m.end())
+            instr = INSTR_RE.search(scan, start, m.end())
             raw = instr.group(0) if instr else ""
             out.append((start, m.end(),
                         unesc(raw[raw.find(">") + 1:raw.rfind("<")]).strip() if raw else ""))
     simple_stack = []
-    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple>", xml):
+    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple>", scan):
         tag = m.group(0)
         if tag.startswith("</"):
             if simple_stack:
@@ -988,7 +1214,8 @@ def _field_result_spans(xml: str) -> list:
     first entry paragraph, a lone end at the last) still yields one span.
     """
     out, stack = [], []
-    for m in FIELD_CHAR_RE.finditer(xml):
+    scan = _mask_noncontent(xml)
+    for m in FIELD_CHAR_RE.finditer(scan):
         kind = m.group(1)
         if kind == "begin":
             stack.append({"sep": None})
@@ -1003,7 +1230,7 @@ def _field_result_spans(xml: str) -> list:
     # element's own content, not a fldChar separate region. The spelling fixer
     # rewrote those results because this walk only knew complex fields.
     simple_stack = []
-    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple>", xml):
+    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple>", scan):
         tag = m.group(0)
         if tag.startswith("</"):
             if simple_stack:
@@ -1074,7 +1301,11 @@ ZOTERO_FIELD_BIBL_INSTR = "ADDIN ZOTERO_BIBL"
 # can hold them in footnotes/endnotes -- and the template pass rewrites those
 # parts too, so the inventory must see them or the gate protects nothing there.
 ZOTERO_FIELD_PARTS = ("word/document.xml", "word/footnotes.xml", "word/endnotes.xml")
-ZOTERO_FIELD_AUX_PARTS_RE = re.compile(r"word/(?:header|footer)\d*\.xml$|word/comments\.xml$")
+# Header/footer parts can carry a VENUE name (`header_venue_default.xml`), not
+# only Word's numbered one; the narrow `\d*` here missed every descriptive part
+# the scanner reads, so zotero-check could report CLEAN with a live field in it.
+ZOTERO_FIELD_AUX_PARTS_RE = re.compile(
+    r"word/(?:header|footer)(?:\d+|[_-][A-Za-z0-9_\-]*)?\.xml$|word/comments\.xml$")
 ZOTERO_FIELD_TOKEN_RE = re.compile(
     r"<w:fldChar\b[^>]*?w:fldCharType=\"(begin|separate|end)\"[^>]*?/?>"
     # A self-closing `<w:t/>`/`<w:instrText/>` is an EMPTY element, never an
@@ -1155,7 +1386,8 @@ def zotero_field_report(xml: str) -> dict:
         errors.append(f"[{code}] {message}")
         codes[code] += 1
 
-    for m in ZOTERO_FIELD_TOKEN_RE.finditer(xml):
+    scan = _mask_noncontent(xml)
+    for m in ZOTERO_FIELD_TOKEN_RE.finditer(scan):
         raw = m.group(0)
         if raw.startswith("<w:fldSimple"):
             # The single-element field form: the instruction is the w:instr

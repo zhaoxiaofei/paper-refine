@@ -111,7 +111,7 @@ def make_root_with_revision(prefix: str) -> Path:
     write(root / "state.json", json.dumps(state))
     out = root / "runs" / "r1_a2_revise" / "revised"
     write(out / "revision_report.json", json.dumps({
-        "counts_by_status": {"fixed": 2, "manual-required": 2,
+        "counts_by_status": {"fixed": 1, "manual-required": 1,
                              "fixed-with-caveat": 1, "discarded": 2},
         "coverage": [
             {"id": "F-001", "final_status": "manual-required",

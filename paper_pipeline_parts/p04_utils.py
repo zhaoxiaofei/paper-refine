@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 04/20 of the pipeline -- executed by the
+# Part 04/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1237,29 +1237,41 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
                     gaps.append(str(d))
             print(f"warning: cannot read directory {d}: {e}; its files are not in the manifest", file=sys.stderr)
             return
+        def note_link(link: Path) -> None:
+            if symlinks is not None:
+                try:
+                    symlinks.append(link.relative_to(root).as_posix())
+                except ValueError:
+                    symlinks.append(str(link))
+
         for p in entries:
-            if p.is_symlink() and p.is_dir():
-                if not follow_dir_links or not _followable_evidence_dir(p, d == root):
-                    continue
-                key = dir_key(p)
-                if key is None or key in ancestors:
-                    continue
-                walk(p, ancestors | {key})
+            if p.is_symlink():
+                if p.is_dir():
+                    if not follow_dir_links or not _followable_evidence_dir(
+                            p, d == root):
+                        # A directory link that is not followed is still an
+                        # ENTRY a read-only-area drop pass must see (F158).
+                        note_link(p)
+                        continue
+                    key = dir_key(p)
+                    if key is None or key in ancestors:
+                        continue
+                    walk(p, ancestors | {key})
+                elif p.is_file():
+                    # A file symlink is not package content (see the paragraph
+                    # below), but a caller that must account for EVERY submitted
+                    # file is told the link exists instead of silently missing it.
+                    note_link(p)
+                else:
+                    # A BROKEN symlink is neither a file nor a directory: it used
+                    # to match no branch and disappear from every drop pass (F158).
+                    note_link(p)
             elif p.is_dir():
                 key = dir_key(p)
                 if key is None or key in ancestors:
                     continue
                 walk(p, ancestors | {key})
-            elif p.is_symlink() and p.is_file():
-                # A file symlink is not package content (see the paragraph
-                # below), but a caller that must account for EVERY submitted
-                # file is told the link exists instead of silently missing it.
-                if symlinks is not None:
-                    try:
-                        symlinks.append(p.relative_to(root).as_posix())
-                    except ValueError:
-                        symlinks.append(str(p))
-            elif p.is_file() and not p.is_symlink():
+            elif p.is_file():
                 # A FILE symlink is not package content: copy_into() refuses it,
                 # so hashing its target here made the input manifest/digest claim
                 # bytes the sandbox never received -- ensure_copy/dir_matches then
@@ -1338,8 +1350,16 @@ def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=(),
 
 
 def manifests_equal(a, b) -> bool:
-    """Manifest equality on the file map (the count is derived from it)."""
-    return (a or {}).get("files") == (b or {}).get("files")
+    """Manifest equality on the file map AND the walk's coverage gaps.
+
+    Comparing `files` alone made two different unreadable subtrees look equal:
+    the changed file inside a chmod-000 directory was invisible to both, so an
+    integrity check certified a blind pass.
+    """
+    a, b = a or {}, b or {}
+    return (a.get("files") == b.get("files")
+            and sorted(a.get("unreadable_dirs") or [])
+            == sorted(b.get("unreadable_dirs") or []))
 
 
 def manifest_digest(m) -> str:
@@ -3511,6 +3531,8 @@ def format_policy_of(ctx: Ctx) -> dict:
         policy["empty_paragraph_slots"] = _venue_empty_paragraph_slots(ctx)
     if "cover_letter" not in configured:
         policy["cover_letter"] = _venue_cover_letter_block(ctx)
+    policy["venue_derivation_gaps"] = list(
+        getattr(ctx, "_venue_format_gaps", []) or [])
     if "style_limits" not in configured:
         # The venue's own sentence/paragraph style limits. Absent from the
         # profile -> `{}`: the formatter records the long text as an advisory
@@ -3541,12 +3563,11 @@ def publication_format_policy(ctx: Ctx, policy: dict, cli_flatten: bool = False)
     pin.
     """
     cfg = (ctx.cfg or {}).get("format_policy") or {}
-    if cli_flatten:
-        flatten = True
-    elif "unlink_zotero_fields_at_publish" in cfg:
-        flatten = bool(cfg.get("unlink_zotero_fields_at_publish"))
-    else:
-        flatten = DEFAULT_PUBLISH_FLATTEN_ZOTERO
+    # `_policy_flag` reads the formatter's documented off spellings ("off",
+    # "false", "no", "0"); raw truthiness turned every one of them ON.
+    flatten = (True if cli_flatten else
+               _policy_flag(cfg, "unlink_zotero_fields_at_publish",
+                            DEFAULT_PUBLISH_FLATTEN_ZOTERO))
     out = dict(policy)
     if flatten:
         out["unlink_zotero_fields"] = True
@@ -3588,6 +3609,19 @@ def _venue_reference_blocks(ctx: Ctx) -> dict:
     except Exception:                                       # noqa: BLE001 -- stub ctx
         pass
     return out
+
+
+def _record_venue_format_gap(ctx: Ctx, message: str) -> None:
+    """Record a named coverage gap for a venue-template derivation failure."""
+    try:
+        gaps = getattr(ctx, "_venue_format_gaps", None)
+        if gaps is None:
+            gaps = []
+            setattr(ctx, "_venue_format_gaps", gaps)
+        if message not in gaps:
+            gaps.append(message)
+    except Exception:                                         # noqa: BLE001 -- stub ctx
+        pass
 
 
 def _venue_cover_letter_block(ctx: Ctx) -> dict:
@@ -3632,8 +3666,11 @@ def _venue_cover_letter_block(ctx: Ctx) -> dict:
                      # document named for the type is that type's MANUSCRIPT,
                      # never the cover letter the FMT-CL1 rule hunts for.
                      "manuscript_article_type_names": article_type_manuscript_names(ctx)}
-    except Exception:                                         # noqa: BLE001 -- never gate setup
+    except Exception as e:                                    # noqa: BLE001 -- never gate setup
         block = {}
+        _record_venue_format_gap(
+            ctx, f"FMT-CL1: the cover-letter/manuscript template block could not be "
+                 f"derived ({type(e).__name__}: {e}); the check was NOT evaluated")
     try:
         ctx._venue_cover_block = (key, block)
     except Exception:                                         # noqa: BLE001 -- stub ctx
@@ -3662,8 +3699,12 @@ def _venue_empty_paragraph_slots(ctx: Ctx) -> list:
                 for sig in fn(p) or []:
                     if sig not in slots:
                         slots.append(sig)
-        except Exception:                                     # noqa: BLE001 -- never gate setup
+        except Exception as e:                                # noqa: BLE001 -- never gate setup
             slots = []
+            _record_venue_format_gap(
+                ctx, f"FMT-S8: the venue template's empty-paragraph slots could not be "
+                     f"derived ({type(e).__name__}: {e}); the blank exempting rule was "
+                     f"NOT evaluated")
     try:
         ctx._venue_empty_slots = (key, slots)
     except Exception:                                         # noqa: BLE001 -- stub ctx
@@ -3726,7 +3767,8 @@ def pre_judge_format_policy(ctx: Ctx) -> dict:
     """format_policy_of() with the text-level consistency rules left unfixed."""
     policy = format_policy_of(ctx)
     configured = (ctx.cfg or {}).get("format_policy") or {}
-    if configured.get("unlink_zotero_fields_at_publish"):
+    if _policy_flag(configured, "unlink_zotero_fields_at_publish",
+                    DEFAULT_PUBLISH_FLATTEN_ZOTERO):
         # The old publication-time flatten cannot run after the panel has
         # scored the bytes: the delivered package must remain the pin. Apply
         # the request to every candidate before it is fingerprinted instead.
@@ -5343,8 +5385,12 @@ def _email_verification_rows(pkg: Path) -> tuple:
                 bad.append("`source_url` uses a reserved/example host, not a real page")
         if len(query) < 3:
             bad.append("`query` is missing (the search string)")
-        if not re.match(r"\d{4}-\d{2}-\d{2}\b", checked_at):
-            bad.append("`checked_at` must be YYYY-MM-DD")
+        try:
+            # A real calendar date, exactly like the identifier gate: the old
+            # shape-only match accepted 2026-99-99 (F160).
+            time.strptime(checked_at, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            bad.append("`checked_at` must be a real YYYY-MM-DD calendar date")
         if len(evidence) < 10 or (after and after.casefold() not in evidence.casefold()):
             bad.append("`evidence` must be a verbatim quote that contains the corrected "
                        "address")
@@ -9098,6 +9144,19 @@ def is_within(child: Path, parent: Path) -> bool:
         # RuntimeError is what Path.resolve raises on a symlink loop
         # (ELOOP); a path that cannot be resolved is not contained.
         return False
+
+
+def contained_under_or_none(root, rel):
+    """`contained_under` without `die()`: None when the recorded path escapes."""
+    try:
+        base = Path(root).resolve()
+        raw = Path(str(rel or ""))
+        target = raw if raw.is_absolute() else base / raw
+        resolved = target.resolve()
+        resolved.relative_to(base)
+        return resolved
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 def contained_under(root, rel) -> Path:

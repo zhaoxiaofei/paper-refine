@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 02/20 of the pipeline -- executed by the
+# Part 02/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -4118,6 +4118,13 @@ AUTHOR_TO_COMPLETE_README_HEADER = (
 AUTHOR_TO_COMPLETE_MANAGED_BEGIN = (
     "<!-- pipeline-managed: author-to-complete rows; regenerated on publication -->")
 AUTHOR_TO_COMPLETE_MANAGED_END = "<!-- end pipeline-managed author-to-complete rows -->"
+# When the author's own classified table is the one inventory, the publisher
+# appends its rows to that table (one-table rule) instead of writing the managed
+# block. This hidden comment then records exactly which T-ids it generated, so
+# the NEXT publish can drop a row whose item has since been resolved instead of
+# mistaking it for author text and keeping it forever.
+AUTHOR_TO_COMPLETE_GENERATED_RE = re.compile(
+    r"<!--\s*pipeline-generated-row-ids:\s*([^>]*)-->\s*")
 
 
 def _atc_mode(value=None) -> str:
@@ -4153,29 +4160,58 @@ def handoff_target(mode=None) -> str:
 
 _HANDOFF_MARKER_RE = re.compile(
     r"\[\s*AUTHOR\s+TO\s+COMPLETE\s*:?\s*(.*?)\s*\]", re.I | re.S)
+# A line that MENTIONS the token describes the convention; it is not an author
+# action. The marker is a mention when it is quoted, introduced by a
+# determiner/name for the token ("the [AUTHOR TO COMPLETE: ...]"), or followed
+# by a copula ("... ] is forbidden"). F191's rule sentences were turned into
+# mangled checklist rows by the old keyword-only guard.
+_HANDOFF_MENTION_BEFORE_RE = re.compile(
+    r"(?:\b(?:the|a|an|this|that|these|those|each|every|any|no|word|phrase|"
+    r"string|label|token|marker|literal|placeholder)\s+|"
+    r"['\"\u2018\u2019\u201c\u201d`])\s*$", re.I)
+_HANDOFF_MENTION_AFTER_RE = re.compile(
+    r"\s*['\"\u2018\u2019\u201c\u201d`]?\s*"
+    r"(?:is|are|was|were|means|marks|denotes|indicates|refers|stands)\b", re.I)
 
 
 def _handoff_items_from_manual_steps(text: str) -> list:
     """The author-action lines a MANUAL_STEPS.md carries in marker form.
 
-    The readme mode's prompt tells a stage to write the hand-off README
-    directly. This extractor is the mechanical fallback for a stage that left
-    the same item in its MANUAL_STEPS.md with the literal marker: the item is
-    MOVED (marker removed, surrounding sentence kept), never invented, so a
-    missing README cannot silently drop the author's work item.
+    Parsed over the WHOLE text: a marker payload may continue on the next line,
+    and two markers on one line are two items (F080). For a single marker the
+    surrounding sentence is kept (the marker is replaced by its payload), which
+    is the documented MOVE-not-invent behaviour.
     """
     out, seen = [], set()
-    for raw in str(text or "").splitlines():
-        line = raw.strip()
-        if not line or not _HANDOFF_MARKER_RE.search(line):
+    whole = str(text or "")
+    for m in _HANDOFF_MARKER_RE.finditer(whole):
+        line_start = whole.rfind("\n", 0, m.start()) + 1
+        line_end = whole.find("\n", m.end())
+        line_end = len(whole) if line_end < 0 else line_end
+        block = whole[line_start:line_end]
+        if block.strip().startswith("|"):
             continue
-        # A classified TODO row is already an inventory row, not a marker-form
-        # bullet to be moved into the README as prose. Moving it would turn
-        # `| T-001 | ... |` into a bullet and lose its columns.
-        if line.startswith("|") or line.count("|") >= 2:
+        before = whole[line_start:m.start()]
+        before = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", before)
+        if re.search(r"\b(?:token|marker|literal|forbidden)\b", before, re.I):
             continue
-        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line)
-        cleaned = _HANDOFF_MARKER_RE.sub(lambda m: m.group(1).strip(), line)
+        if _HANDOFF_MENTION_BEFORE_RE.search(before[-40:]) \
+                or _HANDOFF_MENTION_AFTER_RE.match(whole[m.end():line_end]):
+            continue
+        payload = re.sub(r"\s+", " ", m.group(1) or "").strip(" .;:")
+        if not payload:
+            continue
+        markers_here = len(_HANDOFF_MARKER_RE.findall(block))
+        if markers_here > 1:
+            cleaned = payload
+        else:
+            without = _HANDOFF_MARKER_RE.sub("", block)
+            if payload.lower() in without.lower():
+                cleaned = without
+            else:
+                cleaned = block[:m.start() - line_start] + payload \
+                    + block[m.end() - line_start:]
+        cleaned = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" .;:")
         if not cleaned:
             continue
@@ -4279,7 +4315,8 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
                 f"file, unreadable, or over the byte budget); the hand-off item cannot be "
                 f"merged into it")
     existing_rows, _row_problems = manual_todo_rows_from_text(existing)
-    known = {re.sub(r"\s+", " ", re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", ln)).strip().lower()
+    known = {re.sub(r"\s+", " ", re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", ln)
+                      ).strip(" .;:").lower()
              for ln in existing.splitlines()
              if re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", ln)}
     # A classified TABLE row is the author-facing form of the same item: the
@@ -4758,6 +4795,11 @@ def _handoff_description_key(description, payload_index: dict) -> tuple:
     text = re.sub(r"\s+", " ", str(description or "")).strip().strip(" .;:").lower()
     if not text:
         return ()
+    # A publisher-generated row is "F-001 [manual-required; major] loc: payload".
+    # The leading id/status prefix is not part of the item identity; leaving it
+    # in made the key miss on every re-publication and append a duplicate row
+    # with a fresh T-id (F090).
+    text = re.sub(r"^[a-z]-\d+\s*\[[^\]]*\]\s*", "", text)
     text = re.sub(r"^missing\s+", "", text)
     match = _HANDOFF_LOC_PAYLOAD_RE.match(text)
     if match:
@@ -4791,8 +4833,10 @@ def _readme_action_rows(text: str) -> list:
                     if len(table_lines) > 1 and separator.match(table_lines[1])
                     else table_lines)
         for line in data:
-            add(" | ".join(cell.strip()
-                           for cell in line.strip().strip("|").split("|")))
+            # `_manual_md_cells` honours the `\|` escape that the classified
+            # table emits; splitting on every pipe produced a different row
+            # string from the gate's parser (F196).
+            add(" | ".join(cell.strip() for cell in _manual_md_cells(line)))
         table_lines = []
 
     for raw in str(text or "").splitlines():
@@ -4981,7 +5025,9 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
             if prev is not None:
                 if _handoff_action_rank(it["action"]) < _handoff_action_rank(prev["action"]):
                     prev["action"] = it["action"]
-                    action_of[prev["row"]] = prev["action"]
+                    # Read back by the LOWER-CASED row key; storing the mixed-case
+                    # key here silently kept the weaker action (F124).
+                    action_of[prev["row"].lower()] = prev["action"]
                 continue
             by_key[key] = it
             payload_index.setdefault(key[1], set()).add(key)
@@ -5016,6 +5062,15 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
         # disagree about what the author owes (F68).
         existing = read_text_bounded(Path(existing_from)) or ""
     external, _managed_rows, had_block = _split_managed_handoff_readme(existing)
+    _prev_generated = AUTHOR_TO_COMPLETE_GENERATED_RE.search(external)
+    if _prev_generated:
+        # Rebuild the author's table from AUTHOR rows + the CURRENT ledger rows:
+        # rows this publisher generated last time are removed first, so a
+        # resolved item actually disappears.
+        _prev_ids = {x.strip() for x in _prev_generated.group(1).split(",") if x.strip()}
+        external = AUTHOR_TO_COMPLETE_GENERATED_RE.sub("", external, count=1)
+        if _prev_ids:
+            external = _drop_manual_todo_rows(external, _prev_ids)
     if stage_text:
         stage_rows, stage_problems = manual_todo_rows_from_text(stage_text)
         if stage_problems:
@@ -5124,6 +5179,10 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
             # append the generated rows to it instead of writing a SECOND
             # inventory in the managed block (the manual rule requires one).
             base = _merge_manual_todo_rows(base, managed_rows).rstrip("\n")
+            _ids = ", ".join(str(r.get(MANUAL_TODO_COLUMNS[0]) or "")
+                             for r in managed_rows if r.get(MANUAL_TODO_COLUMNS[0]))
+            base = (base + "\n\n<!-- pipeline-generated-row-ids: "
+                    + _ids + " -->")
             pieces = [base]
         else:
             pieces.append(AUTHOR_TO_COMPLETE_MANAGED_BEGIN + "\n" + table + "\n"
@@ -6124,8 +6183,9 @@ author a discovery hunt and do not propose new sweeps."""
     return f"""
 === THE ROUND'S DISCOVERY FINDINGS (`X-*`) — FROZEN, INTEGRATE THE FIXES ===
 
-The round's review ran the $paper-review skill's discovery round (D0-D5) against this round's BASE
-corpus and its findings are the X-* list in `frozen_discovery/findings_extra.json` (readable copy:
+The round's discovery source -- the guided review's D0-D5 discovery round, or the cold-start
+review when `--no-guided-review` is on -- ran against this round's BASE corpus and its findings are
+the X-* list in `frozen_discovery/findings_extra.json` (readable copy:
 `frozen_discovery/findings_extra.md`): READ-ONLY, the SAME list the round's revision arms
 resolved. This is the ONE piece of the frozen review this sandbox consumes -- there is still no
 `guided_review/` directory, no F-* finding list and no A1 ledger here.

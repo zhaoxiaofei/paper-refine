@@ -172,7 +172,9 @@ def test_f06() -> None:
             "counting": {"main_text": {"excludes": ["abstract", "methods",
                                                     "references", "figure-legends"]}},
             "tables": {}, "figures": {}, "references": {}, "numbering": {},
-            "leftover_phrases": [], "figure_text": {}, "image_dpi": {},
+            "leftover_phrases": [],
+            # A present-but-empty measured-rule block is invalid under F116;
+            # a profile with no measured rule omits the keys.
             "foreign_container_headings": [], "page_budget": {}}
     prof = pp._snapshot_profile({"venue": "nature-biotechnology",
                                  "venue_profile": snap}, "nature-biotechnology")
