@@ -396,8 +396,10 @@ def is_date_prose(m) -> bool:
     """True when an author-year match is prose, not a real call-out."""
     if m.group("a1") or m.group("a3") or m.group("a4"):
         # The "X et al., YYYY" and "(X, YYYY)" branches carry their own anchors; a
-        # month CAN be a surname there ("(May, 2019)").
-        return False
+        # month CAN be a surname there ("(May, 2019)"). A capitalized SECTION
+        # word before the year is prose, not an author call-out.
+        name = m.group("a1") or m.group("a3") or m.group("a4")
+        return str(name or "").lower() in _NON_AUTHOR_WORDS
     names = [m.group("a2"), m.group("a2b")]
     if not (names[0] and names[1]):
         return True
@@ -606,7 +608,14 @@ def main():
                 continue
             prev_line = raw
             scan_raw = callout_lines[li - 1] if li - 1 < len(callout_lines) else raw
-            for m in NUM_CIT_RE.finditer(scan_raw):
+            # F194: a bracketed option/page number inside \cite[...]{key} is part
+            # of the citation command, not a numeric call-out. Blank the command
+            # span (length-preserving) before the numeric scan.
+            scan_nums = scan_raw
+            if str(fname).lower().endswith((".tex", ".ltx")):
+                scan_nums = TEX_CITE_RE.sub(
+                    lambda mm: " " * len(mm.group(0)), scan_raw)
+            for m in NUM_CIT_RE.finditer(scan_nums):
                 before = scan_raw[:m.start()].rstrip()
                 suspect = bool(SUSPECT_PRECEDERS.search(before))
                 inner = m.group(1)
@@ -645,6 +654,11 @@ def main():
                     if im.group("a2"):
                         author = "%s and %s" % (author, im.group("a2"))
                     if author.lower() in MONTH_NAMES:
+                        continue
+                    # "(Results, 2019; Discussion, 2020)" is a table of contents,
+                    # not two call-outs: reject every section word in the cluster.
+                    _parts = re.split(r"\s+(?:and|&)\s+", author)
+                    if any(p.strip().lower() in _NON_AUTHOR_WORDS for p in _parts):
                         continue
                     if not ay_name_case_ok(author):
                         continue

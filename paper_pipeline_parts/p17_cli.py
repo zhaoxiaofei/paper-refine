@@ -161,7 +161,9 @@ USAGE_EXAMPLES = """usage:
           started in that invocation, and a round whose other stages are still
           pending stays incomplete for a later `run`.
   run-decide --root <dir> [same options as `run`] [same options as `decide`]
-          run the pending rounds and then decide, in series: the `run` phase
+          run the pending rounds and then decide, in series (a non-`all` --only
+          selection runs only the selection and does NOT start the decide
+          phase; `--only all` is a plain run): the `run` phase
           holds the root lock and finishes first, then `decide` recomputes the
           decision and publishes <root>/final_clean_version_<root name>/ -- the
           champion corpus byte-for-byte (no scratch, no auxiliaries, no
@@ -580,8 +582,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the venue's article type this submission is (e.g. article, "
                          "brief-communication, review, resource, analysis, matters-arising, "
                          "letter-to-the-editor -- the ids the selected venue profile carries; "
-                         "`setup` prints them and, on an existing root, "
-                         "`set-article-type --list` shows them with their caps). Each type "
+                         "`setup` prints the selected id and the profile's type count, and "
+                         "`set-article-type --list` shows every id with its caps). Each type "
                          "carries its own M19 limits: a type the profile has no numbers for is "
                          "counted and reported against the venue's own table, never against "
                          "another type's caps. Default: the venue profile's default type")
@@ -664,7 +666,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "init (start a NEW submission: the venue's own Word template is filled "
                          "by the conform stage BEFORE round 1 -- or, when no template ships, "
                          "the journal's author guidelines and then academic convention -- "
-                         "`--no-template-stage` opts out; then the pipeline's own rounds run "
+                         "the `run` option `--no-template-stage` opts out; then the "
+                         "pipeline's own rounds run "
                          "with no journal feedback and no response letter), transfer (option 1: "
                          "revise for a NEW journal; no response to reviewers; rewrites "
                          "allowed), resubmit (option 2: new submission to the SAME journal; "
@@ -1873,6 +1876,32 @@ def agent_session_plan(ctx: Ctx, only=None) -> list:
         if only is not None and (not only.covers_round(r) or not only.selects_round(ctx, r)):
             continue
         producing = []
+        # F146: the template-first session (INIT/TRANSFER modes) runs BEFORE
+        # round 1 and is a full agent session. It was absent from this plan, so
+        # `agents --only conform` budgeted zero sessions.
+        if int(r) == 1 and not template_stage_record(ctx):
+            _tpl_entry = {"id": TEMPLATE_REWRITE_DIRNAME, "vid": "conform",
+                          "stage": "conform", "round": 0, "deps": []}
+            _tpl_selected = (only is None
+                             or only.stage_selected(r, "conform")
+                             or only.entry_selected(r, _tpl_entry))
+            _tpl_templates = venue_word_templates(ctx)
+            _tpl_mode = journal_mode_of(ctx)
+            _tpl_has_docx = any(
+                p.suffix.lower() == ".docx"
+                for p in template_package_files(ctx.pristine))
+            if _tpl_selected and _tpl_has_docx and (
+                    _tpl_templates or _tpl_mode == JOURNAL_MODE_INIT):
+                producing.append({
+                    "id": TEMPLATE_REWRITE_DIRNAME,
+                    "session": "conform",
+                    "stage": "conform",
+                    "label": "template-first stage",
+                    "agent": True,
+                    "status": (ctx.run(TEMPLATE_REWRITE_DIRNAME) or {}).get(
+                        "status") or "planned",
+                    "deps": [],
+                })
         # The round's base copy (a1) is not an agent session -- it is the
         # orchestrator's copy of the previous round's pin -- but the run table
         # carries it, so list it first and label it.

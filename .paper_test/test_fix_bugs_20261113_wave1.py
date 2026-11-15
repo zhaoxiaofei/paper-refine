@@ -661,7 +661,7 @@ def test_pipeline():
     check("F065 panel completeness tracks duplicate/missing opponent slots",
           "slot_problems" in p08 and "duplicate_comparisons" in p08)
     check("F072 tracking resolves winner_dir with containment",
-          "contained_under(ctx.root, wname)" in p14)
+          "contained_under_or_none(ctx.root, wname)" in p14)
     check("F075 severity '-' is used when no census row exists",
           "rank_nonzero" in p08 and "no census exists" in p08)
     check("F063 the paged-rules probe is byte-bounded",

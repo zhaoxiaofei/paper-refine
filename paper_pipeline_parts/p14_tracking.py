@@ -417,9 +417,11 @@ def write_text_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
                                 reason: str) -> dict:
     """The `.logging-*` fallback for a `.tex`/`.bib` pair (never raises).
 
-    Every emitted line is commented out, so the file is inert if a build tool
-    picks it up; the content is a unified before/after diff the reader can
-    inspect without any LaTeX toolchain.
+    A `.tex` fallback is inert because every line is commented out. BibTeX has
+    NO line-comment character, so a `%`-prefixed `.bib` still parses the diff's
+    `@entry` lines; a `.bib` fallback is therefore wrapped in one balanced
+    `@comment{...}` entry (BibTeX ignores it), with the diff's own braces shown
+    as parentheses so the comment cannot close early.
     """
     def read_lines(p: Path) -> list:
         try:
@@ -427,17 +429,24 @@ def write_text_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
         except OSError as e:                                    # noqa: BLE001
             return [f"[unreadable: {type(e).__name__}: {e}]"]
 
+    is_bib = out.suffix.lower() == ".bib"
     lines = [
         f"LOGGING FALLBACK -- not a latexdiff copy of {cand.name}",
         f"difference tracking against the {baseline} version failed: {reason}",
-        "the unified diff below is commented out (both TeX and BibTeX treat a leading % as "
-        "a comment)",
+        ("the unified diff below is inside one balanced @comment entry (BibTeX has no "
+         "line-comment character; braces in the diff are shown as parentheses)"
+         if is_bib else
+         "the unified diff below is commented out (TeX treats a leading % as a comment)"),
         "", f"--- {base.name}", f"+++ {cand.name}"]
     lines += list(difflib.unified_diff(read_lines(base), read_lines(cand),
                                        fromfile=base.name, tofile=cand.name, lineterm=""))[2:]
     out.parent.mkdir(parents=True, exist_ok=True)
+    if is_bib:
+        text = "@comment{\n" + "\n".join(lines).replace("{", "(").replace("}", ")") + "\n}\n"
+    else:
+        text = "\n".join("% " + ln for ln in lines) + "\n"
     try:
-        write_text_atomic(out, "\n".join("% " + ln for ln in lines) + "\n")
+        write_text_atomic(out, text)
     except OSError as e:                                        # noqa: BLE001
         return {"ok": False, "error": f"the logging fallback could not be written: {e}"}
     return {"ok": True, "out": out}
@@ -647,7 +656,9 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
         # `winner_dir` is a state record, not a trusted path: an absolute or
         # `../` value must not make tracking read (and docx-parse) outside the
         # root. `contained_under` is the same guard `decide` applies.
-        wdir = contained_under(ctx.root, wname) if wname else None
+        # A tracking copy is an audit aid: a damaged state path must be a
+        # skipped row, never a SystemExit out of the run (F213).
+        wdir = contained_under_or_none(ctx.root, wname) if wname else None
         if wdir is None or not wdir.is_dir():
             continue
         winner_srcs = [(wdir, "", ())]

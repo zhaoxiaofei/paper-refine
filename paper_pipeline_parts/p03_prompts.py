@@ -1258,7 +1258,8 @@ You are REVISE run @@RUN_ID@@ — round @@ROUND@@, PHASE 2 OF 2, revision @@REVI
 @@REVISE_TOTAL@@ — inside an isolated orchestration pipeline. Your sandbox is:
   @@SANDBOX@@
 This round has @@REVISE_TOTAL@@ reviewed-and-then-revised candidates. They are independent sessions
-that all consume the SAME frozen guided_review/ copy (one review pass per round) and all start from the
+that all consume the SAME frozen finding list (the guided review's `guided_review/` copy, or the
+cold-start review's X-9xx list under `--no-guided-review`) and all start from the
 same base/; you cannot see the other revise sessions and must not try to guess or duplicate what
 they did. Your own package is judged on its merits.
 @@PRIOR_FAILURE@@
@@ -1786,7 +1787,8 @@ Layout (paths relative to the sandbox root):
                   reference: nothing in integrated/ may be worse than this.
   integrated/   — YOU create this; YOUR INTEGRATED PACKAGE goes here.
   code/         — revised analysis code + rerun instructions, if the imported fixes require them.
-  frozen_discovery/ — when this round ran a discovery round, the round's FROZEN X-* finding list
+  frozen_discovery/ — when this round carries a frozen discovery list (the guided review's D0-D5
+                  round, or the cold-start review under `--no-guided-review`), its FROZEN X-* finding list
                   (findings_extra.json + findings_extra.md), READ-ONLY and byte-verified: the
                   one review artifact this sandbox consumes -- see THE ROUND'S DISCOVERY FINDINGS
                   below. Absent when the round carries no discovery findings.
@@ -1909,7 +1911,8 @@ downstream judges and the human gate receive only the package.
     IDs, do NOT look for those files, and do NOT stop to ask the user for a review (the skill's
     "findings files missing -> STOP and ask the user" rule does not apply here).
     integrated/DIFF_LEDGER.md, described above, IS this run's ledger.
-    THE ONE EXCEPTION: when this round ran a discovery round, its frozen X-* findings ARE handed
+    THE ONE EXCEPTION: when this round carries a frozen discovery list (the guided review's D0-D5
+    round, or the cold-start review under `--no-guided-review`), its X-* findings ARE handed
     to you, read-only, under `frozen_discovery/` -- see THE ROUND'S DISCOVERY FINDINGS below. That
     list is what the round's revision arms resolved, so it is the round's shared defect landscape
     for exactly the classes no frozen sweep owns, and it must be reconciled (ported / kept-base /
@@ -3558,6 +3561,29 @@ PRIOR_AUDIT_RULE = """PRIOR-AUDIT OBSERVATIONS (read-only):
     staged record."""
 
 
+# The discovery-round task and canonical-output blocks in REVIEW_DIRECTIVES are
+# written for a FULL review. A scoped review and split-A do not run D0-D5 (their
+# own scope/split block says so, and `_postcheck_contract` drops
+# findings_extra.json from their expected files), so `review_prompt` swaps these
+# two blocks for the not-owned variants below. Keep them verbatim: the
+# substitution is exact.
+REVIEW_DISCOVERY_TASK = '4. The discovery round D0-D5 (references/discovery.md): the checklist-gap table, the probes and\n   their EXECUTED dispositions, the X-* findings and the proposed new sweeps, all written under\n   guided_review/round2/. The orchestrator verifies this phase\'s deliverables as a contract:\n   D0 known_index.md names the frozen class range; D1 gap_table.md carries >=25 class rows, each\n   marked COVERED (by which check) or UNCOVERED, with at least one UNCOVERED row; D2 probes.md\n   turns EVERY uncovered row into a probe (P2-...) or records it as an analysis limitation, and\n   every probe row carries its status; D3 probe_results.md executes every probe with a\n   disposition -- a clean probe says "no anomalies -- checked: <locations>", an `unable` probe\n   says why; D4 findings_extra.json and findings_extra.md carry the standard finding shape (id X-NNN, location,\n   category 0-5, check = the gap-row class label, severity, evidence quote, explanation) and no\n   row that merely re-reports a frozen F-* finding; D5 new_sweeps.md carries sweeps.md-shaped\n   proposals (Purpose, Enumeration, Artifact, Finding rules) numbered from M37, or states\n   explicitly that there were no proposals and why; round2_summary.md reports the counts and the\n   round\'s honest limits. A placeholder "# none" round fails the postcheck. The SAME frozen list\n   (verbatim) is handed to the stages that need it: the auditor disposes every X id and the\n   integration stage must reconcile each one in its ledger (ported / kept-base / no-donor-fix), so\n   whatever the revisers resolve from this list is also integrated. The judge panel is COMPLETELY\n   blind to provenance and is never handed your list: it re-derives its own discovery findings\n   over every side, so keep every id stable and every evidence quote exactly locatable in case a\n   judge\'s own pass re-finds the same defect.\n   Discovery findings obey shared rule D8: do not invent a structural requirement (a sentence\n   that reports a fact is not an orphan merely because it lacks its own subheading or reads like\n   a table row). A genuine cohesion/placement finding must name the reader-facing break and\n   propose a CONNECT or RELOCATE fix, never deletion of the fact.'
+
+REVIEW_DISCOVERY_TASK_NOT_OWNED = """4. DISCOVERY ROUND D0-D5 -- NOT RUN in this session: this
+   session's review scope or split does not own it (see the scope/split block below). Do NOT
+   create guided_review/round2/ and do NOT run D0-D5. The postcheck contract printed below is
+   this session's own contract and does not expect the discovery deliverables. Record every
+   discovery-owned check id in the coverage table with the out-of-scope disposition the scope
+   block requires.
+"""
+
+REVIEW_DISCOVERY_OUTPUTS = '  guided_review/round2/        — the complete D0-D5 set: known_index.md, gap_table.md, probes.md,\n                          probe_results.md, findings_extra.json, findings_extra.md, new_sweeps.md and\n                          round2_summary.md (the D0-D5 section below and the postcheck use\n                          this same list; do not deliver only a subset).'
+
+REVIEW_DISCOVERY_OUTPUTS_NOT_OWNED = """  guided_review/round2/        -- NOT produced by this session: its scope/split does not own the
+                          discovery round D0-D5 (so no findings_extra.json/findings_extra.md here).
+"""
+
+
 def review_prompt(sandbox: Path, run_id: str, r: int,
                   caption_limit: int = DEFAULT_CAPTION_LIMIT,
                   zotero: str = DEFAULT_ZOTERO_MODE,
@@ -3629,6 +3655,18 @@ the surface, and the revisers may not change a claim here."""
         ("@@CAPTION_RULE@@", "CAPTION RULE", caption_rule_text(caption_limit, prof)),
     ]
     text = REVIEW_DIRECTIVES
+    # The SAME predicate the generated postcheck contract uses (see
+    # `_postcheck_contract`): a scoped review and split-A do not own the D0-D5
+    # discovery round, so their task list and canonical-output list must not
+    # order it. Leaving those blocks unconditional made one prompt both forbid
+    # the discovery round (in its scope/split block) and call it a verified
+    # contract (in the shared task list).
+    no_discovery = bool(str(scope).strip().lower() != "full"
+                        or (split is not None and split != "b"))
+    if no_discovery:
+        text = text.replace(REVIEW_DISCOVERY_TASK, REVIEW_DISCOVERY_TASK_NOT_OWNED)
+        text = text.replace(REVIEW_DISCOVERY_OUTPUTS,
+                            REVIEW_DISCOVERY_OUTPUTS_NOT_OWNED)
     if split:
         # The canonical schema below is part of REVIEW_DIRECTIVES and names
         # F-001; a split reviewer must see its OWN namespace there too, or the
@@ -4100,7 +4138,8 @@ Two consequences for this session:
 
 
 def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
-                 venue=None, author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
+                 venue=None, venue_norm: str = "",
+                 author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
                  execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                  guided_review_off: bool = False) -> str:
     """The COLD-START REVIEW prompt: a generic, cold-context independent discovery pass.
@@ -4136,7 +4175,7 @@ def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: 
     # with-checklist block, which no longer occurs in this prompt; the clean
     # variant is registered separately so `medium` still pages it correctly.
     cold_shared = shared_blocks(include_checks=False)
-    text = page_stage_prompt(sandbox, text + cold_shared + COLD_START_TAIL,
+    text = page_stage_prompt(sandbox, text + cold_shared + COLD_START_TAIL + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete)
                              + [("SHARED DECISION RULES", cold_shared)],
                              "cold_start_review", execution_profile)

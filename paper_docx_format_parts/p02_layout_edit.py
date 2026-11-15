@@ -475,7 +475,7 @@ def _publish_unchanged_copy(res: dict, out: Path, parts: dict) -> dict:
     return res
 
 
-def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
+def strip_reference_sentences(src: Path, out: Path, finder, fact_test=None) -> dict:
     """Remove every SENTENCE of `src` that `finder` names as a dangling pointer.
 
     `finder(text) -> [(start, end), ...]` names the reference spans inside one
@@ -526,7 +526,7 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
         # OOXML is UTF-8 (or UTF-16 with a BOM, which `.decode("utf-8")` refuses):
         # a wrongly encoded part is an unreadable document, reported through this
         # function's own record -- the ValueError used to escape as a traceback.
-        xml = parts["word/document.xml"].decode("utf-8")
+        xml = ooxml_part_text(parts["word/document.xml"])
     except UnicodeDecodeError as e:
         res["error"] = f"unreadable DOCX package: word/document.xml is not UTF-8 ({e})"
         return res
@@ -564,7 +564,8 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
                     f"carries a live citation field ({text[a:b].strip()[:80]!r}); dropping it "
                     f"would renumber the bibliography -- fix it in prose")
                 continue
-            if sentence_carries_scientific_fact(text[a:b]):
+            _fact = fact_test or sentence_carries_scientific_fact
+            if _fact(text[a:b]):
                 res["skipped"].append(
                     f"paragraph {index}: the sentence carrying a dangling reference also "
                     f"carries a numeric fact ({text[a:b].strip()[:80]!r}); a packaging repair "
@@ -1169,8 +1170,9 @@ def _caption_continuation(para: str) -> bool:
     """True when `para` continues the caption block opened above it."""
     if not text_of(para).strip():
         return False
-    if has_drawing(para):
-        return False
+    # A drawing-bearing continuation is still part of the caption block: the
+    # merge predicate refuses it (CAPTION_MERGE_REFUSE_RE), so the scan reports
+    # FMT-T2c with fix=editorial instead of shipping the split silently (F166).
     if "<w:sectPr" in para:
         return False
     style = _para_style(para)
@@ -5615,6 +5617,14 @@ def refresh_zotero_package(src, out=None, policy: dict = None) -> dict:
     src = Path(src)
     rep = {"source": str(src), "output": str(out or src), "ok": True, "changed": False,
            "changes": [], "skip": None, "zotero": None, "nothing_to_do": False}
+    try:
+        _guard = _input_file_problem(src)
+    except NameError:                                                 # pragma: no cover
+        _guard = ""
+    if _guard:
+        # A FIFO/symlink named trap.docx blocked or redirected the archive open
+        # (F071); the refresh shares scan/fix's input guard.
+        return dict(rep, ok=False, skip=f"unreadable DOCX ({_guard})")
     try:
         with zipfile.ZipFile(src) as pkg:
             names = [n for n in pkg.namelist() if not n.endswith("/")]

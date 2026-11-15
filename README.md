@@ -1174,7 +1174,10 @@ python paper_pipeline.py run --root ./paper_rounds --only r1_judge_w2_j1,r2_judg
 whose predecessor is not finished (round 2 consumes round 1's pinned champion)
 is reported as the unmet dependency it is, and nothing is started. A plain
 `run` continues whatever is still pending; `run-decide` accepts the same flag
-and then decides. A session item the round's plan cannot satisfy (a typo like
+and then decides -- except that a non-`all` `--only` selection is a
+session-selection contract, so `run-decide --only <selection>` runs only that
+selection, prints that the decide phase was not started, and leaves `decide` to
+a later invocation (`--only all` is a plain run and keeps the decide phase). A session item the round's plan cannot satisfy (a typo like
 `integrator9`, or an arm a round's `--integrators` mask leaves out) is refused
 before anything starts, naming the sessions that round does plan.
 
@@ -2449,7 +2452,7 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | cold_start_review | 62 KB | 27 KB | 56% |
 | audit | 90 KB | 47 KB | 47% |
 | revise | 120 KB | 66 KB | 45% |
-| integrate | 118 KB | 65 KB | 45% |
+| integrate | 118 KB | 65 KB | 44% |
 | rewrite | 111 KB | 61 KB | 45% |
 | judge | 104 KB | 74 KB | 29% |
 | revision_audit | 25 KB | 15 KB | 38% |
@@ -3620,7 +3623,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 234 suites (a few
+any failure. They are independent, so run them in parallel — 237 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

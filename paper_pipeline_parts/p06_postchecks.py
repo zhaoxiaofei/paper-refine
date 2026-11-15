@@ -999,6 +999,34 @@ def seed_discovery_findings(ctx: Ctx, r: int, sb: Path) -> dict:
 
 _DISCOVERY_DECISIONS_RE = re.compile(
     r"\b(?:PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED|DROPPED)\b", re.I)
+# The DECISION CELL must START with the token: `NOT PORTED -- left unchanged`
+# and `not ported, ignored` record the opposite of a disposition (F024).
+_DISCOVERY_DECISION_START_RE = re.compile(
+    r"^[\s\-\u2013\u2014:|]*(PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED|DROPPED)\b",
+    re.I)
+_DISCOVERY_NEGATED_RE = re.compile(
+    r"(?i)\b(?:no|not)\s+(?:disposition|decision|row|status|reconcil\w*)\b")
+
+
+def _discovery_decision_cell(line: str, pid: str) -> str:
+    """The text after `pid` in its table row, or the rest of a prose line."""
+    if "|" in line:
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        for i, cell in enumerate(cells):
+            if pid not in cell:
+                continue
+            # The id may share the DECISION cell ("KEPT-BASE: preserves X-001").
+            if _DISCOVERY_DECISION_START_RE.match(cell):
+                return cell
+            for cand in cells[i + 1:]:
+                if _DISCOVERY_NEGATED_RE.search(cand):
+                    continue
+                if _DISCOVERY_DECISION_START_RE.match(cand):
+                    return cand
+            return ""
+        return ""
+    i = line.find(pid)
+    return "" if i < 0 else line[i + len(pid):]
 
 
 def discovery_ledger_missing(ledger_text: str, ids) -> list:
@@ -1016,9 +1044,16 @@ def discovery_ledger_missing(ledger_text: str, ids) -> list:
     lines = str(ledger_text or "").splitlines()
     missing = []
     for pid in (str(i) for i in (ids or ())):
-        disposed = any(_finding_id_mentioned(pid, line)
-                       and _DISCOVERY_DECISIONS_RE.search(line)
-                       for line in lines)
+        disposed = False
+        for line in lines:
+            if not _finding_id_mentioned(pid, line):
+                continue
+            if _DISCOVERY_NEGATED_RE.search(line):
+                continue
+            if _DISCOVERY_DECISION_START_RE.match(
+                    _discovery_decision_cell(line, pid)):
+                disposed = True
+                break
         if not disposed:
             missing.append(pid)
     return missing
@@ -1048,6 +1083,22 @@ def discovery_ledger_reconciliation_problems(ledger: Path, ids) -> list:
               "package"]
 
 
+def _frozen_findings_doc_valid(ctx: Ctx, rec: dict):
+    """True/False for a present frozen review; None when the file is absent.
+
+    A dict with a non-list `findings` member (or non-object rows) is NOT a valid
+    all-clean review: it is a malformed one (F010).
+    """
+    frozen = ctx.sandbox_of(rec) / FINDINGS_REL
+    if not frozen.exists():
+        return None
+    doc = read_json(frozen, revive=False, lenient=True)
+    if not isinstance(doc, dict):
+        return False
+    rows = doc.get("findings")
+    return isinstance(rows, list) and all(isinstance(r, dict) for r in rows)
+
+
 def critical_findings_input(ctx: Ctx, rec: dict):
     """Number of Critical findings in the frozen review the run consumed (or None).
 
@@ -1062,6 +1113,9 @@ def critical_findings_input(ctx: Ctx, rec: dict):
     if not findings:
         findings = round_consumed_findings(ctx, rec.get("round"))
     if not findings and not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
+        return None
+    if _frozen_findings_doc_valid(ctx, rec) is False:
+        # Present but malformed: the zero self-report cannot be cross-checked.
         return None
     return sum(1 for f in findings
                if str(f.get("severity") or "").strip().lower() in ("critical", "fatal"))
@@ -1083,6 +1137,8 @@ def writing_findings_input(ctx: Ctx, rec: dict):
     if not findings:
         findings = round_consumed_findings(ctx, rec.get("round"))
     if not findings and not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
+        return None
+    if _frozen_findings_doc_valid(ctx, rec) is False:
         return None
     return _category2_count(findings)
 
@@ -1192,6 +1248,11 @@ def frozen_findings_total(ctx: Ctx, rec: dict):
         # parse failure used to fall through to 0 and accept an empty ledger
         # as an all-clean one.
         return None
+    rows = doc.get("findings")
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        # A dict without a findings LIST (or with non-object rows) is malformed,
+        # not an all-clean review (F010).
+        return None
     return len(consumed_findings(ctx, rec))
 
 
@@ -1208,7 +1269,8 @@ def frozen_finding_ids(ctx: Ctx, rec: dict) -> list:
     return ids
 
 
-def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total, rel: str = None) -> tuple:
+def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total,
+                             rel: str = None, frozen_error: str = None) -> tuple:
     """(errors, warnings) for one package stage's machine-readable revision ledger.
 
     The contract this enforces (`revision_report.json`, the deliverable that
@@ -1225,6 +1287,9 @@ def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total, rel: str
     """
     pkg_rel = rel or f"{pkg.name}/revision_report.json"
     errs, warns = [], []
+    if frozen_error:
+        errs.append(frozen_error)
+        return errs, warns
     path = pkg / "revision_report.json"
     if not path.is_file():
         errs.append(f"{pkg_rel} is missing: it is the revision ledger (one row per finding id, "
@@ -1359,25 +1424,29 @@ def ledger_named_ids(ledger, wanted=()) -> set:
             if token and (not want or token in want):
                 named.add(token)
 
-    def visit(node, depth: int):
+    _ID_LIST_KEYS = {"ids", "finding_ids", "named_ids", "coverage_ids", "named"}
+
+    def visit(node, depth: int, allow_strings: bool = False):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
             for key, value in node.items():
-                if want and isinstance(key, str) and key.strip() in want:
-                    named.add(key.strip())          # {"F-001": {...}}
+                k = key.strip() if isinstance(key, str) else ""
+                if want and k in want:
+                    named.add(k)                # {"F-001": {...}}
+                if k in ("id", "finding", "finding_id", "frozen_id") \
+                        and isinstance(value, str) and value.strip() in want:
+                    named.add(value.strip())    # {"id": "F-001", ...}
                 if isinstance(value, (dict, list, tuple)):
-                    visit(value, depth + 1)
-                else:
-                    note(value)
+                    visit(value, depth + 1, k.lower() in _ID_LIST_KEYS)
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
                     visit(item, depth + 1)
-                else:
-                    note(item)                      # ["F-001", "F-002"]
+                elif allow_strings:
+                    note(item)                  # a DOCUMENTED plain id list
 
-    visit(ledger, 0)
+    visit(ledger, 0, isinstance(ledger, (list, tuple)))
     return named
 
 
@@ -1494,7 +1563,9 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
                 return val.strip()
         return ""
 
-    def visit(node, depth: int, keyed_id: str = ""):
+    _ID_LIST_KEYS = {"ids", "finding_ids", "named_ids", "coverage_ids", "named"}
+
+    def visit(node, depth: int, keyed_id: str = "", allow_strings: bool = False):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
@@ -1509,22 +1580,21 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
                 found.setdefault(rid, set()).add(
                     verdict + (f" (final={final})" if final else ""))
             for key, value in node.items():
+                k = key.strip() if isinstance(key, str) else ""
                 if isinstance(value, (dict, list, tuple)):
-                    visit(value, depth + 1, key.strip() if isinstance(key, str) else "")
+                    visit(value, depth + 1, k, k.lower() in _ID_LIST_KEYS)
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
                     visit(item, depth + 1)
-                elif isinstance(item, str) and (not want or item.strip() in want):
-                    # A plain ID LIST is the documented "naming" shape (the row
-                    # container's name is not pinned); it proves no id was
-                    # dropped even though it carries no per-row verdict. The
-                    # unsupported shape this gate REJECTS is a mapping key whose
-                    # value is a bare string/null (`{"F-001": ""}`): that reads
-                    # as a row and records no verdict.
+                elif allow_strings and isinstance(item, str) \
+                        and (not want or item.strip() in want):
+                    # A plain ID LIST is the documented "naming" shape; an id
+                    # quoted inside another row's `evidence` list is NOT a row
+                    # identity (F005).
                     found.setdefault(item.strip(), set())
 
-    visit(ledger, 0)
+    visit(ledger, 0, allow_strings=isinstance(ledger, (list, tuple)))
     return found
 
 
@@ -1917,6 +1987,31 @@ def visual_tools_available() -> bool:
 RENDER_EVIDENCE_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
 
 
+def _render_evidence_is_real(p: Path) -> bool:
+    """True only for a non-empty file whose magic matches its extension.
+
+    A zero-byte `touch work/x.pdf` or a text file renamed `.png` is not proof of
+    a rendered page (F056).
+    """
+    try:
+        if p.stat().st_size < 8:
+            return False
+        with open(p, "rb") as fh:
+            head = fh.read(8)
+    except OSError:
+        return False
+    suf = p.suffix.lower()
+    if suf == ".pdf":
+        return head.startswith(b"%PDF-")
+    if suf == ".png":
+        return head.startswith(b"\x89PNG\r\n\x1a\n")
+    if suf in (".jpg", ".jpeg"):
+        return head.startswith(b"\xff\xd8\xff")
+    if suf in (".tif", ".tiff"):
+        return head[:4] in (b"II*\x00", b"MM\x00*")
+    return False
+
+
 def render_evidence_files(render_roots) -> list:
     """Rendered page files (PDF/PNG/...) in a version's `work/` scratch.
 
@@ -1937,7 +2032,8 @@ def render_evidence_files(render_roots) -> list:
                 # is_file() follows symlinks: a `work/fig1.png -> figures/fig1.png`
                 # link is NOT a rendered page (the visual pass produced nothing).
                 if (not p.is_file() or p.is_symlink()
-                        or p.suffix.lower() not in RENDER_EVIDENCE_EXTS):
+                        or p.suffix.lower() not in RENDER_EVIDENCE_EXTS
+                        or not _render_evidence_is_real(p)):
                     continue
                 try:
                     parts = p.relative_to(root).parts
@@ -2108,20 +2204,33 @@ def _toml_array_values(raw: str):
     if len(body) < 2 or body[0] != "[" or body[-1] != "]":
         return None
     inner, out, i, n = body[1:-1], [], 0, len(body) - 2
+    need_comma = False
     while i < n:
         ch = inner[i]
-        if ch in " \t\r\n,":
+        if ch in " \t\r\n":
             i += 1
             continue
         if ch == "#":
             nl = inner.find("\n", i)
             i = n if nl < 0 else nl + 1
             continue
+        if need_comma:
+            # TOML requires a comma between array elements: `["node"
+            # "server.js"]` is invalid, not a two-element argv.
+            if ch != ",":
+                return None
+            need_comma = False
+            i += 1
+            continue
+        if ch == ",":
+            # A leading/double comma is invalid.
+            return None
         got = _toml_string_at(inner, i)
         if got is None:
             return None
         value, i = got
         out.append(value)
+        need_comma = True
     return out
 
 
@@ -5680,7 +5789,8 @@ def _raw_data_key(rel: str) -> str:
     return "/".join(parts)
 
 
-def raw_data_entries(dirp: Path, gaps: list = None, symlinks: list = None) -> dict:
+def raw_data_entries(dirp: Path, gaps: list = None, symlinks: list = None,
+                     failures: list = None) -> dict:
     """{relative path: (relative path, sha256)} for `dirp`'s raw-data directory.
 
     The key is the EXACT corpus-relative path; `raw_data_pairs` applies the
@@ -5689,11 +5799,11 @@ def raw_data_entries(dirp: Path, gaps: list = None, symlinks: list = None) -> di
     hiding in the read-only area instead of treating both as absent (F162/F172).
     """
     area = dirp / raw_data_dirname(dirp)
-    return _entries_in(area, dirp, gaps=gaps, symlinks=symlinks)
+    return _entries_in(area, dirp, gaps=gaps, symlinks=symlinks, failures=failures)
 
 
 def _entries_in(area: Path, base: Path, gaps: list = None,
-                symlinks: list = None) -> dict:
+                symlinks: list = None, failures: list = None) -> dict:
     """{relative path: (relative path, sha256)} for ONE raw-data area directory.
 
     The key is the EXACT path, not `_raw_data_key`'s token-stripped form: that
@@ -5740,7 +5850,12 @@ def _entries_in(area: Path, base: Path, gaps: list = None,
         rel = p.relative_to(base).as_posix()
         try:
             out[rel] = (rel, sha256_file(p))
-        except OSError:
+        except OSError as e:
+            # A file we cannot hash is NOT absent: dropping it here made a
+            # readable candidate copy at that path look like an extra and
+            # deleted it (F018).
+            if failures is not None:
+                failures.append(f"{rel}: {e}")
             continue
     return out
 
@@ -5770,6 +5885,12 @@ def raw_data_pairs(want: dict, got: dict) -> tuple:
     by_key = {}
     for rel in sorted(got):
         by_key.setdefault(_raw_data_key(rel), []).append(rel)
+    # How many PRISTINE entries fold to each key: if two do, one leftover
+    # candidate is not evidence of either one's token rename and must not be
+    # overwritten with the other's bytes (F128).
+    want_by_key = {}
+    for rel in sorted(want):
+        want_by_key.setdefault(_raw_data_key(rel), []).append(rel)
     for rel in sorted(want):
         dig = want[rel][1]
         if rel in got:
@@ -5781,8 +5902,9 @@ def raw_data_pairs(want: dict, got: dict) -> tuple:
         # `cohort_a.tsv` with the candidate's `cohort_b.tsv` would restore the
         # wrong bytes. Restoring is the safe outcome for the unmatched file.
         cands = [c for c in by_key.get(_raw_data_key(rel), [])
-                 if c not in used and c not in want]
-        if len(cands) == 1:
+                 if c not in used and c not in want
+                 and Path(c).parent == Path(rel).parent]
+        if len(cands) == 1 and len(want_by_key.get(_raw_data_key(rel), [])) == 1:
             pairs.append((rel, dig, cands[0], got[cands[0]][1]))
             used.add(cands[0])
         else:
@@ -5841,16 +5963,17 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     """
     src = ctx.pristine / raw_data_dirname(ctx.pristine)
     if not src.is_dir():
-        return {"present": False, "files": 0, "restored": [], "dropped": []}
-    gaps = []
-    want = raw_data_entries(ctx.pristine, gaps=gaps)
-    if gaps:
+        return {"present": False, "files": 0, "restored": [], "dropped": [],
+                "failures": []}
+    gaps, want_failures = [], []
+    want = raw_data_entries(ctx.pristine, gaps=gaps, failures=want_failures)
+    if gaps or want_failures:
         msg = (f"READ-ONLY raw data: the pristine raw-data tree could not be read "
-               f"({', '.join(gaps[:4])}); the restore/drop pass was SKIPPED rather than "
-               f"treating the partial walk as authoritative")
+               f"({', '.join((gaps + want_failures)[:4])}); the restore/drop pass was "
+               f"SKIPPED rather than treating the partial walk as authoritative")
         warns.append(msg)
         return {"present": True, "files": len(want), "restored": [], "dropped": [],
-                "failures": [msg]}
+                "failures": [msg] + list(want_failures)}
     # The pristine area EXISTS (checked above) even when it carries no file:
     # `want` being empty must not skip the candidate scan, or a package may add
     # arbitrary files under raw_data/ whenever the author's directory is empty
@@ -5867,13 +5990,28 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
             same = False
         if same:
             return {"present": True, "files": len(want), "restored": [], "dropped": [],
-                    "linked": True}
+                    "linked": True, "failures": []}
         with contextlib.suppress(OSError):
             area.unlink()
         warns.append(f"READ-ONLY raw data: {name}/ was a symlink to a different target and was "
                      f"replaced with the pristine copy")
     links = []
-    got = raw_data_entries(cand_dir, symlinks=links)
+    # F018: clear the read-only modes BEFORE the candidate identity is taken.
+    # A file/directory unreadable during the scan was absent from `got`, so an
+    # agent-added unreadable entry was never dropped. The modes are restored by
+    # the finally below (and immediately on the fail-closed path).
+    mode_plan = make_tree_writable(area) if area.is_dir() else []
+    cand_gaps, cand_failures = [], []
+    got = raw_data_entries(cand_dir, gaps=cand_gaps, symlinks=links,
+                           failures=cand_failures)
+    if cand_gaps or cand_failures:
+        restore_modes(mode_plan)
+        msg = (f"READ-ONLY raw data: the package's raw-data tree could not be read "
+               f"({', '.join((cand_gaps + cand_failures)[:4])}); the restore/drop pass "
+               f"was SKIPPED rather than certifying a partial identity")
+        warns.append(msg)
+        return {"present": True, "files": len(want), "restored": [], "dropped": [],
+                "failures": [msg] + list(cand_failures)}
     pairs, extras = raw_data_pairs(want, got)
     # A DIRECTORY squatting on one of the original's file paths (agent scratch at
     # the wrong path) is the recovery layer's case: it refuses to delete real work
@@ -5890,7 +6028,6 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     # put every mode back exactly as it was, whether the copy ends up restored or
     # unchanged. Without this, a read-only raw_data copy would make the RESTORE
     # itself fail with EACCES (or, worse, leave half a package repaired).
-    mode_plan = make_tree_writable(area) if area.is_dir() else []
     restored, dropped, failures = [], [], []
     try:
         for rel in links:
@@ -6040,7 +6177,8 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             "the LLM review findings whose false positives were filtered out")
     src = ctx.pristine / area_name
     if not src.is_dir():
-        return {"present": False, "files": 0, "restored": [], "dropped": []}
+        return {"present": False, "files": 0, "restored": [], "dropped": [],
+                "failures": []}
     gaps = []
     want = feedback_area_entries(ctx.pristine, area_name, gaps=gaps)
     if gaps:
@@ -6062,7 +6200,7 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             same = False
         if same:
             return {"present": True, "files": len(want), "restored": [], "dropped": [],
-                    "linked": True}
+                    "linked": True, "failures": []}
         with contextlib.suppress(OSError):
             area.unlink()
         warns.append(f"READ-ONLY {label} review feedback: {area_name}/ was a symlink to "
@@ -6072,7 +6210,12 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
     def inside_squat(rel: str) -> bool:
         return any(rel == s or rel.startswith(s + "/") for s in squat)
 
-    links = []
+    links, failures = [], []
+    # Populate the link list from the CANDIDATE area: `links` was initialised and
+    # then never filled, so the purge loop below was dead code (F161). A file
+    # link whose target leaves the area, a directory link and a broken link are
+    # all reported by the walker.
+    feedback_area_entries(cand_dir, area_name, symlinks=links)
     mode_plan = make_tree_writable(area) if area.is_dir() else []
     restored, dropped = [], []
     try:
@@ -6085,8 +6228,11 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
                 warns.append(f"READ-ONLY {label} review feedback: removed the symlink {rel} "
                              f"from the read-only area (a link is not package content)")
             except OSError as e:
+                msg = (f"{rel} is a symlink in the read-only area and could not be "
+                       f"removed: {e}")
                 warns.append(f"READ-ONLY {label} review feedback: could not remove symlink "
                              f"{rel}: {e}")
+                failures.append(msg)
         for rel, dig in sorted(want.items()):
             dest = cand_dir / rel
             if dest.is_file():
@@ -6104,6 +6250,7 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             except OSError as e:
                 warns.append(f"READ-ONLY {label} review feedback: could not restore "
                              f"{dest.name}: {e}")
+                failures.append(f"could not restore {dest.name}: {e}")
                 continue
             restored.append(rel)
         for rel in sorted(feedback_area_entries(cand_dir, area_name)):
@@ -6114,6 +6261,7 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             except OSError as e:
                 warns.append(f"READ-ONLY {label} review feedback: could not remove added "
                              f"file {rel}: {e}")
+                failures.append(f"could not remove added file {rel}: {e}")
                 continue
             dropped.append(rel)
         for src_dir in [src, *[p for p in sorted(src.rglob("*")) if p.is_dir()]]:
@@ -6128,6 +6276,7 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
         warns.append(f"READ-ONLY {label} review feedback: {s} is a directory where the pristine "
                      f"original has a file; its content was left alone (the recovery layer "
                      f"refuses to delete real work) and the attempt fails")
+        failures.append(f"{s} is a directory where the pristine original has a file")
     for d in sorted([p for p in area.rglob("*") if p.is_dir()],
                     key=lambda p: len(p.parts), reverse=True):
         try:
@@ -6144,7 +6293,8 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             f"The area is an INPUT ({what}): never edit, rename, "
             f"add or drop anything inside it -- it is copied from the original, so a document "
             f"that points into it must use the name that is there")
-    return {"present": True, "files": len(want), "restored": restored, "dropped": dropped}
+    return {"present": True, "files": len(want), "restored": restored,
+            "dropped": dropped, "failures": failures}
 
 
 def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
@@ -6181,6 +6331,19 @@ def verify_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     # comments and the pre-filtered LLM review).
     info["human_review_feedback"] = enforce_readonly_human_feedback(ctx, cand_dir, warns)
     info["llm_review_feedback"] = enforce_readonly_llm_feedback(ctx, cand_dir, warns)
+    # F027: the feedback enforcers record their own failures, but verify_* read
+    # only the raw-data dict's list, so a modified/unrestorable read-only
+    # feedback fact never failed the attempt.
+    for _key, _label in (("human_review_feedback", "human"),
+                         ("llm_review_feedback", "LLM")):
+        _fails = list((info.get(_key) or {}).get("failures") or [])
+        if _fails:
+            info["readonly_failures"].extend(_fails)
+            warns.append(f"READ-ONLY {_label} input failure in the package: "
+                         + "; ".join(_fails))
+    if info["readonly_failures"]:
+        warns.append("READ-ONLY input failure in the package: "
+                     + "; ".join(info["readonly_failures"]))
     return info
 
 
@@ -6197,8 +6360,8 @@ def raw_data_advisories(ctx: Ctx) -> list:
     want = raw_data_entries(ctx.pristine)
     want_hf = human_feedback_entries(ctx.pristine)
     want_llm = llm_feedback_entries(ctx.pristine)
-    if not want and not want_hf and not want_llm:
-        return []
+    # Do NOT early-return on an empty pristine area: a decided corpus that
+    # ADDS a raw-data/feedback file is still a deviation and must be checked.
     out, seen = [], set()
     areas = [(f"pinned/{pin['id']}", pinned_docs_dir(ctx, pin))
              for pin in (ctx.state.get("pinned") or [])]
@@ -6210,50 +6373,51 @@ def raw_data_advisories(ctx: Ctx) -> list:
         if label in seen or not d.is_dir():
             continue
         seen.add(label)
-        if want:
-            got = raw_data_entries(d)
-            # Same pairing as `enforce_readonly_raw_data`: exact paths first,
-            # then the token-insensitive fallback -- a package that carries the
-            # base's token names (`dataset_summary-4f3a9c1.tsv`) is compliant,
-            # and reading it by exact path alone reported it as a deviation.
-            pairs, extras = raw_data_pairs(want, got)
-            bad = sorted(rel for rel, dig, _crel, cdig in pairs if cdig != dig)
-            # An ADDED file is a deviation too: `enforce_readonly_raw_data`
-            # deletes it, so a decided corpus that carries one does not match the
-            # pristine raw data. Discarding `extras` here told the operator the
-            # corpus was clean (F118).
-            added = sorted(rel for rel, _dig in extras)
-            if bad or added:
-                named = sorted(set(bad) | set(added))
-                what = []
-                if bad:
-                    what.append(f"{len(bad)} raw-data file(s) that differ from the pristine "
-                                f"original")
-                if added:
-                    what.append(f"{len(added)} raw-data file(s) the pristine original does not "
-                                f"carry")
-                out.append(f"{label}/ carries {' and '.join(what)} ({', '.join(named[:3])}"
-                           f"{f' +{len(named) - 3} more' if len(named) > 3 else ''}); every stage "
-                           f"materializes the original's copy, so this cannot reach a new "
-                           f"package")
-        if want_hf:
-            got_hf = human_feedback_entries(d)
-            bad_hf = sorted(rel for rel, dig in want_hf.items() if got_hf.get(rel) != dig)
-            if bad_hf:
-                out.append(f"{label}/ carries {len(bad_hf)} human-review-feedback file(s) that "
-                           f"differ from the pristine original ({', '.join(bad_hf[:3])}"
-                           f"{f' +{len(bad_hf) - 3} more' if len(bad_hf) > 3 else ''}); every "
-                           f"stage materializes the original's copy, so this cannot reach a new "
-                           f"package")
-        if want_llm:
-            got_llm = llm_feedback_entries(d)
-            bad_llm = sorted(rel for rel, dig in want_llm.items() if got_llm.get(rel) != dig)
-            if bad_llm:
-                out.append(f"{label}/ carries {len(bad_llm)} LLM-review-feedback file(s) that "
-                           f"differ from the pristine original ({', '.join(bad_llm[:3])}"
-                           f"{f' +{len(bad_llm) - 3} more' if len(bad_llm) > 3 else ''}); every "
-                           f"stage materializes the original's copy, so this cannot reach a new "
-                           f"package")
+        got = raw_data_entries(d)
+        # Same pairing as `enforce_readonly_raw_data`: exact paths first,
+        # then the token-insensitive fallback -- a package that carries the
+        # base's token names (`dataset_summary-4f3a9c1.tsv`) is compliant,
+        # and reading it by exact path alone reported it as a deviation.
+        pairs, extras = raw_data_pairs(want, got)
+        bad = sorted(rel for rel, dig, _crel, cdig in pairs if cdig != dig)
+        # An ADDED file is a deviation too: `enforce_readonly_raw_data`
+        # deletes it, so a decided corpus that carries one does not match the
+        # pristine raw data. Discarding `extras` here told the operator the
+        # corpus was clean (F118).
+        added = sorted(rel for rel, _dig in extras)
+        if bad or added:
+            named = sorted(set(bad) | set(added))
+            what = []
+            if bad:
+                what.append(f"{len(bad)} raw-data file(s) that differ from the pristine "
+                            f"original")
+            if added:
+                what.append(f"{len(added)} raw-data file(s) the pristine original does not "
+                            f"carry")
+            out.append(f"{label}/ carries {' and '.join(what)} ({', '.join(named[:3])}"
+                       f"{f' +{len(named) - 3} more' if len(named) > 3 else ''}); every stage "
+                       f"materializes the original's copy, so this cannot reach a new "
+                       f"package")
+        got_hf = human_feedback_entries(d)
+        bad_hf = sorted(rel for rel, dig in want_hf.items() if got_hf.get(rel) != dig)
+        added_hf = sorted(set(got_hf) - set(want_hf))
+        bad_hf = sorted(set(bad_hf) | set(added_hf))
+        if bad_hf:
+            out.append(f"{label}/ carries {len(bad_hf)} human-review-feedback file(s) that "
+                       f"differ from the pristine original ({', '.join(bad_hf[:3])}"
+                       f"{f' +{len(bad_hf) - 3} more' if len(bad_hf) > 3 else ''}); every "
+                       f"stage materializes the original's copy, so this cannot reach a new "
+                       f"package")
+        got_llm = llm_feedback_entries(d)
+        bad_llm = sorted(rel for rel, dig in want_llm.items() if got_llm.get(rel) != dig)
+        added_llm = sorted(set(got_llm) - set(want_llm))
+        bad_llm = sorted(set(bad_llm) | set(added_llm))
+        if bad_llm:
+            out.append(f"{label}/ carries {len(bad_llm)} LLM-review-feedback file(s) that "
+                       f"differ from the pristine original ({', '.join(bad_llm[:3])}"
+                       f"{f' +{len(bad_llm) - 3} more' if len(bad_llm) > 3 else ''}); every "
+                       f"stage materializes the original's copy, so this cannot reach a new "
+                       f"package")
     return out
 
 
@@ -6379,8 +6543,12 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
                 return q
         return None
 
-    def _candidate_twin(stem_of_base_twin: str):
+    def _candidate_twin(stem_of_base_twin: str, parent: str = ""):
+        # Mirror _editable_twin_in_base's directory scope: a same-stem editable
+        # file in a DIFFERENT directory is not this PDF's twin.
         for key, p in cand_files:
+            if Path(key).parent.as_posix() != parent:
+                continue
             if p.suffix.lower() in _PDF_TWIN_EXTS \
                     and _stem_key(Path(key).name) == stem_of_base_twin:
                 return p
@@ -6498,7 +6666,8 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
             if p.suffix.lower() == ".pdf":
                 twin = _editable_twin_in_base(src_dir, rel_in)
                 if twin is not None:
-                    cand_twin = _candidate_twin(_stem_key(twin.name))
+                    cand_twin = _candidate_twin(_stem_key(twin.name),
+                                                 Path(rel_in).parent.as_posix())
                     if cand_twin is not None:
                         twin_dig = base_digs.get(prefix + twin.relative_to(src_dir).as_posix())
                         try:
@@ -8346,6 +8515,12 @@ def _repair_scope_symlinks(sb: Path, kind: str) -> list:
     digests nor the writable-file diff can see the write (F171).
     """
     out = []
+    # F069: when the package DIRECTORY itself is a link, rglob does not descend
+    # into it and no package file enters the guard. Report the link explicitly.
+    if kind in ("rewrite", "revise", "integrate"):
+        pkg = sb / output_dir_for_kind(kind)
+        if pkg.is_symlink():
+            out.append(output_dir_for_kind(kind))
     for p in sorted(sb.rglob("*")):
         if not p.is_symlink():
             continue
@@ -8355,7 +8530,13 @@ def _repair_scope_symlinks(sb: Path, kind: str) -> list:
             continue
         if _repair_path_writable(rel, kind) or _repair_path_creatable(rel, kind):
             out.append(rel.as_posix())
-    return out
+    # Any symlinked ANCESTOR of a writable path is equally uncertifiable.
+    for wp in _repair_writable_files(sb, kind):
+        for anc in wp.relative_to(sb).parents:
+            ap = sb / anc
+            if anc.as_posix() not in out and ap.is_symlink():
+                out.append(anc.as_posix())
+    return sorted(set(out))
 
 
 def _repair_guard_files(sb: Path, kind: str) -> dict:

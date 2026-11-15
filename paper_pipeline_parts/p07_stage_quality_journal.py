@@ -1372,8 +1372,17 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # The revision ledger is the deliverable that proves "no finding silently
     # dropped": require the machine-readable one, and ask for a human-readable
     # counterpart.
-    lerrs, lwarns = revision_ledger_problems(rev, frozen_finding_ids(ctx, rec),
-                                             frozen_findings_total(ctx, rec))
+    _frozen_total = frozen_findings_total(ctx, rec)
+    _frozen_exists = (ctx.sandbox_of(rec) / FINDINGS_REL).exists()
+    _frozen_error = None
+    if _frozen_exists and _frozen_total is None:
+        _frozen_error = (f"{FINDINGS_REL} is present but is not a valid finding "
+                         f"list (the document or its 'findings' member is "
+                         f"malformed); the revision ledger cannot be accepted as "
+                         f"an all-clean ledger (F010)")
+    lerrs, lwarns = revision_ledger_problems(
+        rev, frozen_finding_ids(ctx, rec), _frozen_total,
+        frozen_error=_frozen_error)
     errs.extend(lerrs)
     warns.extend(lwarns)
     # WHOLE-PARAGRAPH RE-READ (2026-10-19): a revision that edits only the
@@ -5303,7 +5312,14 @@ _DELETED_PARA_SKIP_RE = re.compile(
     # A Markdown bullet reference (`- Smith J, Jones K. ...` or `- Smith, J.`)
     # is a reference entry, like the `[1]` form already skipped; treating it as
     # prose made a legitimate bibliography edit look like deleted content.
-    r"(?:[-*+]\s+)?[A-Z][A-Za-z'’.-]+(?:\s+[A-Z]\.?)?,\s+(?:[A-Z]\.|[A-Z])|"
+    # A year is REQUIRED: without it `However, A recent study ...` and
+    # `Notably, B cells ...` matched as reference entries and the whole prose
+    # paragraph became invisible to every content/deletion gate (F040).
+    r"[-*+]\s+[A-Z][A-Za-z'’.-]+(?:\s+[A-Z]\.?)?,\s+"
+    r"(?:[A-Z]\.|[A-Z][a-z]+)|"
+    r"[A-Z][A-Za-z'’.-]+(?:\s+[A-Z]\.?)?,\s+"
+    r"(?:[A-Z]\.|[A-Z][a-z]+)(?:,\s+[A-Za-z'’.-]+){0,5},?\s*"
+    r"(?:18|19|20)\d{2}[a-z]?\b|"
     # YAML front matter and HTML comments are not prose.
     r"-{3,}\s|<!--)\s*")
 _HEADING_BLOCK_SKIP_RE = re.compile(
@@ -5458,14 +5474,15 @@ def deletion_audit_paragraphs(root: Path, skipped: list = None) -> list:
                 prose = _deleted_para_candidate(trow, _CONTENT_UNIT_MIN_CHARS)
                 if prose:
                     rows.append((rel, index, prose))
-        elif ext in (".rtf", ".doc"):
+        elif ext in (".rtf", ".doc", ".odt"):
             # Editable document formats this scan cannot parse. Falling through
             # both branches made an RTF manuscript read as EMPTY: record it as
-            # unreadable so the gate fails closed instead (F198).
+            # unreadable so the gate fails closed instead (F198/F142).
             if skipped is not None:
                 skipped.append(rel)
             continue
-        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx"):
+        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst",
+                     ".html", ".htm"):
             text = read_text_bounded(p)
             if text is None:
                 if skipped is not None:
@@ -5673,13 +5690,28 @@ _CONTENT_MATCH_STOPWORDS = {
 # `(?<=[.!?])\s+` split failed on `."`, `.)`, `.[1]` and `.\cite{x}`, merging
 # the following sentence into the unit and masking a deletion.
 _CONTENT_SENTENCE_END_RE = re.compile(
-    r"(?<=[.!?])(?:[\"\'”’\)\]\}]+|\[\d+\]|\\cite[a-zA-Z]*\{[^{}]*\})?\s+")
+    r"[.!?](?:[\"\'”’\)\]\}]+|\s*\[\d+\]|\s*\\cite[a-zA-Z]*\{[^{}]*\})?"
+    r"(?=\s+|$)")
 # A fragment ending in one of these is not a sentence boundary: `Smith et al.`
 # and `e.g.` used to become fake units the one-to-one matcher reported missing.
 _CONTENT_ABBREV_END_RE = re.compile(
     r"(?:\b(?:et al|e\.g|i\.e|etc|vs|cf|approx|ca|fig|figs|eq|eqs|no|dr|mr|"
     r"mrs|ms|prof|al|ref|refs?)\.)$", re.I)
 _CONTENT_INITIAL_END_RE = re.compile(r"(?:^|\s)[A-Z]\.$")
+# A single capital that closes a sentence is common after a NUMBER ("4 C.") or
+# a capitalised label/common noun ("Vitamin D.", "Group A."). Only these label
+# nouns are listed: a bare capital after a surname-like word ("John J.") keeps
+# the name-initial behaviour, so `J. Smith` is still one unit.
+_CONTENT_INITIAL_LABEL_WORDS = frozenset("""
+vitamin group type class cluster phase stage grade level site room code figure
+fig table section appendix week day month year patient trial arm cohort dose
+temperature step part category condition treatment panel series
+""".split())
+# A one-letter tail after these introducers is a personal initial ("written by
+# J. Smith"), not a sentence end.
+_CONTENT_INITIAL_INTRODUCERS = frozenset("""
+by from with and of for et al dr prof mr mrs ms miss sir dame
+""".split())
 
 
 def _initial_is_sentence_final(prev: str) -> bool:
@@ -5693,13 +5725,31 @@ def _initial_is_sentence_final(prev: str) -> bool:
     if not m:
         return False
     word = m.group(1)
+    if re.fullmatch(r"\d+(?:[.,]\d+)?", word):
+        # "The samples were stored at 4 C. The mice ...": a numeral cannot be a
+        # personal initial (F049).
+        return True
+    if word.lower() in _CONTENT_INITIAL_LABEL_WORDS:
+        # "Vitamin D." / "Group A." close a sentence (F049).
+        return True
+    if word.lower() in _CONTENT_INITIAL_INTRODUCERS:
+        # "written by J. Smith": a name initial, not a sentence end.
+        return False
     return any(ch.islower() for ch in word) and word[0].islower()
 
 
 def _content_sentence_parts(text) -> list:
     """Split one paragraph into sentence units without false boundaries."""
-    parts = [p.strip() for p in _CONTENT_SENTENCE_END_RE.split(
-        _deleted_para_norm(text)) if p.strip()]
+    norm = _deleted_para_norm(text)
+    raw_parts, start = [], 0
+    # The boundary match CONSUMES a trailing closing quote/[n]/\cite, so that
+    # marker stays attached to the sentence it follows instead of being
+    # dropped or moved to the next sentence (F053).
+    for match in _CONTENT_SENTENCE_END_RE.finditer(norm):
+        raw_parts.append(norm[start:match.end()])
+        start = match.end()
+    raw_parts.append(norm[start:])
+    parts = [p.strip() for p in raw_parts if p.strip()]
     merged = []
     for part in parts:
         if not merged:
@@ -5713,6 +5763,12 @@ def _content_sentence_parts(text) -> list:
             # only into a lowercase word or a digit; before a capitalised
             # sentence start it is a boundary (F202).
             if re.search(r"(?i)\bno\.$", prev) and not re.match(r"[a-z0-9]", part):
+                merge = False
+            elif re.match(r"[A-Z]", part):
+                # A sentence-final citation/abbreviation followed by a
+                # capitalised sentence start IS a boundary: `Smith et al. The
+                # results ...` used to become one unit, so deleting the second
+                # sentence passed the no-deletion gate (F012).
                 merge = False
             else:
                 merge = True
@@ -5838,13 +5894,14 @@ def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
                 if len(para) >= _CONTENT_UNIT_MIN_CHARS \
                         and not _DELETED_PARA_SKIP_RE.match(para):
                     rows.append((rel, index, para))
-        elif ext in (".rtf", ".doc"):
+        elif ext in (".rtf", ".doc", ".odt"):
             # An editable format this scan cannot parse must not disappear
-            # silently: record it so the caller fails closed (F198).
+            # silently: record it so the caller fails closed (F198/F142).
             if skipped is not None:
                 skipped.append(rel)
             continue
-        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx"):
+        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst",
+                     ".html", ".htm"):
             text = read_text_bounded(p)
             if text is None:
                 if skipped is not None:
@@ -5874,7 +5931,15 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
     """
     units = []
     for rel, line, paragraph in _content_unit_paragraphs(package, skipped=skipped):
-        for sentence in _content_sentence_parts(paragraph):
+        if _is_handoff_marker(paragraph):
+            # A hand-off marker can contain an internal sentence boundary
+            # ("[AUTHOR TO COMPLETE: Add the grant number. It is printed on the
+            # cover sheet.]"). Detect it on the WHOLE paragraph before sentence
+            # splitting, or its required removal reads as two deletions (F009).
+            sentences = [paragraph]
+        else:
+            sentences = _content_sentence_parts(paragraph)
+        for sentence_index, sentence in enumerate(sentences):
             text = re.sub(r"\s+", " ", str(sentence or "")).strip()
             if len(text) < _CONTENT_UNIT_MIN_CHARS:
                 continue
@@ -5882,7 +5947,7 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
             if len(tokens) < _CONTENT_UNIT_MIN_WORDS:
                 continue
             units.append({"document": rel, "line": int(line or 0), "text": text,
-                          "norm": text.lower().strip(),
+                          "norm": text.lower().strip(), "sentence_index": sentence_index,
                           "tokens": set(tokens)})
     return units
 
@@ -5924,6 +5989,27 @@ def _match_content_unit_pairs(base_units: list, cand_units: list) -> tuple:
     exact = {}
     for j, cand in enumerate(cand_units):
         exact.setdefault(cand["norm"], []).append(j)
+
+    def _slots(units):
+        """(id -> sentence slot) by explicit index, else by position per line.
+
+        A multi-sentence paragraph gives every sentence the paragraph's first
+        line, so line alone cannot identify the slot. The sentence ordinal is
+        the anchor the positional pass needs (F047); constructed units without
+        one fall back to their order among same-(document,line) units.
+        """
+        counts, out = {}, {}
+        for unit in units:
+            key = (unit.get("document"), unit.get("line"))
+            if "sentence_index" in unit:
+                out[id(unit)] = unit["sentence_index"]
+            else:
+                out[id(unit)] = counts.get(key, 0)
+                counts[key] = counts.get(key, 0) + 1
+        return out
+
+    base_slots = _slots(base_units)
+    cand_slots = _slots(cand_units)
     # 1. Global exact pass: every verbatim copy is consumed before any fuzzy
     # claim can steal it.
     for base in base_units:
@@ -5936,15 +6022,20 @@ def _match_content_unit_pairs(base_units: list, cand_units: list) -> tuple:
     # 2. Positional-anchor pass: a unit rewritten IN FULL at the same
     #    paragraph/sentence slot is a rewrite, not a deletion + insertion. Token
     #    Jaccard alone marked the benchmark's legitimate full rewrites missing
-    #    (F05); the anchor is the shared document/line plus at least one shared
-    #    content token, number or citation key. It is deliberately narrow: a
-    #    different paragraph, or no shared content at all, still fails.
+    #    (F05); a multi-sentence paragraph shares one line, so the sentence
+    #    ordinal is the anchor (F047). It is deliberately narrow: the slot is
+    #    trusted only when the same paragraph already has a verbatim match (so
+    #    the paragraph is demonstrably aligned) or the two units share content;
+    #    an unrelated single same-line sentence still fails.
     fuzzy_left = []
     _anchors_done = set()
+    exact_paragraphs = {(base["document"], base["line"])
+                        for base, _cand in pairs}
     for base in base_left:
         same_pos = [j for j in unmatched
                     if cand_units[j]["document"] == base["document"]
-                    and cand_units[j]["line"] == base["line"]]
+                    and cand_units[j]["line"] == base["line"]
+                    and cand_slots[id(cand_units[j])] == base_slots[id(base)]]
         if len(same_pos) != 1:
             continue
         cand = cand_units[same_pos[0]]
@@ -5954,7 +6045,9 @@ def _match_content_unit_pairs(base_units: list, cand_units: list) -> tuple:
         cand_keys = _prose_citation_keys(cand["text"])
         base_nums = set(re.findall(r"\d+(?:\.\d+)?", base["text"]))
         cand_nums = set(re.findall(r"\d+(?:\.\d+)?", cand["text"]))
-        if shared or (base_keys & cand_keys) or (base_nums & cand_nums):
+        paragraph_aligned = (base["document"], base["line"]) in exact_paragraphs
+        if shared or (base_keys & cand_keys) or (base_nums & cand_nums) \
+                or paragraph_aligned:
             unmatched.discard(same_pos[0])
             pairs.append((base, cand))
             _anchors_done.add(id(base))
@@ -6003,6 +6096,17 @@ _CONTENT_HANDOFF_MARKER_RE = re.compile(
 _CITATION_RE = re.compile(
     r"\\[a-zA-Z]*cite[a-zA-Z]*\s*(?:\[[^\]]*\]\s*)*\{([^{}]*)\}")
 _BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,\s]+)\s*,")
+# A `.bbl` bibliography defines its keys with `\bibitem{key}` (the optional
+# label is consumed first). Recognising only BibTeX syntax left a `.bbl`-only
+# package with no bibliography keys, so a legitimate citation-key correction
+# was reported as a new citation (F081).
+_BBL_ENTRY_RE = re.compile(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}")
+
+
+def _bib_keys_in_text(text) -> set:
+    keys = {m.group(1).strip() for m in _BIB_ENTRY_RE.finditer(text or "")}
+    keys.update(m.group(1).strip() for m in _BBL_ENTRY_RE.finditer(text or ""))
+    return keys
 # MARKDOWN/DOCX manuscripts cite in prose, not with `\cite`: an author-year
 # call-out `(Smith, 2020)` / `Smith et al. (2020)` is the same citation unit.
 # Recognising only LaTeX made the strict insertion gate unable to see a new
@@ -6080,7 +6184,7 @@ def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
             # citation syntax is what the prose compares (F03).
             keys.update(_prose_citation_keys(text))
         if include_bibliography and ext in (".bib", ".bbl"):
-            keys.update(m.group(1).strip() for m in _BIB_ENTRY_RE.finditer(text))
+            keys.update(_bib_keys_in_text(text))
     return keys
 
 
@@ -6096,9 +6200,16 @@ def _bibliography_keys(package: Path) -> set:
             continue
         if not _is_submitted(rel) or p.suffix.lower() not in (".bib", ".bbl"):
             continue
+        top = rel.split("/", 1)[0].lower()
+        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
+            continue
+        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
+                or is_non_submitted_readme_name(p.name)
+                or is_non_shippable_name(p.name)):
+            continue
         text = read_text_bounded(p)
         if text:
-            keys.update(m.group(1).strip() for m in _BIB_ENTRY_RE.finditer(text))
+            keys.update(_bib_keys_in_text(text))
     return keys
 
 
@@ -6333,7 +6444,9 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
 # mode with no unit-level check, and the mode where a deletion is allowed
 # precisely because it is supposed to be redundant.
 # ---------------------------------------------------------------------
-_FACT_SURVIVAL_NUMBER_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w.])")
+_FACT_SURVIVAL_NUMBER_RE = re.compile(
+    r"(?<![\w.])(?P<sign>[+\-\u2212])?\d[\d,]*(?:\.\d+)?"
+    r"(?:[eE][+\-]?\d+)?(?!\w|\.\d)")
 _FACT_SURVIVAL_IDENT_RE = re.compile(
     r"(?i)(?:https?://[^\s)>]+|doi:\s*10\.[^\s,;)]+|10\.\d{4,9}/[^\s,;)]+|"
     r"orcid[:\s]+\d[\dX-]+|"
@@ -6454,8 +6567,16 @@ _FACT_SURVIVAL_MIN_DIGITS = 2
 def _fact_survival_key(token) -> str:
     """One comparable key for a printed value or identifier."""
     raw = str(token or "").strip().rstrip(",.;:)")
+    raw = raw.replace("\u2212", "-")          # Unicode minus is a sign (F093)
     if not raw:
         return ""
+    if re.fullmatch(r"[+\-]?\d[\d,]*(?:\.\d+)?(?:[eE][+\-]?\d+)?", raw):
+        # A signed value and a scientific-notation value are numeric facts:
+        # normalise -55/+55 and 1.2e-4/1.2E-4 to one key (F093/F094).
+        try:
+            return repr(float(raw.replace(",", "")))
+        except ValueError:
+            pass
     if re.search(r"[A-Za-z/]", raw):
         return raw.lower()
     try:
@@ -6680,11 +6801,14 @@ def _fact_unit_change_examples(base_units, cand_units, pairs=None,
     if pairs is None:
         _m, _a, pairs = _match_content_unit_pairs(base_units, cand_units)
     cand_by_base = {id(base): cand for base, cand in pairs}
-    surviving = _fact_number_units(cand_units)
     changed = []
     for unit in base_units or ():
         text = str(unit.get("text") or "")
         paired = cand_by_base.get(id(unit))
+        # Compare the MATCHED candidate occurrence, not the package-wide unit
+        # set: a surviving copy of `55 mg` in another sentence must not hide a
+        # `55 mg` -> `55 ml` change in this one (F129).
+        surviving = _fact_number_units([paired]) if paired is not None else {}
         seen = set()
         for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
             raw = match.group(0)
@@ -6699,12 +6823,11 @@ def _fact_unit_change_examples(base_units, cand_units, pairs=None,
             seen.add((num_key, printed_unit))
             others = surviving.get(num_key)
             if others and printed_unit not in others:
-                if paired is not None:
-                    cand_units_here = _fact_number_units([paired]).get(num_key, set())
-                    if _unit_change_is_correction(
-                            text, paired.get("text") or "", raw, printed_unit,
-                            cand_units_here, authority_text):
-                        continue
+                cand_units_here = others
+                if _unit_change_is_correction(
+                        text, paired.get("text") or "", raw, printed_unit,
+                        cand_units_here, authority_text):
+                    continue
                 changed.append((unit, f"{raw} {printed_unit}",
                                 sorted(u or "(unitless)" for u in others)))
     return changed
@@ -7114,14 +7237,25 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
         contract-bearing table (F199). A summary table with a
         `disposition`-like column must not demand one verdict per metric row.
         """
-        header = block.get("header") or []
-        if "#" in header and "paragraph" in header:
+        header = {str(h).strip().lower() for h in (block.get("header") or [])}
+        # The seeded table's OWN header shape, not any table that happens to
+        # call a column `#` and another `paragraph`: a session's appended
+        # summary/coverage table was forced through per-row disposition checks.
+        if ({"#", "document", "line", "paragraph"} <= header
+                and any("disposition" in h for h in header)):
+            # The exact-name lookup later reports a RENAMED column
+            # (`disposition notes`) as "no disposition column" (F190); a
+            # summary table without the seed's four identity columns is not
+            # the contract-bearing block (F169).
             return True
         for row in block.get("rows") or ():
             ref = str(row.get("#") or "").strip()
-            if ref and (not _expected_ref_set or ref in _expected_ref_set):
+            # A row only identifies the seed when the SEED's own identity set
+            # exists and the row matches it; otherwise every table with a `#`
+            # column would be treated as the disposition table.
+            if ref and ref in _expected_ref_set:
                 return True
-            if _norm_para(row.get("paragraph")) in _expected_paras:
+            if _expected_paras and _norm_para(row.get("paragraph")) in _expected_paras:
                 return True
         return False
 

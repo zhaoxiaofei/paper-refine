@@ -137,8 +137,10 @@ def test_f23_page_field_keeps_drawing() -> None:
     plain = ('<w:hdr ' + W + f'><w:p><w:r><w:t>Page </w:t></w:r>{PAGE}</w:p>'
              f'<w:p><w:r><w:t>2</w:t></w:r>{PAGE}</w:p></w:hdr>')
     pfix = fmt.page_field_fixes(plain)
-    check("F23 a text-only duplicate PAGE paragraph is still deleted",
-          len(pfix) == 1 and "<w:t>2</w:t>" not in fmt.apply_edits(plain, pfix), str(pfix))
+    # F037 (2026-11-15 08:17 run): static digits such as "2" are CONTENT, not
+    # a duplicate page number, so a text-bearing PAGE paragraph is kept.
+    check("F037 a text-bearing duplicate PAGE paragraph is kept",
+          pfix == [] and "<w:t>2</w:t>" in plain, str(pfix))
 
 
 # ---------------------------------------------------------------------------

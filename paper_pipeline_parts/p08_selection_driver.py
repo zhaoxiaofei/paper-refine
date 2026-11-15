@@ -358,27 +358,23 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
     ranges = [max(vals) - min(vals) for vid in field_ids
               for vals in (per[vid].get("own") or {}).values() if len(vals) >= 2]
     pq["within_direction_range_max"] = max(ranges) if ranges else 0
+    # F211: the panel-quality statistics use the SAME accepted comparisons the
+    # scoring loop used (`census_obs`), not a fresh scan of every comparison in
+    # an accepted sheet. An unissued label, an out-of-range score, an abstention
+    # or a duplicate opponent was rejected for scoring and must not shift the
+    # diagnostics either.
+    accepted_by_rec = {}
+    for _rid, _vid, _opp, _comp in census_obs:
+        accepted_by_rec.setdefault(_rid, []).append(_comp)
     for rec in accepted_recs:
-        # The SAME accepted roster scoring used: superseded, out-of-range and
-        # disabled sheets are already excluded above. Re-scanning every done
-        # sheet here let a superseded sheet change basis counts, calibration
-        # totals and judge means (F-053).
-        if not isinstance(rec.get("scores"), dict):
-            continue
-        vals = [c.get("score") for c in (rec["scores"].get("comparisons") or [])
-                if isinstance(c, dict) and is_int(c.get("score"))]
+        comps = accepted_by_rec.get(rec.get("id")) or []
+        vals = [int(c["score"]) for c in comps if is_int(c.get("score"))]
         if vals:
             pq["judge_means"][rec["id"]] = round(sum(vals) / len(vals), 3)
         # ---- graded-basis calibration (judge contract v2+) -----------------
-        # How many sheets carry a checkable basis, what tiers they claim, and
-        # where an integer contradicts its own ledger. Reported, never used for
-        # eligibility: the score statistics above stay the ranking input.
-        n_comps = 0
+        n_comps = len(comps)
         n_with_basis = 0
-        for c in (rec["scores"].get("comparisons") or []):
-            if not isinstance(c, dict):
-                continue
-            n_comps += 1
+        for c in comps:
             basis = str(c.get("basis") or "").strip().lower()
             if basis in BASIS_VALUES:
                 n_with_basis += 1
@@ -1086,6 +1082,22 @@ def invalidate_from_round(ctx: Ctx, r: int, reason: str) -> list:
     """
     R = ctx.rounds_count()
     touched = []
+    # F137: a certified decision and its published final_clean_version are the
+    # answer for the OLD chain. Once a round is invalidated their pins/rounds no
+    # longer exist, so archive them instead of leaving certified bytes on disk
+    # until a later `decide` happens to overwrite them.
+    _stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    _decision = ctx.reports_dir / "decision.json"
+    _clean_artifacts = sorted(ctx.root.glob("final_clean_version*"))
+    if _decision.exists() or _clean_artifacts:
+        _aside = unique_path(superseded_dir_of(ctx) / f"decision_artifacts.{_stamp}")
+        _aside.mkdir(parents=True, exist_ok=True)
+        if _decision.exists():
+            with contextlib.suppress(OSError):
+                shutil.move(str(_decision), str(_aside / _decision.name))
+        for _p in _clean_artifacts:
+            with contextlib.suppress(OSError):
+                shutil.move(str(_p), str(_aside / _p.name))
     for rr in range(int(r), int(R) + 1):
         rec = ctx.round_rec(rr)
         # A round that is being rebuilt must not leave a stale "winner" sitting

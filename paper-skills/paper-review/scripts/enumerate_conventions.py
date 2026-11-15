@@ -222,6 +222,19 @@ def _non_manuscript(name: str) -> bool:
     return _is_evidence(name, _NON_MANUSCRIPT_RE, _REPLY_RE)
 
 
+_TEX_VERBATIM_RE = re.compile(
+    r"\\begin\{(verbatim\*?|lstlisting|minted|Verbatim\*?)\}"
+    r".*?\\end\{\1\}", re.S)
+_TEX_COMMENT_RE = re.compile(r"(?<!\\)%.*$", re.M)
+
+
+def latex_source_text(text):
+    """LaTeX text with comments and verbatim/listing bodies blanked in place."""
+    def blank(m):
+        return re.sub(r"[^\n]", " ", m.group(0))
+    return _TEX_COMMENT_RE.sub(blank, _TEX_VERBATIM_RE.sub(blank, text or ""))
+
+
 def read_text_files(corpus: str):
     """(name, lines) for every text file under corpus, sorted by name."""
     out = []
@@ -237,6 +250,8 @@ def read_text_files(corpus: str):
                 text = open(path, encoding="utf-8", errors="replace").read()
             except OSError:
                 continue
+            if rel.lower().endswith((".tex", ".tex.txt", ".ltx", ".ltx.txt")):
+                text = latex_source_text(text)
             lines = text.split("\n")
             in_refs = False
             for i, line in enumerate(lines):
@@ -333,8 +348,7 @@ def collect_candidates(docs, min_len=5, min_count=1):
                 if len(key) < min_len:
                     continue
                 by_key[key][low] += 1
-                if len(where[(key, low)]) < 3:
-                    where[(key, low)].append((name, li, raw.strip()[:100]))
+                where[(key, low)].append((name, li, raw.strip()[:100]))
     cands = []
     for key, counter in sorted(by_key.items()):
         forms = sorted(counter)
@@ -344,7 +358,8 @@ def collect_candidates(docs, min_len=5, min_count=1):
             continue
         cands.append({"key": key, "forms": forms,
                       "counts": {f: counter[f] for f in forms},
-                      "examples": {f: where[(key, f)] for f in forms}})
+                      "examples": {f: where[(key, f)][:3] for f in forms},
+                      "occurrences": {f: where[(key, f)] for f in forms}})
     return cands
 
 
@@ -366,8 +381,7 @@ def collect_hyphen_families(docs, min_len=5, min_count=2):
                 if len(key) < min_len:
                     continue
                 forms[key][tok.lower()] += 1
-                if len(examples[(key, tok.lower())]) < 3:
-                    examples[(key, tok.lower())].append((name, li, raw.strip()[:100]))
+                examples[(key, tok.lower())].append((name, li, raw.strip()[:100]))
     out = []
     for key, counter in sorted(forms.items()):
         if len(counter) < 2:
@@ -378,7 +392,8 @@ def collect_hyphen_families(docs, min_len=5, min_count=2):
             continue
         out.append({"key": key, "forms": sorted(counter),
                     "counts": dict(counter),
-                    "examples": {f: examples[(key, f)] for f in counter}})
+                    "examples": {f: examples[(key, f)][:3] for f in counter},
+                    "occurrences": {f: examples[(key, f)] for f in counter}})
     return out
 
 
@@ -410,6 +425,16 @@ def write_outputs(rows, candidates, hyphens, out_dir):
         ex = "; ".join("%s:%d" % (l[0], l[1])
                        for f in c["forms"] for l in c["examples"][f][:1])
         md.append("| %d | %s | %s | %s | |" % (i, c["key"], forms, ex))
+    md += ["", "## Candidate family occurrences (one row per occurrence)", "",
+           "| # | family key | variant | document | line | excerpt | disposition |",
+           "|---|---|---|---|---|---|---|"]
+    _n = 0
+    for c in candidates:
+        for f in c["forms"]:
+            for (doc, line, excerpt) in (c.get("occurrences") or {}).get(f, []):
+                _n += 1
+                md.append("| %d | candidate:%s | %s | %s | %d | %s | |" % (
+                    _n, c["key"], f, doc, line, excerpt.replace("|", "\\|")))
     md += ["", "## Hyphenation / preverb families (surfaces differing only by hyphens)", "",
            "| # | family key | surface forms (counts) | example locations | disposition |",
            "|---|---|---|---|---|"]
@@ -418,6 +443,16 @@ def write_outputs(rows, candidates, hyphens, out_dir):
         ex = "; ".join("%s:%d" % (l[0], l[1])
                        for f in c["forms"] for l in c["examples"][f][:1])
         md.append("| %d | %s | %s | %s | |" % (i, c["key"], forms, ex))
+    md += ["", "## Hyphen family occurrences (one row per occurrence)", "",
+           "| # | family key | variant | document | line | excerpt | disposition |",
+           "|---|---|---|---|---|---|---|"]
+    _n = 0
+    for c in hyphens:
+        for f in c["forms"]:
+            for (doc, line, excerpt) in (c.get("occurrences") or {}).get(f, []):
+                _n += 1
+                md.append("| %d | hyphen:%s | %s | %s | %d | %s | |" % (
+                    _n, c["key"], f, doc, line, excerpt.replace("|", "\\|")))
     md.append("")
     with open(md_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(md) + "\n")
