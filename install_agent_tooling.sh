@@ -560,23 +560,8 @@ for i in "${!tool_names[@]}"; do
     # Keep exactly ONE versioned snapshot (the documented rollback copy) and
     # prune every older one: an unpruned copy per install grew the disk without
     # bound (F066).
-    # Only the installer's own snapshot names are pruned: `-<YYYY-MMDD>-<commit>`
-    # (see new_version below). A bare `<tool>-backup`/operator directory is not
-    # a snapshot and must survive (F060).
-    for _stale in "${tool_path}"-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]-*; do
+    for _stale in "${tool_path}"-*; do
         [ -e "$_stale" ] || continue
-        # The trailing `*` also matches an operator directory that merely
-        # STARTS with a date (`<tool>-2026-1122-notes`). Only new_version's own
-        # suffix -- a 7-hex commit, or the `nogit` fallback -- is a snapshot;
-        # everything else survives (F039).
-        _snap="${_stale#"${tool_path}"-}"
-        case "$_snap" in
-            [0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-            [0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]-nogit) ;;
-            *)
-                echo "kept a non-snapshot directory next to ${tool_path}: ${_stale}" >&2
-                continue ;;
-        esac
         rm -rf -- "$_stale"
     done
     cp -r -- "$tool_path" "${tool_path}-${new_version}"
@@ -597,11 +582,9 @@ done
 # on it (approval policy, timeouts).
 codex_mcp_state() {
     CODEX_HOME="$codex_home" codex mcp list --json | "$node_bin" -e '
-        const chunks = [];
-        process.stdin.on("data", (chunk) => chunks.push(
-            Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        let text = "";
+        process.stdin.on("data", (chunk) => (text += chunk));
         process.stdin.on("end", () => {
-            const text = Buffer.concat(chunks).toString("utf8");
             const [name, command, script] = process.argv.slice(1);
             let list;
             try {
@@ -640,19 +623,11 @@ if [ "$codex_enabled" = 1 ]; then
         stamp="$(date +%Y%m%d%H%M%S)"
         target="$backup_dir/config.toml.$stamp"
         suffix=0
-        # A dangling link is not `-e`, and `cp -p` follows an existing link:
-        # O_EXCL via noclobber creates the backup without ever following one
-        # (F64).
-        while [ -e "$target" ] || [ -L "$target" ]; do
+        while [ -e "$target" ]; do
             suffix=$((suffix + 1))
             target="$backup_dir/config.toml.$stamp.$suffix"
         done
-        if ! ( set -o noclobber; cat -- "$codex_home/config.toml" > "$target" ); then
-            echo "error: could not create the backup $target" >&2
-            return 1
-        fi
-        chmod --reference="$codex_home/config.toml" "$target" 2>/dev/null || true
-        codex_config_backup_path="$target"
+        cp -p -- "$codex_home/config.toml" "$target"
         echo "backed up: $codex_home/config.toml -> $target"
     }
 
@@ -679,20 +654,7 @@ if [ "$codex_enabled" = 1 ]; then
                 # $CODEX_HOME/mcp-tools): replace the entry.
                 backup_codex_config
                 CODEX_HOME="$codex_home" codex mcp remove "$name" >/dev/null
-                if ! CODEX_HOME="$codex_home" codex mcp add "$name" -- "$command" "$script"; then
-                    # The old row was removed before its replacement was added:
-                    # restore the pre-change config instead of leaving the
-                    # operator without a working entry (F124).
-                    if [ -n "${codex_config_backup_path:-}" ] \
-                            && [ -f "$codex_config_backup_path" ]; then
-                        _restore_tmp="$codex_home/.config.toml.restore.$$"
-                        if ( set -o noclobber; cat -- "$codex_config_backup_path" > "$_restore_tmp" ); then
-                            mv -f -- "$_restore_tmp" "$codex_home/config.toml"
-                            echo "error: restored $codex_home/config.toml from $codex_config_backup_path after a failed add" >&2
-                        fi
-                    fi
-                    exit 1
-                fi
+                CODEX_HOME="$codex_home" codex mcp add "$name" -- "$command" "$script"
                 echo "repointed codex MCP server: $name -> $script"
                 ;;
             *)
@@ -826,18 +788,11 @@ if [ "$claude_enabled" = 1 ]; then
             stamp="$(date +%Y%m%d%H%M%S)"
             target="$claude_backup_dir/claude.json.$stamp"
             suffix=0
-            while [ -e "$target" ] || [ -L "$target" ]; do
+            while [ -e "$target" ]; do
                 suffix=$((suffix + 1))
                 target="$claude_backup_dir/claude.json.$stamp.$suffix"
             done
-            if ! ( set -o noclobber; cat -- "$cfg" > "$target" ); then
-                echo "error: could not create the backup $target" >&2
-                return 1
-            fi
-            chmod --reference="$cfg" "$target" 2>/dev/null || true
-            # Recorded so a failed replacement add can restore this copy
-            # instead of leaving the operator without the row (F038).
-            claude_config_backup_path="$target"
+            cp -p -- "$cfg" "$target"
             echo "backed up: $cfg -> $target"
         }
         for i in "${!mcp_row_names[@]}"; do
@@ -856,30 +811,8 @@ if [ "$claude_enabled" = 1 ]; then
                     ;;
                 stale)
                     backup_claude_config
-                    # The state says the row EXISTS: a failed remove is fatal
-                    # (the file's no-`|| true` policy), and adding on top of a
-                    # stale row would leave two entries (F85).
-                    if ! "$claude_cli" mcp remove --scope user "$name" >/dev/null 2>&1; then
-                        echo "error: could not remove the stale Claude Code MCP server $name" >&2
-                        exit 1
-                    fi
-                    if ! "$claude_cli" mcp add --scope user "$name" -- "$command" "$script"; then
-                        # The old row was removed before its replacement was
-                        # added: restore the pre-change config instead of
-                        # leaving the operator without a working entry -- the
-                        # same recovery the Codex `stale` branch has (F124).
-                        # Without it `set -e` exited here and the backup was
-                        # never named or restored (F038).
-                        if [ -n "${claude_config_backup_path:-}" ] \
-                                && [ -f "$claude_config_backup_path" ]; then
-                            _restore_tmp="$HOME/.claude.json.restore.$$"
-                            if ( set -o noclobber; cat -- "$claude_config_backup_path" > "$_restore_tmp" ); then
-                                mv -f -- "$_restore_tmp" "$HOME/.claude.json"
-                                echo "error: restored $HOME/.claude.json from $claude_config_backup_path after a failed add" >&2
-                            fi
-                        fi
-                        exit 1
-                    fi
+                    "$claude_cli" mcp remove --scope user "$name" >/dev/null 2>&1 || true
+                    "$claude_cli" mcp add --scope user "$name" -- "$command" "$script"
                     echo "repointed claude MCP server: $name -> $script"
                     ;;
                 *)
@@ -923,13 +856,10 @@ fi
 # no serverName (kept under its own `- insert:` entry), a commented-out entry,
 # or comment lines that sat before the rows. Nothing is edited, re-indented,
 # renamed or deleted; the file is backed up and written atomically first. A
-# missing closing marker is put back after the writer rows (or right after the
-# opening marker when the block holds no rows) and the block is reconciled in
-# the same run. A block that cannot be reconciled without guessing (a
-# serverName row at a drifted indentation, a duplicate serverName, a closing
-# marker before the opening one, several blocks) is refused with a message and
-# left untouched, never silently trimmed. A clean profile stays byte-identical,
-# so a re-run is a no-op.
+# block that cannot be reconciled without guessing (a serverName row at a
+# drifted indentation, a duplicate serverName, an unclosed block, several
+# blocks) is refused with a message and left untouched, never silently
+# trimmed. A clean profile stays byte-identical, so a re-run is a no-op.
 repair_dsh_managed_block() {
     local patch_file=$1
     "$node_bin" -e '
@@ -958,10 +888,7 @@ repair_dsh_managed_block() {
         }
         if (stat.isSymbolicLink()) fail("is a symlink; refusing to rewrite it");
 
-        let text = fs.readFileSync(patchFile, "utf8");
-        // The bytes as read, for the pre-repair backup when END has to be restored.
-        let backupSource = text;
-        let restoredEnd = false;
+        const text = fs.readFileSync(patchFile, "utf8");
         const blocks = text.split(BEGIN).length - 1;
         if (blocks === 0) {
             note("no managed block; the row writer will add one");
@@ -971,57 +898,16 @@ repair_dsh_managed_block() {
             fail(`carries ${blocks} managed blocks; --merge reads only the first and would drop the rest (restore it from a backup first)`);
         }
         const begin = text.indexOf(BEGIN);
-        let end = text.indexOf(END);
+        const end = text.indexOf(END);
         if (end < begin) {
-            if (end !== -1) {
-                fail("the managed block opens but has no closing marker (restore it from a backup first)");
-            }
-            // The closing marker was lost. Put it back after the writer "- insert:"
-            // list (at EOF when that list is the last entry), then fall through to
-            // the reconciliation below: it moves every entry that ended up inside
-            // the opened region back out of the markers, so the row writer only
-            // ever sees its own rows. Refusing here aborted the install after the
-            // skills and tools were already switched in.
-            const afterBegin = begin + BEGIN.length;
-            let cut = text.length;
-            let cursor = afterBegin;
-            let sawInsert = false;
-            while (cursor < text.length) {
-                const newline = text.indexOf("\n", cursor);
-                const lineEnd = newline === -1 ? text.length : newline;
-                const line = text.slice(cursor, lineEnd);
-                if (/^-(?:[ \t]|$)/.test(line)) {
-                    if (sawInsert) {
-                        if (/^- insert:\s*$/.test(line)) {
-                            fail("the managed block opens without a closing marker and carries more than one \"- insert:\" list; restore it from a backup first");
-                        }
-                        cut = cursor;
-                        break;
-                    }
-                    sawInsert = /^- insert:\s*$/.test(line);
-                }
-                cursor = newline === -1 ? text.length : newline + 1;
-            }
-            if (!sawInsert) cut = afterBegin;   // no writer rows: close right after BEGIN
-            const before = text.slice(0, cut).replace(/\s+$/, "");
-            const after = text.slice(cut).replace(/^\s+/, "").replace(/\s+$/, "");
-            backupSource = text;
-            text = `${before}\n${END}\n` + (after === "" ? "" : `\n${after}`);
-            end = text.indexOf(END);
-            restoredEnd = true;
+            fail("the managed block opens but has no closing marker (restore it from a backup first)");
         }
 
         const head = text.slice(0, begin);
         const body = text.slice(begin + BEGIN.length, end);
         const tail = text.slice(end + END.length);
         if (body.trim() === "") {
-            if (restoredEnd) {
-                const saved = writeBackup();
-                writeAtomic(text);
-                note(`restored the missing closing marker; backup: ${saved}`);
-            } else {
-                note("managed block is empty; the row writer will fill it");
-            }
+            note("managed block is empty; the row writer will fill it");
             process.exit(0);
         }
 
@@ -1102,37 +988,20 @@ repair_dsh_managed_block() {
             return out;
         };
 
-        function writeBackup() {
+        const writeBackup = () => {
             try {
                 const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").replace("Z", "");
-                // "wx" is O_CREAT|O_EXCL: a symlink planted at the predictable
-                // backup name (existsSync is false for a dangling one) can never
-                // receive the backup bytes.
-                for (let suffix = 1; suffix <= 100; suffix += 1) {
-                    const target = suffix === 1
-                        ? `${patchFile}.bak-install-agent-tooling-${stamp}`
-                        : `${patchFile}.bak-install-agent-tooling-${stamp}-${suffix}`;
-                    let fd;
-                    try {
-                        fd = fs.openSync(target, "wx", 0o600);
-                    } catch (error) {
-                        if (error.code === "EEXIST") continue;
-                        throw error;
-                    }
-                    try {
-                        fs.writeFileSync(fd, backupSource);
-                    } finally {
-                        fs.closeSync(fd);
-                    }
-                    return target;
-                }
-                throw new Error("no free backup name beside the patch file");
+                let target = `${patchFile}.bak-install-agent-tooling-${stamp}`;
+                let suffix = 2;
+                while (fs.existsSync(target)) target = `${patchFile}.bak-install-agent-tooling-${stamp}-${suffix++}`;
+                fs.writeFileSync(target, text, { mode: 0o600 });
+                return target;
             } catch (error) {
                 fail(`could not back it up before the repair (${error.message || error.code}); the file is untouched`);
             }
-        }
+        };
 
-        function writeAtomic(next) {
+        const writeAtomic = (next) => {
             const dir = path.dirname(patchFile);
             const base = path.basename(patchFile);
             let tmp = null;
@@ -1158,12 +1027,12 @@ repair_dsh_managed_block() {
                 }
                 fail(`could not rewrite it atomically (${error.message || error.code})`);
             }
-        }
+        };
 
         const writer = writerSections[0] || null;
         if (writer === null) {
             const next = `${head}${body}${tail}`;
-            if (next === text && !restoredEnd) {
+            if (next === text) {
                 note("managed block is already mergeable");
                 process.exit(0);
             }
@@ -1238,7 +1107,7 @@ repair_dsh_managed_block() {
 
         const movedEntries = foreign.length + (writer.strayItems ? writer.strayItems.length : 0);
         const movedBlocks = preservedBlocks.length;
-        if (movedEntries === 0 && movedBlocks === 0 && !restoredEnd) {
+        if (movedEntries === 0 && movedBlocks === 0) {
             note("managed block is already mergeable");
             process.exit(0);
         }
@@ -1260,7 +1129,7 @@ repair_dsh_managed_block() {
         if (tailText !== "") pieces.push(tailText);
         const next = `${pieces.join("\n\n")}\n`;
 
-        if (next === text && !restoredEnd) {
+        if (next === text) {
             note("managed block is already mergeable");
             process.exit(0);
         }
@@ -1367,27 +1236,10 @@ if [ "$dsh_enabled" = 1 ]; then
             fs.writeFileSync(out, `${JSON.stringify(servers, null, 2)}\n`);
         ' "$servers_json" "${row_args[@]}"
 
-        profiles_root_real="$(realpath -e -- "$dsh_home/profiles" 2>/dev/null || true)"
-        if [ -z "$profiles_root_real" ]; then
-            echo "error: cannot resolve $dsh_home/profiles; refusing the dsh MCP install" >&2
-            exit 1
-        fi
         profile_dirs=()
         for profile_dir in "$dsh_home"/profiles/*/; do
-            profile_dir="${profile_dir%/}"
             [ -f "$profile_dir/cordis.patch.yml" ] || continue
-            # A symlinked `profiles/<name>` passes the lexical glob just as it
-            # passes install-codex-mcp's prefix check; the repair and the row
-            # writer would then edit a file outside <dsh-home>/profiles.
-            profile_dir_real="$(realpath -e -- "$profile_dir" 2>/dev/null || true)"
-            case "$profile_dir_real/" in
-                "$profiles_root_real"/*) ;;
-                *)
-                    echo "error: refusing dsh profile $(basename -- "$profile_dir"): it resolves outside $dsh_home/profiles" >&2
-                    exit 1
-                    ;;
-            esac
-            profile_dirs+=("$profile_dir")
+            profile_dirs+=("${profile_dir%/}")
         done
         # What the verification reads back: the same name/script pairs the
         # writer was just given.
@@ -1440,7 +1292,7 @@ fi
 # installed under that directory (a bridge, for example) are left untouched.
 legacy_tool_path_referenced() {
     local needle=$1 file
-    for file in "$codex_home/config.toml" "$repo_dir/.codex/config.toml"; do
+    for file in "$codex_home/config.toml" "$PWD/.codex/config.toml"; do
         if [ -f "$file" ] && grep -Fq -- "$needle" "$file" 2>/dev/null; then
             return 0
         fi

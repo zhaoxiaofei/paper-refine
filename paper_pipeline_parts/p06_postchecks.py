@@ -79,11 +79,14 @@ def _signal_names_this_run(data, rec: dict, name: str) -> bool:
     if name == SCORES_FILE:
         # The judge's sheet carries an OPAQUE target token while the run record
         # holds the raw version id: comparing the two id spaces rejected every
-        # modern stray sheet. A sheet that names THIS run is this run's signal.
-        if data.get("run_id") == rec.get("id"):
-            return True
-        if rec.get("target_id") and data.get("target_id") not in (None, rec["target_id"]):
-            return False
+        # modern stray sheet. A sheet that names THIS run is this run's signal;
+        # an ANONYMOUS sheet names nothing and is never adopted (F189).
+        rid, tid = data.get("run_id"), data.get("target_id")
+        if rid is not None:
+            return rid == rec.get("id")
+        if tid is not None:
+            return not rec.get("target_id") or tid == rec.get("target_id")
+        return False
     elif data.get("stage") != rec.get("kind"):
         return False
     return data.get("run_id") in (None, rec.get("id"))
@@ -876,8 +879,23 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
     # cross-checked against an incomplete list.
     cold_start_rows, _remap = cold_start_findings_for_merge(
         [f.get("id") for f in findings], cold_start_findings_rows(ctx, r))
+    audit = audit_record_of(ctx, r)
+    if audit:
+        # The auditor's drop/add filter applies to the cold-start X-9xx rows
+        # too. Without it a dropped X-9xx stayed in a rewrite/integration arm's
+        # self-report cross-check (F159).
+        drops = {str(d.get("id") or "").strip()
+                 for d in (audit.get("dispositions") or []) if isinstance(d, dict)
+                 and str(d.get("verdict") or "").strip().lower() == "drop"}
+        cold_start_rows = [f for f in cold_start_rows
+                           if str(f.get("id") or "").strip() not in drops]
     have = {str(f.get("id")) for f in findings}
     findings += [f for f in cold_start_rows if str(f.get("id")) not in have]
+    if audit:
+        have = {str(f.get("id")) for f in findings}
+        findings += [f for f in (audit.get("adds") or [])
+                     if isinstance(f, dict)
+                     and str(f.get("id") or "").strip() not in have]
     return findings
 
 

@@ -1754,6 +1754,18 @@ def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
                   if f["kind"] == "item" and f.get("citationID")}
     out_items = {f["citationID"]: f for f in out_fields
                  if f["kind"] == "item" and f.get("citationID")}
+    if base_items and out_items and not (set(base_items) & set(out_items)):
+        # Every baseline citationID replaced by new ones is the SAME loss as
+        # "all fields deleted": Zotero can no longer repair the fields from the
+        # base. Counting fields missed it (F103).
+        errors.append(
+            f"ALL {len(base_items)} baseline citationID(s) were replaced: deleted "
+            f"{', '.join(sorted(base_items)[:5])}"
+            + (f" (+{len(base_items) - 5} more)" if len(base_items) > 5 else "")
+            + f"; added {', '.join(sorted(out_items)[:5])}"
+            + (f" (+{len(out_items) - 5} more)" if len(out_items) > 5 else "")
+            + ". A version may edit fields in place, but replacing every live citationID "
+              "removes the only baseline Zotero can repair from")
     missing_visible = Counter()
     for cid, f in base_items.items():
         if cid in out_items:

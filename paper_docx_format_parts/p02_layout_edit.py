@@ -3145,12 +3145,43 @@ def style_convention_rows(paras: list, styles: dict, doc: str) -> list:
 _IMAGE_EXT_RE = re.compile(r"\.(?:png|jpe?g|gif|bmp|tiff?|svg|emf|wmf)$", re.I)
 
 
+def _exif_orientation(tiff: bytes) -> int:
+    """EXIF Orientation tag (274) of a TIFF/EXIF block, or 1 when absent."""
+    try:
+        if tiff[:2] == b"II":
+            endian = "<"
+        elif tiff[:2] == b"MM":
+            endian = ">"
+        else:
+            return 1
+        off = struct.unpack(endian + "I", tiff[4:8])[0]
+        if off + 2 > len(tiff):
+            return 1
+        count = struct.unpack(endian + "H", tiff[off:off + 2])[0]
+        for k in range(count):
+            base = off + 2 + 12 * k
+            if base + 12 > len(tiff):
+                break
+            tag, typ = struct.unpack(endian + "HH", tiff[base:base + 4])
+            if tag != 274 or typ != 3:
+                continue
+            return struct.unpack(endian + "H", tiff[base + 8:base + 10])[0]
+    except (struct.error, IndexError, ValueError):
+        return 1
+    return 1
+
+
 def image_pixel_size(data: bytes):
     """(width, height) of PNG/JPEG/GIF/BMP/TIFF/SVG/EMF/WMF bytes, or None.
 
     Vector art carries its own aspect ratio too: an SVG's `viewBox`/width+
     height, an EMF header's `rclFrame` and a placeable WMF's bounding box. The
     unit does not matter (only the ratio is compared).
+
+    A JPEG's stored SOF dimensions are the UNROTATED pixel matrix. EXIF
+    Orientation 5-8 makes the renderer display it rotated 90 degrees, so the
+    rendered ratio is the inverse; returning the stored order made the ratio
+    repair "correct" a correctly displayed portrait figure (F094).
     """
     try:
         if data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -3161,6 +3192,7 @@ def image_pixel_size(data: bytes):
             return (w, h) if w and h else None
         if data[:2] == b"\xff\xd8":
             i = 2
+            orientation = 1
             while i + 9 < len(data):
                 if data[i] != 0xFF:
                     i += 1
@@ -3172,9 +3204,16 @@ def image_pixel_size(data: bytes):
                 if marker == 0xD9:
                     break
                 seglen = struct.unpack(">H", data[i + 2:i + 4])[0]
+                if marker == 0xE1:
+                    # APP1/EXIF: record Orientation before the SOF segment.
+                    payload = data[i + 4:i + 2 + seglen]
+                    if payload[:6] == b"Exif\x00\x00":
+                        orientation = _exif_orientation(payload[6:])
                 if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
                               0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
                     h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                    if orientation in (5, 6, 7, 8):
+                        w, h = h, w
                     return (w, h) if w and h else None
                 i += 2 + seglen
             return None

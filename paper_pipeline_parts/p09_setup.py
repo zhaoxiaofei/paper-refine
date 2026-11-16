@@ -314,6 +314,7 @@ def cmd_setup(args) -> None:
             _saved_scope = [str(x).strip().lower() for x in _saved_scope if str(x).strip()]
             _saved_plan = {
                 "rounds": rounds,
+                "judges": list(judges_list),
                 "rewrites": list(rewrites),
                 "revises": list(revises),
                 "integrators": list(integrators),
@@ -338,6 +339,11 @@ def cmd_setup(args) -> None:
             if rounds != 1:
                 rounds = 1
                 forced.append("rounds=1 (the concerns are addressed once)")
+            if judges_list != [judges_list[0]]:
+                # The per-round judge list must not outlive the forced
+                # single-round plan (F182).
+                judges_list = judges_list[:1]
+                forced.append(f"judges={judges_list[0]} (one round)")
             if rewrites != [0] * rounds:
                 rewrites = [0] * rounds
                 forced.append("rewrites=0 (a major/minor revision may not rewrite the manuscript)")
@@ -494,7 +500,7 @@ def cmd_setup(args) -> None:
         die("--source must name a non-empty directory: an empty value resolves to the current "
             "working directory and would copy the whole tree (including .git) as the pristine "
             "corpus", code=2)
-    source = Path(args.source).resolve()
+    source = Path(os.path.expanduser(str(args.source))).resolve()
     if not source.is_dir():
         die(f"--source directory not found: {source}", code=2)
     _legacy = legacy_input_area_problems(source)
@@ -562,8 +568,11 @@ def cmd_setup(args) -> None:
             for item in journal_feedback:
                 q = Path(item).expanduser()
                 if not q.is_absolute():
-                    root_rel = Path(args.root).resolve() / q
-                    q = root_rel if root_rel.exists() else (Path.cwd() / q)
+                    # The help says a relative --journal-feedback path is
+                    # resolved against --root. The old root_exists fallback
+                    # silently consumed a same-named cwd file on a fresh root
+                    # (F138).
+                    q = Path(args.root).resolve() / q
                 if not q.is_file():
                     die(f"--journal-feedback {item!r} does not exist (looked for {q}).", code=2)
                 _resolved_feedback.append(str(q.resolve()))
@@ -662,6 +671,10 @@ def cmd_setup(args) -> None:
               f"{_hint}\nPass --pipeline-snapshot-ok only when freezing this exact snapshot is "
               f"what you intend.", code=2)
     _pipeline_state = dict(_ident)
+    # The freeze INSTANT, not the maintained file's mtime: copy2 preserves the
+    # source mtime, so reporting that as "frozen at" named the wrong event
+    # (F191).
+    _pipeline_state["frozen_at"] = utcnow()
     if _snap and _snap.get("origin_path"):
         _pipeline_state.update(snapshot_of=_snap.get("root"),
                                snapshot_origin=_snap.get("origin_path"))
@@ -713,8 +726,16 @@ def cmd_setup(args) -> None:
         # directory or file, so it is skipped like every other link (including
         # links nested inside an evidence area).
         at_source_root = Path(_dir).resolve() == _source_root
+        # VCS metadata, bytecode caches and build scratch are not corpus
+        # content. A source directory that is itself a checkout carried them
+        # into non_revised/ and every later digest (F228).
+        _scratch = {".git", "__pycache__", ".pytest_cache", ".mypy_cache",
+                    ".ruff_cache", ".venv", "venv", "node_modules", "build", "dist"}
         for name in names:
             path = Path(_dir) / name
+            if name in _scratch or name.endswith(".egg-info"):
+                out.append(name)
+                continue
             if os.path.islink(path):
                 canonical = (at_source_root and is_evidence_rel(name)
                              and _canonical_source_link(path) is not None)
@@ -985,8 +1006,12 @@ def cmd_setup(args) -> None:
     # must refuse to touch it (the interrupted-setup branch above keys on this).
     try:
         marker.unlink()
-    except OSError:
-        pass
+    except OSError as e:
+        # Swallowing this left a marker on a COMPLETE root with nothing telling
+        # the operator; the next setup's recovery branch keys on it (F183).
+        print(f"[setup] WARNING: could not remove the setup marker {marker}: {e}. "
+              f"The root is complete and usable; remove the marker manually so a later "
+              f"setup does not mistake it for an interrupted run.", file=sys.stderr)
     # Round r's field is {original} + {pins from earlier rounds} + the round's
     # fresh arms (a1, M rewrites, N revisions and the integrated candidates the
     # round's integrator mask selects); a1 always deduplicates against the
@@ -3348,8 +3373,9 @@ def cmd_set_revision_mode(args) -> None:
         for item in named:
             q = Path(item).expanduser()
             if not q.is_absolute():
-                root_rel = ctx.root / q
-                q = root_rel if root_rel.exists() else (Path.cwd() / q)
+                # Deterministic root-relative resolution, matching the help
+                # text; never fall back to cwd (F138).
+                q = ctx.root / q
             if not q.is_file():
                 die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
             if mode_arg != JOURNAL_MODE_LLM:
@@ -3399,6 +3425,7 @@ def cmd_set_revision_mode(args) -> None:
                     "cold_start_review": (str(ctx.cfg.get("cold_start_review")).lower()
                                           if "cold_start_review" in ctx.cfg else None),
                     "rounds": int(ctx.cfg.get("rounds") or DEFAULTS["rounds"]),
+                    "judges": list(ctx.cfg.get("judges") or DEFAULTS["judges"]),
                     "rewrites": list(ctx.cfg.get("rewrites") or DEFAULTS["rewrites"]),
                     "revises": list(ctx.cfg.get("revises") or DEFAULTS["revises"]),
                     "integrators": list(ctx.cfg.get("integrators") or DEFAULTS["integrators"]),
@@ -3416,6 +3443,14 @@ def cmd_set_revision_mode(args) -> None:
             if rounds != 1:
                 ctx.cfg["rounds"] = 1
                 forced.append("rounds=1")
+            _judges = list(ctx.cfg.get("judges") or DEFAULTS["judges"])
+            if len(_judges) != 1:
+                ctx.cfg["judges"] = _judges[:1]
+                forced.append(f"judges={_judges[:1]} (one round)")
+            _scope = list(ctx.cfg.get("review_scope") or DEFAULTS["review_scope"])
+            if len(_scope) != 1:
+                ctx.cfg["review_scope"] = _scope[:1]
+                forced.append(f"review_scope={_scope[:1]} (one round)")
             if list(ctx.cfg.get("rewrites") or []) != [0]:
                 ctx.cfg["rewrites"] = [0]
                 forced.append("rewrites=0")
@@ -3444,7 +3479,8 @@ def cmd_set_revision_mode(args) -> None:
             # `audit=off` while `journal_is_scoped` was already false -- neither
             # the documented default three-round workflow nor a scoped revision.
             saved = ctx.cfg.pop("scoped_mode_restore", None) or {}
-            for _key in ("rounds", "rewrites", "revises", "review_scope", "integrators"):
+            for _key in ("rounds", "judges", "rewrites", "revises", "review_scope",
+                         "integrators"):
                 _value = saved.get(_key, DEFAULTS[_key])
                 ctx.cfg[_key] = list(_value) if isinstance(_value, list) else _value
                 forced.append(f"{_key}={ctx.cfg[_key]} (restored)")
@@ -4111,6 +4147,13 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     retries = _retries
     retry_backoff = _backoff
     retry_backoff_max = _backoff_max
+    # A custom --agent-cmd/PAPER_AGENT_CMD bypasses model selection entirely:
+    # recording the endpoint/model/prep as if they were active made the
+    # invocation trace false for those runs (F194). Mark them ignored.
+    _custom_agent_cmd = bool(_agent_cmd_override(getattr(args, "agent_cmd", None),
+                                                 use_env=True))
+    _custom_judge_cmd = bool(_agent_cmd_override(getattr(args, "judge_agent_cmd", None),
+                                                use_env=True))
     ctx.state["run_policy"] = {
         "agent": agent_label,
         "agent_harness": agent_harness,
@@ -4119,6 +4162,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         "agent_endpoint": (_record_agent_model
                            if agent_model_is_endpoint(agent_model) else None),
         "agent_model_prep_keys": sorted(_new_prep) if _new_prep else [],
+        # Values stay recorded (the pair still labels the run), but an ignored
+        # flag says a custom --agent-cmd bypassed them (F194).
+        "agent_model_ignored": ("--agent-cmd" if _custom_agent_cmd else None),
         "agent_legacy": None,
         "judge_agent": judge_label,
         "judge_agent_harness": judge_harness,
@@ -4126,6 +4172,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         "judge_agent_model_name": (None if not agent_model_is_endpoint(judge_model)
                                    else _judge_name),
         "judge_agent_model_prep_keys": sorted(_judge_prep) if _judge_prep else [],
+        "judge_agent_model_ignored": ("--judge-agent-cmd" if _custom_judge_cmd else None),
         "jobs": _jobs, "timeout": timeout,
         "judge_timeout": judge_timeout, "retries": retries,
         "attempts_per_run": retries + 1,

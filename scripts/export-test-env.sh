@@ -137,8 +137,21 @@ rm -f "${STEM}.conda.packages.txt"
 # can or should install. VCS pins (`pkg @ git+https://...`) are kept.
 for f in "${STEM}.requirements.list_e.txt" "${STEM}.requirements.list_e_no_pypi.txt"; do
   [[ -f "$f" ]] || continue
-  grep -v -E '^pip @ file://|^[A-Za-z0-9_.\-]+ @ file:///home/' "$f" > "$f.tmp" || true
-  mv "$f.tmp" "$f"
+  # grep exit 1 means "no line matched" (the temp file is a valid empty
+  # record); exit >1 is a read error, and moving its partial output would
+  # destroy a good pip record (F025).
+  # `|| rc=$?` keeps the non-zero status from tripping `set -e`: a plain
+  # `grep` followed by `rc=$?` exits the shell at the grep, making the 0/1
+  # branch below unreachable (R02).
+  rc=0
+  grep -v -E '^pip @ file://|^[A-Za-z0-9_.\-]+ @ file:///home/' "$f" > "$f.tmp" || rc=$?
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
+    mv "$f.tmp" "$f"
+  else
+    rm -f "$f.tmp"
+    echo "error: could not sanitise $f (grep exit $rc); record left unchanged" >&2
+    exit 1
+  fi
 done
 
 # The DECLARED test dependencies and their transitive closure, at the exact

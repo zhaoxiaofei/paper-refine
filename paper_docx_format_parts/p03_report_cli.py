@@ -2217,7 +2217,7 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         # "refresh, re-run zotero-check, and only then flatten", and flattening
         # a stale document freezes the wrong numbers in the submission copy (no
         # later refresh can repair a field that is no longer a field).
-        field_parts = [(name, parts[name].decode("utf-8", "replace"))
+        field_parts = [(name, _ooxml_part_codec(parts[name])[0])
                        for name in sorted(parts)
                        if name in ZOTERO_FIELD_PARTS
                        or ZOTERO_FIELD_AUX_PARTS_RE.search(name)]
@@ -2280,10 +2280,10 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             if not (_name in ZOTERO_FIELD_PARTS
                     or ZOTERO_FIELD_AUX_PARTS_RE.search(_name)):
                 continue
-            _txt = parts_new[_name].decode("utf-8", "replace")
+            _txt, _encode = _ooxml_part_codec(parts_new[_name])
             _new, _removed = _unlink_fields(_txt)
             if _removed:
-                parts_new[_name] = _new.encode("utf-8")
+                parts_new[_name] = _encode(_new)
                 changes.append(f"unlinked {_removed} Zotero field(s) in "
                                f"{posixpath.basename(_name)}")
     # Write to a sibling temp and publish only after verification: a failed
@@ -2351,7 +2351,7 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     for name, (_axml, arels) in aux.items():
         if name not in referenced_aux:
             continue
-        fixed = parts_new.get(name, _axml.encode("utf-8")).decode("utf-8", "replace")
+        fixed = _ooxml_part_codec(parts_new.get(name, _axml.encode("utf-8")))[0]
         _aux_rows, _aux_fixes = drawing_geometry_rows(fixed, arels, sizes, src.name,
                                                       policy)
         aux_remaining += [r["rule"] for r in _aux_rows
@@ -2709,10 +2709,10 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     prose. Every substitution is reported in `footer_replaced`.
     """
     try:
-        tdoc = tpkg.read("word/document.xml").decode("utf-8", "replace")
-        trels = (tpkg.read("word/_rels/document.xml.rels").decode("utf-8", "replace")
+        tdoc = ooxml_part_text(tpkg.read("word/document.xml"))
+        trels = (ooxml_part_text(tpkg.read("word/_rels/document.xml.rels"))
                  if "word/_rels/document.xml.rels" in tnames else "")
-        tset = (tpkg.read("word/settings.xml").decode("utf-8", "replace")
+        tset = (ooxml_part_text(tpkg.read("word/settings.xml"))
                 if "word/settings.xml" in tnames else "")
     except (KeyError, OSError, RuntimeError, NotImplementedError):
         return {}
@@ -2757,7 +2757,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         copied.append(dest_name)
         rels_name = f"word/_rels/{src_name}.rels"
         if rels_name in tnames:
-            rxml = tpkg.read(rels_name).decode("utf-8", "replace")
+            rxml, rxml_encode = _ooxml_part_codec(tpkg.read(rels_name))
             for rm in _rels_entries(rxml):
                 if rm["type"] != "image":
                     continue
@@ -2782,8 +2782,8 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
                     r"(Target\s*=\s*)([\"'])" + re.escape(media) + r"\2",
                     lambda mm: mm.group(1) + mm.group(2) + rel_target + mm.group(2),
                     rxml)
-            parts[f"word/_rels/{dest_name}.rels"] = rxml.encode("utf-8")
-        hdr = tpkg.read(full).decode("utf-8", "replace")
+            parts[f"word/_rels/{dest_name}.rels"] = rxml_encode(rxml)
+        hdr = ooxml_part_text(tpkg.read(full))
         issued[dest_name] = bool(re.search(r"<w:drawing|<w:pict|<v:imagedata|<a:blip", hdr))
         return True
 
@@ -2824,7 +2824,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         target = target_of("footer", role)
         if not target:
             return False
-        xml = tpkg.read(f"word/{target}").decode("utf-8", "replace")
+        xml = ooxml_part_text(tpkg.read(f"word/{target}"))
         if not re.search(r'<w:instrText[^>]*>[^<]*\bPAGE\b'
                          r'|<w:fldSimple[^>]*w:instr="[^"]*\bPAGE\b', xml, re.I):
             return False
@@ -2869,7 +2869,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     out["logo"] = bool(issued.get(out.get("header_first", ""), False))
     out["copied"] = copied
     # content-type overrides for the new parts + media defaults
-    ct = parts.get("[Content_Types].xml", b"").decode("utf-8", "replace")
+    ct, ct_encode = _ooxml_part_codec(parts.get("[Content_Types].xml", b""))
     for name in copied:
         kind = "header" if name.startswith("header") else "footer"
         if f'PartName="/word/{name}"' not in ct:
@@ -2884,9 +2884,10 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         if ctype and f'Extension="{ext}"' not in ct:
             ct = ct.replace("</Types>", f'<Default Extension="{ext}" ContentType="{ctype}"/>'
                                        f'</Types>')
-    parts["[Content_Types].xml"] = ct.encode("utf-8")
+    parts["[Content_Types].xml"] = ct_encode(ct)
     # document relationships (fresh ids)
-    rels = parts.get("word/_rels/document.xml.rels", b"").decode("utf-8", "replace")
+    rels, rels_encode = _ooxml_part_codec(
+        parts.get("word/_rels/document.xml.rels", b""))
     used = set(re.findall(r'Id="([^"]+)"', rels))
     n = 2001
     for key, dest in (("header_default", out.get("header_default")),
@@ -2908,7 +2909,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
                             f'officeDocument/2006/relationships/{kind}" Target="{dest}"/>'
                             f'</Relationships>')
         out[key + "_rid"] = rid
-    parts["word/_rels/document.xml.rels"] = rels.encode("utf-8")
+    parts["word/_rels/document.xml.rels"] = rels_encode(rels)
     return out
 
 
@@ -2927,10 +2928,8 @@ def template_style_roles(template: Path) -> dict:
             problem = _docx_zip_problem(tpkg)
             if problem:
                 raise OSError(problem)
-            styles = _docx_xml_part_guarded(
-                tpkg, "word/styles.xml").decode("utf-8", "replace")
-            doc = _docx_xml_part_guarded(
-                tpkg, "word/document.xml").decode("utf-8", "replace")
+            styles = ooxml_part_text(_docx_xml_part_guarded(tpkg, "word/styles.xml"))
+            doc = ooxml_part_text(_docx_xml_part_guarded(tpkg, "word/document.xml"))
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return {}
     roles = {"headings": {}}
@@ -3647,7 +3646,7 @@ def _with_even_odd_headers(parts: dict) -> bool:
     `w:characterSpacingControl`, or before the first later element present.
     Returns True when the setting was added (the package is modified in place).
     """
-    ct = parts.get("[Content_Types].xml", b"").decode("utf-8", "replace")
+    ct, ct_encode = _ooxml_part_codec(parts.get("[Content_Types].xml", b""))
     settings = parts.get("word/settings.xml")
     if settings is None:
         parts["word/settings.xml"] = (
@@ -3659,8 +3658,9 @@ def _with_even_odd_headers(parts: dict) -> bool:
                 "</Types>", '<Override PartName="/word/settings.xml" ContentType='
                             '"application/vnd.openxmlformats-officedocument.wordprocessingml.'
                             'settings+xml"/></Types>')
-            parts["[Content_Types].xml"] = ct.encode("utf-8")
-        rels = parts.get("word/_rels/document.xml.rels", b"").decode("utf-8", "replace")
+            parts["[Content_Types].xml"] = ct_encode(ct)
+        rels, rels_encode = _ooxml_part_codec(
+            parts.get("word/_rels/document.xml.rels", b""))
         if "relationships/settings" not in rels:
             used = set(re.findall(r'Id="([^"]+)"', rels))
             n = 3001
@@ -3671,7 +3671,7 @@ def _with_even_odd_headers(parts: dict) -> bool:
                 f'<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/'
                 f'officeDocument/2006/relationships/settings" Target="settings.xml"/>'
                 f"</Relationships>")
-            parts["word/_rels/document.xml.rels"] = rels.encode("utf-8")
+            parts["word/_rels/document.xml.rels"] = rels_encode(rels)
         return True
     text, settings_encode = _ooxml_part_codec(settings)
     if is_on(text, "evenAndOddHeaders"):
@@ -3765,14 +3765,14 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     document's references. Returns {old numId: new numId} for what it carried;
     a numId the template DOES define keeps the template's definition.
     """
-    tpl_numbering = parts.get("word/numbering.xml", b"").decode("utf-8", "replace")
+    tpl_numbering = _ooxml_part_codec(parts.get("word/numbering.xml", b""))[0]
     if not tpl_numbering or "</w:numbering>" not in tpl_numbering:
         return {}
     doc_names = [n for n in sorted(parts) if doc_part_re.fullmatch(n)]
     referenced = set()
     for name in doc_names:
         referenced |= set(re.findall(r'<w:numId(?=[\s/>])[^>]*w:val="(\d+)"',
-                                     parts[name].decode("utf-8", "replace")))
+                                     _ooxml_part_codec(parts[name])[0]))
     defined = set(re.findall(r'<w:num(?=[\s/>])[^>]*w:numId="(\d+)"', tpl_numbering))
     missing = sorted(referenced - defined, key=lambda s: (len(s), s))
     if not missing:
@@ -3839,16 +3839,16 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     # a template that already defines one made the merged part run
     # `abstractNum, num, abstractNum, num`, and `docx validate` rejected it
     # ("abstractNum: This element is not expected. Expected is num").
-    parts["word/numbering.xml"] = _reorder_numbering_groups(
-        parts["word/numbering.xml"].decode("utf-8", "replace"),
-        "".join(pic_blocks), "".join(abs_blocks), "".join(num_blocks)).encode("utf-8")
+    _num_xml, _num_encode = _ooxml_part_codec(parts["word/numbering.xml"])
+    parts["word/numbering.xml"] = _num_encode(_reorder_numbering_groups(
+        _num_xml, "".join(pic_blocks), "".join(abs_blocks), "".join(num_blocks)))
     for name in doc_names:
-        xml = parts[name].decode("utf-8", "replace")
+        xml, _doc_encode = _ooxml_part_codec(parts[name])
         new_xml = re.sub(
             r'(<w:numId(?=[\s/>])[^>]*w:val=")(\d+)(")',
             lambda m: m.group(1) + num_map.get(m.group(2), m.group(2)) + m.group(3), xml)
         if new_xml != xml:
-            parts[name] = new_xml.encode("utf-8")
+            parts[name] = _doc_encode(new_xml)
     return num_map
 
 
@@ -5384,7 +5384,7 @@ def referenced_header_footer_parts(parts: dict, document_xml: str) -> set:
     rels_name = "word/_rels/document.xml.rels"
     if rels_name not in parts:
         return set()
-    rels_xml = parts[rels_name].decode("utf-8", "replace") \
+    rels_xml = _ooxml_part_codec(parts[rels_name])[0] \
         if isinstance(parts[rels_name], bytes) else str(parts[rels_name])
     targets = {}
     for rel in _rels_entries(rels_xml):
@@ -6340,10 +6340,10 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
             # An orphan part is not printed; repairing it contradicts the
             # referenced-only policy the scanner and `fix` already follow.
             continue
-        part = data[name].decode("utf-8", "replace")
+        part, part_encode = _ooxml_part_codec(data[name])
         part_edits = page_field_fixes(part)
         if part_edits:
-            data[name] = apply_edits(part, part_edits).encode("utf-8")
+            data[name] = part_encode(apply_edits(part, part_edits))
             report["changes"].append(f"removed {len(part_edits)} duplicate PAGE field "
                                      f"paragraph(s) from {name}")
     if not report["changes"]:
@@ -6370,7 +6370,7 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
             if name not in referenced_aux:
                 continue
             remaining_page += [r for r in page_field_rows(
-                [(name, data[name].decode("utf-8", "replace"))], out.name)
+                [(name, _ooxml_part_codec(data[name])[0])], out.name)
                 if r.get("rule") == "FMT-S10"]
         report["remaining"] = list(rows) + remaining_page
         # `ok` is the command's verified-clean signal: a mechanical row the
@@ -6389,12 +6389,12 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         os.replace(tmp, out)
         # Re-scan the written copy: only the fixed rows may be left.
         with zipfile.ZipFile(out) as z:
-            out_doc = z.read("word/document.xml").decode("utf-8", "replace")
+            out_doc = ooxml_part_text(z.read("word/document.xml"))
             out_styles = parse_styles(z)
             rels_name = "word/_rels/document.xml.rels"
             targets = {}
             if rels_name in z.namelist():
-                rels_xml = z.read(rels_name).decode("utf-8", "replace")
+                rels_xml = ooxml_part_text(z.read(rels_name))
                 for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
                     attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
                     typ = attrs.get("Type", "")
@@ -6403,7 +6403,7 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
                         targets[attrs["Id"]] = (tgt if tgt.startswith("word/")
                                                 else "word/" + tgt)
             ref_ids = re.findall(r'<w:(?:header|footer)Reference[^>]*r:id="([^"]+)"', out_doc)
-            aux = [(targets[rid], z.read(targets[rid]).decode("utf-8", "replace"))
+            aux = [(targets[rid], ooxml_part_text(z.read(targets[rid])))
                    for rid in ref_ids if rid in targets and targets[rid] in z.namelist()]
     except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
         try:
@@ -6438,8 +6438,7 @@ def cmd_scan_figures(args) -> int:
                 problem = _docx_zip_problem(z)
                 if problem:
                     raise OSError(problem)
-                xml = _docx_xml_part_guarded(
-                    z, "word/document.xml").decode("utf-8", "replace")
+                xml = ooxml_part_text(_docx_xml_part_guarded(z, "word/document.xml"))
             # Validate before the regex `paragraphs` reader: it tolerates a
             # truncated tag, so a malformed DOCX silently yielded an EMPTY term
             # source and the scan proceeded with no vocabulary terms, exit 0.

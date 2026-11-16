@@ -188,8 +188,13 @@ NUMBER_RE = re.compile(
     # sign, so `10-20` is 10 then 20, while ` -80`/`(-80)` keep the minus.
     # The decimal alternative allows a glued unit (`7.5mg`) and does NOT let
     # the engine backtrack the fraction away to record the integer 7.
-    r"(?<![\w.])((?:[-\u2212]?\d[\d,\u2009\u202f\u00a0]*\.\d+"
+    r"(?<![\w.])(?<![A-Za-z]-)((?:[-\u2212]?\d[\d,\u2009\u202f\u00a0]*\.\d+"
     r"(?:[eE][+\-\u2212]?\d+)?)(?![\d]|\.\d)"
+    # A SPACE-grouped quantity (`12 000`, NBSP/thin-space too) is ONE number.
+    # The old integer branch split it into 12 and 000, inventing a bogus value
+    # and losing the real one (F160). The group must be exactly three digits.
+    r"|(?:[-\u2212]?\d{1,3}(?:[ \u2009\u202f\u00a0]\d{3})+"
+    r"(?:\.\d+)?(?:[eE][+\-\u2212]?\d+)?)(?![\w]|\.\d)"
     r"|(?:[-\u2212]?\d[\d\u2009\u202f\u00a0]*(?:,\d{3})*"
     r"(?:[eE][+\-\u2212]?\d+)?)(?![\w]|\.\d))")
 

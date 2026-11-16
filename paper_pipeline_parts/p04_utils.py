@@ -577,12 +577,16 @@ def frozen_snapshot_root(path=None) -> dict:
         return {}
     rec = _read_pipeline_registry(holder / "state.json")
     origin = rec.get("pipeline") or {}
-    frozen_at = ""
-    try:
-        frozen_at = datetime.fromtimestamp(here.stat().st_mtime, timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ")
-    except OSError:                                                   # pragma: no cover
-        pass
+    frozen_at = str(origin.get("frozen_at") or "")
+    # A root set up before the freeze instant was recorded falls back to the
+    # frozen file's mtime, but a copy2-based freeze preserves the MAINTAINED
+    # file's mtime, so prefer the recorded instant whenever it exists (F191).
+    if not frozen_at:
+        try:
+            frozen_at = datetime.fromtimestamp(here.stat().st_mtime, timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+        except OSError:                                               # pragma: no cover
+            pass
     origin_path = str(origin.get("path") or "")
     origin_digest = ""
     if origin_path and Path(origin_path).is_file():
@@ -636,8 +640,10 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
            "maintained_modules": {}, "module_diffs": []}
     if frozen.is_file():
         try:
-            out["frozen_at"] = datetime.fromtimestamp(
-                frozen.stat().st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            out["frozen_at"] = (str(recorded.get("frozen_at") or "")
+                                or datetime.fromtimestamp(
+                                    frozen.stat().st_mtime, timezone.utc).strftime(
+                                        "%Y-%m-%dT%H:%M:%SZ"))
         except OSError:                                               # pragma: no cover
             pass
         try:
@@ -1545,6 +1551,15 @@ def _json_safe(obj):
             return "Infinity" if obj > 0 else "-Infinity"
         return obj
     if isinstance(obj, dict):
+        # Two distinct keys can stringify to the same text (`1` and `"1"`); a
+        # dict comprehension would silently drop one value. Refuse the write
+        # instead of losing data in state/report JSON (F179).
+        keys = [str(k) for k in obj]
+        if len(set(keys)) != len(keys):
+            dup = sorted({k for k in keys if keys.count(k) > 1})
+            raise ValueError(
+                "cannot serialise a mapping whose distinct keys collapse to the same "
+                f"JSON key: {', '.join(dup[:5])}")
         return {str(k): _json_safe(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_json_safe(v) for v in obj]
@@ -6713,6 +6728,13 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
         # a package directory: writing through it reaches outside the root.
         return {"ok": False, "error": f"{dest} is a symbolic link; refusing to write the "
                                       f"rebuilt package through it"}
+    try:
+        # An ANCESTOR link (`<protected>/link/sub/package` where link -> outside)
+        # passes is_within on the unresolved path and every mkdir/copy below
+        # follows it, writing the package outside the protected root (F220).
+        _refuse_symlinked_parent(dest)
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
     if dest.exists() and not dest.is_dir():
         return {"ok": False, "error": f"{dest} exists and is not a directory"}
     if dest.is_dir():
@@ -9250,6 +9272,12 @@ def collect_documents(sources: list, gaps: list = None) -> dict:
                 continue
             if is_bookkeeping_name(p.name):
                 continue
+            if is_non_manuscript_rel(rel):
+                # A response-to-reviewers / reviewer-comments document is an
+                # authored reply, not submission content: it must not be
+                # reported as a lost submission document when the candidate
+                # does not carry it (F096).
+                continue
             if p.suffix.lower() not in EDITABLE_DOC_EXTS:
                 continue
             entries.append(p)
@@ -9752,10 +9780,10 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
     publication that meets such a package preserves the pin and reports the
     residue instead of changing judged bytes). Files inside an EVIDENCE area
     are never touched -- that
-    subtree is read-only by contract (`raw_data/` is a byte-frozen input) -- and
-    `__pycache__/` DIRECTORIES are skipped on purpose: removing one would empty
-    the directory a bytecode file's name lives in, and an empty directory is
-    still a directory the next round would carry.
+    subtree is read-only by contract (`raw_data/` is a byte-frozen input). A
+    `__pycache__/` directory emptied by removing its bytecode files is removed
+    too (bottom-up): an empty directory is still a directory the next round
+    would carry, and leaving it contradicts this sweep's own contract (F082).
 
     Returns `{"removed": [rel, ...], "kept_in_evidence": [rel, ...]}`.
     """
@@ -9781,6 +9809,22 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
         except OSError:
             continue
         out["removed"].append(rel)
+    # A __pycache__ directory this sweep emptied is residue with no content:
+    # remove it bottom-up so the delivered/corpus tree does not carry the empty
+    # directory the docstring promises to avoid (F082).
+    for cache in sorted((p for p in dirp.rglob("__pycache__")
+                         if p.is_dir() and not p.is_symlink()),
+                        key=lambda p: len(p.parts), reverse=True):
+        # The directory sweep honours the same evidence-area guard as the file
+        # loop: a cache directory below `raw_data/` (or another evidence area)
+        # is part of a byte-frozen input and is never removed (R05).
+        if is_evidence_rel(cache.relative_to(dirp).as_posix()):
+            continue
+        try:
+            if not any(cache.iterdir()):
+                cache.rmdir()
+        except OSError:
+            continue
     return out
 
 

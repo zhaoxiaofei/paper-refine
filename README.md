@@ -71,7 +71,7 @@ or into the generated dependency files. (The harness MCP registrations necessari
 absolute server path, because a harness starts its servers from its own working directory.) The
 script also probes the optional system tools
 (Zotero Desktop, Word/PowerShell, LibreOffice, Poppler, Ghostscript, ImageMagick, TeX Live,
-`codex`/`dsh`) and prints the exact missing command instead of installing an OS package.
+`codex`/`dsh`/`claude`) and prints the exact missing command instead of installing an OS package.
 Use `--dry-run` to see the plan, `--offline` to reuse existing checkouts, and `--help` for
 the switches that skip conda, Node, the external checkouts or the agent-tooling
 registration.
@@ -1768,9 +1768,12 @@ codex mcp add docx-compare -- node /path/to/repo/mcp-docx-compare/index.js
 ```
 
 `install_agent_tooling.sh` performs the `npm ci` and the registration for every
-harness it finds -- one `[mcp_servers.<name>]` entry per server in Codex, and
-the same two servers in every DeepSeek Harness profile's `cordis.patch.yml` --
-so the two commands above are the manual equivalent for a single server.
+harness it finds -- one `[mcp_servers.<name>]` entry per server in Codex, the
+same two servers in every DeepSeek Harness profile's `cordis.patch.yml`, and in
+Claude Code both skills under `$CLAUDE_HOME/skills/` plus the two servers through
+`claude mcp add --scope user` (without the `claude` CLI it installs the skills
+and prints the exact `claude mcp add` commands) -- so the two commands above are
+the manual equivalent for a single server.
 
 Both shipped MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) need that
 `npm ci` step before they can start: `node_modules/` is never vendored, so a
@@ -2448,15 +2451,15 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 124 KB | 54 KB | 56% |
-| cold_start_review | 62 KB | 27 KB | 56% |
-| audit | 90 KB | 47 KB | 47% |
-| revise | 120 KB | 66 KB | 45% |
-| integrate | 111 KB | 59 KB | 47% |
-| rewrite | 103 KB | 60 KB | 42% |
+| review | 125 KB | 55 KB | 56% |
+| cold_start_review | 63 KB | 27 KB | 56% |
+| audit | 91 KB | 48 KB | 47% |
+| revise | 121 KB | 67 KB | 44% |
+| integrate | 112 KB | 59 KB | 47% |
+| rewrite | 104 KB | 60 KB | 42% |
 | judge | 104 KB | 74 KB | 29% |
-| revision_audit | 25 KB | 15 KB | 38% |
-| revision_repair | 23 KB | 10 KB | 56% |
+| revision_audit | 38 KB | 16 KB | 57% |
+| revision_repair | 36 KB | 11 KB | 69% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
@@ -3623,7 +3626,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 248 suites (a few
+any failure. They are independent, so run them in parallel — 251 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

@@ -217,6 +217,14 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
                     + (enabled_total - per_judges.get(vid, 0))
                     for vid in field_ids}
     expected = 2 * judges * (k - 1)
+    # With a `run --only r1_judge_*` selector the enabled sessions define a
+    # SMALLER panel; recording the full configured expectation made the frozen
+    # record claim a panel that did not run (F169). Keep the scalar only when
+    # every version really has that many scores; otherwise record None and let
+    # the per-version map carry the truth.
+    selection_active = any(per_judges.get(vid, 0) != judges for vid in field_ids)
+    if selection_active:
+        expected = None
     # The round's base A1_r is content-identical to one of the field members
     # (the pristine original in round 1, the previous round's pin later on) and is
     # therefore deduplicated out of the field. That member's row IS the base's
@@ -543,8 +551,14 @@ def census_prefix_total(agg: dict, sel: dict, vid: str):
         return None
     _, _, cumulative = issue_matrix_and_cumulative(census, [str(vid)])
     row = cumulative.get(str(vid)) or []
-    cells = int(((sel or {}).get("tiebreak") or {}).get("cells_used") or 0)
-    if not cells or not row:
+    raw_cells = ((sel or {}).get("tiebreak") or {}).get("cells_used")
+    try:
+        cells = int(raw_cells) if raw_cells not in (None, "") else 0
+    except (TypeError, ValueError):
+        return None
+    if isinstance(raw_cells, bool) or cells < 1 or not row:
+        # A negative/non-numeric cells_used used to index from the end (or
+        # raise) and show the whole-census total instead of '-' (F151).
         return None
     return int(row[min(cells, len(row)) - 1])
 
@@ -3793,7 +3807,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                                             execution_profile=execution_profile_of(ctx),
                                             insertions_allowed=_audit_ins,
                                             deletions_allowed=_audit_del,
-                                            prefer_rewrite=_audit_prefer))
+                                            prefer_rewrite=_audit_prefer,
+                                            author_to_complete=author_to_complete_mode_of(ctx)))
     if journal_is_scoped(ctx):
         scope = ("\nMANDATORY CONCERN-SCOPED AUDIT: this is a major/minor revision. "
                  "Read concerns/JF_concerns.json and the JF findings. Verify every admitted "
@@ -3896,7 +3911,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                                              execution_profile=execution_profile_of(ctx),
                                              insertions_allowed=_edit_ins,
                                              deletions_allowed=_edit_del,
-                                             prefer_rewrite=_edit_prefer))
+                                             prefer_rewrite=_edit_prefer,
+                                             author_to_complete=author_to_complete_mode_of(ctx)))
     if journal_is_scoped(ctx):
         prompt_path = sb / REVISION_REPAIR_PROMPT_FILE
         write_text_atomic(prompt_path,

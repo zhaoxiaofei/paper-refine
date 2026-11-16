@@ -260,7 +260,7 @@ fi
 # The optional tools are reported, never installed: some need administrator
 # rights and all are probed at run time by the pipeline.
 OPTIONAL_TOOLS=(
-    codex dsh conda node npm
+    codex dsh claude conda node npm
     soffice libreoffice pandoc pdftotext pdftoppm gs latexmk pdflatex
     powershell.exe montage magick
 )
@@ -289,7 +289,7 @@ if [ "$DO_CONDA" = 1 ]; then
                 && test_env_run python -c 'import sys' >/dev/null 2>&1; then
             note "installing the optional pyzotero-cli (`zot`) command"
             if ! run test_env_run python -m pip install \
-                    --disable-pip-version-check pyzotero-cli; then
+                    --disable-pip-version-check pyzotero-cli==1.0.0; then
                 warn "pyzotero-cli could not be installed; the Zotero MCP/skill routes still work"
             fi
         fi
@@ -330,8 +330,14 @@ install_repo() {
         if [ "$OFFLINE" = 0 ] && [ -z "$(git -C "$dest" status --porcelain 2>/dev/null || true)" ]; then
             note "refreshing $name"
             if run git -C "$dest" fetch --depth 1 origin "$ref" >/dev/null 2>&1; then
-                run git -C "$dest" checkout --detach FETCH_HEAD >/dev/null 2>&1 || \
+                if ! run git -C "$dest" checkout --detach FETCH_HEAD >/dev/null 2>&1; then
+                    # `--strict-external` promises to fail when the external
+                    # checkout cannot be brought to the requested ref, not only
+                    # when the fetch itself fails (F026).
+                    [ "$STRICT_EXTERNAL" = 1 ] && \
+                        fail_step "could not check out external ref: $name/$ref"
                     warn "could not check out $name/$ref; keeping the existing checkout"
+                fi
             else
                 warn "could not fetch $name/$ref; keeping the existing checkout"
                 # `--strict-external` promises to fail "when an external repo
@@ -415,17 +421,23 @@ if [ "$DO_AGENT" = 1 ]; then
     step "agent skills and MCP servers"
     if ! have node; then
         fail_step "node is not on PATH; cannot register the MCP servers"
-    elif ! have codex && ! have dsh && ! have dshx; then
-        warn "no codex/dsh CLI detected; keeping the local skills and servers only"
+    elif ! have codex && ! have dsh && ! have dshx && ! have claude; then
+        warn "no codex/dsh/claude CLI detected; keeping the local skills and servers only"
     else
         # install_agent_tooling.sh owns the harness configuration, including the
         # `zotero` row: it is given the same MCP tools/bridge directories this
         # script installed into, and `--no-zotero-mcp` travels as
         # INSTALL_ZOTERO_MCP=0 (the tooling script's default is `auto`, so it
         # also leaves the rows alone when no bridge is installed).
-        agent_env=(INSTALL_CODEX=auto INSTALL_DSH=auto
+        agent_env=(INSTALL_CODEX=auto INSTALL_DSH=auto INSTALL_CLAUDE=auto
                    MCP_TOOLS_DIR="$MCP_TOOLS_DIR"
                    ZOTERO_BRIDGE_DIR="$ZOTERO_BRIDGE_DIR")
+        # The tooling script's `auto` needs the Claude Code config directory;
+        # this script owns the CLI probe, so a fresh claude-code-only machine
+        # (CLI on PATH, ~/.claude not yet created) is wired here.
+        if have claude; then
+            agent_env+=(INSTALL_CLAUDE=1)
+        fi
         if [ "$REGISTER_ZOTERO_MCP" = 0 ]; then
             agent_env+=(INSTALL_ZOTERO_MCP=0)
         fi

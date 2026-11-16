@@ -2886,9 +2886,10 @@ def render_word_template(venue_id: str, norm: dict, official: dict = None) -> st
     titles = _skeleton_titles(norm, off)
     mandatory = {m.lower() for m in (off.get("mandatory_sections") or [])}
     L = [f"<!-- Word template skeleton for venue '{venue_id}'. Structure only; replace every "
-         f"placeholder. Word styles: use Heading 1 for the title, Heading 2 for top-level "
-         f"sections and Heading 3 for subsections, so the generated .docx carries a navigable "
-         f"outline."
+         f"placeholder. Word styles: use the Title style for the manuscript title, Heading 1 "
+         f"for top-level sections and Heading 2 for subsections, so the generated .docx "
+         f"carries a navigable outline and the pack readers (which treat Heading 1 as a "
+         f"top-level section) see the same hierarchy."
          + (" The sections marked [MANDATORY] come from the journal's OWN template: they must "
             "exist. Use the styles the journal's .dotx/.docx template provides."
             if off.get("sections") or off.get("mandatory_sections") else "")

@@ -428,6 +428,50 @@ def _extglob_to_regex(pat: str):
 
 
 MANUSCRIPT_DOC_EXTS = (".docx", ".doc", ".pdf", ".tex", ".ltx", ".md", ".txt")
+# Formats that carry a rendered/typeset manuscript on their own. A `.md`/`.txt`
+# can also name a log, a scratch report or a stray note, so a weak-format match
+# is only manuscript evidence when no strong-format candidate exists and the
+# path is not a non-document bucket (`logs/`, `tmp/`, ...).
+_STRONG_MANUSCRIPT_DOC_EXTS = (".docx", ".doc", ".pdf", ".tex", ".ltx")
+_NON_DOCUMENT_DIR_RE = re.compile(
+    r"(?i)(?:^|/)(?:logs?|log[-_]?files?|tmp|temp|scratch|build|dist|out|output|"
+    r"work|__pycache__|\.git)(?:/|$)")
+# A PDF/PNG-style display item is not the manuscript even though
+# `docx_document_role` calls an unrecognised name `main`: `Only Figure*.pdf will
+# be submitted` must not be honoured as manuscript evidence (F144).
+_DECLARED_FIGURE_NAME_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])(?:supp(?:lementary)?[ _-]?)?"
+    r"(?:fig(?:ure)?\.?[ _-]?)[S]?\d")
+
+
+def _declared_manuscript_documents(files) -> list:
+    """Package files that can actually be the submitted manuscript.
+
+    The declaration's plausibility used to be "at least one declared file has a
+    manuscript suffix", and `.txt` is one: `Only logs/*.txt will be submitted`
+    was honoured while the real `main.docx` was carried-but-not-submitted and
+    then unlinked from the journal submission (F144). A file counts only when
+    its role is `main` (not cover/supplementary), it is not bookkeeping/aux/
+    README/evidence, and it is either a strong document format or a `.md`/`.txt`
+    outside a log/scratch bucket.
+    """
+    out = []
+    for rel in files:
+        p = Path(str(rel))
+        ext = p.suffix.lower()
+        if ext not in MANUSCRIPT_DOC_EXTS:
+            continue
+        if docx_document_role(p.name) != "main":
+            continue
+        if (is_non_manuscript_rel(str(rel)) or is_bookkeeping_name(p.name)
+                or _is_aux_doc(p.name) or is_non_shippable_name(p.name)
+                or _DECLARED_FIGURE_NAME_RE.search(p.name)):
+            continue
+        if ext in _STRONG_MANUSCRIPT_DOC_EXTS:
+            out.append(str(rel))
+        elif not _NON_DOCUMENT_DIR_RE.search(str(rel).replace("\\", "/")):
+            out.append(str(rel))
+    return out
 
 
 def declared_submission_set(root: Path) -> dict:
@@ -624,6 +668,23 @@ def declared_submission_set(root: Path) -> dict:
     if not any(Path(f).suffix.lower() in MANUSCRIPT_DOC_EXTS for f in declared):
         out["ignored_reason"] = (f"the declared pattern(s) {patterns} match no manuscript "
                                  f"document ({len(declared)} file(s) matched)")
+        out["patterns"] = patterns
+        return out
+    # Plausibility is not the SUFFIX alone: the declared set must still name a
+    # manuscript the package actually carries. A declaration whose only match
+    # is `logs/*.txt` would exclude `main.docx` and make the assembly unlink it
+    # (F144), so it is ignored instead (every carried file then counts as
+    # submitted, the fail-safe direction).
+    manuscript_docs = _declared_manuscript_documents(declared + carried)
+    strong_docs = [r for r in manuscript_docs
+                   if Path(r).suffix.lower() in _STRONG_MANUSCRIPT_DOC_EXTS]
+    candidates = strong_docs or manuscript_docs
+    declared_set = set(declared)
+    if not any(r in declared_set for r in candidates):
+        out["ignored_reason"] = (
+            f"the declared pattern(s) {patterns} exclude every manuscript document the "
+            f"package carries ({len(candidates)} candidate(s)); a declaration that drops "
+            f"the manuscript is not applied")
         out["patterns"] = patterns
         return out
     out.update(declared=True, patterns=patterns, files=declared,
@@ -1023,10 +1084,12 @@ def _pkg3_prose_document(rel: str) -> bool:
 #     main text displays `raw_data/Fig3_ploidy_balloons.png` byte for byte), or
 #     a display table the parent .tex typesets (the closure above).
 #
-# The row is a REPORT, never a mechanical edit: the reference becomes legitimate
-# once the author ships the file, and deleting the sentence would destroy the
-# information that the material exists. The operator's rule is categorical, so
-# the row reaches the readiness list rather than the advisory tail.
+# The finding travels two ways, and they must agree: the REPORT row names the
+# reference, and the submission-surface repair MECHANICALLY removes the
+# reference from an editable document (AGENTS rule 9: nothing that ships may
+# point at what does not ship). A reference the operator's rule treats as
+# carried is exempt from both. The old comment claimed the row was report-only,
+# contradicting the strip that actually runs (F166).
 TEX_INPUT_COMMANDS = (
     "input", "include", "includegraphics", "includepdf", "addbibresource",
     "bibliography", "pgfplotstableread", "pgfplotstabletypeset", "lstinputlisting",
@@ -3261,8 +3324,10 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40,
                         continue
                     if not _pkg3_prose_document(rel):
                         continue
-                    if _sentence_has_locator(line, m.start(), m.end(), PKG3_LOCATOR_RE) \
-                            or PKG3_LOCATOR_RE.search(line):
+                    if _sentence_has_locator(line, m.start(), m.end(), PKG3_LOCATOR_RE):
+                        # Sentence-scoped only: a URL in ANOTHER sentence used to
+                        # suppress a real unresolvable-file row on the same line
+                        # (F168).
                         continue
                     rows.append({
                         "rule": "PKG-3", "file": rel, "line": i, "reference": m.group(0),
@@ -3817,6 +3882,9 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
         return report
     if not dirp.is_dir():
         report["skipped_note"] = f"{dirp} is not a directory"
+        # Nothing was scanned, so `ok: True` would be indistinguishable from a
+        # clean re-scan (F161).
+        report["ok"] = False
         return report
     try:
         _decl, _is_sub = declared_submission_filter(dirp)
@@ -4648,9 +4716,16 @@ def _docx_body(path: Path):
 
 
 def _docx_paragraph_text(paragraph) -> str:
-    """The text of one `<w:p>`, with a break/tab rendered as a newline."""
+    """The text of one `<w:p>` AS WORD RENDERS IT.
+
+    Uses the shared visibility-aware walker: one AlternateContent branch,
+    hidden (`w:vanish`) runs skipped, nested paragraphs excluded. The old
+    `paragraph.iter()` read both Choice and Fallback and read hidden text, so a
+    deleted table sentence could be hidden instead of restored and still pass
+    the content gate (F088).
+    """
     parts = []
-    for node in paragraph.iter():
+    for node in _docx_visible_nodes(paragraph):
         if node.tag in (DOCX_W_NS + "br", DOCX_W_NS + "cr", DOCX_W_NS + "tab"):
             parts.append("\n")
         elif node.tag == DOCX_W_NS + "t":
@@ -6289,7 +6364,29 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
         return info
     info["run"] = rid
     info["kind"] = rec.get("kind")
+    # The run id is data from state.json, not a trusted path fragment: a `../`
+    # or absolute id (or a symlinked run dir) must never read another run's
+    # review items or escape the root (F231).
+    if (not re.fullmatch(r"[A-Za-z0-9_.\-]+", str(rid))
+            or ".." in str(rid)):
+        info["error"] = (f"the producing run id {rid!r} is not a valid run id; its open "
+                         f"review items cannot be read safely")
+        info["sandbox_missing"] = True
+        return info
     sb = ctx.runs_dir / str(rid)
+    try:
+        sb_resolved = sb.resolve()
+        sb_resolved.relative_to(ctx.runs_dir.resolve())
+    except (OSError, RuntimeError, ValueError):
+        info["error"] = (f"the producing run's sandbox {sb} resolves outside this root; "
+                         f"its open review items cannot be read safely")
+        info["sandbox_missing"] = True
+        return info
+    if sb.is_symlink():
+        info["error"] = (f"the producing run's sandbox {sb} is a symlink; its open "
+                         f"review items cannot be read safely")
+        info["sandbox_missing"] = True
+        return info
     if not sb.is_dir():
         # A pruned/removed producing sandbox is NOT "no open items": the hand-off
         # list cannot be reconstructed, so readiness must fail closed and the
@@ -7043,6 +7140,20 @@ def collect_residuals(ctx: Ctx) -> dict:
             "count": len(items), "gating_count": len(gating), "advisory_count": len(advisory)}
 
 
+def scores_per_version_label(agg: dict) -> str:
+    """The human label for a round's score set: a count, or the per-version map.
+
+    A judge-session selector can give every version its own panel; the scalar
+    `scores_per_version` is then None and `scores_per_version_by_version` is the
+    truth (F169). Every report site uses this one spelling so none of them can
+    print the literal "None" or claim that "all None scores" were collected
+    (R06).
+    """
+    count = (agg or {}).get("scores_per_version")
+    return ("per-version (see `scores_per_version_by_version`)"
+            if count is None else str(count))
+
+
 def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                           problems: list, final: dict, win_lengths=None,
                           final_clean=None, revision_token=None, win_format=None,
@@ -7242,8 +7353,12 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                      "`--champion-select`; no directed scores exist and no ranking key was "
                      "consulted. The result is PROVISIONAL, never a certified panel result.")
         else:
-            L.append(f"- score set: {agg['scores_per_version']} directed scores per version "
-                     f"= 2 * {round_judges(ctx, r)} * ({agg['field_size']} - 1)")
+            if agg.get("scores_per_version") is None:
+                L.append("- score set: PER-VERSION (a judge-session selector defined "
+                         "different panels; see `scores_per_version_by_version`)")
+            else:
+                L.append(f"- score set: {agg['scores_per_version']} directed scores per version "
+                         f"= 2 * {round_judges(ctx, r)} * ({agg['field_size']} - 1)")
             L.append(f"- judges per version: {round_judges(ctx, r)} "
                      f"({agg['diagnostics']['sheets_used']}/{agg['diagnostics']['sheets_expected']} "
                      f"sheets usable)")
@@ -7464,15 +7579,25 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     if rounds_data:
         r = rounds_data[-1].get("round", 0)
         agg = rounds_data[-1].get("agg") or {}
+    _scores_label = scores_per_version_label(agg)
+    if agg.get("scores_per_version") is None:
+        _score_set_text = ("a PER-VERSION panel (`scores_per_version_by_version`); "
+                           "no single count applies")
+        _complete_text = ("A version is only ELIGIBLE to win when its own per-version panel "
+                          "is complete (every score `scores_per_version_by_version` names for "
+                          "it was collected)")
+    else:
+        _score_set_text = (f"{_scores_label} at judges={round_judges(ctx, r)}, "
+                           f"|field|={agg.get('field_size')}")
+        _complete_text = ("A version is only ELIGIBLE to win when its own panel is complete "
+                          f"(all {_scores_label} scores collected)")
     L.append("**Directed scores.** Each judge session scores the target against every opponent in "
              "the target's own direction only, one integer in -4..+4. V-vs-W comes from V's "
              "judges; W-vs-V comes from W's judges and is negated into V's frame, so a version's "
              f"score list is `{round_judges(ctx, r)}*(|field|-1)` own scores plus "
              f"`(|field|-1)*{round_judges(ctx, r)}` negated received scores = "
-             f"`2*judges*(|field|-1)` values (here: {agg.get('scores_per_version')} at "
-             f"judges={round_judges(ctx, r)}, |field|={agg.get('field_size')}). A version is only "
-             f"ELIGIBLE to win when its own panel is complete (all "
-             f"{agg.get('scores_per_version')} scores collected); a FRESH arm additionally needs both "
+             f"`2*judges*(|field|-1)` values (here: {_score_set_text}). "
+             f"{_complete_text}; a FRESH arm additionally needs both "
              f"directions against the original (the anti-regression gate below), while the round's "
              f"base row needs the complete panel only. A partial panel is reported as a panel gap "
              f"and can never decide a round.")
@@ -8232,8 +8357,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         if gaps:
             panel_gaps[r] = gaps
             _need = (agg.get("scores_per_version_by_version") or {})
-            _need = ", ".join(f"{v}: {_need.get(v, agg['scores_per_version'])}"
-                              for v in gaps)
+            _need = ", ".join(f"{v}: {_need.get(v, agg['scores_per_version'])}"                              for v in gaps)
             problems.append(
                 f"round {r}: JUDGE PANEL INCOMPLETE for {', '.join(gaps)} "
                 f"({_need} directed scores are required); "
@@ -8658,9 +8782,25 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         # reads); fall back to the pin. Both are verified to be identical.
         wsrc = (contained_under(ctx.root, final["stored"]["winner_dir"])
                 if final["stored"].get("winner_dir") else None)
-        src = wsrc if (wsrc and wsrc.is_dir()) else (pinned_docs_dir(ctx, pin) if pin else None)
+        src = wsrc if (wsrc and wsrc.is_dir()) else (
+            contained_under(ctx.root, pinned_docs_dir(ctx, pin)) if pin else None)
         if final["mismatch"]:
             print("[decide] --package-winner skipped: the stored champion failed recomputation.")
+        elif any(rd.get("mismatch") for rd in rounds_data):
+            # Certification treats ANY round's mismatch as a blocker; the
+            # packaging guard must be the same rule, or an earlier round's
+            # unverified chain is handed over as `final/` (F104).
+            print("[decide] --package-winner REFUSED: an earlier round's stored champion "
+                  "failed recomputation (the decision is NOT CERTIFIED). Re-run that round "
+                  "before packaging a winner.")
+        elif final_regression:
+            print("[decide] --package-winner REFUSED: the final champion regressed against "
+                  f"the pristine original ({final_regression}). Fix the regression before "
+                  "packaging a winner.")
+        elif gate_problems:
+            print("[decide] --package-winner REFUSED: the enabled decision gates failed:\n  - "
+                  + "\n  - ".join(str(p) for p in gate_problems[:8])
+                  + ("\n  - ..." if len(gate_problems) > 8 else ""))
         elif not chain_ok:
             print("[decide] --package-winner REFUSED: the content-addressed chain is broken "
                   "(see the PROBLEMS list); packaging it would hand you content that does not "
@@ -8709,7 +8849,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         med = crow.get("median")
         mean = crow.get("mean")
         print(f"[decide] round {rd['round']}: field={rd['agg']['field_size']} "
-              f"scores/version={rd['agg']['scores_per_version']} champion={champ} "
+              f"scores/version={scores_per_version_label(rd['agg'])} champion={champ} "
               f"median={med if med is not None else '-'} "
               f"mean={f'{mean:.3f}' if mean is not None else '-'} "
               f"winner={rd['stored'].get('winner_dir') or rd['stored'].get('pin_path')}")

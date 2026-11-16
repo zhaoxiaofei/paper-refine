@@ -5387,7 +5387,10 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
-_DELETED_PARA_MIN = 30
+# Match the content unit floor (2 words / 8 characters): a short defective
+# sentence ("This is false.") is still prose whose deletion must be audited,
+# and the old 30-character floor let it vanish with no row (F012).
+_DELETED_PARA_MIN = 8
 # The uppercase-sensitive reference alternatives must NOT be case-insensitive:
 # with a global `(?i)`, `- Results, however, ...` matched as a reference entry.
 _DELETED_PARA_SKIP_RE = re.compile(
@@ -5539,7 +5542,8 @@ def deletion_audit_paragraphs(root: Path, skipped: list = None) -> list:
             continue
         if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
                 or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)):
+                or is_non_shippable_name(p.name)
+                or is_non_manuscript_rel(rel)):
             continue
         ext = p.suffix.lower()
         if ext == ".docx":
@@ -5632,6 +5636,12 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None,
         # (or a case-only gene/unit edit) compare equal, so a fact-changing
         # edit produced no deletion-audit row (F-059).
         revised_paras.setdefault(rel, []).append(_deleted_para_norm(text))
+    # Consume revised occurrences one-to-one: two identical base paragraphs and
+    # one surviving copy must still leave one deleted row. A membership test
+    # made every deleted duplicate look present and `seen` suppressed the
+    # second base occurrence (F130).
+    revised_counts = {rel: Counter(parts)
+                      for rel, parts in revised_paras.items()}
     revised_join = {rel: " ".join(parts) for rel, parts in revised_paras.items()}
     exempt = {}
     for document, sentence in exempt_removed or ():
@@ -5658,7 +5668,9 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None,
         # A paragraph must survive in ITS OWN document. The package-wide set
         # treated a copy in another document as proof the local one survived
         # (F-061); a cross-document move is now a row the auditor disposes.
-        if low in revised_paras.get(rel, ()) or (rel, low) in seen:
+        # Consume one revised occurrence per base occurrence (F130).
+        if revised_counts.get(rel, Counter())[low] > 0:
+            revised_counts[rel][low] -= 1
             continue
         seen.add((rel, low))
         rows.append({"document": rel, "line": line, "paragraph": norm})
@@ -5929,6 +5941,26 @@ def _content_paragraph_rows(raw: str, first_line: int) -> list:
         rows = _markdown_table_data_rows(raw, first_line)
         if rows:
             return rows
+    if "\\begin{tabular}" in str(raw or ""):
+        # A LaTeX tabular row is a content unit, exactly like a Markdown table
+        # row. As one paragraph, deleting a row left a similar paragraph and
+        # the fuzzy matcher paired it as a rewrite (F014).
+        rows = []
+        for i, line in enumerate(str(raw or "").splitlines()):
+            cell_line = line.strip()
+            if not cell_line or cell_line.startswith(("\\begin", "\\end", "\\hline",
+                                                      "\\toprule", "\\midrule",
+                                                      "\\bottomrule", "\\cline",
+                                                      "\\multicolumn")):
+                continue
+            cells = [c.strip() for c in cell_line.rstrip("\\").split("&")]
+            if len(cells) < 2:
+                continue
+            row = " | ".join(c for c in cells if c)
+            if row:
+                rows.append((first_line + i, row))
+        if rows:
+            return rows
     norm = _deleted_para_norm(raw)
     if len(norm) < _CONTENT_UNIT_MIN_CHARS and not _short_text_carries_fact(norm):
         return []
@@ -5973,7 +6005,8 @@ def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
             continue
         if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
                 or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)):
+                or is_non_shippable_name(p.name)
+                or is_non_manuscript_rel(rel)):
             continue
         ext = p.suffix.lower()
         if ext == ".docx":
@@ -6047,15 +6080,36 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
             sentences = _content_sentence_parts(paragraph)
         for sentence_index, sentence in enumerate(sentences):
             text = re.sub(r"\s+", " ", str(sentence or "")).strip()
-            if len(text) < _CONTENT_UNIT_MIN_CHARS and not _short_text_carries_fact(text):
+            # A TABLE ROW is a structural content unit even when every cell is
+            # short (`9 | 9`): the prose character/word floor dropped it, so a
+            # fabricated data row could be added under --disable-insertions
+            # (F241).
+            is_row = bool(re.fullmatch(r"[^|]+(?:\s*\|\s*[^|]+)+", text))
+            if len(text) < _CONTENT_UNIT_MIN_CHARS \
+                    and not (is_row or _short_text_carries_fact(text)):
                 continue
             tokens = re.findall(r"[^\W_]+", text.lower(), flags=re.UNICODE)
-            if len(tokens) < _CONTENT_UNIT_MIN_WORDS:
+            if len(tokens) < _CONTENT_UNIT_MIN_WORDS and not is_row:
                 continue
-            units.append({"document": rel, "line": int(line or 0), "text": text,
-                          "norm": text.lower().strip(), "sentence_index": sentence_index,
-                          "tokens": set(tokens)})
+            unit = {"document": rel, "line": int(line or 0), "text": text,
+                    "norm": text.lower().strip(), "sentence_index": sentence_index,
+                    "tokens": set(tokens)}
+            if is_row:
+                unit["cells"] = tuple(c.strip() for c in text.split("|"))
+            units.append(unit)
     return units
+
+
+def _content_tokens(unit: dict) -> set:
+    """Tokens that carry the STATEMENT: stopwords and one-letter words removed.
+
+    The full-token Jaccard counted the shared function-word frame of two
+    unrelated sentences, so "The samples were stored at 4 C." and "The mice
+    were housed at 22 C." scored 0.73 and were paired (F086/F002).
+    """
+    return {str(t) for t in (unit.get("tokens") or ())
+            if t not in _CONTENT_MATCH_STOPWORDS and (len(str(t)) > 2
+                                                      or str(t).isdigit())}
 
 
 def _content_unit_similarity(base: dict, cand: dict) -> float:
@@ -6065,19 +6119,36 @@ def _content_unit_similarity(base: dict, cand: dict) -> float:
     sentence has no counterpart at all. The token Jaccard is the cheap term that
     survives reordering; SequenceMatcher covers a heavy but meaning-preserving
     in-place rewrite. Both are normalized, so case/whitespace are not changes.
+    Similarity is computed over CONTENT tokens only: a shared "the/and/were"
+    frame is not evidence that two statements are the same.
     """
     if base["norm"] == cand["norm"]:
         return 1.0
-    if not base["tokens"] or not cand["tokens"]:
+    # A table row that gained/lost a CELL is not the same statement, however
+    # similar the surviving cells are: removing a measurement column must be
+    # reported as a missing row, not "paired as a rewrite" (F013).
+    if (base.get("cells") is not None and cand.get("cells") is not None
+            and len(base["cells"]) != len(cand["cells"])):
         return 0.0
-    inter = len(base["tokens"] & cand["tokens"])
-    union = len(base["tokens"] | cand["tokens"])
+    bt, ct = _content_tokens(base), _content_tokens(cand)
+    if not bt or not ct:
+        return 0.0
+    inter = len(bt & ct)
+    union = len(bt | ct)
     jac = (inter / union) if union else 0.0
-    # A four-word unit can hit a spurious 0.3 Jaccard on function words alone;
-    # only spend the character-level matcher when there is real token overlap.
+
+    def _ordered(unit):
+        words = re.findall(r"[^\W_]+", str(unit.get("norm") or ""), flags=re.UNICODE)
+        return " ".join(w for w in words
+                        if w not in _CONTENT_MATCH_STOPWORDS
+                        and (len(w) > 2 or w.isdigit()))
+
+    bjoin, cjoin = _ordered(base), _ordered(cand)
     ratio = 0.0
-    if jac >= 0.25 or base["norm"] in cand["norm"] or cand["norm"] in base["norm"]:
-        ratio = difflib.SequenceMatcher(None, base["norm"], cand["norm"]).ratio()
+    if jac >= 0.25 or bjoin in cjoin or cjoin in bjoin:
+        # Preserve the sentence's WORD ORDER: sorting the tokens made unrelated
+        # sentences that happen to share a few nouns look nearly identical.
+        ratio = difflib.SequenceMatcher(None, bjoin, cjoin).ratio()
     return max(jac, ratio)
 
 
@@ -6145,15 +6216,22 @@ def _match_content_unit_pairs(base_units: list, cand_units: list) -> tuple:
         if len(same_pos) != 1:
             continue
         cand = cand_units[same_pos[0]]
-        shared = {t for t in (base["tokens"] & cand["tokens"])
-                  if len(t) > 2 and t not in _CONTENT_MATCH_STOPWORDS}
+        shared = _content_tokens(base) & _content_tokens(cand)
         base_keys = _prose_citation_keys(base["text"])
         cand_keys = _prose_citation_keys(cand["text"])
         base_nums = set(re.findall(r"\d+(?:\.\d+)?", base["text"]))
         cand_nums = set(re.findall(r"\d+(?:\.\d+)?", cand["text"]))
         paragraph_aligned = (base["document"], base["line"]) in exact_paragraphs
-        if shared or (base_keys & cand_keys) or (base_nums & cand_nums) \
-                or paragraph_aligned:
+        similarity = _content_unit_similarity(base, cand)
+        # A single shared token, a shared number or mere same-slot position is
+        # NOT proof of an in-place rewrite (F002): an unrelated replacement
+        # shares "treatment"/"cohort" or one number and used to pass both strict
+        # gates. Require a real similarity floor or several content tokens.
+        if similarity >= _CONTENT_UNIT_MATCH \
+                or (base_keys & cand_keys) \
+                or (len(shared) >= 2 and similarity >= 0.35) \
+                or paragraph_aligned \
+                or (base_nums & cand_nums and similarity >= 0.40):
             unmatched.discard(same_pos[0])
             pairs.append((base, cand))
             _anchors_done.add(id(base))
@@ -6274,7 +6352,8 @@ def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
             continue
         if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
                 or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)):
+                or is_non_shippable_name(p.name)
+                or is_non_manuscript_rel(rel)):
             continue
         ext = p.suffix.lower()
         if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".bib", ".bbl"):
@@ -6311,12 +6390,121 @@ def _bibliography_keys(package: Path) -> set:
             continue
         if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
                 or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)):
+                or is_non_shippable_name(p.name)
+                or is_non_manuscript_rel(rel)):
             continue
         text = read_text_bounded(p)
         if text:
             keys.update(_bib_keys_in_text(text))
     return keys
+
+
+_REFERENCE_HEADING_RE = re.compile(
+    r"(?i)^\s*(?:#{1,6}\s*)?(?:references?|bibliography|works\s+cited|"
+    r"literature\s+cited)\s*$|\\begin\{thebibliography\}|"
+    r"\\(?:sub)?section\*?\s*\{\s*(?:references?|bibliography)\s*\}")
+_REFERENCE_ENTRY_LINE_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}[.)])\s+\S")
+
+
+def _reference_entry_keys(package: Path) -> set:
+    """Normalised reference-list ENTRIES the submitted package carries.
+
+    Reference entries were stripped before they became content units, so a
+    fabricated entry could be added (or a real one deleted) with no
+    missing/added unit and no fact loss (F005). The entries are compared as
+    text; `.bib`/`.bbl` entries are compared by key.
+    """
+    entries = set()
+    package = Path(package)
+    if not package.is_dir():
+        return entries
+    _decl, _is_submitted = declared_submission_filter(package)
+    for p in _iter_tree_files(package):
+        try:
+            rel = p.relative_to(package).as_posix()
+        except ValueError:
+            continue
+        if not _is_submitted(rel):
+            continue
+        top = rel.split("/", 1)[0].lower()
+        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
+            continue
+        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
+                or is_non_submitted_readme_name(p.name)
+                or is_non_shippable_name(p.name)
+                or is_non_manuscript_rel(rel)):
+            continue
+        ext = p.suffix.lower()
+        # Only a RENDERED reference-list entry is a content unit. A .bib/.bbl
+        # is a source database: adding an uncited key there does not insert a
+        # reference into the manuscript (F31), and a corrected key is covered
+        # by the citation-key gate (F02).
+        if ext not in (".md", ".markdown", ".txt", ".tex", ".ltx"):
+            continue
+        text = read_text_bounded(p)
+        if not text:
+            continue
+        in_refs = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if _REFERENCE_HEADING_RE.search(stripped):
+                in_refs = True
+                continue
+            if in_refs and re.match(r"(?i)^(?:#{1,6}\s|\\(?:sub)?section)", stripped):
+                in_refs = False
+                continue
+            if not in_refs:
+                continue
+            m = re.match(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}", stripped)
+            if m:
+                entries.add(f"key:{m.group(1).strip().lower()}")
+                continue
+            if stripped and (_REFERENCE_ENTRY_LINE_RE.match(stripped)
+                             or (re.search(r"\b(?:18|19|20)\d{2}\b", stripped)
+                                 and "," in stripped)):
+                entries.add(re.sub(r"\s+", " ", stripped).lower())
+    return entries
+
+
+def _reference_entry_changes(base_package: Path, candidate_package: Path) -> tuple:
+    """(added, removed) reference entries, treating near-identical text as a fix."""
+    base = _reference_entry_keys(base_package)
+    cand = _reference_entry_keys(candidate_package)
+    added, removed = sorted(cand - base), sorted(base - cand)
+    # A typo fix changes one entry's text; pair a removed entry with a very
+    # similar added one so an in-place correction is not reported as delete+add.
+    for old in list(removed):
+        best, score = None, 0.0
+        for new in added:
+            ratio = difflib.SequenceMatcher(None, old, new).ratio()
+            if ratio > score:
+                best, score = new, ratio
+        if best is not None and score >= 0.80:
+            removed.remove(old)
+            added.remove(best)
+    return added, removed
+
+
+def _citation_removed_keys(base_package: Path, candidate_package: Path) -> set:
+    """Citation keys a MATCHED content unit loses with no replacement.
+
+    The citation gate compared only new keys; deleting a supporting citation
+    from a surviving sentence passed --disable-deletions (F006). A key replaced
+    by a different key in the same unit is the documented correction.
+    """
+    removed = set()
+    try:
+        pairs = _match_content_unit_pairs(
+            _content_unit_sentences(base_package),
+            _content_unit_sentences(candidate_package))[2]
+    except Exception:                                                 # noqa: BLE001
+        return removed
+    for base, cand in pairs:
+        gone = _prose_citation_keys(base["text"]) - _prose_citation_keys(cand["text"])
+        new = _prose_citation_keys(cand["text"]) - _prose_citation_keys(base["text"])
+        if gone and not new:
+            removed |= gone
+    return removed
 
 
 def _citation_correction_keys(base_package: Path, candidate_package: Path) -> set:
@@ -6510,6 +6698,31 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
             + ". Correct the existing unit in place instead of adding prose; if a finding can "
               "only be resolved by new text, record it as manual-required/unable and leave the "
               "unit unchanged.")
+    if not delete:
+        removed_cites = _citation_removed_keys(base_package, candidate_package)
+        if removed_cites:
+            problems.append(
+                f"{label}{len(removed_cites)} citation key(s) disappeared from a surviving "
+                f"statement although --disable-deletions is in force (a removed citation is "
+                f"a deletion): " + ", ".join(sorted(removed_cites)[:8])
+                + (" ..." if len(removed_cites) > 8 else "")
+                + ". Restore the citation, or replace it with the corrected key in place.")
+    ref_added, ref_removed = _reference_entry_changes(base_package, candidate_package)
+    if not insert and ref_added:
+        problems.append(
+            f"{label}{len(ref_added)} reference entr{'y' if len(ref_added) == 1 else 'ies'} "
+            f"appeared in the delivered bibliography although --disable-insertions is in "
+            f"force: " + "; ".join(x[:120] for x in ref_added[:3])
+            + (" ..." if len(ref_added) > 3 else "")
+            + ". A reference entry is a content unit; add it only through the documented "
+              "correction route.")
+    if not delete and ref_removed:
+        problems.append(
+            f"{label}{len(ref_removed)} reference entr{'y' if len(ref_removed) == 1 else 'ies'} "
+            f"present in the base bibliography are MISSING although --disable-deletions is in "
+            f"force: " + "; ".join(x[:120] for x in ref_removed[:3])
+            + (" ..." if len(ref_removed) > 3 else "")
+            + ". A removed reference is a deletion; restore it or replace it in place.")
     if not insert:
         new_keys = (_citation_keys(candidate_package, include_bibliography=False)
                     - _citation_keys(base_package, include_bibliography=False))
@@ -6697,9 +6910,14 @@ _FACT_SURVIVAL_UNIT_CANON = {
 }
 _FACT_SURVIVAL_COMPOUND_SIDE_RE = re.compile(
     r"^[A-Za-z\u00b5\u03bc][A-Za-z0-9\u00b5\u03bc]*$")
-# A two-digit floor: a lone "1" or "2" is a list marker, a section number or a
-# cross-reference in nearly every paragraph, so it cannot prove a fact survived.
+# Below this floor a value is a fact only when it carries a recognised unit or
+# a fact LABEL (`pH 7`, `grade 2`, `score 9`). A bare lone digit stays un-keyed:
+# a list marker, a section number or a cross-reference, and the documented
+# R12-5b contract treats "3 blocks" as a count a rewrite may change. The
+# unit/label line is `_fact_single_digit_is_fact`.
 _FACT_SURVIVAL_MIN_DIGITS = 2
+_FACT_SURVIVAL_SINGLE_DIGIT_LABEL_RE = re.compile(
+    r"(?i)\b(?:ph|grade|score)\b[^.;\n]{0,24}$")
 
 
 def _fact_survival_key(token) -> str:
@@ -6810,13 +7028,59 @@ def _fact_survival_value_key(raw, unit: str = "") -> str:
     return f"{key} {unit}" if unit else key
 
 
+def _fact_number_is_display_marker(text, match) -> bool:
+    """A display/citation LABEL or bracketed number, never a fact.
+
+    `Figure 12`, `Table 2`, `[1]` and `[^12]` number something else; their
+    digits are not measurements, whatever their width.
+    """
+    text = str(text or "")
+    before = text[:match.start()].rstrip().lower()
+    if re.search(r"\b(?:fig(?:ure)?|tables?|sections?|eq(?:uation)?s?|"
+                 r"ref(?:erence)?s?|appendix|step|line|panel)\s*$", before):
+        return True
+    return text[max(0, match.start() - 2):match.start()].endswith(("[", "^"))
+
+
+def _fact_single_digit_is_marker(text, match) -> bool:
+    """True for a one-digit match that is a marker rather than a fact.
+
+    A lone `1`/`2` is a list marker, a section number or a cross-reference in
+    nearly every paragraph, so it cannot prove a fact survived. The marker
+    shapes are exempt; every other single digit is a value, count, score or
+    grade (F010).
+    """
+    if _fact_number_is_display_marker(text, match):
+        return True
+    text = str(text or "")
+    before = text[:match.start()].rstrip().lower()
+    return bool(re.match(r"^[.)]\s", text[match.end():])
+                and (not before or before.endswith(("\n", "."))))
+
+
+def _fact_single_digit_is_fact(text, match) -> bool:
+    """A one-digit value that carries a recognised unit or fact label (F010).
+
+    `5 mg`, `pH 7`, `grade 2` and `score 9` are measurements/scores and must be
+    keyed. A bare lone count (`3 blocks`) is NOT a survival token: R12-5b pins
+    that contract, and a rewrite may legitimately change such a count.
+    """
+    if _fact_single_digit_is_marker(text, match):
+        return False
+    text = str(text or "")
+    if _fact_survival_unit_after(text, match.end()):
+        return True
+    return bool(_FACT_SURVIVAL_SINGLE_DIGIT_LABEL_RE.search(text[:match.start()]))
+
+
 def _fact_survival_tokens(text) -> list:
     """Numeric values and identifiers a text carries, in printing order."""
     found = []
     text = str(text or "")
     for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
         raw = match.group(0)
-        if len(re.sub(r"\D", "", raw)) >= _FACT_SURVIVAL_MIN_DIGITS:
+        if len(re.sub(r"\D", "", raw)) >= _FACT_SURVIVAL_MIN_DIGITS \
+                or not _fact_single_digit_is_marker(text, match):
             found.append(raw)
     for match in _FACT_SURVIVAL_IDENT_RE.finditer(text):
         # The accession NUMBER, never the word "number" in front of it: the old
@@ -6832,7 +7096,8 @@ def _fact_survival_keys(units) -> set:
         text = str(unit.get("text") or "")
         for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
             raw = match.group(0)
-            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
+                    and not _fact_single_digit_is_fact(text, match):
                 continue
             keys.add(_fact_survival_value_key(
                 raw, _fact_survival_unit_after(text, match.end())))
@@ -6854,7 +7119,8 @@ def _fact_survival_lost_tokens(text, surviving_keys, handoff_keys=()) -> list:
     handoff_keys = set(handoff_keys or ())
     for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
         raw = match.group(0)
-        if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+        if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
+                and not _fact_single_digit_is_fact(text, match):
             continue
         unit = _fact_survival_unit_after(text, match.end())
         num_key = _fact_survival_key(raw)
@@ -7223,6 +7489,91 @@ def _manual_handoff_keys(package: Path) -> set:
     return keys
 
 
+def _fact_pair_values(text):
+    """[(bare numeric key, printed form)] and [identifier key] of one text."""
+    nums, idents = [], []
+    text = str(text or "")
+    ident_spans = []
+    for match in _FACT_SURVIVAL_IDENT_RE.finditer(text):
+        token = match.group("accession") or match.group(0)
+        idents.append((_fact_survival_key(token), token))
+        ident_spans.append((match.start(), match.end()))
+    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
+        raw = match.group(0)
+        ndig = len(re.sub(r"\D", "", raw))
+        if ndig < 1:
+            continue
+        if any(a <= match.start() < b for a, b in ident_spans):
+            # The `10.9999` prefix of a DOI is part of the identifier, not a
+            # second fact: reporting it twice inflated the message (F004).
+            continue
+        if _fact_number_is_display_marker(text, match):
+            # A display/citation LABEL number is not a fact, whatever its
+            # width (`Figure 12`, `Table 2`), and neither is a bracketed
+            # citation/list/footnote marker (`[1]`, `[^12]`).
+            continue
+        if ndig < _FACT_SURVIVAL_MIN_DIGITS and _fact_single_digit_is_marker(
+                text, match):
+            # A single digit can carry a real fact (`5 mg`, `pH 7`, a count),
+            # and pair deltas need it so a 12 -> 6 correction is recognised as a
+            # replacement rather than a deletion (R12-3). Exempt only a list
+            # marker (`1.` at a line start) or a display label.
+            continue
+        unit = _fact_survival_unit_after(text, match.end())
+        nums.append((_fact_survival_key(raw), f"{raw} {unit}".strip()))
+    return nums, idents
+
+
+def _fact_pair_delta_examples(pairs, handoff_keys=()) -> tuple:
+    """(lost, added) values inside MATCHED pairs, corrections excluded.
+
+    A value that disappears from a surviving sentence while a DIFFERENT value
+    appears in the same sentence is a correction and stays allowed (R12-3). A
+    value that disappears with no replacement is a lost fact (F003), and a value
+    that appears with no removal is an insertion (F004). Identifiers follow the
+    same rule.
+    """
+    handoff = set(handoff_keys or ())
+    lost, added = [], []
+    for base, cand in pairs or ():
+        bnums, bids = _fact_pair_values(base.get("text"))
+        cnums, cids = _fact_pair_values(cand.get("text"))
+        for kind, bvals, cvals in (("num", bnums, cnums), ("ident", bids, cids)):
+            bmap, cmap = {}, {}
+            for key, printed in bvals:
+                bmap.setdefault(key, printed)
+            for key, printed in cvals:
+                cmap.setdefault(key, printed)
+            gone = [k for k in bmap if k not in cmap]
+            new = [k for k in cmap if k not in bmap]
+            pair_n = min(len(gone), len(new))
+            for key in gone[pair_n:]:
+                printed = bmap[key]
+                if key not in handoff:
+                    lost.append((base, [printed]))
+            for key in new[pair_n:]:
+                printed = cmap[key]
+                if key not in handoff:
+                    added.append((cand, [printed]))
+    return lost, added
+
+
+def _fact_pair_added_message(added, label: str) -> str:
+    def one(item):
+        unit, tokens = item
+        return (f"{unit.get('document') or '?'}:{int(unit.get('line') or 0)} added "
+                f"{', '.join(sorted(set(tokens)))} "
+                f"({str(unit.get('text') or '')[:80]})")
+
+    return (f"{label}{len(added)} surviving statement(s) gained a value or identifier that "
+            f"the base did not state and did not replace: " + "; ".join(one(x) for x in added[:5])
+            + (" ..." if len(added) > 5 else "")
+            + ". A measurement, count or identifier is corrected in place (one value replaces "
+              "another), never appended as a new fact. If the new fact is independently "
+              "evidenced, record it in README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md with "
+              "that evidence; otherwise remove it.")
+
+
 def _fact_loss_message(lost, label: str) -> str:
     def one(item):
         unit, tokens = item
@@ -7279,10 +7630,18 @@ def fact_preservation_problems(base_package: Path, candidate_package: Path,
     surviving = _fact_survival_keys(cand_units)
     handoff = _manual_handoff_keys(candidate_package)
     lost = _fact_loss_examples(missing, surviving, handoff)
+    # A value can also vanish from a sentence that still MATCHES: the unit
+    # change check below only sees a value that survives with a different unit,
+    # never one that disappears entirely (F003). Check both directions of every
+    # matched pair, treating a same-sentence removal+addition as a correction.
+    missing_ids = {id(u) for u in missing}
+    pairs = [(b, c) for b, c in _match_content_unit_pairs(base_units, cand_units)[2]
+             if id(b) not in missing_ids]
+    pair_lost, pair_added = _fact_pair_delta_examples(pairs, handoff)
+    lost = lost + pair_lost
     # A unit-only change can live in a SURVIVING sentence (the fuzzy matcher
     # pairs "55 mg" with "55 ml"), so check matched units too. Units already in
     # `missing` are covered by the loss message; do not report them twice.
-    missing_ids = {id(u) for u in missing}
     # The package's own author hand-off is the documented channel for a value
     # the reviser must CHANGE rather than keep: a corrected unit recorded there
     # is a correction, not a silent fact change (F04).
@@ -7308,6 +7667,8 @@ def fact_preservation_problems(base_package: Path, candidate_package: Path,
         problems.append(_fact_loss_message(lost, label))
     if changed:
         problems.append(_fact_unit_change_message(changed, label))
+    if pair_added:
+        problems.append(_fact_pair_added_message(pair_added, label))
     return problems
 
 

@@ -141,7 +141,7 @@ SUSPECT_PRECEDERS = re.compile(
 # A bracket may be omitted, and a following non-digit may be glued to the
 # number ("[1]Smith"); a DIGIT after the separator is a decimal, not a new
 # entry ("12.5 mg was given" is not reference 12).
-REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,4})[\].)](?!\d)\s*(.*)$")
+REF_ENTRY_RE = re.compile(r"^\s*[\[(]?(\d{1,4})[\].)](?!\d)\s*(.*)$")
 BIB_ENTRY_RE = re.compile(
     r"@(?!(?:comment|string|preamble)\b)\w+\s*[{(]\s*([^,]+),", re.I)
 # LaTeX: the call-out is a KEY inside a \cite-family macro (`\cite`, `\citep`,
@@ -271,7 +271,7 @@ FIG_CAPTION_RE = re.compile(
 TABLE_CAPTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:extended\s+data|supplementary\s+)?tables?\.?\s*"
     r"(?:s\d+|\d+[a-z]?)\s*" + CAP_SEP, re.I)
-NUM_ENTRY_RE = re.compile(r"^\s*(?:\[?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
+NUM_ENTRY_RE = re.compile(r"^\s*(?:[\[(]?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
 BULLET_ENTRY_RE = re.compile(r"^\s*[-*•]\s+\S")
 YEAR_RE = re.compile(r"\b(?:1[5-9]|20)\d{2}[a-z]?\b")
 ENTRY_HINT_RE = re.compile(
@@ -612,7 +612,10 @@ def main():
             # of the citation command, not a numeric call-out. Blank the command
             # span (length-preserving) before the numeric scan.
             scan_nums = scan_raw
-            if str(fname).lower().endswith((".tex", ".ltx")):
+            # Corpus converter output is named `*.tex.txt`: strip the
+            # transport suffix before the extension test, or the
+            # `\cite[...]` blanking never runs (F015).
+            if re.sub(r"\.txt$", "", str(fname).lower()).endswith((".tex", ".ltx")):
                 scan_nums = TEX_CITE_RE.sub(
                     lambda mm: " " * len(mm.group(0)), scan_raw)
             for m in NUM_CIT_RE.finditer(scan_nums):
@@ -943,6 +946,22 @@ def main():
         dupes = {n: c for n, c in Counter(nums).items() if c > 1}
         if dupes:
             duplicate_entries[f] = dupes
+    # A real duplicate can carry TWO DIFFERENT numbers ("[1] Smith ..." and
+    # "[2] Smith ..."): counting duplicate NUMBERS never sees it (F018).
+    duplicate_entry_text = {}
+    _by_text = {}
+    for e in ref_entries:
+        if e.get("num") is None:
+            continue
+        key = re.sub(r"\W+", " ", (e.get("text") or "")).strip().lower()
+        if len(key) < 20:
+            continue
+        _by_text.setdefault(e["file"], {}).setdefault(key, []).append(e["num"])
+    for f, groups in _by_text.items():
+        rows = [{"numbers": sorted(set(nums)), "text": text}
+                for text, nums in groups.items() if len(set(nums)) > 1]
+        if rows:
+            duplicate_entry_text[f] = rows
     # Duplicate LaTeX KEYS were never checked: key lookup collapsed them into a
     # set and the duplicate test above reads numbered lists only (F-029). A key
     # defined twice inside one compile root is a conflict; the same key in two
@@ -1029,6 +1048,8 @@ def main():
            "  - per document: %s" % (tex_orphans_by_file or "none"),
            "- LaTeX \\bibitem entries never cited by any \\cite: %s" % (tex_uncited or "none"),
            "- Duplicate entry numbers within one list: %s" % (duplicate_entries or "none"),
+           "- Duplicate entry TEXT under different numbers: %s" % (
+               duplicate_entry_text or "none"),
            "- Duplicate LaTeX keys within one compile root: %s" % (
                duplicate_tex_keys or "none"),
            "- Order violations (numeric style, within one document): %d" % len(order_violations),
@@ -1064,6 +1085,7 @@ def main():
                                               tex_uncited_by_context.items()},
                    "tex_unresolved": tex_unresolved,
                    "duplicate_entries": duplicate_entries,
+                   "duplicate_entry_text": duplicate_entry_text,
                    "duplicate_tex_keys": duplicate_tex_keys,
                    "order_violations": order_violations,
                    "suspect_brackets": suspect_brackets}, f, indent=2)

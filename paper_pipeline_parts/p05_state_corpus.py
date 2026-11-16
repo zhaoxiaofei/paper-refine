@@ -1687,8 +1687,15 @@ def revision_token_for_dir(dirp: Path) -> dict:
             unreadable.append(f"{p.relative_to(dirp).as_posix()}: {e.strerror or e}")
             continue
     if not digs:
+        notes = ["no payload file could be read"]
+        if unreadable:
+            # Distinguish an EMPTY package from a fully unreadable one: the old
+            # return discarded the per-file detail, so both hashed the same (F059).
+            notes.append(f"{len(unreadable)} payload file(s) could not be read: "
+                         + "; ".join(unreadable[:5])
+                         + (f" (+{len(unreadable) - 5} more)" if len(unreadable) > 5 else ""))
         return {"token": "", "files": 0, "tokens_seen": [], "consistent": False,
-                "notes": ["no payload file could be read"]}
+                "unreadable": list(unreadable), "notes": notes}
     token = hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()[:7]
     # The READ-ONLY raw-data directory keeps the ORIGINAL file names: any version
     # token a name inside it carries belongs to the run that produced the source
@@ -3322,7 +3329,9 @@ def ensure_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
     want = expected_view_digest(ctx, r, vid, view_seed)
     if dst.is_dir() and judge_view_digest(dst) == want:
         return False
-    if dst.exists():
+    if dst.exists() or dst.is_symlink():
+        # A dangling symlink at `dst` makes exists() False; mkdir then raises
+        # FileExistsError and the derived view can never be rebuilt (F188).
         rmtree_force(dst, ignore_errors=True)
     build_judge_view(ctx, r, vid, dst, stamp, view_seed)
     return True
@@ -4076,8 +4085,14 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
         inputs["feedback"] = hash_manifest(sb / "feedback", follow_dir_links=True)
     if (sb / "concerns").is_dir():
         inputs["concerns"] = hash_manifest(sb / "concerns")
-    if prior is not None:
-        prior_files = prior_round_file_sources(prior)
+    prior_files = prior_round_file_sources(prior) if prior is not None else {}
+    if not prior_files:
+        # No current prior review (or it carries no files): a prior_round/ left
+        # by an earlier materialization is STALE and must not be recorded or
+        # shown to this round's reviewer (F139).
+        if (sb / "prior_round").exists() or (sb / "prior_round").is_symlink():
+            rmtree_force(sb / "prior_round", ignore_errors=True)
+    else:
         want_prior = {name: sha256_file(src) for name, src in prior_files.items()}
         if want_prior and not dir_matches(sb / "prior_round", want_prior):
             # A partial carry-over copy is rebuilt, not trusted: the review must
@@ -4101,13 +4116,30 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
         audit_obs = prior_audit_observations(ctx, r - 1)
         if audit_obs is not None:
             prior_audit_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(audit_obs, prior_audit_dir / "UNRESOLVED.md")
+            _copy_ok = True
+            try:
+                shutil.copy2(audit_obs, prior_audit_dir / "UNRESOLVED.md")
+            except OSError:
+                # An unreadable observation source must become an explicit gap
+                # row below, not abort or stage an empty table (F187).
+                _copy_ok = False
             # The observations are prose lines with no ids, so a review could
             # not name the one it disposed. Stage the SAME lines with stable
             # ids (an indexed READ-ONLY view; UNRESOLVED.md stays verbatim)
             # and let the postcheck require one disposition per id.
-            _obs_lines = prior_audit_observation_lines(
-                read_text_bounded(prior_audit_dir / "UNRESOLVED.md") or "")
+            _obs_text = (read_text_bounded(prior_audit_dir / "UNRESOLVED.md")
+                         if _copy_ok else None)
+            if _obs_text is None:
+                # An unreadable prior-audit file must not become an EMPTY id
+                # table: the next review would dispose nothing and the audit's
+                # observations would vanish silently (F187). Stage one explicit
+                # gap row, which the postcheck then requires a disposition for.
+                _obs_lines = [
+                    f"UNREADABLE prior-audit observations: {audit_obs} could not be "
+                    f"read; restore the file and retry so this observation can be "
+                    f"disposed"]
+            else:
+                _obs_lines = prior_audit_observation_lines(_obs_text)
             write_text_atomic(
                 prior_audit_dir / "OBSERVATIONS.md",
                 "\n".join([
@@ -4388,10 +4420,32 @@ def cold_start_obligation_rows(root: Path, limit: int = 200, area_names=None) ->
                          "where": str(r.get("detail") or "")[:120]})
     except Exception:                                             # noqa: BLE001
         pass
-    rows.append({"family": "coverage",
-                 "obligation": f"the corpus carries {len(carried)} file(s); "
-                               f"{len(submitted)} declared as submitted",
-                 "resolves": "context", "where": ""})
+    coverage = {"family": "coverage",
+                "obligation": f"the corpus carries {len(carried)} file(s); "
+                              f"{len(submitted)} declared as submitted",
+                "resolves": "context", "where": ""}
+    if limit <= 0:
+        return []
+    # Never slice the coverage row away, and never truncate silently: the
+    # inventory is a CANDIDATE list the reviewer relies on, so a prefix says
+    # how many entries it omitted (F099).
+    if len(rows) > limit - 1:
+        # The branch keeps `limit - 2` original rows and spends the other two
+        # slots on the truncation row and the coverage row, so the omitted
+        # count is what `rows[:limit - 2]` dropped (R03). With `limit == 1`
+        # there is no truncation row and every original row is omitted.
+        kept = max(0, limit - 2)
+        omitted = len(rows) - kept
+        coverage["obligation"] += f"; {omitted} inventory row(s) omitted by the {limit}-row limit"
+        if limit >= 2:
+            rows = rows[:kept] + [{
+                "family": "truncation",
+                "obligation": f"{omitted} row(s) omitted from this inventory by the "
+                              f"{limit}-row limit",
+                "resolves": "gap", "where": "raise the limit to see them"}]
+        else:
+            rows = []
+    rows.append(coverage)
     return rows[:limit]
 
 
