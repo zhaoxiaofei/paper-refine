@@ -576,9 +576,9 @@ def test_f79() -> None:
     print("\n== F79: nested w:ins/w:del text is counted once ==")
     W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     doc = (f'<w:document xmlns:w="{W}"><w:body><w:p>'
-           '<w:ins w:id="1"><w:r><w:t>one two</w:t></w:r>'
+           '<w:ins w:id="1"><w:r><w:t>one two </w:t></w:r>'
            '<w:ins w:id="2"><w:r><w:t>three</w:t></w:r></w:ins></w:ins>'
-           '<w:del w:id="3"><w:r><w:delText>four five</w:delText></w:r>'
+           '<w:del w:id="3"><w:r><w:delText>four five </w:delText></w:r>'
            '<w:del w:id="4"><w:r><w:delText>six</w:delText></w:r></w:del></w:del>'
            '</w:p></w:body></w:document>')
     pkg = scratch("f79_") / "x.docx"

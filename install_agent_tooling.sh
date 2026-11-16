@@ -12,6 +12,12 @@
 #   * DeepSeek Harness ($DSH_HOME, default ~/.dsh): both skills in its flat
 #     skills directory (one copy per frontmatter `name`), and the same two
 #     servers in EVERY profile's cordis.patch.yml.
+#   * Claude Code ($CLAUDE_HOME, default ~/.claude): both skills in its
+#     `skills/<frontmatter name>/` directory and the same server rows through
+#     `claude mcp add --scope user` when the `claude` CLI is on PATH. Without
+#     the CLI the skills are still installed and the exact manual MCP commands
+#     are printed (a claude-code-only machine used to be told "nothing to
+#     install").
 #
 # The `zotero` row is conditional and is REPOINTED, not merely added:
 # install_dependencies.sh installs the Zotero bridge (upstream:
@@ -164,9 +170,33 @@ case "$install_dsh" in
         ;;
 esac
 
-if [ "$codex_enabled" = 0 ] && [ "$dsh_enabled" = 0 ]; then
-    echo "error: nothing to install -- neither the codex CLI nor a DeepSeek Harness was found" >&2
-    echo "       (set INSTALL_CODEX=1 and/or INSTALL_DSH=1 to force a half on)" >&2
+# claude-code: Claude Code keeps user skills under $CLAUDE_HOME/skills (default
+# ~/.claude/skills) and MCP rows in its own user config. `auto` needs evidence
+# of the harness (an explicit CLAUDE_HOME or the config directory); the
+# one-script installer forces the half when the `claude` CLI is on PATH, so a
+# fresh machine with the CLI but no config directory is still wired.
+claude_home="${CLAUDE_HOME:-$HOME/.claude}"
+claude_skills_dir="$claude_home/skills"
+claude_backup_dir="$claude_home/backup"
+install_claude="${INSTALL_CLAUDE:-auto}"
+claude_enabled=0
+case "$install_claude" in
+    auto)
+        if [ -n "${CLAUDE_HOME:-}" ] || [ -d "$claude_home" ]; then
+            claude_enabled=1
+        fi
+        ;;
+    1|yes|true|on) claude_enabled=1 ;;
+    0|no|false|off) claude_enabled=0 ;;
+    *)
+        echo "error: INSTALL_CLAUDE=$install_claude is not one of auto, 1 (force), 0 (skip)" >&2
+        exit 2
+        ;;
+esac
+
+if [ "$codex_enabled" = 0 ] && [ "$dsh_enabled" = 0 ] && [ "$claude_enabled" = 0 ]; then
+    echo "error: nothing to install -- neither the codex CLI, a DeepSeek Harness, nor Claude Code was found" >&2
+    echo "       (set INSTALL_CODEX=1, INSTALL_DSH=1 and/or INSTALL_CLAUDE=1 to force a half on)" >&2
     exit 1
 fi
 
@@ -224,6 +254,11 @@ if [ "$dsh_enabled" = 1 ]; then
     dsh_home=$(resolve_dir "$dsh_home")
     dsh_skills_dir="$dsh_home/skills"
     dsh_backup_dir="$dsh_home/backup"
+fi
+if [ "$claude_enabled" = 1 ]; then
+    claude_home=$(resolve_dir "$claude_home")
+    claude_skills_dir="$claude_home/skills"
+    claude_backup_dir="$claude_home/backup"
 fi
 node_bin=$(resolve_file "$node_bin")
 if [ -n "$python_bin" ]; then
@@ -340,6 +375,7 @@ stage_skills=""
 stage_tools=()
 stage_companions=()
 stage_dsh=""
+stage_claude=""
 servers_json=""
 cleanup() {
     rc=$?
@@ -351,6 +387,7 @@ cleanup() {
         [ -n "$s" ] && rm -f -- "$s"
     done
     [ -n "$stage_dsh" ] && rm -rf -- "$stage_dsh"
+    [ -n "$stage_claude" ] && rm -rf -- "$stage_claude"
     [ -n "$servers_json" ] && rm -f -- "$servers_json"
     exit "$rc"
 }
@@ -398,6 +435,33 @@ if [ "$dsh_enabled" = 1 ]; then
         printf '{\n  "source": "local:%s",\n  "version": "%s",\n  "installedAt": "%s"\n}\n' \
             "$src" "$new_version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             > "$stage_dsh/$name/.dshx.json"
+    done
+fi
+
+# ---- stage the Claude Code skills -----------------------------------------
+# Claude Code discovers user skills as $CLAUDE_HOME/skills/<name>/SKILL.md.
+# Stage outside the live skills directory, verify the same frontmatter dsh
+# requires, then switch in one directory per frontmatter `name`.
+if [ "$claude_enabled" = 1 ]; then
+    stage_claude="$claude_home/.paper-skills-stage.$$"
+    rm -rf -- "$stage_claude"
+    mkdir -p -- "$stage_claude"
+    for name in paper-review paper-revise; do
+        src="$repo_dir/paper-skills/$name"
+        [ -f "$src/SKILL.md" ] || {
+            echo "error: $src/SKILL.md is missing; refusing to install a skill Claude Code cannot load" >&2
+            exit 1
+        }
+        declared=$(frontmatter_value "$src/SKILL.md" name)
+        [ "$declared" = "$name" ] || {
+            echo "error: $src/SKILL.md declares name '${declared}', not '$name'" >&2
+            exit 1
+        }
+        [ -n "$(frontmatter_value "$src/SKILL.md" description)" ] || {
+            echo "error: $src/SKILL.md has no description; Claude Code refuses to load such a skill" >&2
+            exit 1
+        }
+        cp -r -- "$src" "$stage_claude/$name"
     done
 fi
 
@@ -493,7 +557,13 @@ for i in "${!tool_names[@]}"; do
         exit 1
     fi
     rm -rf -- "$old_path"
-    rm -rf -- "${tool_path}-${new_version}"
+    # Keep exactly ONE versioned snapshot (the documented rollback copy) and
+    # prune every older one: an unpruned copy per install grew the disk without
+    # bound (F066).
+    for _stale in "${tool_path}"-*; do
+        [ -e "$_stale" ] || continue
+        rm -rf -- "$_stale"
+    done
     cp -r -- "$tool_path" "${tool_path}-${new_version}"
     echo "installed mcp-tool: ${tool_path}"
     # Both node servers answer initialize() and then fail EVERY tool call with
@@ -645,6 +715,125 @@ if [ "$dsh_enabled" = 1 ]; then
     rm -rf -- "$stage_dsh"
     stage_dsh=""
     echo "dsh hot-reloads its skills directory; no restart needed."
+fi
+
+# ---- switch the Claude Code skills in --------------------------------------
+if [ "$claude_enabled" = 1 ]; then
+    mkdir -p -- "$claude_skills_dir" "$claude_backup_dir"
+    for staged in "$stage_claude"/*/; do
+        [ -d "$staged" ] || continue
+        name=$(basename -- "$staged")
+        dest="$claude_skills_dir/$name"
+        previous_claude=""
+        if [ -e "$dest" ] || [ -L "$dest" ]; then
+            stamp="$(date +%Y%m%d%H%M%S)"
+            previous_claude="$claude_backup_dir/$name.$stamp"
+            suffix=0
+            while [ -e "$previous_claude" ]; do
+                suffix=$((suffix + 1))
+                previous_claude="$claude_backup_dir/$name.$stamp.$suffix"
+            done
+            mv -- "$dest" "$previous_claude"
+            echo "backed up: $dest -> $previous_claude"
+        fi
+        if ! mv -- "$staged" "$dest"; then
+            if [ -n "$previous_claude" ]; then
+                if mv -- "$previous_claude" "$dest"; then
+                    echo "restored the previous Claude Code skill after the failed switch-in: ${dest}" >&2
+                else
+                    echo "error: could not restore ${dest}; the previous copy is at ${previous_claude}" >&2
+                fi
+            fi
+            exit 1
+        fi
+        echo "installed skill: $dest"
+    done
+    rm -rf -- "$stage_claude"
+    stage_claude=""
+fi
+
+# ---- register the MCP rows with Claude Code --------------------------------
+# `claude mcp add --scope user` is the CLI's native registration. Read the
+# current row back with `claude mcp get` and only rewrite a missing/stale one,
+# so operator options on a correct row are preserved. Without the CLI the
+# skills are still installed and the exact commands are printed instead of a
+# silent no-op.
+claude_cli=""
+if command -v claude >/dev/null 2>&1; then claude_cli=$(command -v claude); fi
+claude_mcp_state() {
+    local out
+    out=$("$claude_cli" mcp get "$1" 2>/dev/null) || { echo missing; return; }
+    if printf '%s\n' "$out" | grep -Fq "Command: $2" \
+        && printf '%s\n' "$out" | grep -Fq "Args: $3"; then
+        echo ok
+    else
+        echo stale
+    fi
+}
+if [ "$claude_enabled" = 1 ]; then
+    if [ -z "$claude_cli" ]; then
+        echo "Claude Code detected at $claude_home, but the 'claude' CLI is not on PATH."
+        echo "The skills were installed; register the MCP servers with:"
+        for i in "${!mcp_row_names[@]}"; do
+            echo "  claude mcp add --scope user ${mcp_row_names[$i]} -- ${mcp_row_commands[$i]} ${mcp_row_scripts[$i]}"
+        done
+    else
+        claude_config_backed_up=0
+        backup_claude_config() {
+            [ "$claude_config_backed_up" = 1 ] && return 0
+            claude_config_backed_up=1
+            local cfg="$HOME/.claude.json"
+            [ -f "$cfg" ] || return 0
+            local stamp target suffix
+            stamp="$(date +%Y%m%d%H%M%S)"
+            target="$claude_backup_dir/claude.json.$stamp"
+            suffix=0
+            while [ -e "$target" ]; do
+                suffix=$((suffix + 1))
+                target="$claude_backup_dir/claude.json.$stamp.$suffix"
+            done
+            cp -p -- "$cfg" "$target"
+            echo "backed up: $cfg -> $target"
+        }
+        for i in "${!mcp_row_names[@]}"; do
+            name="${mcp_row_names[$i]}"
+            command="${mcp_row_commands[$i]}"
+            script="${mcp_row_scripts[$i]}"
+            state=$(claude_mcp_state "$name" "$command" "$script" || printf 'unreadable\n')
+            case "$state" in
+                ok)
+                    echo "claude MCP server already current: $name -> $script"
+                    ;;
+                missing)
+                    backup_claude_config
+                    "$claude_cli" mcp add --scope user "$name" -- "$command" "$script"
+                    echo "registered claude MCP server: $name -> $script"
+                    ;;
+                stale)
+                    backup_claude_config
+                    "$claude_cli" mcp remove --scope user "$name" >/dev/null 2>&1 || true
+                    "$claude_cli" mcp add --scope user "$name" -- "$command" "$script"
+                    echo "repointed claude MCP server: $name -> $script"
+                    ;;
+                *)
+                    echo "error: could not read the Claude Code MCP configuration (state: $state)" >&2
+                    exit 1
+                    ;;
+            esac
+            state=$(claude_mcp_state "$name" "$command" "$script" || printf 'unreadable\n')
+            [ "$state" = ok ] || {
+                echo "error: Claude Code still does not report $name -> $script after writing it (state: $state)" >&2
+                exit 1
+            }
+            if [ "$name" = zotero ]; then zotero_rows=1; fi
+        done
+    fi
+else
+    if [ "$install_claude" = auto ]; then
+        echo "skipped the claude-code half: no $claude_home directory (set INSTALL_CLAUDE=1 to force it)"
+    else
+        echo "skipped the claude-code half: INSTALL_CLAUDE=0"
+    fi
 fi
 
 # ---- reconcile each dsh profile's managed block ----------------------------

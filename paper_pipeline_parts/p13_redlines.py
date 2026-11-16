@@ -25,6 +25,10 @@ from __future__ import annotations
 
 REDLINE_DIRNAME = "redlines"
 REDLINE_AUTHOR = "paper_pipeline"
+# The same deadline the subprocess backends use (`_run_redline_cmd`). The
+# in-process docxodus engine gets it too, so a hung native call cannot block
+# the redline/tracking pass and the whole run (F192).
+INPROC_REDLINE_TIMEOUT = 900
 # The python-redlines adapter ships in the repo root next to the orchestrator;
 # `setup` copies it into the root with `paper_docx_format.py` so the tracking
 # stage's second backend is available where the run actually executes. A root
@@ -157,13 +161,43 @@ def redline_adapter_path() -> Path:
     return Path(__file__).resolve().with_name(REDLINE_ADAPTER_NAME)
 
 
+def _inproc_call_with_timeout(fn, timeout: int) -> tuple:
+    """(value, error) for `fn()` run in a daemon worker, bounded by `timeout`.
+
+    The in-process docxodus engine spawns its own .NET child; a hung engine
+    used to block the redline pass, the tracking pass and the whole `run`
+    forever, while every subprocess backend is bounded by
+    `_run_redline_cmd(..., timeout=900)` and killed by process group. The
+    worker thread gives this backend the same deadline. A timed-out call is
+    abandoned (daemon, so interpreter shutdown does not wait for it) and
+    reported as a failed attempt; the caller then falls through to the next
+    backend instead of hanging.
+    """
+    box = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:                              # noqa: BLE001
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, name="redline-engine", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        return None, f"timeout after {timeout}s"
+    return box.get("value"), box.get("error")
+
+
 def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
-    """Run `python-redlines` in THIS process (no adapter file needed).
+    """Run `python-redlines` in THIS process, but in a bounded daemon worker.
 
     The docxodus engine extracts a binary lazily; a read-only user cache (a
     sandboxed home) makes the first call fail, so the engine is retried against
     a writable temp cache -- the same two-step the adapter performs, minus the
     file-path dependency that silently skipped this backend on every root.
+    Every engine call carries a deadline (the subprocess backends' 900 s); a
+    timeout is a failed attempt, never an unbounded hang.
     """
     try:
         import python_redlines as mod                             # noqa: PLC0415
@@ -176,6 +210,7 @@ def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
         if cls is None:
             continue
         tmp_cache = None
+        timed_out = False
         for use_tmp in (False, True):
             if use_tmp and tmp_cache is None:
                 try:
@@ -183,12 +218,23 @@ def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
                 except OSError as e:
                     attempts.append(f"{eng_name}: cannot create a temp cache: {e}")
                     continue
-            try:
-                data, _stdout, _stderr = (cls(tmp_cache) if use_tmp else cls()).run_redline(
-                    REDLINE_AUTHOR, str(base), str(revised))
-            except Exception as e:                                # noqa: BLE001
-                attempts.append(f"{eng_name}: {type(e).__name__}: {e}")
+
+            def call(cls=cls, use_tmp=use_tmp, tmp_cache=tmp_cache):
+                engine = cls(tmp_cache) if use_tmp else cls()
+                return engine.run_redline(REDLINE_AUTHOR, str(base), str(revised))
+
+            payload, error = _inproc_call_with_timeout(call, INPROC_REDLINE_TIMEOUT)
+            if isinstance(error, str):
+                # The timeout sentinel: do not retry the same hung engine with a
+                # writable cache (that would double the deadline), and do not
+                # rmtree a cache the abandoned worker may still be reading.
+                attempts.append(f"{eng_name}: {error}")
+                timed_out = True
+                break
+            if error is not None:
+                attempts.append(f"{eng_name}: {type(error).__name__}: {error}")
                 continue
+            data, _stdout, _stderr = payload
             if data:
                 try:
                     out.parent.mkdir(parents=True, exist_ok=True)
@@ -205,8 +251,9 @@ def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
                     shutil.rmtree(tmp_cache, ignore_errors=True)
                 return {"backend": "python-redlines[docxodus]", "cmd": ["in-process", eng_name],
                         "rc": 0, "ok": True,
-                        "detail": f"python-redlines:{eng_name}.run_redline (in process)"}
-        if tmp_cache:
+                        "detail": f"python-redlines:{eng_name}.run_redline (in process, "
+                                  f"bounded worker)"}
+        if tmp_cache and not timed_out:
             shutil.rmtree(tmp_cache, ignore_errors=True)
     return {"backend": "python-redlines[docxodus]", "ok": False, "rc": None,
             "detail": "; ".join(attempts)[:300] or "no supported engine class"}
@@ -1099,7 +1146,10 @@ def redline_markup_weight(docx: Path) -> dict:
             for child in node:
                 if child.tag == _w(wrapper):
                     if not inside:
-                        total += len(" ".join(
+                        # Adjacent runs can spell ONE word (`corre` + `spondence`):
+                        # joining their text with a space counted two words and
+                        # inflated the over-marking gate (F158).
+                        total += len("".join(
                             t.text or "" for t in child.iter(_w(text_tag))).split())
                     walk(child, True)
                 else:
@@ -1613,6 +1663,11 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
                     continue
                 if note:
                     entry["skipped"].append({"source": label, "reason": note})
+                    # Do not ALSO write comparisons under a label reported as
+                    # skipped: the readme would say the source was skipped while
+                    # listing its files as written against a different baseline
+                    # (F110).
+                    continue
                 unreadable_base, unreadable_cand = [], []
                 pairs, unmatched_base, unmatched_cand = match_docx_pairs(
                     base_sources, srcs, base_problems=unreadable_base,

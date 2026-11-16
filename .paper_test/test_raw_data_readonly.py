@@ -264,7 +264,12 @@ def test_round_and_publish(root: Path, src: Path):
           "PermissionError" not in (dec.stdout + dec.stderr)
           and not (root / f"final_clean_version_{root.name}.tmp").exists())
     if not (clean / "raw_data").is_dir():
-        check("RO3 the published package carries raw_data/", False, str(sorted(clean.iterdir())))
+        # The detail expression must not crash on the very failure it reports
+        # (F033): a missing final_clean_version directory made iterdir() raise
+        # FileNotFoundError instead of printing one failed check.
+        detail = (str(sorted(clean.iterdir())) if clean.is_dir()
+                  else f"(no final_clean_version directory at {clean})")
+        check("RO3 the published package carries raw_data/", False, detail)
         return
     names = sorted(p.name for p in clean.glob("cnb-*"))
     check("RO3 the manuscript filenames are the judged names",

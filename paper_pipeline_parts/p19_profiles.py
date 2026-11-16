@@ -228,8 +228,9 @@ GUIDED_REVIEW_OFF_NOTE = """=== THIS ROUND HAS NO GUIDED REVIEW (operator policy
 
 `--no-guided-review` was set at setup: the round's general checklist pass
 (M1-M36 / J1-J5 and its D0-D5 discovery round) DID NOT RUN.  The frozen finding
-list you were given is the cold-start review's independent, generic output (X-9xx
-rows) and nothing else.
+list you were given is the cold-start review's independent, generic output
+(X-9xx/X-9xxx rows: X-901..X-999, or X-9001..X-9999 when there are more than 99)
+and nothing else.
 
 What that means for you:
 
@@ -238,7 +239,7 @@ What that means for you:
     list as evidence that the corpus is clean, and do not report "no findings"
     for one of those classes.
   * Your mandate is unchanged in kind: dispose (audit) or resolve (revise, in
-    a re-validation ledger row) every frozen X-9xx id you were given.
+    a re-validation ledger row) every frozen X-9xx/X-9xxx id you were given.
   * This gap is recorded in the run's state and in the frozen
     `guided_review/findings.json` coverage table. It is not yours to close.
 """

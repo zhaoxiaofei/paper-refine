@@ -624,6 +624,27 @@ def caption_ranges(lines: list, kinds=("figure",)) -> list:
     return ranges
 
 
+def strip_markdown_nonprose(text: str) -> str:
+    """Blank fenced code, HTML comments and YAML front matter in Markdown.
+
+    A reader does not count a code listing, a hidden comment or front-matter
+    metadata as manuscript words; the LaTeX path already strips its own
+    non-prose constructs (F155). Line breaks are preserved so section
+    detection still sees the same structure.
+    """
+    src = str(text or "")
+
+    def _blank(m):
+        return "\n" * m.group(0).count("\n")
+
+    # YAML front matter only at the very start.
+    src = re.sub(r"\A---[ \t]*\n.*?\n---[ \t]*(?:\n|\Z)", _blank, src,
+                 count=1, flags=re.S)
+    src = re.sub(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$", _blank, src)
+    src = re.sub(r"(?s)<!--.*?-->", _blank, src)
+    return src
+
+
 def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) -> list:
     """[(section, words, note)] for a document's text lines.
 
@@ -1079,6 +1100,8 @@ def main(argv=None) -> int:
                 # A converted Word corpus file carries the converter's part
                 # markers and the header/footer text; neither is counted prose.
                 text = strip_converted_page_furniture(text)
+            if ext in (".md", ".markdown"):
+                text = strip_markdown_nonprose(text)
         if is_tex:
             # A multi-file manuscript's body lives in the children; counting
             # the master alone reported 1-2 words (F06).

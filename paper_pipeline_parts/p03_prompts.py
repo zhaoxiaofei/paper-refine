@@ -3198,7 +3198,13 @@ def mcp_server_unusable_reason(name: str) -> str:
     header = re.compile(
         r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'" + quoted + r"'|" + quoted +
         r")\s*\]\s*(?:#.*)?$", re.MULTILINE)
-    m = header.search(text)
+    # A phantom `[mcp_servers.x]` inside a multiline string must not configure
+    # the probe, but a QUOTED real header (`[mcp_servers."x"]`) contains a
+    # string and must still be found: search the raw text and accept only a
+    # header whose `[` sits outside a string/comment (F221).
+    _masked = _toml_unquoted_mask(text)
+    m = next((cand for cand in header.finditer(text)
+              if _masked[cand.start()] != "\x00"), None)
     if not m:
         return f"{name!r} is not configured in {cfg}"
     rest = text[m.end():]
@@ -4702,6 +4708,7 @@ the bounded repair write a new error.
 
 Write only under `revision_audit/`. Never touch `base/`, `revised/`, `guided_review/`, `audit/`, `raw_data/`
 or `code/`.
+@@PLACEHOLDER_RULE@@
 """
 
 
@@ -4709,7 +4716,8 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
                           execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                           insertions_allowed: bool = True,
                           deletions_allowed: bool = True,
-                          prefer_rewrite: bool = False) -> str:
+                          prefer_rewrite: bool = False,
+                          author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """The REVISION AUDITOR prompt: audit the revision, write the repair plan only.
 
     The audit's REPAIR_PLAN drives the bounded repair, and the repair prompt
@@ -4720,7 +4728,9 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
     text = (REVISION_AUDIT_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
-            .replace("@@ROUND@@", str(int(r))))
+            .replace("@@ROUND@@", str(int(r)))
+            .replace("@@PLACEHOLDER_RULE@@",
+                     placeholder_rule_text(author_to_complete)))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
                                      prefer_rewrite)
     # The audit is a full session: it gets the shared decision rules, the source
@@ -4732,10 +4742,13 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
     shared = shared_blocks(include_checks=False)
     text = apply_hierarchy_reconcile(text + shared, "revision_audit")
     text = with_context_budget(text)
-    text = apply_author_to_complete_prompt(text)
+    text = apply_author_to_complete_prompt(text, author_to_complete)
     text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
-    return page_stage_prompt(sandbox, text, [("SHARED DECISION RULES", shared)],
-                             "revision_audit", execution_profile)
+    return page_stage_prompt(
+        sandbox, text,
+        [("SHARED DECISION RULES", shared),
+         ("PLACEHOLDER RULE", placeholder_rule_text(author_to_complete))],
+        "revision_audit", execution_profile)
 
 
 REVISION_REPAIR_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
@@ -4751,6 +4764,7 @@ confirmed row(s). You apply that plan to `revised/` and produce the arm's revise
 for the arm before integration. You do not re-review the submission, do not run a discovery hunt,
 and do not re-audit.
 @@CONTENT_EDIT_POLICY@@
+@@PLACEHOLDER_RULE@@
 
 RE-VALIDATE EVERY PLANNED REPAIR BEFORE YOU APPLY IT. The plan is a set of CLAIMS, not instructions.
 For each row: re-read the cited location in `revised/`, compare it with `base/` and the source
@@ -4800,22 +4814,28 @@ def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int,
                            execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                            insertions_allowed: bool = True,
                            deletions_allowed: bool = True,
-                           prefer_rewrite: bool = False) -> str:
+                           prefer_rewrite: bool = False,
+                           author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """The BOUNDED REPAIR prompt: re-validate the plan, apply only confirmed rows."""
     text = (REVISION_REPAIR_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
             .replace("@@ROUND@@", str(int(r)))
-            .replace("@@ROWS@@", str(int(rows))))
+            .replace("@@ROWS@@", str(int(rows)))
+            .replace("@@PLACEHOLDER_RULE@@",
+                     placeholder_rule_text(author_to_complete)))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
                                      prefer_rewrite)
     shared = shared_blocks()
     text = apply_hierarchy_reconcile(text + shared, "revision_repair")
     text = with_context_budget(text)
-    text = apply_author_to_complete_prompt(text)
+    text = apply_author_to_complete_prompt(text, author_to_complete)
     text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
-    return page_stage_prompt(sandbox, text, [("SHARED DECISION RULES", shared)],
-                             "revision_repair", execution_profile)
+    return page_stage_prompt(
+        sandbox, text,
+        [("SHARED DECISION RULES", shared),
+         ("PLACEHOLDER RULE", placeholder_rule_text(author_to_complete))],
+        "revision_repair", execution_profile)
 
 REVISION_AUDIT_PROMPT = revision_audit_prompt
 REVISION_REPAIR_PROMPT_FN = revision_repair_prompt

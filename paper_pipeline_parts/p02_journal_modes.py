@@ -2130,9 +2130,36 @@ def _content_edit_enabled(ctx, kind: str, default: bool = True) -> bool:
     if override is not None:
         return bool(override)
     cfg = (getattr(ctx, "cfg", None) or {}) if ctx is not None else {}
-    for key in CONTENT_EDIT_KEYS[kind]:
-        if key not in cfg:
-            continue
+
+    def _alias_allows(key: str, value) -> bool:
+        """One alias spelling -> the boolean permission it states."""
+        if isinstance(value, bool):
+            return value if not key.startswith("disable_") else not value
+        if isinstance(value, (int, float)):
+            truthy = bool(value)
+            return truthy if not key.startswith("disable_") else not truthy
+        text = str(value or "").strip().lower()
+        if not text:
+            raise ValueError("empty")
+        truthy = text in _CONTENT_EDIT_ON
+        allowed = truthy if truthy else text not in _CONTENT_EDIT_OFF
+        return (not allowed) if key.startswith("disable_") else allowed
+
+    # Every present alias must agree. The old first-present-key precedence let
+    # `deletions: true` silently override `disable_deletions: true` in the same
+    # config, ignoring the safety switch (F152).
+    present = [(key, cfg.get(key)) for key in CONTENT_EDIT_KEYS[kind] if key in cfg]
+    if len(present) > 1:
+        try:
+            verdicts = {_alias_allows(k, v) for k, v in present}
+        except ValueError:
+            verdicts = set()
+        if len(verdicts) > 1:
+            die(f"conflicting content-edit keys for {kind}: "
+                + ", ".join(f"{k}={v!r}" for k, v in present)
+                + f". They disagree; remove the contradictory key(s) before running.",
+                code=2)
+    for key, value in present:
         value = cfg.get(key)
         if isinstance(value, bool):
             truthy = value
@@ -2197,8 +2224,21 @@ def content_edit_policy_allowed(ctx=None, rec=None) -> tuple:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict):
-        return (bool(policy.get("insertions", True)),
-                bool(policy.get("deletions", True)))
+        def _flag(value, default=True) -> bool:
+            # A run record can carry the documented string spellings ('off',
+            # 'false'); bool('false') is True and widened a strict stage into
+            # the permissive policy (F153).
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            text = str(value or "").strip().lower()
+            if not text:
+                return default
+            return text not in _CONTENT_EDIT_OFF
+
+        return (_flag(policy.get("insertions", True)),
+                _flag(policy.get("deletions", True)))
     return insertions_enabled(ctx), deletions_enabled(ctx)
 
 
@@ -4492,6 +4532,13 @@ def _manual_md_cells(line: str) -> list:
         text = text[:-1]
     cells, cur, i = [], [], 0
     while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] == "\\":
+            # `md_table_cell` escapes a literal backslash as `\\`; decode it in
+            # the SAME pass as `\|` or a Windows path/LaTeX token doubles on
+            # every write/read round trip (F133).
+            cur.append("\\")
+            i += 2
+            continue
         if text[i] == "\\" and i + 1 < len(text) and text[i + 1] == "|":
             cur.append("|")
             i += 2

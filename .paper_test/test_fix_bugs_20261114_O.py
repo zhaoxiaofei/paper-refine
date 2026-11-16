@@ -331,9 +331,13 @@ def test_ranking_fixes():
     no_census = {"median": 2.0, "mean": 2.0, "iqr": 0.0, "digest": "a" * 40}
     one = {"defect_prefix_total": 1, "median": 0.0, "mean": 0.0, "iqr": 0.0,
            "digest": "b" * 40}
-    check("F174 a row with no recorded census/total is ranked WORST, never as zero defects",
-          pp.champion_sort_key(no_census) > pp.champion_sort_key(one),
-          pp.champion_sort_key(no_census)[:1])
+    # A total-only row is MISSING the ordered severity/tier census the rule
+    # requires (F184), so both it and a row with neither input are unrankable:
+    # neither may be read as a low-defect row.
+    check("F174 a row without an ordered census is never ranked as zero defects",
+          pp.champion_sort_key(no_census)[0] == 10 ** 9
+          and pp.champion_sort_key(one)[0] == 10 ** 9,
+          (pp.champion_sort_key(no_census)[:1], pp.champion_sort_key(one)[:1]))
 
     stats = {"w1": stat(vs_original_complete=None, anti_regression_ok=True, median=2.0),
              "a2": stat(median=1.0), "base": stat(median=0.0)}

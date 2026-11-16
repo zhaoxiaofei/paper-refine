@@ -539,7 +539,11 @@ def _docx_paragraphs_with_styles(path: Path, include_tables: bool = True,
             try:
                 note_roots.append(ET.fromstring(nd))
             except ET.ParseError:
-                continue
+                # A malformed footnotes/endnotes/header part must make the
+                # WHOLE read fail closed: silently dropping it hid a deleted
+                # footnote fact from every content/fact gate (F154). The
+                # caller treats None as an unscannable submitted file.
+                return None
     except (OSError, KeyError, zipfile.BadZipFile, zipfile.LargeZipFile,
             ET.ParseError, RuntimeError, NotImplementedError):
         return None

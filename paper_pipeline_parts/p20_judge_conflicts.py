@@ -1526,6 +1526,10 @@ def decide_certification(gate_problems, rounds_data, chain_ok, panel_gaps, final
     a blocker), because the operator asked for exactly this outcome.
     """
     auto_promoted = [int(r) for r in (auto_promoted or [])]
+    # An auto-promoted champion is PROVISIONAL by construction: the machine
+    # verdict must agree with `certification_label`, not merely add a note
+    # (F021).
+    provisional = bool(provisional or auto_promoted)
     blockers = list(gate_problems)
     if any(rd.get("mismatch") for rd in rounds_data):
         blockers.extend(str(rd["mismatch"]) for rd in rounds_data if rd.get("mismatch"))

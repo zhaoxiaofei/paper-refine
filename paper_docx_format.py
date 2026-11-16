@@ -18,11 +18,16 @@ spacing. This tool makes those defects checkable and fixes the mechanical ones.
     python3 paper_docx_format.py scan-figures   FIGURES/ [--from-docx MS.docx]
     python3 paper_docx_format.py repair-layout  FILE.docx --out FILE.fixed.docx
     python3 paper_docx_format.py xfa-export     FORM.pdf       # readable rendering of the answers
+    python3 paper_docx_format.py validate       PATH [...]     # DOCX XML/schema + .tex compile
+    python3 paper_docx_format.py lookup         QUERY [...]    # resolve preprint/DOI/accession/...
     # policy overrides:  --policy policy.json  (see POLICY_DEFAULTS)
 
 Design rules, each one the result of an observed failure:
 
-* reading uses ElementTree; WRITING never re-serializes the XML. Re-serializing
+* the OOXML readers are mostly regex/literal-prefix token walks over the part
+  text (`paragraphs()`/`text_of()`/`run_is_italic()`); a few checks use
+  ElementTree only to inspect a specific part. WRITING never re-serializes the
+  XML. Re-serializing
   `word/document.xml` drops namespace declarations that `mc:Ignorable` still
   references and Word then refuses the file ("the file appears to be
   corrupted"). Every edit is a byte-level splice of the original text, so all

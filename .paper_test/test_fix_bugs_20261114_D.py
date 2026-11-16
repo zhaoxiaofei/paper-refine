@@ -255,15 +255,25 @@ def test_f37() -> None:
 # ---------------------------------------------------------------------------
 # F41: a failed `pip freeze` fails the export instead of writing 0 bytes
 # ---------------------------------------------------------------------------
-def _fake_conda(path: Path, pip_freeze_ok: bool) -> None:
+def _fake_conda(path: Path, pip_freeze_ok: bool, local_only: bool = False) -> None:
+    if pip_freeze_ok and local_only:
+        # Both lines are filtered as build-machine artifacts: the sanitise
+        # grep has NO surviving line and must treat exit 1 as a valid empty
+        # record (R02).
+        freeze = ("    echo 'pip @ file:///home/test/pip-25.0-py3-none-any.whl'\n"
+                  "    echo 'python-docx @ file:///home/test/python-docx-1.1.0-py3-none-any.whl'\n"
+                  "    exit 0\n")
+    elif pip_freeze_ok:
+        freeze = "    echo 'python-docx==1.1.0'\n    exit 0\n"
+    else:
+        freeze = "    exit 1\n"
     body = (
         "#!/bin/sh\n"
         "if [ \"$1\" = \"run\" ]; then\n"
         "  shift 4\n"
         "  if [ \"$1\" = \"-c\" ]; then exit 0; fi\n"
         "  if [ \"$1\" = \"-m\" ]; then\n"
-        + ("    echo 'python-docx==1.1.0'\n    exit 0\n"
-           if pip_freeze_ok else "    exit 1\n") +
+        + freeze +
         "  fi\n"
         "  printf 'python-docx==1.1.0\\n' > \"$2\"\n"
         "  exit 0\n"
@@ -307,6 +317,18 @@ def test_f41() -> None:
               proc.returncode == 0 and record.is_file()
               and "python-docx==1.1.0" in record.read_text(encoding="utf-8"),
               (proc.returncode, (proc.stdout + proc.stderr)[-300:]))
+    with tempfile.TemporaryDirectory(prefix="fbD41local_") as scratch:
+        tmp = Path(scratch)
+        conda = tmp / "bin" / "conda"
+        _fake_conda(conda, pip_freeze_ok=True, local_only=True)
+        out_dir = tmp / "out"
+        env = clean_env(CONDA_EXE=str(conda))
+        proc = run(["bash", script, "--out", str(out_dir)], env=env)
+        record = out_dir / "paper-refine-test.requirements.list_e.txt"
+        check("R02 an all-local pip record is a valid empty record",
+              proc.returncode == 0 and record.is_file()
+              and record.read_text(encoding="utf-8") == "",
+              (proc.returncode, (proc.stdout + proc.stderr)[-400:]))
 
 
 # ---------------------------------------------------------------------------

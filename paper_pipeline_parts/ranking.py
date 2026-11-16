@@ -163,11 +163,10 @@ def champion_sort_key(row: dict) -> tuple:
     """
     census = row.get("defect_prefix_census")
     if census is None:
-        total = row.get("defect_prefix_total")
-        # A missing census/total is MISSING EVIDENCE, never zero defects: a
-        # legacy/trimmed row with no recorded census must not outrank a row that
-        # really carries one defect (Rule 6's "missing value is worst").
-        census = (int(total),) if total is not None else (10 ** 9,)
+        # A missing ordered census is MISSING EVIDENCE, never a one-total
+        # substitute: collapsing fatal..minor to a total ties one fatal defect
+        # with one minor and lets the digest decide (Rule 6 forbids it; F184).
+        census = (10 ** 9,)
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
     return (tuple(int(x) for x in census)
             + (-(med if med is not None else -99.0),)
@@ -347,6 +346,16 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     rows.sort(key=champion_sort_key)
     champ_row = rows[0]
     base_row = next((t for t in rows if t["is_base"]), None)
+    # The incumbent's identity and statistics are a property of "the field has
+    # an incumbent", not of the incumbent being eligible. A base with an
+    # incomplete panel is filtered out of `rows`, and the old lookup then
+    # silently skipped retention (F185). Compare against its recorded stats
+    # directly.
+    base_stats = stats.get(base_rep) if base_rep else None
+    if base_row is None and base_stats is not None and champ_row["id"] != A1_ID:
+        base_row = {"id": A1_ID, "rep": base_rep, "is_base": True,
+                    "median": base_stats.get("median"),
+                    "mean": base_stats.get("mean"), "iqr": base_stats.get("iqr")}
     if base_row is not None and champ_row is not base_row \
             and (champ_row["median"], champ_row["mean"], champ_row["iqr"]) == \
             (base_row["median"], base_row["mean"], base_row["iqr"]):

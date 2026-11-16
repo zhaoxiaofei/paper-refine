@@ -257,32 +257,33 @@ check("B2 the prefix stops when the cleanest version reaches the floor",
       f"{np.tiebreak_prefix_cells(_cum, ['A','B'], 0)}")
 # The cumulative defect count LEADS the key: it is compared before the median...
 row_better_census = {"median": 1.0, "mean": -9.0, "iqr": 0.0, "digest": "z", "id": "A",
-                     "defect_prefix_total": 0}
+                     "defect_prefix_census": (0,), "defect_prefix_total": 0}
 row_worse_census = {"median": 1.0, "mean": 9.0, "iqr": 0.0, "digest": "a", "id": "B",
-                    "defect_prefix_total": 1}
+                    "defect_prefix_census": (1,), "defect_prefix_total": 1}
 check("B2 the cumulative defect count is compared before the median and the mean",
       np.champion_sort_key(row_better_census) < np.champion_sort_key(row_worse_census))
 # ... and a version with FEWER defects outranks one with a BETTER median (the
 # prefix leads: the median is the first tie-break below it).
 row_bad_median_clean = {"median": -2.0, "mean": -1.0, "iqr": 2.0, "digest": "z", "id": "A",
-                        "defect_prefix_total": 1}
+                        "defect_prefix_census": (1,), "defect_prefix_total": 1}
 row_good_median_dirty = {"median": 3.0, "mean": 3.0, "iqr": 0.0, "digest": "a", "id": "B",
-                         "defect_prefix_total": 5}
+                         "defect_prefix_census": (5,), "defect_prefix_total": 5}
 check("B2 the prefix outranks the median (fewer defects wins even with a lower median)",
       np.champion_sort_key(row_bad_median_clean) < np.champion_sort_key(row_good_median_dirty))
-# A LOWER total wins even when its defects live in lower-priority tiers: the
-# prefix decides on the accumulated NUMBER, not on per-cell identity.
+# The ORDERED census decides, not a single total (F184/Rule 6): one fatal
+# defect outranks two defects that live in a later tier, even though its total
+# is smaller. Collapsing to a total would tie a fatal with a minor.
 row_total_1 = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "A",
-               "defect_prefix_total": 2}
+               "defect_prefix_census": (0, 2), "defect_prefix_total": 2}
 row_total_2 = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "B",
-               "defect_prefix_total": 1}
-check("B2 the cumulative total decides (fewer defects is better)",
-      np.champion_sort_key(row_total_2) < np.champion_sort_key(row_total_1))
+               "defect_prefix_census": (1,), "defect_prefix_total": 1}
+check("B2 the ordered census decides (a fatal defect is worse than two minor ones)",
+      np.champion_sort_key(row_total_1) < np.champion_sort_key(row_total_2))
 # ... and equal cumulative totals fall through to the mean.
 row_mean_better = {"median": 1.0, "mean": 2.0, "iqr": 9.0, "digest": "z", "id": "A",
-                   "defect_prefix_total": 1}
+                   "defect_prefix_census": (1,), "defect_prefix_total": 1}
 row_mean_worse = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "B",
-                  "defect_prefix_total": 1}
+                  "defect_prefix_census": (1,), "defect_prefix_total": 1}
 check("B2 equal cumulative totals are broken by the mean",
       np.champion_sort_key(row_mean_better) < np.champion_sort_key(row_mean_worse))
 # The configured floor changes the stop: floor 0 is the EMPTY prefix (Rule 6),
