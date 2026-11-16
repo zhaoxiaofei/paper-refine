@@ -712,7 +712,19 @@ judged again from scratch, which wastes the whole session and leaves the panel i
 """)
 
 
-ORCHESTRATION_DIRECTIVES_HEADER = "ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):"
+ORCHESTRATION_DIRECTIVES_HEADER = (
+    "ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below "
+    "where they conflict):\n"
+    "\n"
+    "SKILL FILES — the $paper-review and $paper-revise packs are READ-ONLY. "
+    "Read SKILL.md and its references from the skill location the run "
+    "provides; when it provides none, the pack is the pipeline root's "
+    "paper-skills/paper-review/ and paper-skills/paper-revise/. Use absolute "
+    "paths. NEVER run `find /`, `grep -r /`, `du /` or any other scan that "
+    "starts at the filesystem root: a root scan is never authorized, and a "
+    "sandboxed run may stop the session for a containment violation. A file "
+    "you cannot find at those locations does not authorize a root scan."
+)
 
 
 REVIEW_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
@@ -2600,6 +2612,12 @@ skill documents, references and bundled scripts that you use to ground your comp
 Zotero helper (`$ZOTERO_SKILL`), the `$zotero-use` skill and the READ routes of the `zot` CLI
 when a citation must be resolved. There is no other judge's sheet and no other pipeline sandbox
 anywhere in your reach -- do not go looking.
+
+SKILL FILES — the $paper-review pack is READ-ONLY. Read SKILL.md and its references from the
+skill location the run provides; when it provides none, the pack is the pipeline root's
+paper-skills/paper-review/. Use absolute paths. NEVER run `find /`, `grep -r /`, `du /` or any
+other scan that starts at the filesystem root: a root scan is never authorized, and a sandboxed
+run may stop the session for a containment violation.
 
 Layout (paths relative to the sandbox root):
   target/       — the ONE package you judge, as a complete document corpus at its top level.
