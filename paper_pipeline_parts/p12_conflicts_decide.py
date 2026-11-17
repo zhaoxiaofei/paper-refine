@@ -8263,16 +8263,34 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             mode = _plan_mode or str(rrec.get("champion_select") or "revise")
             target = auto_champion_vid(ctx, r, mode)
             stored_champ = str(rrec.get("champion") or target)
-            agg, sel = auto_round_payload(ctx, r, stored_champ, mode)
+            # An ALMOST_FAIL fallback is a DECLARED provisional result: the
+            # promised candidate never finished and the round closed with its
+            # base. It is not a corrupted record, so it is re-derived as a
+            # fallback (provisional) instead of becoming an integrity problem.
+            _af = rrec.get("almost_fail") or {}
+            _af_fallback = bool(
+                isinstance(_af, dict) and _af.get("fallback")
+                and stored_champ == A1_ID and stored_champ != target
+            )
+            agg, sel = auto_round_payload(ctx, r, stored_champ, mode,
+                                          fallback=_af_fallback)
             mismatch = None
-            if stored_champ != target:
-                mismatch = (f"auto-promoted champion {stored_champ!r} != the version its plan "
-                            f"names ({target!r})")
-                problems.append(f"round {r}: {mismatch}; the round record is inconsistent")
+            if _af_fallback:
+                sel["almost_fail"] = _af
+                sel["almost_fail_fallback"] = True
+                sel["promised_champion"] = str(_af.get("promised_champion") or target)
+                print(f"[decide] round {r}: {stored_champ} is the recorded ALMOST_FAIL "
+                      f"fallback (the promised {target} never finished); the round is "
+                      f"PROVISIONAL (not a scored/certified decision)")
+            else:
+                if stored_champ != target:
+                    mismatch = (f"auto-promoted champion {stored_champ!r} != the version its "
+                                f"plan names ({target!r})")
+                    problems.append(f"round {r}: {mismatch}; the round record is inconsistent")
+                print(f"[decide] round {r}: {stored_champ} was auto-promoted by "
+                      f"--champion-select {mode}; no judge panel exists, so the round is "
+                      f"PROVISIONAL (not a scored/certified decision)")
             auto_rounds.append(r)
-            print(f"[decide] round {r}: {stored_champ} was auto-promoted by "
-                  f"--champion-select {mode}; no judge panel exists, so the round is "
-                  f"PROVISIONAL (not a scored/certified decision)")
             rounds_data.append({"round": r, "agg": agg, "sel": sel,
                                 "pin": find_pin(ctx, rrec.get("pin_id")) or {},
                                 "winner": find_winner(ctx, r), "stored": rrec,

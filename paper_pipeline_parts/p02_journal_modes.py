@@ -792,6 +792,45 @@ DEFAULT_STRICT_ARTIFACTS = True
 ARTIFACT_POLICY_FIX = "fix"
 ARTIFACT_POLICIES = ("on", ARTIFACT_POLICY_FIX, "off")
 DEFAULT_ARTIFACT_POLICY = "on"
+# `--almost-fail` is the benchmark/collection mode (`--no-almost-fail`
+# restores the default): a stage that exhausts its retry budget is recorded and
+# printed as ALMOST_FAIL instead of a FAIL, the invocation does not exit
+# non-zero for it, and an auto-promoted round falls back to its base when the
+# promised candidate never finished. It is OFF by default; the off path is the
+# historical strict behaviour (a failed stage leaves the round incomplete and
+# `run` exits 3).
+ALMOST_FAIL_MODES = ("on", "off")
+DEFAULT_ALMOST_FAIL = "off"
+_ALMOST_FAIL_ACTIVE = False
+
+
+def set_almost_fail_active(flag: bool) -> None:
+    """Record the invocation's mode for output paths that have no `ctx`."""
+    global _ALMOST_FAIL_ACTIVE
+    _ALMOST_FAIL_ACTIVE = bool(flag)
+
+
+def almost_fail_of(ctx=None) -> bool:
+    """Is a stage failure ALMOST_FAIL instead of a FAIL?
+
+    The per-invocation `run` override wins over the root's recorded policy,
+    exactly like the content-edit policy pairs; a root without the key reads the
+    strict default (`off`).  A caller without a `ctx` (the sandbox self-check
+    client, a report helper) reads the mode the invocation activated.
+    """
+    override = getattr(ctx, "_almost_fail_override", None)
+    if override is not None:
+        return bool(override)
+    if ctx is None:
+        return bool(_ALMOST_FAIL_ACTIVE)
+    cfg = getattr(ctx, "cfg", None) or {}
+    raw = str(cfg.get("almost_fail") or "").strip().lower()
+    return raw == "on"
+
+
+def failure_status(ctx=None) -> str:
+    """The console status word for a failed attempt (`FAIL` / `ALMOST_FAIL`)."""
+    return "ALMOST_FAIL" if almost_fail_of(ctx) else "FAIL"
 DEFAULT_RESIDUAL_GATE = True
 # How many identifier lookups one stage may spend. Each lookup is one or more
 # requests (a DOI asks Crossref, then DataCite, then the handle registry) with a

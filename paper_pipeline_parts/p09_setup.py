@@ -931,6 +931,13 @@ def cmd_setup(args) -> None:
     _prefer = getattr(args, "prefer_rewrite_over_deletion", None)
     if _prefer is not None:
         ctx.cfg["prefer_rewrite_over_deletion"] = "on" if _prefer else "off"
+    # The failure policy. Off is the historical strict path, so a setup that
+    # does not name the pair writes NO key and keeps the byte-identical
+    # pipeline_config.json. `run --almost-fail/--no-almost-fail`
+    # overrides this record for one invocation without rewriting the root.
+    _af = getattr(args, "almost_fail", None)
+    if _af is not None:
+        ctx.cfg["almost_fail"] = "on" if _af else "off"
     if round_indices:
         # Traceability: pipeline round k follows built-in schedule round
         # round_indices[k-1]. The recorded per-round lists below already carry
@@ -1214,6 +1221,18 @@ def cmd_setup(args) -> None:
         "off": "the detector still runs and is recorded, but never fails an attempt",
     }[artifact_policy]
     print(f"[setup] artifact policy:         {artifact_policy}: {_art_note}")
+    _af_recorded = str(ctx.cfg.get("almost_fail") or DEFAULT_ALMOST_FAIL)
+    if _af_recorded == "on":
+        _af_note = ("a stage that exhausts its retry budget is recorded and printed as "
+                    "ALMOST_FAIL, the invocation does not fail for it, and an "
+                    "auto-promoted round falls back to its base when the promised candidate "
+                    "never finished (the result stays PROVISIONAL, never certified; a "
+                    "judge-mode/scoped round stays pending)")
+    else:
+        _af_note = ("a stage that exhausts its retry budget FAILS and leaves the round "
+                    "incomplete (`run` exits 3); pass --almost-fail to record it as "
+                    "ALMOST_FAIL instead")
+    print(f"[setup] almost-fail policy:     {_af_recorded}: {_af_note}")
     print(f"[setup] per-round winners:       {root}/round<r>_winner/  (digest-verified against "
           f"the content-addressed pins)")
     # WHICH CODE THIS ROOT WILL RUN (2026-10-16): `setup` froze the script that
@@ -3718,6 +3737,18 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     ctx._prefer_rewrite_override = (
         getattr(args, "prefer_rewrite_over_deletion")
         if getattr(args, "_prefer_rewrite_over_deletion_explicit", False) else None)
+    # The failure policy is a run property like the content-edit policy: an
+    # explicit pair overrides the root's record for THIS invocation, and an
+    # absent pair keeps it. The module-level flag lets the console helpers that
+    # have no `ctx` (the labels around a failed attempt) use the same mode.
+    ctx._almost_fail_override = getattr(args, "almost_fail", None)
+    set_almost_fail_active(almost_fail_of(ctx))
+    _af_note = ("on -- an exhausted stage is recorded as ALMOST_FAIL; an auto-promoted round "
+                "closes with its base, a judge-mode/scoped round stays pending, and this "
+                "invocation exits 0"
+                if almost_fail_of(ctx) else
+                "off -- an exhausted stage FAILS and leaves the round incomplete (exit 3)")
+    print(f"[run] failure policy: {_af_note}")
     _edit_note = content_edit_policy_note(ctx)
     if _edit_note:
         print(f"[run] content-edit policy: {_edit_note}")
@@ -4133,6 +4164,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         "attempts_per_run": retries + 1,
         "retry_backoff": retry_backoff,
         "retry_backoff_max": retry_backoff_max,
+        "almost_fail": "on" if almost_fail_of(ctx) else "off",
         "set": utcnow()}
     ctx.save_state()
     retry_note = (f"attempts/run={retries + 1} (retries={retries}, exponential backoff "
@@ -4242,6 +4274,10 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 print(f"[run] the {journal_mode_of(ctx)} revision is incomplete; progress is "
                       f"saved. Resume with `run --root {ctx.root}` or reset one run with "
                       f"`retry --run <ID>`.")
+                if almost_fail_of(ctx):
+                    print("[run] ALMOST_FAIL: --almost-fail is on, so the incomplete "
+                          "revision is a warning, not an invocation failure (exit 0).")
+                    return
                 sys.exit(3)
         if only is not None:
             print(f"[run] --only {getattr(args, 'only', None)!r}: the response letter and "
@@ -4259,6 +4295,10 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             print(f"[run] the {journal_mode_of(ctx)} revision itself is complete, but the "
                   f"response/submission stage did not finish; re-run `run` (or "
                   f"`retry --run {rid_response(1)}`) to finish it.")
+            if almost_fail_of(ctx):
+                print("[run] ALMOST_FAIL: --almost-fail is on, so the unfinished "
+                      "finalization is a warning, not an invocation failure (exit 0).")
+                return
             sys.exit(3)
         summarize(ctx)
         return
@@ -4306,6 +4346,11 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             print(f"[run] round {r} is incomplete; progress is saved. Resume with "
                   f"`run --root {ctx.root}` (a fresh invocation grants every failed run a "
                   f"fresh retry budget) or reset a single run with `retry --run <ID>`.")
+            if almost_fail_of(ctx):
+                print(f"[run] ALMOST_FAIL: --almost-fail is on, so round {r}'s "
+                      f"incomplete state is a warning, not an invocation failure (exit 0). "
+                      f"Nothing after it was driven.")
+                break
             sys.exit(3)
         # C28: the pre-registered no-progress stop. A round whose champion is its
         # own base (A1) demonstrably improved nothing, and under this measurement
@@ -4370,7 +4415,11 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 summarize(ctx)
                 print(f"[run] the rounds are complete, but the journal finalization did not "
                       f"finish; re-run `run` (or `retry --run {rid_response(R)}`) to finish it.")
-                sys.exit(3)
+                if almost_fail_of(ctx):
+                    print("[run] ALMOST_FAIL: --almost-fail is on, so the unfinished "
+                          "finalization is a warning, not an invocation failure (exit 0).")
+                else:
+                    sys.exit(3)
         else:
             print(f"[run] journal mode {journal_mode_of(ctx)!r}: the response letter and the "
                   f"submission package are assembled once EVERY round is complete; finish the "
@@ -4405,7 +4454,11 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             print(f"[run] --only {getattr(args, 'only', None)!r} selected no session of the "
                   f"round(s) that still need work ({', '.join(str(r) for r in covered_pending)}): "
                   f"nothing was started in this invocation.")
-            sys.exit(3)
+            if almost_fail_of(ctx):
+                print("[run] ALMOST_FAIL: --almost-fail is on, so the empty "
+                      "selection is a warning (exit 0).")
+            else:
+                sys.exit(3)
         print(f"[run] --only {getattr(args, 'only', None)!r}: round(s) "
               f"{', '.join(str(r) for r in selected) or '(none)'} of {R} are already complete -- "
               f"nothing to do in this invocation")
@@ -4414,9 +4467,19 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
               f"{R} champion is the final answer once every configured round is complete. "
               f"Next: python {Path(sys.argv[0]).name} run --root {ctx.root} "
               f"(or `decide` when all rounds are done)")
-    else:
+    elif all(ctx.round_rec(r).get("status") == "done" for r in range(1, R + 1)):
         print(f"[run] round {R} champion is the final answer. "
               f"Next: python {Path(sys.argv[0]).name} decide --root {ctx.root}")
+    else:
+        pending = [r for r in range(1, R + 1) if ctx.round_rec(r).get("status") != "done"]
+        if almost_fail_of(ctx):
+            print(f"[run] ALMOST_FAIL: round(s) {', '.join(str(r) for r in pending)} are "
+                  f"still incomplete; this invocation exits 0 because --almost-fail is on, "
+                  f"but no champion is the final answer yet. Resume with `run` (or "
+                  f"`retry --run <ID>`).")
+        else:
+            print(f"[run] round(s) {', '.join(str(r) for r in pending)} are still incomplete; "
+                  f"resume with `run` (or `retry --run <ID>`) before `decide`.")
 
 
 def summarize(ctx: Ctx) -> None:

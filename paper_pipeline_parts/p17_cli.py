@@ -18,7 +18,9 @@ USAGE_EXAMPLES = """usage:
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]   (default: both enabled)
           [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
-          (default: off) copy the pristine corpus read-only, record its SHA-256 manifest, and
+          [--almost-fail] [--no-almost-fail]
+          (default: prefer-rewrite off, strict failures) copy the pristine corpus read-only,
+          record its SHA-256 manifest, and
           create pipeline_config.json + state.json (no sandboxes are built yet).
           --venue selects the VENUE PROFILE whose submission rules every stage
           enforces (default: nature-biotechnology, this pipeline's pre-venue
@@ -110,8 +112,10 @@ USAGE_EXAMPLES = """usage:
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]
           [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
+          [--almost-fail] [--no-almost-fail]
           (default: the root's recorded policy; both enabled unless `setup` disabled one;
-           prefer-rewrite off unless `setup` recorded it on or this invocation's flag sets it)
+           prefer-rewrite off and almost-fail off unless `setup` recorded them on or
+           this invocation's flag sets it)
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent-harness dsh|gpt-codex|claude-code] [--agent-model NAME_OR_URL]
           [--agent-model-api-key KEY] [--agent-model-name MODEL]
@@ -136,7 +140,12 @@ USAGE_EXAMPLES = """usage:
           attempt, capped by --retry-backoff-max; 0 = retry immediately). If the
           judge panel is still incomplete after the retries, the round is left
           pending (reports/round<r>_panel_gaps.json) instead of being decided on
-          the reduced panel.
+          the reduced panel. --almost-fail turns that exhausted-stage
+          FAILURE into ALMOST_FAIL: the invocation keeps going, an
+          auto-promoted round closes with its base when the promised candidate
+          never finished (still PROVISIONAL / NOT CERTIFIED), a judge-mode or
+          scoped round stays pending, and `run` exits 0.
+          It is OFF by default and `run` can override the root's `setup` record.
           --judge-manual/--judge-agent-cmd select the judge backend without
           changing the production pair (it is the largest wave), e.g. to run
           judges on a cheaper CLI than the production stages.
@@ -921,6 +930,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "`--strict-artifacts` means `on`")
     ps.add_argument("--fix-artifacts", dest="artifact_policy", action="store_const", const="fix",
                     help="same as --strict-artifacts fix")
+    ps.add_argument("--almost-fail", dest="almost_fail",
+                    action="store_const", const=True, default=None,
+                    help="record and print a stage that exhausts its retry budget as "
+                         "ALMOST_FAIL instead of FAIL and keep the invocation going: an "
+                         "auto-promoted round closes with the base when the promised candidate "
+                         "never finished (a judge-mode/scoped round stays pending) and `run` "
+                         "exits 0. OFF by default; "
+                         "the strict path (a failed stage leaves the round incomplete) is the "
+                         "default. `setup` records it; `run` can override it for one invocation")
+    ps.add_argument("--no-almost-fail", dest="almost_fail",
+                    action="store_const", const=False,
+                    help="use the strict failure path (the default; same as omitting the pair)")
 
     decide_opts = argparse.ArgumentParser(add_help=False)  # shared by decide / run-decide
     decide_opts.add_argument("--package-winner", action="store_true",
@@ -1007,6 +1028,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_content_edit_policy_opts(run_opts, default=True)   # config unless explicitly passed
     run_opts.add_argument("--champion-select", choices=list(CHAMPION_SELECT_MODES),
                           default=None, metavar="MODE", help=CHAMPION_SELECT_HELP)
+    run_opts.add_argument("--almost-fail", dest="almost_fail",
+                          action="store_const", const=True, default=None,
+                          help="override the root's failure policy for this invocation: a "
+                               "stage that exhausts its retry budget is recorded and printed as "
+                               "ALMOST_FAIL, an auto-promoted round falls back to its base when its "
+                               "promised candidate never finished (the result stays "
+                               "PROVISIONAL, never certified; a judge-mode/scoped round "
+                               "stays pending). Default: the root's policy "
+                               "(strict FAIL unless setup recorded --almost-fail)")
+    run_opts.add_argument("--no-almost-fail", dest="almost_fail",
+                          action="store_const", const=False,
+                          help="use the strict failure path for this invocation (overrides a "
+                               "root that recorded --almost-fail)")
     run_opts.add_argument("--jobs", type=int, default=DEFAULTS["jobs"],
                     help=f"concurrent agent sessions (default: {DEFAULTS['jobs']})")
     run_opts.add_argument("--timeout", type=int, default=None,

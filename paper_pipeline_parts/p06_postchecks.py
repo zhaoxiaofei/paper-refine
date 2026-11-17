@@ -9601,7 +9601,7 @@ def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
         record_attempt(ctx, rec, False, [rec["last_error"]], [],
                        source="continuation (process failed)")
         print_failure(rec["id"], [rec["last_error"]],
-                      note=f"after continuation {flight['session'][:8]}")
+                      note=f"after continuation {flight['session'][:8]}", ctx=ctx)
     else:
         rec["last_failure_kind"] = ""
         postcheck(ctx, rec, source="continuation")
@@ -9610,7 +9610,7 @@ def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
                   f"({fmt_dur(res.get('dur'))})")
         else:
             print_failure(rec["id"], (rec.get("postcheck") or {}).get("errors", []),
-                          note="after the continuation")
+                          note="after the continuation", ctx=ctx)
     rec["last_resume"].update({"finished": utcnow(), "ok": rec["status"] == "done",
                                "duration": round(res.get("dur") or 0.0, 1)})
     ctx.log("continuation", rec["id"],
@@ -9674,7 +9674,7 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     else:
         print_failure(rec["id"], [record["error"]] if record.get("error")
                       else record["postcheck_errors"],
-                      note=f"after scoped repair {flight.get('repair')}")
+                      note=f"after scoped repair {flight.get('repair')}", ctx=ctx)
     return record
 
 
