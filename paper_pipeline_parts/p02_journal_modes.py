@@ -792,45 +792,49 @@ DEFAULT_STRICT_ARTIFACTS = True
 ARTIFACT_POLICY_FIX = "fix"
 ARTIFACT_POLICIES = ("on", ARTIFACT_POLICY_FIX, "off")
 DEFAULT_ARTIFACT_POLICY = "on"
-# `--almost-fail` is the benchmark/collection mode (`--no-almost-fail`
+# `--tolerate-fail` is the benchmark/collection mode (`--no-tolerate-fail`
 # restores the default): a stage that exhausts its retry budget is recorded and
-# printed as ALMOST_FAIL instead of a FAIL, the invocation does not exit
-# non-zero for it, and an auto-promoted round falls back to its base when the
-# promised candidate never finished. It is OFF by default; the off path is the
-# historical strict behaviour (a failed stage leaves the round incomplete and
-# `run` exits 3).
-ALMOST_FAIL_MODES = ("on", "off")
-DEFAULT_ALMOST_FAIL = "off"
-_ALMOST_FAIL_ACTIVE = False
+# printed as TOLERATED_FAIL and the run's BEST FAILED TRIAL is used (the trial
+# with the most required output files, then the fewest FAIL messages), so the
+# pipeline continues with its most complete attempt instead of terminating. The
+# result stays PROVISIONAL and is never certified. It is OFF by default; the off
+# path is the historical strict behaviour (a failed stage leaves the round
+# incomplete and `run` exits 3).
+TOLERATED_FAIL_STATUS = "TOLERATED_FAIL"
+TOLERATE_FAIL_MODES = ("on", "off")
+DEFAULT_TOLERATE_FAIL = "off"
+_TOLERATE_FAIL_ACTIVE = False
 
 
-def set_almost_fail_active(flag: bool) -> None:
+def set_tolerate_fail_active(flag: bool) -> None:
     """Record the invocation's mode for output paths that have no `ctx`."""
-    global _ALMOST_FAIL_ACTIVE
-    _ALMOST_FAIL_ACTIVE = bool(flag)
+    global _TOLERATE_FAIL_ACTIVE
+    _TOLERATE_FAIL_ACTIVE = bool(flag)
 
 
-def almost_fail_of(ctx=None) -> bool:
-    """Is a stage failure ALMOST_FAIL instead of a FAIL?
+def tolerate_fail_of(ctx=None) -> bool:
+    """Is an exhausted stage tolerated (best failed trial used) instead of FAIL?
 
     The per-invocation `run` override wins over the root's recorded policy,
     exactly like the content-edit policy pairs; a root without the key reads the
-    strict default (`off`).  A caller without a `ctx` (the sandbox self-check
-    client, a report helper) reads the mode the invocation activated.
+    strict default (`off`).  A root written by the older boolean feature carries
+    `almost_fail: on|off`; it is read as the same policy.  A caller without a
+    `ctx` (the sandbox self-check client, a report helper) reads the mode the
+    invocation activated.
     """
-    override = getattr(ctx, "_almost_fail_override", None)
+    override = getattr(ctx, "_tolerate_fail_override", None)
     if override is not None:
         return bool(override)
     if ctx is None:
-        return bool(_ALMOST_FAIL_ACTIVE)
+        return bool(_TOLERATE_FAIL_ACTIVE)
     cfg = getattr(ctx, "cfg", None) or {}
-    raw = str(cfg.get("almost_fail") or "").strip().lower()
+    raw = str(cfg.get("tolerate_fail") or cfg.get("almost_fail") or "").strip().lower()
     return raw == "on"
 
 
 def failure_status(ctx=None) -> str:
-    """The console status word for a failed attempt (`FAIL` / `ALMOST_FAIL`)."""
-    return "ALMOST_FAIL" if almost_fail_of(ctx) else "FAIL"
+    """The console status word for a failed attempt (`FAIL` / `TOLERATED_FAIL`)."""
+    return TOLERATED_FAIL_STATUS if tolerate_fail_of(ctx) else "FAIL"
 DEFAULT_RESIDUAL_GATE = True
 # How many identifier lookups one stage may spend. Each lookup is one or more
 # requests (a DOI asks Crossref, then DataCite, then the handle registry) with a

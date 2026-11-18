@@ -334,7 +334,7 @@ evidence pack.
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
 | `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. `--judge-manual` stages the judge prompts for a human, and `--judge-agent-cmd JSON` overrides the judge command |
 | `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
-| `--almost-fail` / `--no-almost-fail` (`setup`, `run`) | collection mode (default: off): a stage that exhausts its retries is printed and recorded as `ALMOST_FAIL`, an auto-promoted round falls back to its base when the promised candidate never finished, and `run` exits 0; the strict default keeps the round incomplete and exits 3 |
+| `--tolerate-fail` / `--no-tolerate-fail` (`setup`, `run`) | collection mode (default: off): a stage that exhausts its retries is printed `TOLERATED_FAIL` and its BEST FAILED TRIAL (most required output files, then fewest FAIL messages) is used so the pipeline continues; the decision stays PROVISIONAL and is never certified. The strict default keeps the round incomplete and exits 3 |
 | `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
 | `--skip-hash` (every command except `selfcheck` and `adopt-sweep`) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
@@ -346,7 +346,7 @@ evidence pack.
 | 0 | success (`decide`: certified decision; `run`: every configured round complete) |
 | 1 | a run failed / the process hit an error |
 | 2 | nothing to decide yet, or a usage error |
-| 3 | a round is incomplete (progress saved; resume with `run`); with `--almost-fail` the exhausted failures are warnings and `run` exits 0 instead |
+| 3 | a round is incomplete (progress saved; resume with `run`); with `--tolerate-fail` a stage that exhausted its retries and had a usable trial is a `TOLERATED_FAIL` warning and `run` exits 0 instead |
 | 4 | a valid stopping point that is not a certified answer: `decide --require-complete` on a provisional decision, or `redline` with failed renders (when a tool was used) |
 | 5 | `decide` found integrity problems, (with `--format-gate`) high-severity formatting problems, or (with `--require-ready`) package-level readiness findings |
 
@@ -1367,38 +1367,51 @@ the package is a provisional hand-off, never a signed panel verdict.
 `--package-winner` still works once every configured round is complete; it says
 plainly that it is packaging an unjudged champion.
 
-## `ALMOST_FAIL` (`--almost-fail`): keep a collection run going when a stage fails
+## `TOLERATED_FAIL` (`--tolerate-fail`): use the best failed trial when a stage exhausts its retries
 
-`--almost-fail` (paired with `--no-almost-fail`) is OFF by default.
-When it is on, a stage that exhausts its retry budget is recorded and printed as
-`ALMOST_FAIL` instead of a `FAIL`:
+`--tolerate-fail` (paired with `--no-tolerate-fail`) is OFF by default. When it
+is on, a run that exhausts its retry budget does not terminate the invocation:
+the run's **best failed trial** is used as that stage's result.
 
-* the failed run's record still carries `status: failed`, its error text and its
-  attempt archives — the evidence is not hidden;
-* the invocation does not abort: an auto-promoted round
-  (`--champion-select revise|integrate`) closes with its base (`a1`) when the
-  promised candidate never finished, and the round record says
-  `almost_fail.fallback: true` (the result stays `PROVISIONAL`, never
-  certified); a judge-mode or concern-scoped round instead stays pending
-  (a shrunken judge field is never certified, and a scoped revision has no
-  base fallback);
-* `run` exits 0 instead of 3, so a collection harness can score what exists
-  instead of losing the row.
+* **Which trial.** The candidates are the run's archived failed attempts
+  (`runs/<run>_try<N>_failed/`) plus its current failed sandbox. They are ordered
+  by the number of required output files the attempt produced in the stage's own
+  output area (`revised/`, `rewritten/`, `integrated/`, `guided_review/`,
+  `cold_start_review/`, `audit/`, `judge_review/`, `concerns/`, `response/`),
+  then by the fewest FAIL messages, then by the latest attempt. A trial is
+  usable only when it reached the stage's completion signal (the marker, or the
+  judge's scores file) and produced at least one output file; a trial that
+  stopped before the signal is not a candidate.
+* **What is used.** The chosen trial is moved into the run's active sandbox and
+  the run becomes `done` with a `tolerated_fail` record
+  (`trial`, `outputs`, `fail_messages`); its `postcheck.ok` and its attempt
+  archives stay as evidence. The stages that depend on it continue on that
+  output, so a collection harness gets the most complete attempt instead of
+  losing the row.
+* **It is never a clean result.** The round record carries
+  `tolerated_fail.failed_runs`, its `certified` is `false`, and `decide` adds a
+  gate problem: any decision whose round used a tolerated trial is
+  `PROVISIONAL` and is never certified. An auto-promoted round promotes the
+  trial it used (still auto-promoted and provisional); a judge round may score
+  the resulting package, but the verdict is not certified (rule 10).
+* **No usable trial means strict.** If every failed attempt produced no required
+  output, the run stays a hard `FAIL`; the round stays incomplete and `run`
+  exits 3 even with the flag. The flag never invents output.
 
-The strict default is unchanged: without the flag a failed stage leaves the round
-incomplete and `run` exits 3. `setup` records the policy in
-`pipeline_config.json` only when the pair is passed; `run` can override it for one
-invocation. The mode is meant for benchmark/collection runs, not for citing a
-package as a certified result. The console word is `ALMOST_FAIL`; the
-machine-readable run status stays `failed`.
+`setup` records the policy in `pipeline_config.json` only when the pair is
+passed; `run` can override it for one invocation. A root written by the earlier
+`--almost-fail` feature carries `almost_fail: on|off`; it is read as the same
+policy, and `decide` still recognizes its recorded base fallback for that old
+root. The console word is `TOLERATED_FAIL`; the run record's `status` is `done`
+(so downstream stages can run) and `postcheck.ok` remains `false`.
 
 ```bash
-# collection mode: turn exhausted stage failures into warnings
+# collection mode: use the best failed trial when a stage exhausts its retries
 python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
-    --champion-select revise --almost-fail
+    --champion-select revise --tolerate-fail
 python paper_pipeline.py run --root ./paper_rounds
 # override back to the strict path for one invocation
-python paper_pipeline.py run --root ./paper_rounds --no-almost-fail
+python paper_pipeline.py run --root ./paper_rounds --no-tolerate-fail
 ```
 
 ## Evidence is not submission text: `raw_data/` and the review-feedback areas
@@ -3660,7 +3673,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 251 suites (a few
+any failure. They are independent, so run them in parallel — 252 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

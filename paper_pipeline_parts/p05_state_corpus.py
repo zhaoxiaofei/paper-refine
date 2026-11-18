@@ -3750,6 +3750,190 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
     return dest
 
 
+def _trial_output_dirs(kind: str) -> tuple:
+    """The stage's own output area(s), from the shared signal-directory map."""
+    return tuple(SIGNAL_ALT_DIRS.get(str(kind or ""), ()))
+
+
+# The materializer seeds the stage's output directory with its inputs and
+# template artifacts (the review's `guided_review/artifacts/` and `work/`, the
+# revise package's base copies, ...). Those are not output the agent produced;
+# counting them would make every attempt look complete. They are excluded, and
+# a trial is usable only when it reached the stage's completion signal.
+_TRIAL_SEEDED_DIRS = set(ATTEMPT_ARCHIVE_SKIP_DIRS) | {
+    "artifacts", "work", "selfcheck", "paper_docx_format_parts", "raw_data",
+    HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR, BYTECODE_DIRNAME, SUPERSEDED_DIRNAME,
+}
+
+
+def _trial_signal_present(sandbox: Path, kind: str) -> bool:
+    try:
+        dirs = signal_search_dirs(sandbox, kind)
+        names = signal_names_of(kind)
+    except Exception:                                # noqa: BLE001
+        dirs, names = [sandbox], (MARKER_FILE,)
+    for d in dirs:
+        for name in names:
+            try:
+                if (d / name).is_file() and not (d / name).is_symlink():
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _trial_output_count(sandbox: Path, kind: str) -> int:
+    """How many required output files this trial produced, 0 when unusable.
+
+    A trial is usable only if it wrote the stage's completion signal (the
+    marker, or the judge's scores file): an attempt that stopped before the
+    signal is not a candidate, even when the materializer had already seeded its
+    output directory. The count then covers the stage's primary output package,
+    excluding the seeded input/template subdirectories, bytecode caches and the
+    attempt's record. It is the completeness proxy the operator asked for.
+    """
+    if not _trial_signal_present(sandbox, kind):
+        return 0
+    total = 0
+    for dirname in _trial_output_dirs(kind):
+        root = sandbox / dirname
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*"):
+            try:
+                if not p.is_file() or p.is_symlink():
+                    continue
+            except OSError:
+                continue
+            rel = p.relative_to(root)
+            if rel.parts and rel.parts[0] in _TRIAL_SEEDED_DIRS:
+                continue
+            if BYTECODE_DIRNAME in p.parts or p.suffix.lower() in BYTECODE_SUFFIXES:
+                continue
+            if p.name == "record.json":
+                continue
+            total += 1
+    return total + 1                                  # the completion signal itself
+
+
+def best_failed_trial(ctx: Ctx, rec: dict):
+    """The most complete failed trial of `rec`, or None.
+
+    Trials are the kept `runs/<run>_try<N>_failed/` sandboxes plus the run's
+    current (last) sandbox. The score is (required output files produced, fewest
+    FAIL messages, latest failure ordinal); a trial that produced no required
+    output is not usable.
+    """
+    rid = str(rec.get("id") or "")
+    kind = rec.get("kind")
+    candidates = []
+    try:
+        kept = sorted(ctx.runs_dir.glob(f"{rid}_try*_failed"))
+    except OSError:
+        kept = []
+    for p in kept:
+        if not p.is_dir():
+            continue
+        m = re.search(r"_try(\d+)_failed$", p.name)
+        ordinal = int(m.group(1)) if m else 0
+        candidates.append((p, read_json(p / "record.json") or {}, ordinal))
+    active = ctx.sandbox_of(rec)
+    if active.is_dir():
+        history = rec.get("attempts_log") or []
+        last = history[-1] if history else {}
+        candidates.append((active, last, 10 ** 9))
+    scored = []
+    for sandbox, record, ordinal in candidates:
+        outputs = _trial_output_count(sandbox, kind)
+        if outputs <= 0:
+            continue
+        errors = (record or {}).get("errors") or []
+        scored.append((outputs, -len(errors), ordinal, sandbox, record))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: (x[0], x[1], x[2]))
+    outputs, neg_errors, ordinal, sandbox, record = scored[-1]
+    return {"sandbox": sandbox, "record": record, "outputs": outputs,
+            "fail_messages": -neg_errors, "ordinal": ordinal}
+
+
+def use_best_failed_trial(ctx: Ctx, rec: dict) -> bool:
+    """Use an exhausted run's best failed trial; True when it was promoted.
+
+    Only `--tolerate-fail` runs reach here. The chosen trial is moved into the
+    run's active sandbox and the run is marked `done` with a `tolerated_fail`
+    record (its postcheck errors are kept as evidence), so the stages that
+    depend on it continue on the most complete attempt instead of the whole
+    invocation terminating. The result is PROVISIONAL and is never certified.
+    With the policy off, or no usable trial, nothing changes and the caller
+    takes the strict FAIL path.
+    """
+    if not tolerate_fail_of(ctx):
+        return False
+    if rec.get("status") == "done" and rec.get("tolerated_fail"):
+        return True
+    best = best_failed_trial(ctx, rec)
+    if best is None:
+        return False
+    active = ctx.sandbox_of(rec)
+    chosen = Path(best["sandbox"])
+    trial_name = chosen.name
+    try:
+        same = chosen.resolve() == active.resolve()
+    except OSError:
+        same = False
+    if not same:
+        # Keep the last attempt as evidence, then put the chosen trial in the
+        # active path. If the evidence move fails, do not lose either copy:
+        # leave the run strict for the caller to report.
+        if active.is_dir():
+            try:
+                move_failed_sandbox(ctx, rec)
+            except (OSError, ValueError):
+                return False
+        try:
+            if active.exists() or active.is_symlink():
+                rmtree_force(active)
+            chosen.rename(active)
+        except OSError:
+            return False
+    digest = None
+    if rec.get("kind") in ("rewrite", "revise", "integrate"):
+        # A tolerated candidate must still be pinnable: record the digest of the
+        # package the trial actually left on disk. Without it the round close
+        # refuses to pin the version (and the collection run loses the row).
+        vid = freshness_vid(rec)
+        if not vid:
+            return False
+        try:
+            digest = recompute_corpus_digest(ctx, rec["round"], vid)
+        except Exception:                            # noqa: BLE001
+            return False
+        if not digest:
+            return False
+    rec["tolerated_fail"] = {
+        "mode": "on",
+        "trial": trial_name,
+        "outputs": int(best["outputs"]),
+        "fail_messages": int(best["fail_messages"]),
+        "recorded": utcnow(),
+        "note": ("every retry failed; the best failed trial (most required output files, "
+                 "then fewest FAIL messages) is used as the stage result -- PROVISIONAL, "
+                 "never certified"),
+    }
+    rec["status"] = "done"
+    if digest:
+        rec["corpus_digest"] = digest
+    post = dict(rec.get("postcheck") or {})
+    post["tolerated"] = True
+    rec["postcheck"] = post
+    ctx.save_state()
+    print(f"  [{TOLERATED_FAIL_STATUS}] {rec['id']}: retries exhausted; using the best "
+          f"failed trial {trial_name} ({best['outputs']} output file(s), "
+          f"{best['fail_messages']} FAIL message(s)) -- PROVISIONAL, never certified")
+    return True
+
+
 def keep_failed_sandboxes(ctx: Ctx, manual: bool = False) -> list:
     """Rename every still-failed run's sandbox to `runs/<run>_try<N>_failed/`.
 

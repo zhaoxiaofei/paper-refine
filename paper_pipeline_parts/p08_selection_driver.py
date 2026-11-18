@@ -610,16 +610,17 @@ def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None,
              "integrate": f"the integrated revised candidate {target}"}.get(
                  mode, f"candidate {target}")
     if fallback:
-        label = (f"the round's base {target} (ALMOST_FAIL fallback: the promised "
+        label = (f"the round's base {target} (TOLERATED_FAIL fallback: the promised "
                  f"auto-promoted candidate never finished)")
     trace = [f"auto-promoted by --champion-select {mode}: {label} was promoted directly; "
              f"NO judge panel scored the field, so no ranking key was consulted.",
              "the result is marked auto_promoted and the decision verdict is PROVISIONAL "
              "(not certified): an unjudged winner is an operator choice, not a panel result."]
     if fallback:
-        trace.append("--almost-fail was on and the promised candidate failed after its "
-                     "retry budget, so the round closed with its base instead of staying "
-                     "incomplete; this is a fallback result, not an improvement.")
+        trace.append("tolerate-fail was on and the promised candidate failed after its "
+                     "retry budget without a usable trial, so the round closed with its base "
+                     "instead of staying incomplete; this is a fallback result, not an "
+                     "improvement.")
     ranking_row = {"id": target, "rep": target, "is_base": target == A1_ID,
                    "n": 0, "median": None, "mean": None, "iqr": None,
                    "vs_original": None, "vs_base": None, "vs_base_vals": [],
@@ -1010,6 +1011,12 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
     except Exception as e:                                      # noqa: BLE001
         review_archive_error = str(e)
         print(f"[run] round {r} WARNING: could not archive the review outputs: {e}")
+    if rrec.get("tolerated_fail"):
+        # The decision must carry the tolerated stages (a best failed trial was
+        # used) so `decide` can refuse certification and the round JSON/report
+        # name what was salvaged instead of presenting a clean round.
+        sel = dict(sel)
+        sel["tolerated_fail"] = dict(rrec["tolerated_fail"])
     rrec.update({
         "status": "done", "completed": utcnow(),
         "plan": {"rewrites": m, "revises": n, "pool": round_pool_ids(m, n),
@@ -1024,7 +1031,8 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
         "stats": agg["stats"], "diagnostics": agg["diagnostics"], "selection": sel,
         "base_id": agg.get("base_id"), "base_rep": agg.get("base_rep"),
         "auto_promoted": auto_promoted, "judged": not auto_promoted,
-        "certified": False if auto_promoted else rrec.get("certified"),
+        "certified": (False if auto_promoted or rrec.get("tolerated_fail")
+                      else rrec.get("certified")),
         "champion": sel["champion"],
         "champion_rep": sel.get("champion_rep") or sel["champion"],
         "champion_run": (rid_for_fresh(r, sel["champion"]) if is_fresh_vid(sel["champion"])
@@ -2163,7 +2171,7 @@ def print_failure(rid: str, errors, note: str = "", ctx=None) -> None:
     archive hold.
     """
     msgs = [str(e) for e in (errors or [])]
-    print(f"  [{failure_status(ctx)}] {rid}: {len(msgs)} problem(s)"
+    print(f"  [FAIL] {rid}: {len(msgs)} problem(s)"
           + (f" -- {note}" if note else ""))
     for m in msgs:
         print(f"        - {m}")
@@ -2220,7 +2228,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
                 rec["last_error"] = f"manual wait exceeded {timeout}s"
                 record_attempt(ctx, rec, False, [rec["last_error"]], [], source="manual-timeout")
                 ctx.save_state()
-                print(f"  [{failure_status(ctx)}] {rec['id']}: manual timeout")
+                print(f"  [FAIL] {rec['id']}: manual timeout")
                 return
             if time.time() - last_note > 30:
                 print(f"  ... waiting for {rec['id']} completion signal "
@@ -2246,7 +2254,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
                     record_attempt(ctx, rec, False, bad, [], source="malformed-output")
                     ctx.log("malformed-output", rec["id"], "; ".join(bad)[:300])
                     ctx.save_state()
-                    print(f"  [{failure_status(ctx)}] {rec['id']}: malformed structured output "
+                    print(f"  [FAIL] {rec['id']}: malformed structured output "
                           f"(unchanged for one poll interval): {bad[0][:120]}")
                     print("         The prompt is re-issued by the retry loop; nothing was adopted "
                           "from this attempt.")
@@ -2264,7 +2272,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
     bump_stage_attempt(rec)
     postcheck(ctx, rec, source="manual (operator-supplied completion signal)")
     ctx.save_state()
-    print(f"  [{'ok' if rec['status'] == 'done' else failure_status(ctx)}] {rec['id']}: "
+    print(f"  [{'ok' if rec['status'] == 'done' else 'FAIL'}] {rec['id']}: "
           f"{'; '.join((rec.get('postcheck') or {}).get('errors', []))[:160] or 'postcheck ok'}")
 
 
@@ -2344,7 +2352,11 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     ctx.save_state()
                     continue
                 elif failures_in_phase.get(rid, 0) > retries:
-                    continue
+                    # Every retry is spent. The collection policy uses the best
+                    # failed trial instead of terminating; without a usable
+                    # trial (or with the policy off) the run stays failed.
+                    if manual or not use_best_failed_trial(ctx, rec):
+                        continue
                 else:
                     try:
                         rebuild_sandbox(ctx, rec)
@@ -2382,6 +2394,9 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                                         "checked_at": utcnow()}
                     if failures_in_phase.get(rid, 0) > retries:
                         rec["status"] = "failed"
+                        if use_best_failed_trial(ctx, rec):
+                            ctx.save_state()
+                            continue
                         aux = auxiliary_session_summary(rec)
                         print(f"        no attempts left in this invocation "
                               f"({failures_in_phase.get(rid, 0)} attempt(s) spent, "
@@ -2460,6 +2475,11 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     if ctx.run(rid)["status"] == "done":
                         continue
                 failures_in_phase[rid] = failures_in_phase.get(rid, 0) + 1
+    if not manual:
+        for rid in ids:
+            _rec = ctx.run(rid)
+            if _rec["status"] == "failed":
+                use_best_failed_trial(ctx, _rec)
     remaining = [rid for rid in ids if ctx.run(rid)["status"] != "done"]
     if remaining:
         paused = [rid for rid in remaining if ctx.run(rid)["status"] == "pending"
@@ -2474,7 +2494,7 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
             # retry budget. A failed repair/continuation spends the slot of the
             # attempt it serves (never an extra one) and its count is named
             # beside the budget, not folded into it.
-            print(f"  [{label}] {failure_status(ctx)}: " + ", ".join(
+            print(f"  [{label}] FAIL: " + ", ".join(
                 failed_run_cell(rid, ctx.run(rid), max_rounds,
                                 failures_in_phase.get(rid, 0)) for rid in hard))
             for rid in hard[:6]:
@@ -4082,7 +4102,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
 def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                    manual: bool, nowait: bool, poll: int, label: str,
                    retry_backoff: int = 0, retry_backoff_max: int = 0,
-                   only=None, lenient: bool = False) -> tuple:
+                   only=None) -> tuple:
     """Drive every run of one round AS SOON AS ITS INPUTS EXIST.
 
     Two consequences that matter for wall-clock time:
@@ -4098,11 +4118,10 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
     backoff of `run_phase` (so a lost session still cannot shrink the panel).
     Returns (all_done, paused_for_manual) exactly like `run_phase`.
 
-    `lenient` is set only for a round whose champion mode HAS a defined
-    ALMOST_FAIL fallback (`revise`/`integrate`).  With it, an exhausted stage
-    returns `all_done=True` so the round can close with its base; a judge-mode
-    or concern-scoped round keeps the strict `False`, because a shrunken field
-    must never be certified as a panel result.
+    A run whose retries are exhausted is handled by `use_best_failed_trial`
+    when --tolerate-fail is on: its best failed trial becomes the run's result
+    and the scheduler continues (PROVISIONAL, never certified). With the policy
+    off, or no usable trial, a still-failed run leaves the round incomplete.
     """
     plan = round_run_plan(ctx, r)
     # FAIL FAST on a plan this build cannot finish. A run kind with no
@@ -4260,6 +4279,13 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
         attempts_left[rid] -= 1
         spent = max_attempts - attempts_left[rid]
         if attempts_left[rid] <= 0:
+            # All retries are spent. With --tolerate-fail the best failed
+            # trial (most required output files, then fewest FAIL messages)
+            # becomes this stage's result and the pipeline continues on it;
+            # without a usable trial, or with the policy off, the run is a
+            # hard FAIL exactly as before.
+            if not manual and use_best_failed_trial(ctx, rec):
+                return
             failed_hard.append(rid)
             return
         delay = backoff_delay(retry_backoff, failures[rid], retry_backoff_max)
@@ -4293,6 +4319,8 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             rec["last_error"] = (str(rec.get("last_error") or "")
                                  + f" | sandbox rebuild failed: {exc}")[:600].lstrip(" |")
             ctx.log("rebuild-failed", rid, str(exc)[:300])
+            if not manual and use_best_failed_trial(ctx, rec):
+                return
             failed_hard.append(rid)
 
     with ThreadPoolExecutor(max_workers=max(1, int(jobs))) as ex:
@@ -4475,7 +4503,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 # (2026-09-23: r1_audit). The budget is per invocation, so a
                 # resumed run starts again at 0; scoped repairs, CONTINUATIONS
                 # and re-verifies are named beside it, not added to it.
-                print(f"  [{label}] {failure_status(ctx)}: " + ", ".join(
+                print(f"  [{label}] FAIL: " + ", ".join(
                     failed_run_cell(rid, ctx.run(rid), max_attempts,
                                     max_attempts - attempts_left[rid])
                     for rid in tried))
@@ -4489,11 +4517,6 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 if err:
                     print(f"        {rid}: {err}")
         ctx.save_state()
-        if lenient and almost_fail_of(ctx) and hard and not paused:
-            print(f"  [{label}] ALMOST_FAIL: {len(hard)} run(s) did not complete, but "
-                  f"--almost-fail keeps the invocation going: the round closes with its "
-                  f"best available version (PROVISIONAL, never certified).")
-            return True, False
         return False, False
     return True, False
 
@@ -4607,17 +4630,6 @@ def _apply_judge_selection(rrec: dict, only, judge_step: bool, r: int, ctx: Ctx)
             rrec["judges_enabled"] = _sel
 
 
-def almost_fail_champion(ctx: Ctx, r: int) -> str:
-    """The best available version when an auto-promoted target never finished.
-
-    Only the round's base is eligible: it is materialized by construction and
-    promoting any OTHER arm would crown a version the operator did not select
-    (rule 5's auto-promotion exception names one target, not any survivor).
-    Returns `""` when even the base is not done, which keeps the strict path.
-    """
-    rec = ctx.run(rid_for_fresh(r, A1_ID)) or {}
-    return A1_ID if rec.get("status") == "done" else ""
-
 
 def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 manual: bool, nowait: bool, poll: int,
@@ -4725,15 +4737,8 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
             mark = "" if k in arms else "  [SKIPPED: integrators bit clear]"
             print(f"[run] r{r}   {integrate_vid(k)} = {src} <- "
                   f"({', '.join(v for v in pool if v != src)}){mark}")
-    # ALMOST_FAIL has a defined fallback only for the no-judge modes
-    # (`--champion-select revise|integrate`), where the round can close with its
-    # base. A judge-mode or concern-scoped round has no safe fallback (a
-    # shrunken field must never be certified, and a scoped revision's answer is
-    # the revision itself), so it stays strict.
-    _lend = (almost_fail_of(ctx) and not scoped and csel != "judge" and not manual)
     try:
-        ok, paused = run_round_runs(ctx, r, label=f"r{r}", only=only,
-                                    lenient=_lend, **ph)
+        ok, paused = run_round_runs(ctx, r, label=f"r{r}", only=only, **ph)
     except KeyboardInterrupt:
         ctx.save_state()
         print("\n[run] interrupted: active agent sessions were terminated; state saved. "
@@ -4741,22 +4746,25 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         raise
     if not ok:
         # A paused round (manual --no-wait, or an agent still writing) is NOT a
-        # failure: closing it with the base would pin a provisional answer while
-        # the real session is still running.
-        if paused or not _lend:
-            return False, paused
-        print(f"[run] r{r} ALMOST_FAIL: the round's plan is not fully done; "
-              f"--almost-fail keeps the round going and it will close with the best "
-              f"available version (PROVISIONAL, never certified).")
-    _af_failed = ([e["id"] for e in round_run_plan(ctx, r)
-                   if (ctx.run(e["id"]) or {}).get("status") != "done"]
-                  if _lend else [])
-    _almost_fail = ({"mode": "on", "failed_runs": _af_failed,
-                     "note": ("stage(s) did not complete (failed after their retry budget, "
-                              "or never started after an upstream failure); recorded as "
-                              "ALMOST_FAIL and the round closed with the best available "
-                              "version")}
-                    if _af_failed else None)
+        # failure, and a run whose retries were exhausted without a usable trial
+        # is a hard FAIL: the round stays incomplete.
+        return False, paused
+    # With --tolerate-fail an exhausted stage was replaced by its best failed
+    # trial (the run is `done` and carries the record); the round must say so,
+    # because its decision is PROVISIONAL and must never be certified.
+    _tf_failed = [e["id"] for e in round_run_plan(ctx, r)
+                  if (ctx.run(e["id"]) or {}).get("tolerated_fail")]
+    _tolerated_fail = ({"mode": "on", "failed_runs": _tf_failed,
+                        "note": ("stage(s) exhausted their retries; the best failed trial "
+                                 "(most required output files, then fewest FAIL messages) "
+                                 "was used -- PROVISIONAL, never certified")}
+                       if _tf_failed else None)
+    if _tolerated_fail:
+        rrec["tolerated_fail"] = dict(_tolerated_fail)
+        rrec["certified"] = False
+        print(f"[run] r{r} {TOLERATED_FAIL_STATUS}: {', '.join(_tf_failed)} exhausted its "
+              f"retries; the best failed trial was used and the round continues "
+              f"(PROVISIONAL, never certified).")
 
     if journal_is_scoped(ctx):
         # A major/minor revision has no judge panel and no champion choice: the
@@ -4848,41 +4856,20 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         # no integration arm); promote the promised version, pin and publish it
         # exactly like a panel winner so the content-addressed chain and every
         # downstream consumer keep working.
-        promised_target = auto_target
-        af_fallback = False
         rec = ctx.run(rid_for_fresh(r, auto_target)) or {}
         if rec.get("status") != "done":
-            if not almost_fail_of(ctx):
-                print(f"[run] r{r} --champion-select {csel}: the promoted version "
-                      f"{auto_target} is not done ({rec.get('status', 'missing')}); the round "
-                      f"stays incomplete. Fix that run (`retry --run "
-                      f"{rid_for_fresh(r, auto_target)}`) and re-run.")
-                return False, False
-            fallback = almost_fail_champion(ctx, r)
-            if not fallback:
-                print(f"[run] r{r} ALMOST_FAIL: the promoted version {auto_target} is not "
-                      f"done and the round's base is not done either; the round stays incomplete.")
-                return False, False
-            print(f"[run] r{r} ALMOST_FAIL: the promoted version {auto_target} is not done "
-                  f"({rec.get('status', 'missing')}); falling back to the round's base "
-                  f"{fallback}. The result is PROVISIONAL and NOT a measured improvement.")
-            auto_target = fallback
-            af_fallback = True
-        agg, sel = auto_round_payload(ctx, r, auto_target, csel, fallback=af_fallback)
-        if _almost_fail:
-            sel["almost_fail"] = dict(_almost_fail, fallback=bool(af_fallback),
-                                      promised_champion=promised_target)
-            sel["almost_fail_fallback"] = af_fallback
-            sel["promised_champion"] = promised_target
+            print(f"[run] r{r} --champion-select {csel}: the promoted version "
+                  f"{auto_target} is not done ({rec.get('status', 'missing')}); the round "
+                  f"stays incomplete. Fix that run (`retry --run "
+                  f"{rid_for_fresh(r, auto_target)}`) and re-run.")
+            return False, False
+        agg, sel = auto_round_payload(ctx, r, auto_target, csel, fallback=False)
+        if _tolerated_fail:
+            sel["tolerated_fail"] = dict(_tolerated_fail)
         rrec = ctx.round_rec(r)
         rrec["auto_promoted"] = True
         rrec["judged"] = False
         rrec["certified"] = False
-        if _almost_fail:
-            # Set BEFORE finalize_round so reports/round<r>.json (written there)
-            # carries the fallback record too, not only state.json.
-            rrec["almost_fail"] = dict(_almost_fail, fallback=bool(af_fallback),
-                                       promised_champion=promised_target)
         pin = pin_champion(ctx, r, auto_target, agg)
         winner = publish_winner(ctx, r, auto_target, pin, agg)
         finalize_round(ctx, r, [{"id": auto_target, "kind": "auto", "vid": auto_target}],
@@ -4891,7 +4878,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         print()
         print(f"[run] r{r} champion: {auto_target} "
               f"(--champion-select {csel}; NO judge panel, NOT CERTIFIED -- provisional)"
-              + (" [ALMOST_FAIL fallback]" if af_fallback else ""))
+              + (" [TOLERATED_FAIL stage used]" if _tolerated_fail else ""))
         print(f"[run] round {r} champion: {auto_target} "
               f"(pinned at {PIN_DIRNAME}/{pin['id']}, digest {pin['digest'][:12]})")
         print(f"[run] round {r} winner published at {winner['directory']}/ "

@@ -8263,23 +8263,24 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             mode = _plan_mode or str(rrec.get("champion_select") or "revise")
             target = auto_champion_vid(ctx, r, mode)
             stored_champ = str(rrec.get("champion") or target)
-            # An ALMOST_FAIL fallback is a DECLARED provisional result: the
-            # promised candidate never finished and the round closed with its
-            # base. It is not a corrupted record, so it is re-derived as a
-            # fallback (provisional) instead of becoming an integrity problem.
-            _af = rrec.get("almost_fail") or {}
-            _af_fallback = bool(
-                isinstance(_af, dict) and _af.get("fallback")
+            # A tolerated stage is a DECLARED provisional result: an exhausted
+            # run's best failed trial was used (or, for a root written by the
+            # older base-fallback feature, the round closed with its base). It
+            # is not a corrupted record, so it is re-derived as provisional
+            # instead of becoming an integrity problem.
+            _tf = rrec.get("tolerated_fail") or rrec.get("almost_fail") or {}
+            _tf_fallback = bool(
+                isinstance(_tf, dict) and _tf.get("fallback")
                 and stored_champ == A1_ID and stored_champ != target
             )
             agg, sel = auto_round_payload(ctx, r, stored_champ, mode,
-                                          fallback=_af_fallback)
+                                          fallback=_tf_fallback)
             mismatch = None
-            if _af_fallback:
-                sel["almost_fail"] = _af
-                sel["almost_fail_fallback"] = True
-                sel["promised_champion"] = str(_af.get("promised_champion") or target)
-                print(f"[decide] round {r}: {stored_champ} is the recorded ALMOST_FAIL "
+            if _tf_fallback:
+                sel["tolerated_fail"] = _tf
+                sel["tolerated_fail_fallback"] = True
+                sel["promised_champion"] = str(_tf.get("promised_champion") or target)
+                print(f"[decide] round {r}: {stored_champ} is the recorded TOLERATED_FAIL "
                       f"fallback (the promised {target} never finished); the round is "
                       f"PROVISIONAL (not a scored/certified decision)")
             else:
@@ -8290,6 +8291,10 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                 print(f"[decide] round {r}: {stored_champ} was auto-promoted by "
                       f"--champion-select {mode}; no judge panel exists, so the round is "
                       f"PROVISIONAL (not a scored/certified decision)")
+            if _tf and not _tf_fallback:
+                sel["tolerated_fail"] = _tf
+                print(f"[decide] round {r}: a TOLERATED_FAIL stage's best failed trial was "
+                      f"used; the round is PROVISIONAL (not a scored/certified decision)")
             auto_rounds.append(r)
             rounds_data.append({"round": r, "agg": agg, "sel": sel,
                                 "pin": find_pin(ctx, rrec.get("pin_id")) or {},
@@ -8464,6 +8469,19 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             print(f"[decide] WARNING: could not write the status readme: {e}")
         sys.exit(2)
     final = rounds_data[-1]
+    # A round that used a TOLERATED_FAIL trial is PROVISIONAL: its exhausted
+    # stage never passed its postcheck, so the decision may not be certified
+    # even when a panel is complete (rule 10: output is not certification).
+    _tolerated_rounds = [rd["round"] for rd in rounds_data
+                         if (rd.get("stored") or {}).get("tolerated_fail")
+                         or (rd.get("sel") or {}).get("tolerated_fail")]
+    _tol_note = ""
+    if _tolerated_rounds:
+        _tol_note = ("round(s) " + ", ".join(str(r) for r in _tolerated_rounds)
+                     + " used TOLERATED_FAIL stage(s): a stage exhausted its retries and "
+                       "its best failed trial was used; the decision is PROVISIONAL and "
+                       "not certified")
+        print(f"[decide] {_tol_note}")
     # The anti-regression gate exempts the round's own base (select_champion: the
     # base is the incumbent the no-progress fallback crowns), so the FINAL champion
     # can be a row the panel judged worse than the pristine original -- in round 2+
@@ -8492,7 +8510,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         and int(_stopped_raw.get("planned_rounds") or -1) == int(R)
     _stopped = _stopped_raw if _stop_applies else {}
     partial_run = final["round"] < R and not _stop_applies
-    provisional = partial_run or bool(auto_rounds)
+    provisional = partial_run or bool(auto_rounds) or bool(_tolerated_rounds)
     win_dir = (contained_under(ctx.root, final["stored"]["winner_dir"])
                if final["stored"].get("winner_dir") else None)
     _win_ok = bool(final["stored"].get("winner_dir") and win_dir and win_dir.is_dir())
@@ -8572,6 +8590,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # champion exists there is nothing to publish, and the readme records the
     # skip reason.
     gate_problems = []
+    if _tol_note:
+        gate_problems.append(_tol_note)
     if getattr(args, "format_gate", False) and format_problems:
         gate_problems.append(f"{len(format_problems)} HIGH-severity formatting finding(s) in the "
                              f"final winner (--format-gate)")
