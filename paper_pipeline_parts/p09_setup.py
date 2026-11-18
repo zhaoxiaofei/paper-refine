@@ -3700,7 +3700,10 @@ def _invocation_failure_state(ctx: Ctx, rounds=None) -> tuple:
         rec = ctx.run(rid) or {}
         if rec.get("tolerated_fail"):
             tolerated.append(rid)
-        elif rec.get("status") != "done":
+        elif rec.get("status") == "failed":
+            # A run that never started, or is pending/stale, is incomplete,
+            # not a FAIL: the collection mode still lets such an invocation
+            # exit 0, while a failed run with no usable trial stays strict.
             hard.append(rid)
     return tolerated, hard
 

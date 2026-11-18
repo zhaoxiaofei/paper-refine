@@ -8472,9 +8472,19 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # A round that used a TOLERATED_FAIL trial is PROVISIONAL: its exhausted
     # stage never passed its postcheck, so the decision may not be certified
     # even when a panel is complete (rule 10: output is not certification).
-    _tolerated_rounds = [rd["round"] for rd in rounds_data
-                         if (rd.get("stored") or {}).get("tolerated_fail")
-                         or (rd.get("sel") or {}).get("tolerated_fail")]
+    _decided_rounds = {rd["round"] for rd in rounds_data}
+    # A tolerated judge or response run is not in `round_run_plan`, so read the
+    # run records too -- but only the runs of the rounds this decision covers.
+    # A tolerated run in a later, incomplete round cannot block (or be hidden
+    # by) this decision; that round is a separate decision.
+    _tolerated_rounds = sorted(
+        {rd["round"] for rd in rounds_data
+         if (rd.get("stored") or {}).get("tolerated_fail")
+         or (rd.get("sel") or {}).get("tolerated_fail")}
+        | {int(rec["round"]) for rec in ctx.runs()
+           if rec.get("tolerated_fail") and rec.get("round") is not None
+           and int(rec["round"]) in _decided_rounds}
+    )
     _tol_note = ""
     if _tolerated_rounds:
         _tol_note = ("round(s) " + ", ".join(str(r) for r in _tolerated_rounds)

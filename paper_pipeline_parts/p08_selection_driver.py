@@ -1011,6 +1011,21 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
     except Exception as e:                                      # noqa: BLE001
         review_archive_error = str(e)
         print(f"[run] round {r} WARNING: could not archive the review outputs: {e}")
+    # Scan EVERY run of this round, not only the round_run_plan: the judge
+    # wave (and the journal response on the last round) runs outside the plan
+    # and can itself be tolerated. Missing it here would let a panel certify a
+    # round whose judge used a failed trial. A stale record whose run has since
+    # been retried successfully is removed.
+    _tol_runs = [rec["id"] for rec in ctx.runs(round_no=r) if rec.get("tolerated_fail")]
+    if _tol_runs:
+        rrec["tolerated_fail"] = {
+            "mode": "on", "failed_runs": _tol_runs,
+            "note": ("stage(s) exhausted their retries; the best failed trial (most "
+                     "required output files, then fewest FAIL messages) was used -- "
+                     "PROVISIONAL, never certified"),
+        }
+    else:
+        rrec.pop("tolerated_fail", None)
     if rrec.get("tolerated_fail"):
         # The decision must carry the tolerated stages (a best failed trial was
         # used) so `decide` can refuse certification and the round JSON/report
@@ -2091,6 +2106,14 @@ def apply_results(ctx: Ctx, results: dict) -> None:
         rec["started"] = rec["started"] or utcnow()
         rec["last_duration"] = round(res.get("dur") or 0.0, 1)
         if res.get("error") or res.get("rc") not in (0,):
+            # A fresh failed attempt supersedes an earlier tolerated result:
+            # the run is no longer "done with a promoted trial", so a later
+            # tolerance decision must be made from this invocation's trials.
+            if rec.get("tolerated_fail"):
+                rec.pop("tolerated_fail", None)
+                _post = dict(rec.get("postcheck") or {})
+                _post.pop("tolerated", None)
+                rec["postcheck"] = _post
             rec["status"] = "failed"
             rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
             rec["last_failure_kind"] = str(res.get("failure_kind") or "")
@@ -2108,6 +2131,14 @@ def apply_results(ctx: Ctx, results: dict) -> None:
             rec["last_failure_kind"] = ""
             postcheck(ctx, rec)
             if rec["status"] == "done":
+                # A run that was tolerated in an earlier invocation and has now
+                # passed a fresh attempt is no longer a tolerated result: drop
+                # the marker so the round is not left provisional forever.
+                if rec.get("tolerated_fail"):
+                    rec.pop("tolerated_fail", None)
+                    _post = dict(rec.get("postcheck") or {})
+                    _post.pop("tolerated", None)
+                    rec["postcheck"] = _post
                 print(f"  [ok]   {rid} done ({fmt_dur(res.get('dur'))})"
                        + (f"  warnings: {'; '.join(rec['postcheck']['warnings'])[:120]}"
                           if rec["postcheck"]["warnings"] else ""))
@@ -2478,7 +2509,11 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
     if not manual:
         for rid in ids:
             _rec = ctx.run(rid)
-            if _rec["status"] == "failed":
+            if (_rec["status"] == "failed"
+                    and failures_in_phase.get(rid, 0) >= max_rounds):
+                # Only after the whole retry budget is spent: a failed
+                # re-verification or a rebuild that could not run yet must
+                # not be turned into a tolerated result prematurely.
                 use_best_failed_trial(ctx, _rec)
     remaining = [rid for rid in ids if ctx.run(rid)["status"] != "done"]
     if remaining:
@@ -4672,6 +4707,11 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     print()
     print(f"[run] ==================== ROUND {r}/{R} ====================")
     rrec = ctx.round_rec(r)
+    # A re-drive recomputes the tolerated record from the runs it actually
+    # drives; a stale record/verdict from an earlier invocation must not keep
+    # the round provisional after the failed run was retried successfully.
+    rrec.pop("tolerated_fail", None)
+    rrec.pop("certified", None)
     rrec["status"] = "active"
     rrec["started"] = rrec.get("started") or utcnow()
     # `run --only r1_judge_w2_j1` (and its roundless form `w2_j1`) selects WHICH

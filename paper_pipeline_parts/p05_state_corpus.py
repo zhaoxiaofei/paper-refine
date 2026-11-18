@@ -3766,7 +3766,9 @@ _TRIAL_SEEDED_DIRS = set(ATTEMPT_ARCHIVE_SKIP_DIRS) | {
 }
 
 
-def _trial_signal_present(sandbox: Path, kind: str) -> bool:
+def _trial_signal_paths(sandbox: Path, kind: str) -> set:
+    """The completion-signal files this trial wrote (empty when it did not)."""
+    found = set()
     try:
         dirs = signal_search_dirs(sandbox, kind)
         names = signal_names_of(kind)
@@ -3774,12 +3776,17 @@ def _trial_signal_present(sandbox: Path, kind: str) -> bool:
         dirs, names = [sandbox], (MARKER_FILE,)
     for d in dirs:
         for name in names:
+            p = d / name
             try:
-                if (d / name).is_file() and not (d / name).is_symlink():
-                    return True
+                if p.is_file() and not p.is_symlink():
+                    found.add(p.resolve())
             except OSError:
                 continue
-    return False
+    return found
+
+
+def _trial_signal_present(sandbox: Path, kind: str) -> bool:
+    return bool(_trial_signal_paths(sandbox, kind))
 
 
 def _trial_output_count(sandbox: Path, kind: str) -> int:
@@ -3792,7 +3799,8 @@ def _trial_output_count(sandbox: Path, kind: str) -> int:
     excluding the seeded input/template subdirectories, bytecode caches and the
     attempt's record. It is the completeness proxy the operator asked for.
     """
-    if not _trial_signal_present(sandbox, kind):
+    signals = _trial_signal_paths(sandbox, kind)
+    if not signals:
         return 0
     total = 0
     for dirname in _trial_output_dirs(kind):
@@ -3802,6 +3810,12 @@ def _trial_output_count(sandbox: Path, kind: str) -> int:
         for p in root.rglob("*"):
             try:
                 if not p.is_file() or p.is_symlink():
+                    continue
+                if p.resolve() in signals:
+                    # The completion signal is counted once below, wherever the
+                    # stage placed it; counting it in the package loop too would
+                    # prefer identical output merely because its marker sits in
+                    # the stage directory instead of the sandbox root.
                     continue
             except OSError:
                 continue
