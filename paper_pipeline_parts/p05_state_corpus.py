@@ -3756,12 +3756,14 @@ def _trial_output_dirs(kind: str) -> tuple:
 
 
 # The materializer seeds the stage's output directory with its inputs and
-# template artifacts (the review's `guided_review/artifacts/` and `work/`, the
-# revise package's base copies, ...). Those are not output the agent produced;
-# counting them would make every attempt look complete. They are excluded, and
-# a trial is usable only when it reached the stage's completion signal.
+# scratch (the revise package's base copies, `work/`, the corpus/evidence
+# areas, ...). Those are not deliverables the agent produced. `artifacts/` is
+# NOT excluded: the review's M-sweep artifacts are required output, and every
+# trial starts with the same seeded templates, so counting the agent's disposed
+# files there is a completeness signal. A trial is usable only when it reached
+# the stage's completion signal.
 _TRIAL_SEEDED_DIRS = set(ATTEMPT_ARCHIVE_SKIP_DIRS) | {
-    "artifacts", "work", "selfcheck", "paper_docx_format_parts", "raw_data",
+    "work", "selfcheck", "paper_docx_format_parts", "raw_data",
     HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR, BYTECODE_DIRNAME, SUPERSEDED_DIRNAME,
 }
 
