@@ -1016,7 +1016,8 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
     # and can itself be tolerated. Missing it here would let a panel certify a
     # round whose judge used a failed trial. A stale record whose run has since
     # been retried successfully is removed.
-    _tol_runs = [rec["id"] for rec in ctx.runs(round_no=r) if rec.get("tolerated_fail")]
+    _tol_runs = [rec["id"] for rec in ctx.runs(round_no=r)
+                 if rec.get("tolerated_fail") and rec.get("status") == "done"]
     if _tol_runs:
         rrec["tolerated_fail"] = {
             "mode": "on", "failed_runs": _tol_runs,
@@ -4793,7 +4794,8 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     # trial (the run is `done` and carries the record); the round must say so,
     # because its decision is PROVISIONAL and must never be certified.
     _tf_failed = [e["id"] for e in round_run_plan(ctx, r)
-                  if (ctx.run(e["id"]) or {}).get("tolerated_fail")]
+                  if (ctx.run(e["id"]) or {}).get("tolerated_fail")
+                  and (ctx.run(e["id"]) or {}).get("status") == "done"]
     _tolerated_fail = ({"mode": "on", "failed_runs": _tf_failed,
                         "note": ("stage(s) exhausted their retries; the best failed trial "
                                  "(most required output files, then fewest FAIL messages) "

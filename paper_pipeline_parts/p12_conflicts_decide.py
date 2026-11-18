@@ -8482,7 +8482,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
          if (rd.get("stored") or {}).get("tolerated_fail")
          or (rd.get("sel") or {}).get("tolerated_fail")}
         | {int(rec["round"]) for rec in ctx.runs()
-           if rec.get("tolerated_fail") and rec.get("round") is not None
+           if rec.get("tolerated_fail") and rec.get("status") == "done"
+           and rec.get("round") is not None
            and int(rec["round"]) in _decided_rounds}
     )
     _tol_note = ""

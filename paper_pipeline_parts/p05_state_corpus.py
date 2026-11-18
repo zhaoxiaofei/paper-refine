@@ -3886,6 +3886,15 @@ def use_best_failed_trial(ctx: Ctx, rec: dict) -> bool:
         return False
     if rec.get("status") == "done" and rec.get("tolerated_fail"):
         return True
+    if rec.get("status") != "done" and rec.get("tolerated_fail"):
+        # A marker is only meaningful on a run that is still using the promoted
+        # trial. A stale marker from an earlier tolerated result must not make a
+        # fresh hard failure look tolerated; the new decision is made from this
+        # invocation's trials below.
+        rec.pop("tolerated_fail", None)
+        _post = dict(rec.get("postcheck") or {})
+        _post.pop("tolerated", None)
+        rec["postcheck"] = _post
     best = best_failed_trial(ctx, rec)
     if best is None:
         return False

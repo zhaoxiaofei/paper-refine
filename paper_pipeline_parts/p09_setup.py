@@ -3698,7 +3698,7 @@ def _invocation_failure_state(ctx: Ctx, rounds=None) -> tuple:
     tolerated, hard = [], []
     for rid in dict.fromkeys(ids):
         rec = ctx.run(rid) or {}
-        if rec.get("tolerated_fail"):
+        if rec.get("status") == "done" and rec.get("tolerated_fail"):
             tolerated.append(rid)
         elif rec.get("status") == "failed":
             # A run that never started, or is pending/stale, is incomplete,
