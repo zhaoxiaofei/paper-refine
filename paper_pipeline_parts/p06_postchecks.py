@@ -8164,12 +8164,66 @@ def _stderr_evidence(stderr: str) -> str:
 AGENT_RUNAWAY_RE = re.compile(r"(?im)\brunaway (?:agent )?guard\b")
 
 
-def agent_runaway_reason(stderr: str) -> str:
-    """The proxy's own sentence for a stopped loop, or "" when it is absent."""
+def _evidence_needles(exclude) -> list:
+    """The excluded LINES that could be mistaken for a failure class.
+
+    Only the spellings this classifier looks for can create a false positive,
+    so only those lines are kept: a stage prompt is over a thousand lines and
+    comparing every transcript line with all of them would make a failed
+    attempt quadratic.  Whitespace is folded because a transcript re-indents
+    and re-wraps whatever it echoes.
+    """
+    needles = []
+    for text in exclude or ():
+        for line in (text or "").splitlines():
+            folded = " ".join(line.split())
+            if len(folded) < 24:
+                continue
+            if AGENT_RUNAWAY_RE.search(folded) or AGENT_CONTEXT_OVERFLOW_RE.search(folded):
+                needles.append(folded)
+    return needles
+
+
+def _without_excluded(text: str, needles: list) -> str:
+    """`text` without the lines that echo one of the excluded needles.
+
+    An echo is not byte-identical: the transcript may re-indent it, and the
+    prompt's display budget truncates it (the observed retry echo lost "... so
+    a fresh attempt is required" from the line's tail).  A line is therefore
+    dropped when, after whitespace folding, it is a prefix of a needle, a
+    needle is a prefix of it, or it is the continuation (suffix) of a needle
+    wrapped over two lines.  Lines shorter than the needle floor are never
+    matched, so an ordinary log line cannot be swallowed.
+    """
+    if not needles:
+        return text
+    kept = []
+    for line in (text or "").splitlines():
+        folded = " ".join(line.split())
+        if len(folded) >= 24 and any(
+                folded.startswith(n) or n.startswith(folded) or n.endswith(folded)
+                for n in needles):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def agent_runaway_reason(stderr: str, exclude=()) -> str:
+    """The proxy's own sentence for a stopped loop, or "" when it is absent.
+
+    `exclude` names the orchestrator's own text (the stage prompt and the
+    previous-attempt record), on the same rule as `agent_failure_kind`: a retry
+    prompt quotes the PREVIOUS attempt's sentence, so an agent that echoes it
+    would otherwise have that sentence reported as the one that stopped THIS
+    session -- naming the wrong cap.
+    """
     # Source lines are not evidence here either: this module's own comments
     # quote the `runaway guard` spelling, so a session that reads the
     # implementation would otherwise have a comment line reported as the
     # proxy's sentence instead of the guard line that actually stopped it.
+    _needles = _evidence_needles(exclude)
+    if _needles:
+        stderr = _without_excluded(stderr, _needles)
     for line in _stderr_evidence(stderr).splitlines():
         if not AGENT_RUNAWAY_RE.search(line):
             continue
@@ -8192,14 +8246,28 @@ def agent_runaway_reason(stderr: str) -> str:
     return ""
 
 
-def agent_failure_kind(stdout: str = "", stderr: str = "") -> str:
+def agent_failure_kind(stdout: str = "", stderr: str = "", exclude=()) -> str:
     """A stable failure class read from the CLI's own transport errors.
 
     Only error-shaped stdout lines are considered (the process already failed,
     but its normal output can quote a manuscript); stderr is the error channel
     and is read whole, except the Python source lines a session may have
     printed into it (see `_stderr_evidence`).
+
+    `exclude` names text THE ORCHESTRATOR ITSELF wrote -- the stage prompt and
+    the previous-attempt record the prompt tells the agent to read.  Those
+    bytes are not provider evidence: a retry prompt quotes the previous
+    attempt's failure verbatim, in the very spellings this function looks for,
+    and an agent that echoes or quotes either file puts that sentence into its
+    own streams.  Scanning it classified every retry as a fresh overflow,
+    which refused the continuation and retired the stage, even when the real
+    failure was a cut-off answer.  A caller with nothing to exclude passes
+    nothing; the default is a no-op.
     """
+    _needles = _evidence_needles(exclude)
+    if _needles:
+        stdout = _without_excluded(stdout, _needles)
+        stderr = _without_excluded(stderr, _needles)
     stdout_errors = "\n".join(
         line for line in (stdout or "").splitlines()
         if _ERROR_SHAPED_STDOUT_RE.match(line))

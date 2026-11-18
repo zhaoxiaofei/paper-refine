@@ -2048,6 +2048,13 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     except OSError:
         pass
     failure_kind = ""
+    # The prompt and the previous-attempt record are the ORCHESTRATOR's own
+    # words, not provider evidence: a retry prompt quotes the prior failure
+    # verbatim, and the record it points the agent at repeats it. An agent that
+    # echoes or quotes either one used to make every retry look like a fresh
+    # overflow, and to report the PREVIOUS attempt's guard sentence as the one
+    # that stopped this one (see `agent_failure_kind`, `agent_runaway_reason`).
+    agent_exclude = (prompt, read_text_bounded(sb / "PREVIOUS_ATTEMPT_ERRORS.md"))
     if rc not in (0, None):
         # BOTH streams, unconditionally: a CLI that puts the provider's 413 on
         # stdout and an unrelated warning on stderr used to be classified as ""
@@ -2055,7 +2062,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         # then resumed the same oversized session. The patterns are anchored to
         # error-shaped lines, so scanning stdout does not flag a manuscript that
         # merely mentions "payload too large".
-        failure_kind = agent_failure_kind(out, err)
+        failure_kind = agent_failure_kind(out, err, exclude=agent_exclude)
     if failure_kind == "context_overflow":
         exc = ("the agent request exceeded the provider's payload/context limit "
                "(HTTP 413 / request too large); a continuation would resend the same "
@@ -2063,7 +2070,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     elif failure_kind == "runaway":
         # The proxy stopped the session itself; keep its sentence, because it
         # names which cap tripped (turns, compactions, a repeated call).
-        exc = agent_runaway_reason(err) or (
+        exc = agent_runaway_reason(err, exclude=agent_exclude) or (
             "the agent session was stopped for looping instead of finishing the "
             "stage; a fresh attempt is required")
     if turn_cap_hit:
