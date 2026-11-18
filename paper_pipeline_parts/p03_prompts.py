@@ -67,8 +67,9 @@ At minimum — and not limited to — the review must surface:
 6. Formatting that violates best practice for manuscript preparation — including but not limited
    to justified alignment of main text (use left alignment), fonts that are too small or too
    large for their part of the manuscript, fancy styles in the cover letter, and the persuading
-   part of the cover letter less than 300 or more than 500 words — unless such formatting is
-   required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
+   part of the cover letter outside the range the venue's own M19 rule states (when the venue
+   states no cover-letter preference, report that instead of applying a default) — unless such
+   formatting is required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
 7. Micro-formatting and consistency defects, including but not limited to: acronym-related errors
    (including but not limited to: repeating fully expanded long-forms after their first use;
    presenting short-forms without their corresponding long-forms at initial mention; failing to
@@ -81,8 +82,9 @@ At minimum — and not limited to — the review must surface:
    dashes [e.g., using a hyphen for a range instead of an en dash]); unit and style inconsistencies
    (e.g., mixed unit styles for the same quantity, and inconsistent citation formatting); font
    (size, normal, bold, italic, etc., properties) inconsistencies, and any other similar stylistic
-   or formatting discrepancies. The entire manuscript should be 1.5-spaced (except that figure
-   caption texts are single-spaced).
+   or formatting discrepancies. Spacing follows the venue template's own style; a venue that
+   states no spacing rule must not be measured against a blanket default (figure captions are
+   single-spaced only where the venue says so).
 
 Length rule (withdraws this master prompt's blanket preference): the "never flag abstract/main-text
 word limits" preference is WITHDRAWN here -- the M19 rule above governs the abstract and main text,
@@ -190,8 +192,9 @@ The master prompt's STYLE, FORMAT and EVIDENCE discipline does govern @@OUTPUT_D
 1. Formatting that violates best practice for manuscript preparation — including but not limited
    to justified alignment of main text (use left alignment), fonts that are too small or too
    large for their part of the manuscript, fancy styles in the cover letter, and the persuading
-   part of the cover letter less than 300 or more than 500 words — unless such formatting is
-   required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
+   part of the cover letter outside the range the venue's own M19 rule states (when the venue
+   states no cover-letter preference, report that instead of applying a default) — unless such
+   formatting is required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
 2. Micro-formatting and consistency defects, including but not limited to: acronym-related errors
    (including but not limited to: repeating fully expanded long-forms after their first use;
    presenting short-forms without their corresponding long-forms at initial mention; failing to
@@ -204,8 +207,9 @@ The master prompt's STYLE, FORMAT and EVIDENCE discipline does govern @@OUTPUT_D
    dashes [e.g., using a hyphen for a range instead of an en dash]); unit and style inconsistencies
    (e.g., mixed unit styles for the same quantity, and inconsistent citation formatting); font
    (size, normal, bold, italic, etc., properties) inconsistencies, and any other similar stylistic
-   or formatting discrepancies. The entire manuscript should be 1.5-spaced (except that figure
-   caption texts are single-spaced).
+   or formatting discrepancies. Spacing follows the venue template's own style; a venue that
+   states no spacing rule must not be measured against a blanket default (figure captions are
+   single-spaced only where the venue says so).
 
 Length rule (withdraws this master prompt's blanket preference): the "never flag abstract/main-text
 word limits" preference is WITHDRAWN here -- the M19 rule above governs the abstract and main text,
@@ -1349,7 +1353,7 @@ def prefer_rewrite_for_sandbox(ctx, rec, prompt: Path) -> bool:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict) and "prefer_rewrite_over_deletion" in policy:
-        return bool(policy["prefer_rewrite_over_deletion"])
+        return content_edit_prefer_flag(policy["prefer_rewrite_over_deletion"])
     prompt = Path(prompt)
     if prompt.is_file():
         from_prompt = prefer_rewrite_from_prompt(prompt)
@@ -1369,8 +1373,11 @@ def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict):
-        return (bool(policy.get("insertions", True)),
-                bool(policy.get("deletions", True)))
+        # Parse the documented string spellings exactly as the postcheck does;
+        # bool('false') is True and prompted the session under the opposite
+        # policy from the one enforced (F132).
+        return (content_edit_flag(policy.get("insertions", True)),
+                content_edit_flag(policy.get("deletions", True)))
     prompt = Path(prompt)
     if prompt.is_file():
         from_prompt = content_edit_policy_from_prompt(prompt)
@@ -2248,9 +2255,9 @@ the original.
      rewrite the FORM, not the science. Anything missing from the submission (a whole mandatory
      file, a statement, an accession number) is scaffolded ONLY with the literal
      "[AUTHOR TO COMPLETE: ...]" marker and listed for the author.
-  3. STYLE AND FORMAT ARE UNCHANGED WHERE THE MASTER PROMPT FIXES THEM: left-aligned main text,
-     1.5-spaced text (single-spaced figure captions), the manuscript's fonts/sizes, figure
-     placement, numbering and cross-references. If your reorganization moves a reference, UPDATE
+  3. STYLE AND FORMAT ARE UNCHANGED WHERE THE VENUE TEMPLATE FIXES THEM: left-aligned main text,
+     the venue template's own spacing (single-spaced figure captions where the venue says so),
+     the manuscript's fonts/sizes, figure placement, numbering and cross-references. If your reorganization moves a reference, UPDATE
      the cross-reference so numbering stays coherent; never renumber a family of items.
   4. ONE COPY OF EACH DOCUMENT, ONE CONTENT-HASH VERSION TOKEN PER PACKAGE: every document you
      carry into rewritten/ keeps its ROLE and body, and the whole package gets ONE token -- the

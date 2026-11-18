@@ -151,7 +151,7 @@ from pathlib import Path
 #     "over the limit" is never reported as "corrupt";
 #   * `compact_state()` drops the redundant BULK before every save: the full
 #     evidence packs stay where they are written (reports/judge_evidence_<id>.json,
-#     runs/<id>/CODE_SCANS_after.json, runs/<id>/FORMAT_FIX.json -- 56 MB of the
+#     runs/<id>/CODE_SCANS_after.json, runs/<id>/FORMAT_FIX_<id>.json -- 56 MB of the
 #     offending registry was copies of those) while the record keeps the counts,
 #     the corpus digest and the path; the registry of that root becomes ~6 MB on
 #     its next save;

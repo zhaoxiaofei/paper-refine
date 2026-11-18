@@ -5,6 +5,10 @@
 # the single-file source.
 from __future__ import annotations
 
+import signal
+import stat
+import threading
+
 _XML_INTER_ELEMENT = rf"(?:\s|{_XML_MISC})*"
 _PARAGRAPH_OPEN_RE = re.compile(rf"<w:p(?=[\s/>]){_XML_ATTRIBUTES}>")
 _PARAGRAPH_PROPERTIES_OPEN_RE = re.compile(rf"<w:pPr(?=[\s/>]){_XML_ATTRIBUTES}>")
@@ -768,42 +772,105 @@ class ToolOutputOverBudget(OSError):
     """A child process printed more than MAX_TOOL_OUTPUT_BYTES on one stream."""
 
 
-def _run_text_tool(argv, timeout: int) -> tuple:
-    """Run a child with bounded FILE-backed output; return (rc, stdout, stderr).
+def _tool_popen_kwargs() -> dict:
+    """Put the tool in its OWN process group so a timeout can kill helpers."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
 
-    An over-budget stream raises `ToolOutputOverBudget` (an OSError, so every
-    existing `except (OSError, subprocess.SubprocessError)` call site degrades
-    with its normal warning/row instead of allocating the output). A timeout
-    raises `subprocess.TimeoutExpired`, as `subprocess.run(timeout=...)` does.
-    """
-    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
-        proc = subprocess.Popen([str(a) for a in argv], stdin=subprocess.DEVNULL,
-                                stdout=out_f, stderr=err_f)
-        timed_out = False
+
+def _kill_tool_group(proc) -> None:
+    """Kill the tool's whole process group, not only its direct child."""
+    if os.name == "nt":
         try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (AttributeError, OSError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _run_text_tool(argv, timeout: int) -> tuple:
+    """Run a child with output bounded in size AND lifetime.
+
+    The old version pointed stdout/stderr at unbounded TemporaryFiles and
+    checked their size only after the child exited, so a flooding tool filled
+    the disk for the whole timeout; and it killed only the direct child, so a
+    pdftotext/convert grandchild survived the timeout (F58/F73). Both streams
+    are now drained through capped reader threads, the process GROUP is killed
+    the moment the cap is crossed or the timeout expires, and an over-budget
+    stream raises `ToolOutputOverBudget` as before.
+    """
+    cap = MAX_TOOL_OUTPUT_BYTES
+    proc = subprocess.Popen([str(a) for a in argv], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            **_tool_popen_kwargs())
+    over_budget = threading.Event()
+    buffers = {}
+
+    def _pump(pipe, key):
+        chunks, total = [], 0
+        try:
+            while True:
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                before = total
+                total += len(chunk)
+                if total <= cap:
+                    chunks.append(chunk)
+                else:
+                    keep = cap + 1 - before
+                    if keep > 0:
+                        chunks.append(chunk[:keep])
+                    over_budget.set()
+                    _kill_tool_group(proc)
+        except (OSError, ValueError):
+            pass
+        finally:
+            buffers[key] = b"".join(chunks)
             try:
-                proc.kill()
+                pipe.close()
             except OSError:
                 pass
+
+    readers = [threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)]
+    for thread in readers:
+        thread.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_tool_group(proc)
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+    for thread in readers:
+        thread.join(timeout=10)
+    for thread, pipe in zip(readers, (proc.stdout, proc.stderr)):
+        if thread.is_alive():
             try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
+                pipe.close()
+            except OSError:
                 pass
-        out_f.seek(0, os.SEEK_END)
-        out_size = out_f.tell()
-        err_f.seek(0, os.SEEK_END)
-        err_size = err_f.tell()
-        if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
-            raise ToolOutputOverBudget(
-                f"tool output over {MAX_TOOL_OUTPUT_BYTES} bytes "
-                f"(stdout={out_size}, stderr={err_size})")
-        out_f.seek(0)
-        err_f.seek(0)
-        out = out_f.read(MAX_TOOL_OUTPUT_BYTES + 1)
-        err = err_f.read(MAX_TOOL_OUTPUT_BYTES + 1)
+        thread.join(timeout=2)
+    out = buffers.get("out", b"")
+    err = buffers.get("err", b"")
+    if over_budget.is_set() or len(out) > cap or len(err) > cap:
+        raise ToolOutputOverBudget(
+            f"tool output over {cap} bytes "
+            f"(stdout={len(out)}, stderr={len(err)})")
     if timed_out:
         raise subprocess.TimeoutExpired(str(argv[0]), timeout)
     return (proc.returncode, out.decode("utf-8", "replace"),
@@ -4411,16 +4478,43 @@ def _inflate_bounded(raw: bytes, limit: int = MAX_PDF_PART_BYTES):
 
 
 def _read_pdf_bounded(path: Path):
-    """The PDF's bytes, or None for an unreadable/symlinked/over-budget file."""
+    """The PDF's bytes, or None for an unreadable/symlinked/over-budget file.
+
+    The check-and-reopen version tested `is_symlink()`/`st_size` by NAME and
+    then called `read_bytes()` by name: a swap between the two followed a
+    planted link or allocated an oversized file (F190). Open once with
+    O_NOFOLLOW, fstat THAT descriptor, and read it under the same cap.
+    """
     p = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
-        if p.is_symlink() or not p.is_file():
-            return None
-        if p.stat().st_size > MAX_PDF_BYTES:
-            return None
-        return p.read_bytes()
+        fd = os.open(p, flags)
     except OSError:
         return None
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_PDF_BYTES:
+            return None
+        chunks, total = [], 0
+        while total <= MAX_PDF_BYTES:
+            block = os.read(fd, min(1 << 20, MAX_PDF_BYTES + 1 - total))
+            if not block:
+                break
+            chunks.append(block)
+            total += len(block)
+        if total > MAX_PDF_BYTES:
+            return None
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _xfa_dataset_report(path: Path):

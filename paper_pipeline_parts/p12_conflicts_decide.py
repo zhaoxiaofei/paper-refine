@@ -8406,6 +8406,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                 with contextlib.suppress(OSError):
                     _stale_gaps.unlink()
         sel = select_champion(ctx, r, agg, floor=rrec.get("tiebreak_defect_floor"))
+        # `select_champion` derives the winner from the field and cannot know a
+        # tolerated stage; `finalize_round` recorded it on the round. Re-derive
+        # it into the decision's selection, exactly as the auto branch does, or
+        # decision.json loses the tolerated run names (F112).
+        sel = selection_with_tolerated(sel, rrec)
         mismatch = None
         if sel["champion"] != rrec.get("champion"):
             mismatch = (f"recomputed champion {sel['champion']!r} != stored champion "

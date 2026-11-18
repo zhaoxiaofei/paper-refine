@@ -1181,6 +1181,11 @@ def sha256_files(paths, on_error=None) -> list:
     return list(_hash_pool().map(one, paths))
 
 
+# A hostile/degenerate package can nest directories far beyond any real
+# corpus; the walk records the cap as a gap instead of exhausting the stack.
+MAX_TREE_DEPTH = 200
+
+
 def _iter_tree_files(root: Path, follow_dir_links: bool = False,
                      owner_root: Path = None, gaps: list = None,
                      symlinks: list = None) -> list:
@@ -1254,7 +1259,21 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
         return (target.is_dir() and target.name == p.name
                 and target.parent.name == PRISTINE_DIR)
 
-    def walk(d: Path, ancestors: frozenset) -> None:
+    def walk(d: Path, ancestors: frozenset, depth: int = 0) -> None:
+        # A depth cap turns the hostile nesting case into a RECORDED gap. The
+        # old uncapped recursion raised RecursionError from hash_manifest /
+        # corpus_tree_manifest on a ~1,200-deep agent package and aborted
+        # run/decide (F54). The cap is well below Python's frame limit, so a
+        # legitimate corpus is never affected.
+        if depth > MAX_TREE_DEPTH:
+            if gaps is not None:
+                try:
+                    gaps.append(d.relative_to(root).as_posix())
+                except ValueError:
+                    gaps.append(str(d))
+            print(f"warning: directory tree under {d} exceeds the {MAX_TREE_DEPTH}-level "
+                  f"depth cap; its deeper files are not in the manifest", file=sys.stderr)
+            return
         try:
             entries = sorted(d.iterdir())
         except OSError as e:
@@ -1288,7 +1307,7 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
                     key = dir_key(p)
                     if key is None or key in ancestors:
                         continue
-                    walk(p, ancestors | {key})
+                    walk(p, ancestors | {key}, depth + 1)
                 elif p.is_file():
                     # A file symlink is not package content (see the paragraph
                     # below), but a caller that must account for EVERY submitted
@@ -1302,7 +1321,7 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
                 key = dir_key(p)
                 if key is None or key in ancestors:
                     continue
-                walk(p, ancestors | {key})
+                walk(p, ancestors | {key}, depth + 1)
             elif p.is_file():
                 # A FILE symlink is not package content: copy_into() refuses it,
                 # so hashing its target here made the input manifest/digest claim
@@ -1896,8 +1915,13 @@ def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
         raise
 
 
-def write_json_atomic(path: Path, obj) -> None:
-    """Write strict JSON atomically: unique .tmp, fsync, then os.replace."""
+def write_json_atomic(path: Path, obj, mode: int = None) -> None:
+    """Write strict JSON atomically: unique .tmp, fsync, then os.replace.
+
+    `mode` lets a secret-bearing registry (state.json carries `judge_salt`) be
+    created 0600: a NEW file otherwise gets 0o666 & ~umask, so any local user
+    could read the salt and de-anonymize the panel (F67).
+    """
     _refuse_symlinked_parent(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path_for(path)
@@ -1905,7 +1929,7 @@ def write_json_atomic(path: Path, obj) -> None:
     def do(f) -> None:
         json.dump(_json_safe(obj), f, indent=2, ensure_ascii=False)
 
-    _atomic_write_bytes(tmp, path, do)
+    _atomic_write_bytes(tmp, path, do, mode=mode)
 
 
 def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
@@ -4642,7 +4666,7 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
     Called by `setup` (the pristine copy), by every package-producing stage's
     postcheck (before the corpus fingerprint/pin, so the version that is judged
     and pinned is the repaired one) and by `publish_final_clean`. The artifact
-    (`FORMAT_FIX.json`, plus before/after scans) lands in `artifacts_dir` (the
+    (`FORMAT_FIX_<label>.json`, plus before/after scans) lands in `artifacts_dir` (the
     run sandbox), never inside the package: `work/` scratch is stripped from the
     corpus but a top-level JSON would become submission content.
 
@@ -5388,25 +5412,9 @@ def _email_texts_in_file(path: Path) -> tuple:
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError,
                 NotImplementedError) as e:
             return [], f"unreadable DOCX ({type(e).__name__}: {e})"
-        mod = _format_module()
-
-        def part_texts(xml: str) -> list:
-            if mod is not None:
-                try:
-                    return [mod.text_of(frag) for _a, _b, frag in mod.paragraphs(xml)]
-                except Exception:                                  # noqa: BLE001
-                    pass
-            try:
-                root = ET.fromstring(xml)
-            except ET.ParseError:
-                return [re.sub(r"<[^>]+>", " ", xml)]
-            return ["\n".join(node.itertext()) for node in root.iter()
-                    if isinstance(node.tag, str)
-                    and node.tag.rsplit("}", 1)[-1] == "p"]
-
         texts = []
         for _name, xml in parts:
-            texts.extend(part_texts(xml))
+            texts.extend(_visible_docx_part_texts(xml))
         return texts, ""
     text = read_text_bounded(path)
     if text is None:

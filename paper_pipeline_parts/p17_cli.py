@@ -861,7 +861,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "`guided_review`, the run id `r<r>_guided_review` and the area "
                          "`guided_review/`. Refused with a concern-scoped revision mode, "
                          "with --review-split, "
-                         "with the probe off (no finding source would remain) and outside a "
+                         "with `--cold-start-review off` (no finding source would remain) "
+                         "and outside a "
                          "full-scope round")
     ps.add_argument("--no-guided-review",
                     dest="guided_review", action="store_const",

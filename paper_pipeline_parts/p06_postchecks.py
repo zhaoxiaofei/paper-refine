@@ -1737,11 +1737,22 @@ def _ledger_rows_without_explanation(ledger, wanted=()) -> dict:
             rid = row_id(node) or keyed_id
             if (not want or rid in want) and _ledger_row_verdict(node):
                 missing = []
-                if not any(str(node.get(k) or "").strip()
-                           for k in _LEDGER_RATIONALE_KEYS):
+
+                def _explained(keys) -> bool:
+                    # An explanation is TEXT: a number, object or array is not
+                    # a rationale/evidence sentence, and `str(5)`/`str([1])`
+                    # used to pass the two-cell proof (F138). A short single
+                    # token is legitimate evidence (a line reference, a sha),
+                    # so only the non-string types are rejected.
+                    for key in keys:
+                        value = node.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return True
+                    return False
+
+                if not _explained(_LEDGER_RATIONALE_KEYS):
                     missing.append("rationale")
-                if not any(str(node.get(k) or "").strip()
-                           for k in _LEDGER_EVIDENCE_KEYS):
+                if not _explained(_LEDGER_EVIDENCE_KEYS):
                     missing.append("evidence")
                 if missing:
                     bad[rid] = missing

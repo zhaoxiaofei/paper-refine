@@ -304,38 +304,20 @@ def _kill_redline_tree(proc) -> None:
 
 def _run_redline_cmd(argv: list, out: Path, timeout: int = 900) -> dict:
     try:
-        # A backend that prints a flood must not accumulate it in memory: its
-        # stdout/stderr go to temporary files and are read back under a budget
-        # (F61).
-        with tempfile.TemporaryFile() as out_tmp, tempfile.TemporaryFile() as err_tmp:
-            proc = subprocess.Popen(
-                [str(a) for a in argv], stdout=out_tmp, stderr=err_tmp,
-                **_redline_popen_kwargs())
-            try:
-                proc.wait(timeout=timeout)
-                rc = proc.returncode
-            except subprocess.TimeoutExpired:
-                _kill_redline_tree(proc)
-                try:
-                    proc.wait(timeout=30)      # reap; never leave a zombie
-                except subprocess.TimeoutExpired:
-                    pass
-                rc = None
-            out_tmp.seek(0, os.SEEK_END)
-            err_tmp.seek(0, os.SEEK_END)
-            over = (out_tmp.tell() > MAX_TOOL_OUTPUT_BYTES
-                    or err_tmp.tell() > MAX_TOOL_OUTPUT_BYTES)
-            out_tmp.seek(0)
-            err_tmp.seek(0)
-            so = out_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
-            err = err_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
-        if over:
-            rc, err, so = None, (f"backend output over the {MAX_TOOL_OUTPUT_BYTES}-byte "
-                                 f"budget; refusing it"), ""
-        elif rc is None:
-            err, so = f"timeout after {timeout}s", ""
-        else:
-            err, so = (err or "").strip(), (so or "").strip()
+        # `run_bounded` drains both streams through capped reader threads and
+        # kills the whole process GROUP the moment the cap is crossed. The old
+        # temp-file capture grew without limit until the child exited and only
+        # checked the budget afterwards, so a flood filled the disk first
+        # (F58; p18's helper carries the same fix).
+        rc, out_bytes, err_bytes = run_bounded([str(a) for a in argv],
+                                               timeout=timeout)
+        so = (out_bytes or b"").decode("utf-8", "replace").strip()
+        err = (err_bytes or b"").decode("utf-8", "replace").strip()
+    except subprocess.TimeoutExpired:
+        rc, err, so = None, f"timeout after {timeout}s", ""
+    except ToolOutputOverBudget:
+        rc, err, so = None, (f"backend output over the {MAX_TOOL_OUTPUT_BYTES}-byte "
+                             f"budget; refusing it"), ""
     except FileNotFoundError as e:                              # noqa: BLE001
         rc, err, so = None, f"not found: {e}", ""
     except OSError as e:                                        # noqa: BLE001
@@ -1295,9 +1277,16 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         except OSError:
             same = False
         if same:
-            return [{"backend": "input-guard", "cmd": [], "rc": None, "ok": False,
-                     "detail": f"refusing to use the {label} file as OUT: it would be "
-                               f"deleted before the diff"}]
+            # Every caller reads result["ok"]; returning a bare LIST here raised
+            # `TypeError: list indices must be integers` and aborted the
+            # tracking pass instead of reporting the refused pair (F61).
+            return {"ok": False, "tool": None,
+                    "attempts": [{"backend": "input-guard", "cmd": [], "rc": None,
+                                  "ok": False,
+                                  "detail": f"refusing to use the {label} file as OUT: "
+                                            f"it would be deleted before the diff"}],
+                    "validated_ooxml": False, "validation_detail": "no output",
+                    "warning": None}
 
     def drop_stale_out(backend_name: str):
         """Claim OUT for the next attempt; returns an attempt record on failure.
@@ -1384,11 +1373,11 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
                     res2["backend"] = "python-redlines[docxodus]"
                     attempts.append(res2)
         elif backend == "docx-trackdiff":
-            for argv in (["docx-trackdiff", str(base), str(revised), str(out)],
-                         ["docx-trackdiff", "--base", str(base), "--revised", str(revised),
-                          "--out", str(out)],
-                         [sys.executable, "-m", "docx_trackdiff", str(base), str(revised),
-                          str(out)]):
+            # The shipped docx-trackdiff CLI accepts exactly `old new out`
+            # (argparse); its `--base/--revised/--out` form exits 2 and the
+            # package has no `__main__`, so the old chain logged two guaranteed
+            # failures per pair before giving up (F195).
+            for argv in (["docx-trackdiff", str(base), str(revised), str(out)],):
                 stale = drop_stale_out(backend)
                 if stale:
                     attempts.append(stale)
@@ -1537,7 +1526,7 @@ def redline_readme(manifest: dict) -> str:
          "automation) -- when that server is configured on this machine",
          "2. `python-redlines[docxodus]` (through `paper_redlines_adapter.py`, which reports the "
          "interface it used)",
-         "3. `docx-trackdiff` (CLI, two argument forms, then `python -m docx_trackdiff`)",
+         "3. `docx-trackdiff` (CLI form: `docx-trackdiff OLD NEW OUT`)",
          "4. `--redline-cmd '<json argv with {base} {revised} {out}>'` when you supply one",
          "5. the built-in OOXML word/paragraph-level tracked-changes writer (stdlib only; "
          "unchanged paragraphs are copied verbatim, a changed paragraph carries word-level "

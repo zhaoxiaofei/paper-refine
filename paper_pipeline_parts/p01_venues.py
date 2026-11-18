@@ -761,6 +761,31 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         clean_limits = copy.deepcopy(EMPTY_LENGTH_LIMITS)
         if top_limits is not None and "cover_letter" in top_limits:
             clean_limits["cover_letter"] = copy.deepcopy(top_limits["cover_letter"])
+    # A profile that carries BOTH a top-level `length_limits` and a
+    # `article_types` table may state different caps for the same section. The
+    # article type wins (it is the selected type's own table), but silently
+    # dropping the top-level numbers left the operator with no report that the
+    # profile says two things (F160).
+    if top_limits is not None and default_entry["length_limits"] is not None:
+        for _section in ("abstract", "main_text"):
+            _top = top_limits.get(_section) or {}
+            _type = default_entry["length_limits"].get(_section) or {}
+            # Only TWO STATED numbers can conflict; `null` means "this block
+            # carries no number", so a top-level value is not contradicted by a
+            # type that states none (and a hand-edited top-level value must keep
+            # loading, as the documented snapshot/re-record path expects).
+            _top_base, _type_base = _top.get("base"), _type.get("base")
+            if _top_base is not None and _type_base is not None \
+                    and (_top_base, _top.get("relaxation")) != (
+                        _type_base, _type.get("relaxation")):
+                problems.append(
+                    f"length_limits.{_section} "
+                    f"(base={_top.get('base')!r}, relaxation={_top.get('relaxation')!r}) "
+                    f"conflicts with article_types[{default_type_id}].length_limits."
+                    f"{_section} (base={_type.get('base')!r}, "
+                    f"relaxation={_type.get('relaxation')!r}); the article type's value is "
+                    f"the one applied -- make the two blocks agree or remove the "
+                    f"top-level number")
 
     journals = _profile_str_list(out.get("journals"), "journals", problems)
     aliases = _profile_str_list(out.get("journal_aliases"), "journal_aliases", problems)

@@ -129,6 +129,11 @@ A finished decision can be certified, provisional or blocked; a blocked decision
 * Python 3.9+ (the pipeline and both companion tools are standard-library only,
   except that `pairwise_scores.py` imports `openpyxl` to write its workbook; the
   pipeline itself and score collection do not need it).
+* On Linux, `bubblewrap` (`bwrap`) when a cold-start review declares a verifier:
+  the orchestrator re-runs that agent-written script in a private, read-only
+  mount/network/PID namespace. If the jail cannot be built the verifier is NOT
+  run and the attempt fails (a verifier is optional — omit it, or install
+  bubblewrap).
 * An agent CLI for the stage sessions. The new pair selects the two axes
   independently: `--agent-harness dsh|gpt-codex|claude-code` (default `dsh`)
   and `--agent-model deepseek-flash|gpt-sol|gpt-terra|claude-opus|claude-sonnet|
@@ -2360,9 +2365,12 @@ operator names):
   (`"verifier": {script, computed, shows}`); findings without a computation are evidence rows like
   any other finding;
 * **the orchestrator re-runs every declared verifier at postcheck time** and compares the last
-  stdout line with the declared `computed` value (`cold_start_review/REPRODUCTION.md`). A mismatch (or
-  a missing script / non-zero exit / empty output / timeout) FAILS the attempt — a computation the
-  cold-start review cannot reproduce is a correctness blocker, not a finding;
+  stdout line with the declared `computed` value (`cold_start_review/REPRODUCTION.md`). The
+  verifier is agent-written code, so it runs in a read-only bubblewrap jail (private namespaces,
+  no network, no `$HOME`, the sandbox read-only at `/sandbox`, a writable `/tmp` only). A mismatch
+  (or a missing script / non-zero exit / empty output / timeout / unavailable jail) FAILS the
+  attempt — a computation the cold-start review cannot reproduce is a correctness blocker, not a
+  finding, and it is never run with host access;
 * every finding is an **`X-9xx` row** (the reserved cold-start-review block) of the same standing as the
   discovery round's `X-*` findings: it is merged into the frozen
   `guided_review/round2/findings_extra.json` of the auditor and every reviser (the source review sandbox
@@ -2502,8 +2510,8 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | cold_start_review | 63 KB | 27 KB | 56% |
 | audit | 91 KB | 48 KB | 47% |
 | revise | 121 KB | 67 KB | 44% |
-| integrate | 112 KB | 59 KB | 47% |
-| rewrite | 104 KB | 60 KB | 42% |
+| integrate | 112 KB | 60 KB | 47% |
+| rewrite | 104 KB | 61 KB | 41% |
 | judge | 104 KB | 74 KB | 29% |
 | revision_audit | 38 KB | 16 KB | 57% |
 | revision_repair | 36 KB | 11 KB | 69% |
@@ -3207,7 +3215,7 @@ a clean panel. Each round's judge wave is followed by ITS OWN audit (two
 rounds produce two audits; `decide` only back-fills a round that has no audit
 yet). The LLM conflict auditor is OFF by default: only the mechanical conflicts
 are written, and every row keeps `origin: mechanical`. `--conflict-agent
-{codex-lite|codex|claude|dsh|qwen|dots}` / `--conflict-agent-cmd JSON` (or the audit-specific
+{codex-lite|codex|claude|dsh|qwen|dots|manual}` / `--conflict-agent-cmd JSON` (or the audit-specific
 `PAPER_CONFLICT_AGENT_CMD`) turn the LLM pass on for that invocation; its
 semantic candidates are schema-checked and merged, never trusted blindly
 (`--no-conflict-agent` and `--conflict-agent manual` keep it off). The separate
@@ -3673,7 +3681,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 252 suites (a few
+any failure. They are independent, so run them in parallel — 254 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
@@ -3757,8 +3765,9 @@ compatibility for a root with no `venue`/`article_type` key.
 
 ## Backward-compatibility removals (2026-10-25)
 
-This tree deliberately keeps **no** compatibility aliases. The breaking changes
-an older command line or root can hit:
+This tree deliberately keeps **no** compatibility aliases, with the single
+documented exception below. The breaking changes an older command line or root
+can hit:
 
 * input areas have ONE canonical name each: `non_revised/` and `raw_data/`.
   `non-revised/` and `raw_figs/` are refused by `setup` and by every command
@@ -3770,6 +3779,10 @@ an older command line or root can hit:
 * the boolean `strict_artifacts` / `strict_dispositions` config keys are no
   longer read; the current key is the three-valued `artifact_policy`.
 * `set-revision-mode none` is removed; the mode is `continue`.
+* `--almost-fail` / `--no-almost-fail` are accepted as HIDDEN aliases of
+  `--tolerate-fail` / `--no-tolerate-fail` (the previous spelling of the same
+  policy; `setup` and `run` both accept them). The canonical spelling is
+  `--tolerate-fail`; the aliases are suppressed from `--help`.
 * a root without `judge_salt` is refused when a judge token is needed; there is
   no unsalted fallback.
 * `paper_pipeline.py` and `paper_docx_format.py` are now thin loaders over

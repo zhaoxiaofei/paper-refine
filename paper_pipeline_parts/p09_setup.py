@@ -418,7 +418,7 @@ def cmd_setup(args) -> None:
     # all are refused HERE, before a root is built:
     #   * a concern-scoped revision already replaces the guided review;
     #   * a split review is two guided-review sessions;
-    #   * no probe means literally nothing produces findings;
+    #   * --cold-start-review off means literally nothing produces findings;
     #   * a polish round reviews the surface only, and it is a guided review.
     if str(getattr(args, "guided_review", GUIDED_REVIEW_DEFAULT)).lower() == "off":
         if scoped_mode_restore is not None:
@@ -3343,6 +3343,19 @@ def cmd_set_revision_mode(args) -> None:
             f"       Re-run `set-revision-mode {mode_arg} --force` if the change is intended.")
     named = [str(x) for x in (getattr(args, "journal_feedback", None) or []) if str(x).strip()]
     info = JOURNAL_MODES[mode_arg]
+    # The same refusal `setup` applies: a feedback-consuming mode replaces the
+    # guided review with the concerns ledger, and the guided review is the
+    # session that reconciles every concern. The setter used to have no such
+    # check, so a root created with `--no-guided-review` could be switched to
+    # transfer/resubmit/llm and leave the letter unanswered (F84).
+    if info["feedback"]:
+        if str((ctx.cfg or {}).get("guided_review")
+               or GUIDED_REVIEW_DEFAULT).lower() == "off":
+            die(f"revision mode {mode_arg!r} reads an editors'/reviewers' letter, but this "
+                f"root was created with --no-guided-review: the guided review is the "
+                f"session that reconciles every concern, so switching would leave the "
+                f"letter unanswered. Re-create the root with the guided review ON, or "
+                f"choose a mode that reads no feedback.", code=2)
     if info["feedback"] and mode_arg != JOURNAL_MODE_LLM:
         # Resolve/validate ONLY for a mode that reads a journal letter. A
         # no-feedback mode (init/continue) documents the flag as ignored, and
@@ -3695,6 +3708,15 @@ def _invocation_failure_state(ctx: Ctx, rounds=None) -> tuple:
     else:
         for r in rounds:
             ids += [e["id"] for e in round_run_plan(ctx, r)]
+            # `round_run_plan` deliberately excludes the judge wave and the
+            # journal response run, but a judge that exhausted its budget with
+            # no usable trial is a HARD failure of this invocation: leaving it
+            # out made `--tolerate-fail` exit 0 ("no hard FAIL remains") over a
+            # panel that never judged the round (F101).
+            ids += [rec["id"] for rec in ctx.runs(kind="judge", round_no=r)]
+            _response = ctx.run(rid_response(r))
+            if _response is not None:
+                ids.append(_response["id"])
     tolerated, hard = [], []
     for rid in dict.fromkeys(ids):
         rec = ctx.run(rid) or {}

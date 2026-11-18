@@ -1617,13 +1617,17 @@ def final_clean_reason(final: dict, rounds_data: list, rounds_total: int, final_
         return ("the champion was auto-promoted without a judge panel "
                 f"(round(s) {', '.join(str(r) for r in auto_promoted)}; "
                 f"--champion-select); it is PROVISIONAL, not a certified panel result")
+    if panel_gaps:
+        return "the judge panel is incomplete"
+    # A NAMED gate blocker (the TOLERATED_FAIL note, an incomplete round, a
+    # publication problem) is more informative than the generic provisional
+    # sentence: a tolerated FINAL round was reported as "only round R of R is
+    # complete" and never named the tolerated stage (F102).
+    if gate_problems:
+        return "; ".join(gate_problems)
     if provisional:
         return (f"only round {final['round']} of {rounds_total} is complete "
                 f"(the champion is provisional)")
-    if panel_gaps:
-        return "the judge panel is incomplete"
-    if gate_problems:
-        return "; ".join(gate_problems)
     return ""
 
 

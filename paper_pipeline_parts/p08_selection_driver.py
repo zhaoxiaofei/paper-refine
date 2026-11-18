@@ -640,6 +640,22 @@ def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None,
     return agg, sel
 
 
+def selection_with_tolerated(sel: dict, rrec: dict) -> dict:
+    """`sel` carrying the round's recorded tolerated run list, when it has one.
+
+    `select_champion` derives a winner from the field and cannot know that a
+    stage exhausted its retries; the round record is the only source. Used by
+    `decide`'s re-derivation so decision.json keeps the tolerated run names
+    (F112).
+    """
+    tolerated = (rrec or {}).get("tolerated_fail") if isinstance(rrec, dict) else None
+    if not tolerated:
+        return sel
+    out = dict(sel)
+    out["tolerated_fail"] = dict(tolerated)
+    return out
+
+
 def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
     """D5: rank the round's fresh candidates AND its own base.
 
@@ -1925,6 +1941,11 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
                 "error": (f"{prompt_name} could not be read (a symlink/non-regular file, "
                           f"unreadable, or over the byte budget); the attempt was not launched")}
     rec["prompt_sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    # Snapshot the orchestrator's own previous-attempt record BEFORE the agent
+    # launches. The sandbox is agent-writable, so reading it after the child
+    # returns let an agent append its own error text and make the classifier
+    # exclude the genuine failure line (F106).
+    previous_errors = read_text_bounded(sb / "PREVIOUS_ATTEMPT_ERRORS.md")
     max_turns = pipeline_max_turns()
     rec["max_turns"] = max_turns
     turn_counter = None
@@ -2054,7 +2075,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     # echoes or quotes either one used to make every retry look like a fresh
     # overflow, and to report the PREVIOUS attempt's guard sentence as the one
     # that stopped this one (see `agent_failure_kind`, `agent_runaway_reason`).
-    agent_exclude = (prompt, read_text_bounded(sb / "PREVIOUS_ATTEMPT_ERRORS.md"))
+    agent_exclude = (prompt, previous_errors)
     if rc not in (0, None):
         # BOTH streams, unconditionally: a CLI that puts the provider's 413 on
         # stdout and an unrelated warning on stderr used to be classified as ""
@@ -3350,9 +3371,18 @@ def _snapshot_revised_prerepair(sb: Path) -> str:
     if pre.is_symlink() or (pre.exists() and not pre.is_dir()):
         return "revised_prerepair/ is a symlink or not a directory"
     if not pre.exists():
-        if not (sb / REVISED_DIR).is_dir():
-            return f"{REVISED_DIR}/ is missing"
-        shutil.copytree(sb / REVISED_DIR, pre, symlinks=True)
+        rev = sb / REVISED_DIR
+        # is_dir() FOLLOWS a symlink: a `revised -> /outside` root made copytree
+        # copy the outside tree into the audited baseline, which a later restore
+        # then made package content (F43). The root must be a real directory
+        # inside this sandbox, whatever it points at.
+        if rev.is_symlink() or not rev.is_dir():
+            return f"{REVISED_DIR}/ is a symlink, missing or not a directory"
+        try:
+            rev.resolve().relative_to(sb.resolve())
+        except (OSError, ValueError):
+            return f"{REVISED_DIR}/ resolves outside the sandbox"
+        shutil.copytree(rev, pre, symlinks=True)
     return ""
 
 
@@ -4719,6 +4749,10 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     # drives; a stale record/verdict from an earlier invocation must not keep
     # the round provisional after the failed run was retried successfully.
     rrec.pop("tolerated_fail", None)
+    # The legacy spelling of the same record: decide reads either one, so a
+    # re-drive that cleared only the new key left an old round PROVISIONAL
+    # after its failed stage had been retried successfully (F104).
+    rrec.pop("almost_fail", None)
     rrec.pop("certified", None)
     rrec["status"] = "active"
     rrec["started"] = rrec.get("started") or utcnow()

@@ -2134,6 +2134,36 @@ _CONTENT_EDIT_ON = ("on", "true", "yes", "1", "enabled")
 PREFER_REWRITE_OVER_DELETION = "prefer_rewrite_over_deletion"
 
 
+def content_edit_flag(value, default: bool = True) -> bool:
+    """One content-edit switch from a run-record/config value.
+
+    A run record can carry the documented string spellings ('off', 'false');
+    `bool('false')` is True and silently widened a strict record, so every
+    reader of the same key must parse it the same way (F132).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    truthy = text in _CONTENT_EDIT_ON
+    return truthy if truthy else text not in _CONTENT_EDIT_OFF
+
+
+def content_edit_prefer_flag(value, default: bool = False) -> bool:
+    """One `prefer_rewrite_over_deletion` value; only explicit ON is on."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    return text in _CONTENT_EDIT_ON
+
+
 def prefer_rewrite_over_deletion(ctx=None) -> bool:
     """Is the prefer-rewrite-over-deletion mode on for this invocation?
 
@@ -2267,21 +2297,8 @@ def content_edit_policy_allowed(ctx=None, rec=None) -> tuple:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict):
-        def _flag(value, default=True) -> bool:
-            # A run record can carry the documented string spellings ('off',
-            # 'false'); bool('false') is True and widened a strict stage into
-            # the permissive policy (F153).
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, (int, float)):
-                return bool(value)
-            text = str(value or "").strip().lower()
-            if not text:
-                return default
-            return text not in _CONTENT_EDIT_OFF
-
-        return (_flag(policy.get("insertions", True)),
-                _flag(policy.get("deletions", True)))
+        return (content_edit_flag(policy.get("insertions", True)),
+                content_edit_flag(policy.get("deletions", True)))
     return insertions_enabled(ctx), deletions_enabled(ctx)
 
 
@@ -2294,7 +2311,7 @@ def prefer_rewrite_allowed(ctx=None, rec=None) -> bool:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict) and PREFER_REWRITE_OVER_DELETION in policy:
-        return bool(policy[PREFER_REWRITE_OVER_DELETION])
+        return content_edit_prefer_flag(policy[PREFER_REWRITE_OVER_DELETION])
     return prefer_rewrite_over_deletion(ctx)
 
 

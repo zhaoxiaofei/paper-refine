@@ -6,6 +6,8 @@
 # p04_utils.py to keep every maintained source file under 10,000 lines.
 from __future__ import annotations
 
+import html as _html
+
 
 def ensure_aux_output_root(root, dirname: str) -> Path:
     """Create `<root>/<dirname>/` and refuse a symlinked/escaping root.
@@ -362,9 +364,19 @@ def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
         if child is None or child in seen:
             return match.group(0)
         seen.add(child)
+        # Read AT MOST the remaining budget (+1 to detect an overrun). Reading
+        # the child whole and charging its length afterwards allocated a
+        # multi-gigabyte \input before the budget check (F171).
+        remaining = max(0, TEX_MAX_EXPANDED_CHARS - int(budget["chars"]))
         try:
-            child_text = child.read_text(encoding="utf-8", errors="replace")
+            with child.open("r", encoding="utf-8", errors="replace") as handle:
+                child_text = handle.read(remaining + 1)
         except OSError:
+            return match.group(0)
+        if len(child_text) > remaining:
+            # The include alone exceeds the budget: leave it as a named gap and
+            # stop expanding any later include.
+            budget["chars"] = TEX_MAX_EXPANDED_CHARS
             return match.group(0)
         if child_text in stack:
             return match.group(0)       # the same source text is already open
@@ -424,6 +436,185 @@ def _tex_caption_units(text: str) -> list:
             kind = _tex_float_env_after(text[:m.start()], None)
         out.append((kind or "figure", text[i + 1:j]))
     return out
+
+
+def _visible_docx_part_texts(xml: str) -> list:
+    """Paragraph texts of one DOCX XML part as Word RENDERS them.
+
+    `text_of` counts a `w:vanish` run, so a hidden e-mail address looked
+    present to the e-mail gate while the visibility-aware content/fact readers
+    could not see it (F129). The same visible-node walk the content policy uses
+    is applied here.
+    """
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return [re.sub(r"<[^>]+>", " ", xml)]
+    out = []
+    for para in _docx_visible_paragraphs(root, ns, mc):
+        parts = []
+        for node in _docx_visible_nodes(para):
+            if node.tag in (ns + "br", ns + "cr", ns + "tab"):
+                parts.append("\n")
+            elif node.tag == ns + "noBreakHyphen":
+                parts.append("-")
+            elif node.tag == ns + "t":
+                parts.append(node.text or "")
+        text = "".join(parts)
+        if text.strip():
+            out.append(text)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Rendered reference-list comparison. Moved here from p07 (same shared
+# namespace, called at runtime) to keep p07 under the 10,000-line cap.
+# ---------------------------------------------------------------------------
+
+_HTML_BLOCK_TAG_RE = re.compile(
+    r"(?is)</?(?:address|article|aside|blockquote|br|dd|div|dl|dt|fieldset|"
+    r"figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|"
+    r"section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>")
+_HTML_TAG_RE = re.compile(r"(?s)<[^>]+>")
+
+
+def _html_text_lines(text: str) -> list:
+    """Text lines of an HTML document, with block boundaries preserved.
+
+    `.html`/`.htm` was added to the reference-entry surface list but the
+    heading/entry regexes need one element per line; a rendered list written as
+    `<h1>References</h1><p>[1] ...</p>` produced no entries at all, so a
+    fabricated or deleted HTML reference still passed the strict gates (F38).
+    Block tags become line breaks, the remaining tags are dropped, and entities
+    are decoded so the entry text compares like the other prose surfaces.
+    """
+    text = _HTML_BLOCK_TAG_RE.sub("\n", str(text or ""))
+    text = _HTML_TAG_RE.sub("", text)
+    return [_html.unescape(line) for line in text.splitlines()]
+
+
+_REFERENCE_HEADING_RE = re.compile(
+    r"(?i)^\s*(?:#{1,6}\s*)?(?:references?|bibliography|works\s+cited|"
+    r"literature\s+cited|cited\s+literature|"
+    r"references?\s+(?:and|&)\s+notes|notes\s+(?:and|&)\s+references?)\s*$|"
+    r"\\begin\{thebibliography\}|"
+    r"\\(?:sub)?section\*?\s*\{\s*(?:references?|bibliography|"
+    r"references?\s+(?:and|&)\s+notes)\s*\}")
+_REFERENCE_ENTRY_LINE_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}[.)])\s+\S")
+
+
+def _reference_entries_in_lines(lines, entries: set) -> set:
+    """Collect rendered reference entries from an iterable of text lines.
+
+    Shared by the text and DOCX readers so the two surfaces cannot drift: the
+    DOCX reference list used to be invisible to this scan while its entries
+    were also skipped as content units (F09). `lines` may be plain strings.
+    """
+    in_refs = False
+    for raw in lines:
+        stripped = str(raw or "").strip()
+        if _REFERENCE_HEADING_RE.search(stripped):
+            in_refs = True
+            continue
+        if in_refs and re.match(r"(?i)^(?:#{1,6}\s|\\(?:sub)?section)", stripped):
+            in_refs = False
+            continue
+        if not in_refs:
+            continue
+        m = re.match(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}", stripped)
+        if m:
+            entries.add(f"key:{m.group(1).strip().lower()}")
+            continue
+        if stripped and (_REFERENCE_ENTRY_LINE_RE.match(stripped)
+                         or (re.search(r"\b(?:18|19|20)\d{2}\b", stripped)
+                             and "," in stripped)):
+            entries.add(re.sub(r"\s+", " ", stripped).lower())
+    return entries
+
+
+def _reference_entry_keys(package: Path) -> set:
+    """Normalised reference-list ENTRIES the submitted package carries.
+
+    Reference entries were stripped before they became content units, so a
+    fabricated entry could be added (or a real one deleted) with no
+    missing/added unit and no fact loss (F005). The entries are compared as
+    text; `.bib`/`.bbl` entries are compared by key.
+    """
+    entries = set()
+    package = Path(package)
+    if not package.is_dir():
+        return entries
+    _decl, _is_submitted = declared_submission_filter(package)
+    for p in _iter_tree_files(package):
+        try:
+            rel = p.relative_to(package).as_posix()
+        except ValueError:
+            continue
+        if not _is_submitted(rel):
+            continue
+        top = rel.split("/", 1)[0].lower()
+        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
+            continue
+        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
+                or is_non_submitted_readme_name(p.name)
+                or is_non_shippable_name(p.name)
+                or is_non_manuscript_rel(rel)):
+            continue
+        ext = p.suffix.lower()
+        # Only a RENDERED reference-list entry is a content unit. A .bib/.bbl
+        # is a source database: adding an uncited key there does not insert a
+        # reference into the manuscript (F31), and a corrected key is covered
+        # by the citation-key gate (F02). The SAME prose surfaces the content
+        # scan reads (.rst/.html included) are scanned here, and a submitted
+        # DOCX is read through the shared visibility-aware paragraph reader:
+        # otherwise a new/removed entry in either format is invisible (F09/F38).
+        if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".html", ".htm"):
+            text = read_text_bounded(p)
+            if text:
+                lines = (_html_text_lines(text) if ext in (".html", ".htm")
+                         else text.splitlines())
+                _reference_entries_in_lines(lines, entries)
+        elif ext == ".docx":
+            paras = _docx_paragraphs_with_styles(p, include_notes=True)
+            if paras:
+                _reference_entries_in_lines((line for line, _style in paras), entries)
+    return entries
+
+
+def _reference_entry_corrections(base_package: Path, candidate_package: Path) -> tuple:
+    """(pairs, added, removed) for the reference lists of one package pair.
+
+    A typo/author-year fix changes one entry's text; a removed entry is paired
+    with a very similar added one (ratio >= 0.80) so an in-place correction is
+    not reported as delete+add. The pairs are returned because the PROSE
+    comparison must exclude the same correction: it used to re-report a
+    corrected entry as a missing+added content unit even though this comparator
+    accepted it (F126).
+    """
+    base = _reference_entry_keys(base_package)
+    cand = _reference_entry_keys(candidate_package)
+    added, removed = sorted(cand - base), sorted(base - cand)
+    pairs = []
+    for old in list(removed):
+        best, score = None, 0.0
+        for new in added:
+            ratio = difflib.SequenceMatcher(None, old, new).ratio()
+            if ratio > score:
+                best, score = new, ratio
+        if best is not None and score >= 0.80:
+            removed.remove(old)
+            added.remove(best)
+            pairs.append((old, best))
+    return pairs, added, removed
+
+
+def _reference_entry_changes(base_package: Path, candidate_package: Path) -> tuple:
+    """(added, removed) reference entries, treating near-identical text as a fix."""
+    _pairs, added, removed = _reference_entry_corrections(
+        base_package, candidate_package)
+    return added, removed
 
 
 # ---------------------------------------------------------------------------

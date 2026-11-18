@@ -94,10 +94,10 @@ def test_f133() -> None:
 
     real_write = pp.write_json_atomic
 
-    def boom(path, obj):
+    def boom(path, obj, **kwargs):
         if Path(path).name == "state.json":
             raise OSError("simulated ENOSPC/crash before the atomic replace")
-        return real_write(path, obj)
+        return real_write(path, obj, **kwargs)
 
     raised = False
     pp.write_json_atomic = boom

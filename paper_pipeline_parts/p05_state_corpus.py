@@ -925,6 +925,11 @@ class Ctx:
                     # Hardlinks unavailable (drvfs) or a concurrent save: fall
                     # back to a copy, never to a missing backup.
                     shutil.copy2(self.state_path, tmp_prev)
+                # The registry carries `judge_salt`; keep the backup private
+                # too. A hardlink shares the live inode, so this also tightens
+                # an existing 0644 registry before the new bytes are written.
+                with contextlib.suppress(OSError):
+                    os.chmod(tmp_prev, 0o600)
                 os.replace(tmp_prev, prev)
         except OSError:
             pass                        # best effort; the new state is written below
@@ -934,7 +939,7 @@ class Ctx:
             except OSError:
                 pass
         try:
-            write_json_atomic(self.state_path, self.state)
+            write_json_atomic(self.state_path, self.state, mode=0o600)
         except BaseException:
             # A failed/crashed write must not leave the LIVE registry hard-linked
             # to `.prev`: load_state_file() refuses a multiply-linked path, so an
@@ -3689,6 +3694,23 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
     return entry
 
 
+def _inputs_generation(rec: dict):
+    """One digest of the inputs a run was materialized from, or None.
+
+    Used to tie an archived failed trial to the input generation it was built
+    from: after `revalidate_round_inputs` replaces the upstream bytes, an old
+    archive must not be promoted as the current attempt's result (F98).
+    """
+    man = rec.get("inputs_manifest") if isinstance(rec, dict) else None
+    if not isinstance(man, dict) or not man:
+        return None
+    try:
+        blob = json.dumps(man, sort_keys=True, default=str).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(blob).hexdigest()
+
+
 def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
     """Rename a failed attempt's WHOLE sandbox to `runs/<run>_try<N>_failed/`.
 
@@ -3715,6 +3737,7 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
     record.update({"run_id": rec.get("id"), "kind": rec.get("kind"), "round": rec.get("round"),
                    "sandbox": str(sb.relative_to(root)) if sb.is_dir() else None,
                    "attempts_in_sandbox": inside,
+                   "inputs_generation": _inputs_generation(rec),
                    "moved_at": utcnow(), "moved_to": str(dest.resolve().relative_to(root))})
     if not sb.is_dir():
         dest.mkdir(parents=True, exist_ok=True)
@@ -3768,8 +3791,37 @@ _TRIAL_SEEDED_DIRS = set(ATTEMPT_ARCHIVE_SKIP_DIRS) | {
 }
 
 
-def _trial_signal_paths(sandbox: Path, kind: str) -> set:
-    """The completion-signal files this trial wrote (empty when it did not)."""
+def _trial_marker_names_this_run(data, rec: dict) -> bool:
+    """Does a trial's completion marker belong to THIS run and stage?
+
+    A marker copied from another stage/run is not this trial's completion
+    signal: `relocate_stray_signal` already validates the same fields, but the
+    trial-selection path accepted any regular file with the marker name (F97).
+    An EMPTY object is not a completion signal either: a failed trial whose
+    only output was `{}` counted as one usable deliverable (F18). The historical
+    `kind` spelling some fixture markers use is tolerated; the prompted field is
+    `stage`, and a marker that states it must match this run's kind.
+    """
+    if not isinstance(data, dict) or not data:
+        return False
+    named_stage = data.get("stage")
+    if named_stage is not None:
+        # The prompted contract carries BOTH fields, so a marker that names a
+        # stage is held to the run identity too.
+        if named_stage != rec.get("kind"):
+            return False
+        return data.get("run_id") in (None, rec.get("id"))
+    # A legacy/older-schema marker that names no stage is still a completion
+    # signal when it is non-empty; the prompted shape always carries `stage`.
+    return True
+
+
+def _trial_signal_paths(sandbox: Path, kind: str, rec: dict = None) -> set:
+    """The completion-signal files this trial wrote (empty when it did not).
+
+    `rec` (when given) validates a marker against this run/stage; without it the
+    helper only enumerates signal-shaped files.
+    """
     found = set()
     try:
         dirs = signal_search_dirs(sandbox, kind)
@@ -3780,8 +3832,13 @@ def _trial_signal_paths(sandbox: Path, kind: str) -> set:
         for name in names:
             p = d / name
             try:
-                if p.is_file() and not p.is_symlink():
-                    found.add(p.resolve())
+                if not (p.is_file() and not p.is_symlink()):
+                    continue
+                if rec is not None and name == MARKER_FILE:
+                    if not _trial_marker_names_this_run(
+                            read_json(p, revive=False, lenient=True), rec):
+                        continue
+                found.add(p.resolve())
             except (OSError, RuntimeError):
                 continue
     return found
@@ -3791,7 +3848,7 @@ def _trial_signal_present(sandbox: Path, kind: str) -> bool:
     return bool(_trial_signal_paths(sandbox, kind))
 
 
-def _trial_output_count(sandbox: Path, kind: str) -> int:
+def _trial_output_count(sandbox: Path, kind: str, rec: dict = None) -> int:
     """How many required output files this trial produced, 0 when unusable.
 
     A trial is usable only if it wrote the stage's completion signal (the
@@ -3801,7 +3858,7 @@ def _trial_output_count(sandbox: Path, kind: str) -> int:
     excluding the seeded input/template subdirectories, bytecode caches and the
     attempt's record. It is the completeness proxy the operator asked for.
     """
-    signals = _trial_signal_paths(sandbox, kind)
+    signals = _trial_signal_paths(sandbox, kind, rec)
     if not signals:
         return 0
     total = 0
@@ -3829,6 +3886,12 @@ def _trial_output_count(sandbox: Path, kind: str) -> int:
             if p.name == "record.json":
                 continue
             total += 1
+    if total <= 0:
+        # The signal alone is not a deliverable: a trial whose only output is a
+        # (valid) completion marker produced no required output file and is not
+        # usable (F18). The judge's scores sheet IS its deliverable and is
+        # counted as the signal, so that stage keeps the one output.
+        return 1 if str(kind or "") == "judge" else 0
     return total + 1                                  # the completion signal itself
 
 
@@ -3842,17 +3905,30 @@ def best_failed_trial(ctx: Ctx, rec: dict):
     """
     rid = str(rec.get("id") or "")
     kind = rec.get("kind")
+    current_generation = _inputs_generation(rec)
     candidates = []
     try:
-        kept = sorted(ctx.runs_dir.glob(f"{rid}_try*_failed"))
+        # A collision-suffixed archive (`..._try3_failed-2`, produced by
+        # unique_path when the destination already exists) is still this run's
+        # trial; the old suffix-free glob and ordinal regex missed it (F108).
+        kept = sorted(ctx.runs_dir.glob(f"{rid}_try*_failed*"))
     except OSError:
         kept = []
     for p in kept:
         if not p.is_dir():
             continue
-        m = re.search(r"_try(\d+)_failed$", p.name)
+        m = re.search(r"_try(\d+)_failed(?:-\d+)?$", p.name)
         ordinal = int(m.group(1)) if m else 0
-        candidates.append((p, read_json(p / "record.json") or {}, ordinal))
+        record = read_json(p / "record.json")
+        # A trial built from a superseded input generation must not be
+        # promoted after the round's inputs were revalidated (F98). A legacy
+        # archive without a generation cannot be compared; it stays eligible.
+        archived_generation = (record or {}).get("inputs_generation") \
+            if isinstance(record, dict) else None
+        if (current_generation and archived_generation
+                and archived_generation != current_generation):
+            continue
+        candidates.append((p, record, ordinal))
     active = ctx.sandbox_of(rec)
     if active.is_dir():
         history = rec.get("attempts_log") or []
@@ -3860,17 +3936,24 @@ def best_failed_trial(ctx: Ctx, rec: dict):
         candidates.append((active, last, 10 ** 9))
     scored = []
     for sandbox, record, ordinal in candidates:
-        outputs = _trial_output_count(sandbox, kind)
+        outputs = _trial_output_count(sandbox, kind, rec)
         if outputs <= 0:
             continue
-        errors = (record or {}).get("errors") or []
-        scored.append((outputs, -len(errors), ordinal, sandbox, record))
+        known_record = isinstance(record, dict) and bool(record)
+        errors = (record or {}).get("errors") or [] if known_record else []
+        # A missing/corrupt record.json is UNKNOWN, never "zero FAIL messages":
+        # scoring it as 0 made an interrupted archive win the tie-break over a
+        # real attempt with errors (F107).
+        error_score = -len(errors) if known_record else float("-inf")
+        scored.append((outputs, error_score, ordinal, sandbox, record))
     if not scored:
         return None
     scored.sort(key=lambda x: (x[0], x[1], x[2]))
-    outputs, neg_errors, ordinal, sandbox, record = scored[-1]
+    outputs, error_score, ordinal, sandbox, record = scored[-1]
+    fail_messages = -error_score if error_score != float("-inf") else 0
     return {"sandbox": sandbox, "record": record, "outputs": outputs,
-            "fail_messages": -neg_errors, "ordinal": ordinal}
+            "fail_messages": int(fail_messages), "ordinal": ordinal,
+            "record_known": error_score != float("-inf")}
 
 
 def use_best_failed_trial(ctx: Ctx, rec: dict) -> bool:
@@ -3922,6 +4005,32 @@ def use_best_failed_trial(ctx: Ctx, rec: dict) -> bool:
             chosen.rename(active)
         except OSError:
             return False
+        # The chosen archive was RENAMED into the run's active path; its own
+        # record.json (and the attempts_log entry) still named the archive that
+        # no longer exists, so prior_failure_block/sandbox_attempts pointed at a
+        # dead path (F111). Record the path the trial actually occupies now.
+        try:
+            active_rel = active.resolve().relative_to(ctx.root.resolve())
+        except (OSError, ValueError):
+            active_rel = active
+        promoted = dict(best.get("record") or {})
+        promoted["moved_to"] = str(active_rel)
+        promoted["promoted"] = True
+        try:
+            write_json_atomic(active / "record.json", promoted)
+        except OSError:
+            pass
+        for entry in (rec.get("attempts_log") or []):
+            # move_failed_sandbox stores these as ROOT-RELATIVE paths
+            # ("runs/<name>"), not basenames. Comparing them to trial_name never
+            # matched, so the promoted entry kept naming the archive that had
+            # just been renamed into the active path (F111).
+            if isinstance(entry, dict) and any(
+                    Path(str(entry.get(key) or "")).name == trial_name
+                    for key in ("archive", "sandbox_moved_to")):
+                entry["archive"] = str(active_rel)
+                entry["sandbox_moved_to"] = str(active_rel)
+                entry["promoted"] = True
     digest = None
     if rec.get("kind") in ("rewrite", "revise", "integrate"):
         # A tolerated candidate must still be pinnable: record the digest of the
@@ -5035,15 +5144,80 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
     return errs, warns, findings
 
 
+def _verifier_jail_command(sb: Path, script: str):
+    """The argv that re-runs `script` inside a read-only bubblewrap jail, or None.
+
+    A verifier is agent-authored code, so it is never executed with the
+    orchestrator's filesystem, environment or network (F76: a verifier escaped
+    with `Path('../ESCAPED.txt')` and could read `~/.ssh` or benchmark ground
+    truth). The jail gives it:
+
+      * private user/PID/network/IPC/UTS/cgroup namespaces and a cleared
+        environment (no secrets, no network);
+      * the interpreter, its system libraries and /etc read-only;
+      * the sandbox READ-ONLY at `/sandbox` (the script's cwd) and a writable
+        tmpfs at `/tmp` only -- `$HOME` and every other host path stay unmounted.
+
+    None means this host cannot build the jail (no bubblewrap, not Linux, or
+    bwrap unable to create a namespace). The caller then REFUSES to run the
+    script: an optional verifier is better omitted than run with host access.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        return None
+    # Bind the TOP-LEVEL paths (not their realpaths): /bin, /lib and /lib64
+    # are usually symlinks into /usr, and the kernel looks for the ELF
+    # interpreter at the literal /lib64/... path, so the symlink NAME must
+    # exist in the jail too. A nested path such as /usr/bin is NOT bound on
+    # top of /usr -- that recursive over-mount made the tree unreachable.
+    roots = []
+    for rel in ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc"):
+        if Path(rel).exists() and rel not in roots:
+            roots.append(rel)
+    # A virtualenv/conda interpreter lives outside the system roots; expose
+    # ONLY that prefix (never the rest of $HOME) so `sys.executable` resolves.
+    covered = {os.path.realpath(r) for r in roots}
+    for prefix in (sys.prefix, sys.base_prefix):
+        try:
+            real = str(Path(prefix).resolve())
+        except OSError:
+            continue
+        if real in ("", "/") or any(real == r or real.startswith(r + "/") for r in covered):
+            continue
+        if str(prefix) not in roots:
+            roots.append(str(prefix))
+            covered.add(real)
+    exe = os.path.abspath(sys.executable)
+    argv = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
+            "--clearenv",
+            "--setenv", "PATH", f"{os.path.dirname(exe)}:/usr/bin:/bin",
+            "--setenv", "HOME", "/tmp",
+            "--setenv", "TMPDIR", "/tmp",
+            "--setenv", "PYTHONUTF8", "1",
+            "--setenv", "PYTHONIOENCODING", "utf-8",
+            "--setenv", "PYTHONDONTWRITEBYTECODE", "1"]
+    for root in roots:
+        argv += ["--ro-bind", root, root]
+    # The sandbox is bound at /sandbox AFTER the system roots and BEFORE the
+    # /tmp tmpfs, so a sandbox that itself lives under /tmp is not shadowed.
+    argv += ["--ro-bind", str(sb), "/sandbox", "--tmpfs", "/tmp",
+             "--proc", "/proc", "--dev", "/dev", "--chdir", "/sandbox",
+             exe, "/sandbox/" + script.lstrip("/")]
+    return argv
+
+
 def cold_start_reproduction(sb: Path, findings: list) -> dict:
     """Re-run every DECLARED verifier and record what it printed.
 
     A finding's `verifier` is {script, computed, shows}: the script's last
     non-empty stdout line must equal `computed`. The orchestrator runs it itself
-    (offline, bounded, cwd = the sandbox root); a mismatch, a missing script, a
-    non-zero exit, an empty output or a timeout is an error the caller turns into
-    a failed attempt -- a computation the cold-start review cannot reproduce is a
-    correctness blocker, not a finding. Findings WITHOUT a verifier are
+    inside a read-only jail (see `_verifier_jail_command`) with cwd = the
+    sandbox root; a mismatch, a missing script, a non-zero exit, an empty
+    output, a timeout or an unavailable jail is an error the caller turns into
+    a failed attempt -- a computation the cold-start review cannot reproduce is
+    a correctness blocker, not a finding. Findings WITHOUT a verifier are
     evidence/quotation rows: they are not re-run (their evidence is the quoted
     text or file:line reference), and they carry status `no-verifier` in the
     record.
@@ -5090,6 +5264,16 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
             entry.update(status="missing")
             results.append(entry)
             continue
+        # The verifier is agent code: execute it only inside the jail. A host
+        # that cannot build one fails the verifier instead of running it with
+        # the orchestrator's filesystem/network/environment (F76).
+        jail = _verifier_jail_command(sb, script)
+        if jail is None:
+            entry.update(status="no-jail",
+                         detail="no verifier jail available (install bubblewrap; agent code "
+                                "is never run with host access)")
+            results.append(entry)
+            continue
         # Enforce the AGGREGATE budget on this run too: checking elapsed only
         # BEFORE each verifier let one started just under the total run its
         # full per-script timeout, so the enforced wall clock exceeded
@@ -5102,8 +5286,13 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
             # float-equal the claim passed. Output goes to files and is capped:
             # a verifier that floods stdout is an over-budget failure, never
             # unbounded memory in the orchestrator (F61).
-            rc, out, _err = run_bounded(
-                [sys.executable, str(target)], timeout, cwd=str(sb))
+            rc, out, err = run_bounded(jail, timeout, cwd=str(sb))
+            if rc != 0 and (err or b"").startswith(b"bwrap:"):
+                entry.update(status="no-jail",
+                             detail=("bubblewrap could not build the jail: "
+                                     + (err or b"").decode("utf-8", "replace").strip())[:200])
+                results.append(entry)
+                continue
             text = (out or b"").decode("utf-8", "replace")
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             produced = lines[-1] if lines else ""
@@ -5127,12 +5316,14 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
     # it is NOT a verified computation (the old code counted it while its status
     # was absent from `broken`, so an unexecuted declared computation passed).
     verified = [r for r in results if r["status"] not in ("no-verifier",
-                                                          "skipped-over-budget")]
+                                                          "skipped-over-budget",
+                                                          "no-jail")]
     skipped = [r["row"] for r in results if r["status"] == "skipped-over-budget"]
+    no_jail = [r["row"] for r in results if r["status"] == "no-jail"]
     mismatches = [r["row"] for r in verified if r["status"] == "mismatch"]
     broken = [r["row"] for r in verified
               if r["status"] in ("missing", "timeout", "failed", "empty")]
-    broken += skipped
+    broken += skipped + no_jail
     return {"rows": len(results), "verified": len(verified),
             "reproduced": sum(1 for r in verified if r["status"] == "reproduced"),
             "skipped": skipped,
@@ -5211,9 +5402,16 @@ def postcheck_cold_start_review(ctx: Ctx, rec: dict):
                         f"{r['produced']!r} where the finding declares {r['declared']!r} -- the "
                         f"declared computation does not reproduce (a correctness blocker: fix "
                         f"the script or the declared value)")
-        elif r["status"] in ("missing", "timeout", "failed", "empty"):
+        elif r["status"] in ("missing", "timeout", "failed", "empty", "no-jail"):
+            if r["status"] == "missing":
+                _what = "is missing"
+            elif r["status"] == "no-jail":
+                _what = ("was NOT re-run because no verifier jail is available on this host "
+                         "(agent-written code is never run with host access)")
+            else:
+                _what = r["status"]
             errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
-                        f"{'is missing' if r['status'] == 'missing' else r['status']}"
+                        f"{_what}"
                         + (f" ({r['detail']})" if r["detail"] else "")
                         + " -- a declared verifier must be a re-runnable script that prints its "
                           "`computed` value as the last stdout line (omit the verifier when no "

@@ -277,7 +277,13 @@ done
 if [ "$DO_CONDA" = 1 ]; then
     step "conda environment: $ENV_NAME"
     if ! have conda; then
-        fail_step "conda is not on PATH; cannot create $ENV_NAME"
+        if [ "$DRY_RUN" = 1 ]; then
+            # --dry-run prints the plan and changes nothing; a missing conda is
+            # a NOTE about what a real run would need, not a failure (F147).
+            note "plan: conda is not on PATH; a real run would fail here (install conda or pass --no-conda)"
+        else
+            fail_step "conda is not on PATH; cannot create $ENV_NAME"
+        fi
     else
         env_args=()
         [ "$RECREATE" = 1 ] && env_args+=(--recreate)

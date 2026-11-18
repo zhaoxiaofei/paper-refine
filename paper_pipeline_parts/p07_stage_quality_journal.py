@@ -5413,6 +5413,13 @@ _DELETED_PARA_SKIP_RE = re.compile(
     r"-{3,}\s|<!--)\s*")
 _HEADING_BLOCK_SKIP_RE = re.compile(
     r"(?i)^(?:#{1,6}\s|\\(?:sub)*section\*?\s*\{|\\(?:sub)*paragraph\s*\{)")
+# A LaTeX heading COMMAND may share its line with prose: `\section{Methods} We
+# ran the assay.` is legal and the sentence is manuscript content. The marker
+# is only the command and its braced title; the remainder of the line survives
+# (F117).
+_TEX_HEADING_COMMAND_RE = re.compile(
+    r"^\\(?:sub)*section\*?\s*\{[^{}]*\}\s*|"
+    r"^\\(?:sub)*paragraph\s*\{[^{}]*\}\s*")
 
 
 def _deleted_para_norm(text) -> str:
@@ -5466,6 +5473,14 @@ def _strip_nonprose_block(raw: str) -> tuple:
                 dropped += close
             continue
         if _DELETED_PARA_SKIP_RE.match(line):
+            heading = _TEX_HEADING_COMMAND_RE.match(line)
+            if heading:
+                rest = line[heading.end():].strip()
+                if rest:
+                    # Keep the prose that follows the heading command; only the
+                    # command itself is non-prose (F117).
+                    lines[0] = rest
+                    break
             lines.pop(0)
             dropped += 1
             continue
@@ -5484,9 +5499,14 @@ def _deleted_para_candidate(text, min_chars: int = None) -> str:
     if min_chars is None:
         min_chars = _DELETED_PARA_MIN
     s = _deleted_para_norm(text)
-    if (len(s) < min_chars and not _short_text_carries_fact(s)) \
-            or _HEADING_BLOCK_SKIP_RE.match(s):
+    if len(s) < min_chars and not _short_text_carries_fact(s):
         return ""
+    if _HEADING_BLOCK_SKIP_RE.match(s):
+        # A heading is not prose, but a LaTeX heading COMMAND that shares its
+        # line with a sentence is: only the command is dropped (F117).
+        heading = _TEX_HEADING_COMMAND_RE.match(s)
+        if not heading or not s[heading.end():].strip():
+            return ""
     if _is_handoff_marker(s):
         # A hand-off placeholder is not prose: the policy may require its
         # REMOVAL, and auditing it as deleted content only seeds a row that
@@ -6356,7 +6376,8 @@ def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
                 or is_non_manuscript_rel(rel)):
             continue
         ext = p.suffix.lower()
-        if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".bib", ".bbl"):
+        if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".html",
+                   ".htm", ".bib", ".bbl"):
             text = read_text_bounded(p)
         elif ext == ".docx":
             text = "\n".join(_docx_paragraphs(p) or [])
@@ -6373,8 +6394,23 @@ def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
     return keys
 
 
+# A `thebibliography` list defines its keys in the manuscript's own .tex: the
+# documented in-place citation correction must find them there, not only in a
+# separate .bib/.bbl (F125).
+_TEX_BIBITEM_RE = re.compile(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}")
+# Prose/database surfaces that may DEFINE a bibliography key.
+_BIBLIOGRAPHY_SURFACES = (".bib", ".bbl", ".tex", ".ltx", ".md", ".markdown",
+                           ".txt", ".rst", ".html", ".htm")
+
+
 def _bibliography_keys(package: Path) -> set:
-    """Keys the package's submitted `.bib`/`.bbl` files DEFINE."""
+    """Keys the package's submitted bibliography DEFINES.
+
+    `.bib`/`.bbl` entries are read by their database syntax; a rendered
+    `thebibliography` list (`\bibitem{...}`) in a submitted .tex is read as
+    well. Without the latter, correcting a cited key whose only definition is
+    its `\bibitem` could never pass the insertion gate (F125).
+    """
     keys = set()
     package = Path(package)
     _decl, _is_submitted = declared_submission_filter(package)
@@ -6383,106 +6419,25 @@ def _bibliography_keys(package: Path) -> set:
             rel = p.relative_to(package).as_posix()
         except ValueError:
             continue
-        if not _is_submitted(rel) or p.suffix.lower() not in (".bib", ".bbl"):
-            continue
-        top = rel.split("/", 1)[0].lower()
-        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
-            continue
-        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
-                or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)
-                or is_non_manuscript_rel(rel)):
-            continue
-        text = read_text_bounded(p)
-        if text:
-            keys.update(_bib_keys_in_text(text))
-    return keys
-
-
-_REFERENCE_HEADING_RE = re.compile(
-    r"(?i)^\s*(?:#{1,6}\s*)?(?:references?|bibliography|works\s+cited|"
-    r"literature\s+cited)\s*$|\\begin\{thebibliography\}|"
-    r"\\(?:sub)?section\*?\s*\{\s*(?:references?|bibliography)\s*\}")
-_REFERENCE_ENTRY_LINE_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}[.)])\s+\S")
-
-
-def _reference_entry_keys(package: Path) -> set:
-    """Normalised reference-list ENTRIES the submitted package carries.
-
-    Reference entries were stripped before they became content units, so a
-    fabricated entry could be added (or a real one deleted) with no
-    missing/added unit and no fact loss (F005). The entries are compared as
-    text; `.bib`/`.bbl` entries are compared by key.
-    """
-    entries = set()
-    package = Path(package)
-    if not package.is_dir():
-        return entries
-    _decl, _is_submitted = declared_submission_filter(package)
-    for p in _iter_tree_files(package):
-        try:
-            rel = p.relative_to(package).as_posix()
-        except ValueError:
-            continue
-        if not _is_submitted(rel):
-            continue
-        top = rel.split("/", 1)[0].lower()
-        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
-            continue
-        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
-                or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)
-                or is_non_manuscript_rel(rel)):
-            continue
         ext = p.suffix.lower()
-        # Only a RENDERED reference-list entry is a content unit. A .bib/.bbl
-        # is a source database: adding an uncited key there does not insert a
-        # reference into the manuscript (F31), and a corrected key is covered
-        # by the citation-key gate (F02).
-        if ext not in (".md", ".markdown", ".txt", ".tex", ".ltx"):
+        if not _is_submitted(rel) or ext not in _BIBLIOGRAPHY_SURFACES:
+            continue
+        top = rel.split("/", 1)[0].lower()
+        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
+            continue
+        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
+                or is_non_submitted_readme_name(p.name)
+                or is_non_shippable_name(p.name)
+                or is_non_manuscript_rel(rel)):
             continue
         text = read_text_bounded(p)
         if not text:
             continue
-        in_refs = False
-        for line in text.splitlines():
-            stripped = line.strip()
-            if _REFERENCE_HEADING_RE.search(stripped):
-                in_refs = True
-                continue
-            if in_refs and re.match(r"(?i)^(?:#{1,6}\s|\\(?:sub)?section)", stripped):
-                in_refs = False
-                continue
-            if not in_refs:
-                continue
-            m = re.match(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}", stripped)
-            if m:
-                entries.add(f"key:{m.group(1).strip().lower()}")
-                continue
-            if stripped and (_REFERENCE_ENTRY_LINE_RE.match(stripped)
-                             or (re.search(r"\b(?:18|19|20)\d{2}\b", stripped)
-                                 and "," in stripped)):
-                entries.add(re.sub(r"\s+", " ", stripped).lower())
-    return entries
-
-
-def _reference_entry_changes(base_package: Path, candidate_package: Path) -> tuple:
-    """(added, removed) reference entries, treating near-identical text as a fix."""
-    base = _reference_entry_keys(base_package)
-    cand = _reference_entry_keys(candidate_package)
-    added, removed = sorted(cand - base), sorted(base - cand)
-    # A typo fix changes one entry's text; pair a removed entry with a very
-    # similar added one so an in-place correction is not reported as delete+add.
-    for old in list(removed):
-        best, score = None, 0.0
-        for new in added:
-            ratio = difflib.SequenceMatcher(None, old, new).ratio()
-            if ratio > score:
-                best, score = new, ratio
-        if best is not None and score >= 0.80:
-            removed.remove(old)
-            added.remove(best)
-    return added, removed
+        if ext in (".bib", ".bbl"):
+            keys.update(_bib_keys_in_text(text))
+        else:
+            keys.update(m.group(1).strip() for m in _TEX_BIBITEM_RE.finditer(text))
+    return keys
 
 
 def _citation_removed_keys(base_package: Path, candidate_package: Path) -> set:
@@ -6499,11 +6454,19 @@ def _citation_removed_keys(base_package: Path, candidate_package: Path) -> set:
             _content_unit_sentences(candidate_package))[2]
     except Exception:                                                 # noqa: BLE001
         return removed
+    # A key stays available when it is still cited ANYWHERE in the delivered
+    # prose. A legitimate sentence split moves the call-out into the second new
+    # unit, so the first matched pair looks like a loss although the citation
+    # survives; only a key gone from the whole package is a deletion (F124).
+    try:
+        package_keys = _citation_keys(candidate_package, include_bibliography=False)
+    except Exception:                                                 # noqa: BLE001
+        package_keys = set()
     for base, cand in pairs:
         gone = _prose_citation_keys(base["text"]) - _prose_citation_keys(cand["text"])
         new = _prose_citation_keys(cand["text"]) - _prose_citation_keys(base["text"])
         if gone and not new:
-            removed |= gone
+            removed |= (gone - package_keys)
     return removed
 
 
@@ -6631,15 +6594,18 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                 f"package director{'y is' if len(missing) == 1 else 'ies are'} missing: "
                 f"{', '.join(missing)}"]
     label = f"{stage}: " if stage else ""
-    exempt_text = set()
-    exempt_document = set()
+    # Exemptions are CONSUMED one-to-one, never treated as a set: a package
+    # that legitimately removed one of two identical sentences must not have
+    # the second, session-deleted copy whitelisted by the same record (F28).
+    exempt_text = Counter()
+    exempt_document = Counter()
     for s in (exempt_removed or ()):
         if isinstance(s, (tuple, list)) and len(s) == 2:
             doc, sentence = s
             if str(sentence or "").strip():
-                exempt_document.add((str(doc), _deleted_para_norm(sentence).lower()))
+                exempt_document[(str(doc), _deleted_para_norm(sentence).lower())] += 1
         elif str(s or "").strip():
-            exempt_text.add(_deleted_para_norm(s).lower())
+            exempt_text[_deleted_para_norm(s).lower()] += 1
     mode = author_to_complete_mode_of(ctx)
     allow_marker_insert = mode == "document"
     allow_marker_delete = mode in ("readme", "off")
@@ -6650,7 +6616,12 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                   if not (allow_marker_insert and _is_handoff_marker(u["text"]))]
     base_units = []
     for u in _content_unit_sentences(base_package, skipped=skipped):
-        if u["norm"] in exempt_text or (u["document"], u["norm"]) in exempt_document:
+        if exempt_text.get(u["norm"], 0) > 0:
+            exempt_text[u["norm"]] -= 1
+            continue
+        doc_key = (u["document"], u["norm"])
+        if exempt_document.get(doc_key, 0) > 0:
+            exempt_document[doc_key] -= 1
             continue
         if _is_handoff_marker(u["text"]):
             if allow_marker_delete:
@@ -6666,6 +6637,31 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                 continue
         base_units.append(u)
     missing, added = _match_content_units(base_units, cand_units)
+    # A reference-entry correction the entry comparator accepted (ratio >=
+    # 0.80) must not be re-reported as a missing+added prose unit: the two
+    # comparators disagreed, so a legitimate author/year fix failed both strict
+    # flags (F126). Only the paired entries are excluded; an unpaired
+    # fabrication/removal stays visible.
+    try:
+        ref_pairs, _ref_added, _ref_removed = _reference_entry_corrections(
+            base_package, candidate_package)
+    except Exception:                                                 # noqa: BLE001
+        ref_pairs = []
+
+    def _drop_corrected_units(units, entries):
+        if not ref_pairs or not entries:
+            return units
+        kept = []
+        for unit in units:
+            norm = _deleted_para_norm(unit.get("text")).lower()
+            if len(norm) >= _DELETED_PARA_MIN and any(norm in e for e in entries):
+                continue
+            kept.append(unit)
+        return kept
+
+    if ref_pairs:
+        missing = _drop_corrected_units(missing, [old for old, _new in ref_pairs])
+        added = _drop_corrected_units(added, [new for _old, new in ref_pairs])
     problems = []
     if skipped:
         names = ", ".join(sorted(set(skipped))[:6])
@@ -6769,6 +6765,11 @@ _FACT_SURVIVAL_NUMBER_RE = re.compile(
 _FACT_SURVIVAL_IDENT_RE = re.compile(
     r"(?i)(?:https?://[^\s)>]+|doi:\s*10\.[^\s,;)]+|10\.\d{4,9}/[^\s,;)]+|"
     r"orcid[:\s]+\d[\dX-]+|"
+    # A contact e-mail is a fact: hiding it (w:vanish) leaves the visible
+    # sentence otherwise unchanged, so only this class can report its loss
+    # (F129). The address pattern is the one the e-mail gate itself uses.
+    r"[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?"
+    r"\.[A-Za-z]{2,}|"
     r"accession(?:\s+(?:number|no\.?|id))?\s*[:\s]\s*"
     r"(?P<accession>[A-Za-z0-9][A-Za-z0-9._\-]*))")
 # A measurement unit printed immediately after a value is part of the FACT: 55
@@ -7385,14 +7386,13 @@ def identity_typo_problems(candidate_package: Path, stage: str = "") -> list:
         return []
     handoff_texts = [text.lower() for _name, text in _manual_handoff_texts(package)]
     skipped: list = []
-    seen: dict = {}
+    seen = []
     for unit in _content_unit_sentences(package, skipped=skipped):
         for match in _EMAIL_TOKEN_RE.finditer(unit.get("text") or ""):
             address = match.group(0)
             local, _, domain = address.partition("@")
-            seen.setdefault(local.lower(), []).append(
-                (domain.lower(), address, unit.get("document") or "",
-                 int(unit.get("line") or 0)))
+            seen.append((local, domain.lower(), address,
+                         unit.get("document") or "", int(unit.get("line") or 0)))
     problems = []
     if skipped:
         # A corrupt/oversized submitted document makes this gate blind, not
@@ -7405,30 +7405,64 @@ def identity_typo_problems(candidate_package: Path, stage: str = "") -> list:
             + (" ..." if len(set(skipped)) > 6 else "")
             + ". The gate is UNENFORCED on those files; repair or remove them before "
               "retrying.")
-    for _local, rows in sorted(seen.items()):
-        domains = sorted({row[0] for row in rows})
-        if len(domains) < 2:
-            continue
-        for i in range(len(domains)):
-            for j in range(i + 1, len(domains)):
-                if _bounded_edit_distance(domains[i], domains[j], 2) > 2:
-                    continue
-                first = next(row for row in rows if row[0] == domains[i])
-                second = next(row for row in rows if row[0] == domains[j])
-                if any(first[1].lower() in text and second[1].lower() in text
-                       for text in handoff_texts):
-                    continue           # recorded for the author: a genuine pair
-                label = f"{stage}: " if stage else ""
-                problems.append(
-                    f"{label}the same address is printed with two domains: "
-                    f"{first[1]} ({first[2]}:{first[3]}) and {second[1]} "
-                    f"({second[2]}:{second[3]}). One spelling is a typo, and the package's "
-                    f"own authoritative identity statement decides which: correct the other "
-                    f"occurrence to that value (an identity typo is a decidable correction, "
-                    f"not an author query). If the pair is genuinely two people, record both "
-                    f"spellings in README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md as "
-                    f"manual-required with the evidence -- that record clears this gate.")
-                break
+    # Compare WHOLE addresses, not one local part's domains: the old key made a
+    # same-domain local-part variant (`j.smith@` vs `jsmith@`) and a wider
+    # domain typo invisible (F120). A near-identical local part on one domain,
+    # a near-identical domain under one local part, and a one/two-character
+    # edit of the full address are all two spellings of one identity.
+    def _norm_addr_local(value: str) -> str:
+        return re.sub(r"[._+-]", "", value.lower())
+
+    def _norm_addr_domain(value: str) -> str:
+        return re.sub(r"[._-]", "", value.lower().strip("."))
+
+    def _one_identity(first, second) -> bool:
+        local1, domain1, addr1 = first[0], first[1], first[2]
+        local2, domain2, addr2 = second[0], second[1], second[2]
+        if addr1.lower() == addr2.lower():
+            return False
+        nl1, nl2 = _norm_addr_local(local1), _norm_addr_local(local2)
+        nd1, nd2 = _norm_addr_domain(domain1), _norm_addr_domain(domain2)
+        if not nl1 or not nl2 or not nd1 or not nd2:
+            return False
+        if domain1 == domain2:
+            # `j.smith@` and `jsmith@` (or a one-character local spelling).
+            return (nl1 != nl2 and _bounded_edit_distance(nl1, nl2, 1) <= 1) \
+                or (nl1 == nl2 and local1 != local2)
+        if nl1 == nl2:
+            if _bounded_edit_distance(domain1, domain2, 2) <= 2:
+                return True
+            # A wider typo (`uni.edu` vs `uni-edu.org`) is one spelling that
+            # gained a label: compare the normalized whole addresses.
+            full1, full2 = f"{nl1}@{nd1}", f"{nl2}@{nd2}"
+            if full1.startswith(full2) or full2.startswith(full1):
+                return abs(len(full1) - len(full2)) <= 6
+        full1, full2 = f"{nl1}@{nd1}", f"{nl2}@{nd2}"
+        return _bounded_edit_distance(full1, full2, 2) <= 2
+
+    reported = set()
+    for i in range(len(seen)):
+        for j in range(i + 1, len(seen)):
+            if not _one_identity(seen[i], seen[j]):
+                continue
+            first, second = seen[i], seen[j]
+            key = tuple(sorted((first[2].lower(), second[2].lower())))
+            if key in reported:
+                continue
+            if any(first[2].lower() in text and second[2].lower() in text
+                   for text in handoff_texts):
+                continue           # recorded for the author: a genuine pair
+            reported.add(key)
+            label = f"{stage}: " if stage else ""
+            problems.append(
+                f"{label}one address is printed two ways: "
+                f"{first[2]} ({first[3]}:{first[4]}) and {second[2]} "
+                f"({second[3]}:{second[4]}). One spelling is a typo, and the package's "
+                f"own authoritative identity statement decides which: correct the other "
+                f"occurrence to that value (an identity typo is a decidable correction, "
+                f"not an author query). If the pair is genuinely two people, record both "
+                f"spellings in README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md as "
+                f"manual-required with the evidence -- that record clears this gate.")
     return problems[:3]
 
 
@@ -7464,6 +7498,14 @@ def _manual_handoff_texts(package: Path) -> list:
 _HANDOFF_TABLE_ID_RE = re.compile(r"(?i)\bT-\d+\b")
 
 
+# Dates/timestamps in a hand-off line are metadata: their components are not
+# the fact values the hand-off records (F121).
+_HANDOFF_DATE_RE = re.compile(
+    r"(?i)\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[T ]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?)?\b"
+    r"|\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b")
+_HANDOFF_TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
+
+
 def _manual_handoff_keys(package: Path) -> set:
     """Value keys the delivered package records in its author hand-off list.
 
@@ -7472,6 +7514,11 @@ def _manual_handoff_keys(package: Path) -> set:
     (T-002 -> 2.0), so every package with a hand-off table silently exempted
     the values 1, 2, ... from the fact gate (F195). A `T-###` occurrence
     anywhere on a line is dropped for the same reason.
+
+    A DATE or timestamp is metadata, not a recorded fact value: `2026-11-01`
+    used to emit the bare keys 1, 11 and 2026, so a line carrying only a date
+    exempted a real `11 mg` loss without naming that fact (F121). The date and
+    time spellings are removed before the token scan.
     """
     keys = set()
     for _name, text in _manual_handoff_texts(package):
@@ -7484,6 +7531,8 @@ def _manual_handoff_keys(package: Path) -> set:
                     # columns are where a manual value is recorded.
                     line = " | ".join(cells[1:])
             line = _HANDOFF_TABLE_ID_RE.sub(" ", line)
+            line = _HANDOFF_DATE_RE.sub(" ", line)
+            line = _HANDOFF_TIME_RE.sub(" ", line)
             for token in _fact_survival_tokens(line):
                 keys.add(_fact_survival_key(token))
     return keys
@@ -9648,9 +9697,13 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                                 f"printed {r['produced']!r} where the finding declares "
                                 f"{r['declared']!r} -- the declared computation does not "
                                 f"reproduce")
-                elif r["status"] in ("missing", "timeout", "failed", "empty"):
+                elif r["status"] in ("missing", "timeout", "failed", "empty", "no-jail"):
+                    _what = ("is missing" if r["status"] == "missing"
+                             else "was NOT re-run because no verifier jail is available on this "
+                                  "host (agent-written code is never run with host access)"
+                             if r["status"] == "no-jail" else r["status"])
                     errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
-                                f"{'is missing' if r['status'] == 'missing' else r['status']}"
+                                f"{_what}"
                                 + (f" ({r['detail']})" if r["detail"] else ""))
                 elif r["status"] == "skipped-over-budget":
                     errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "

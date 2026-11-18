@@ -242,6 +242,14 @@ What that means for you:
     a re-validation ledger row) every frozen X-9xx/X-9xxx id you were given.
   * This gap is recorded in the run's state and in the frozen
     `guided_review/findings.json` coverage table. It is not yours to close.
+  * The guided review's own surfaces DO NOT EXIST this round:
+    `guided_review/artifacts/` and `guided_review/work/` carry no seeded
+    sweep tables, because no sweep ran. The disposition mandate's list of
+    seeded tables (M18, M19, M20, M4/NUMBERS_LEDGER, M8, M24, GLOSSARY,
+    IDENTIFIERS, PLACEHOLDERS, PLACEHOLDER_LOOKUP, OUTLINE, CLAIM_STRENGTH,
+    M2_references, M30) therefore has nothing to dispose here: record the
+    M1-M36/J1-J5 classes as the named gap above, and do not invent a table,
+    an artifact or a disposition for one.
 """
 
 
