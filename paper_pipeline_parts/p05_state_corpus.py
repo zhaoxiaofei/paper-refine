@@ -3780,7 +3780,7 @@ def _trial_signal_paths(sandbox: Path, kind: str) -> set:
             try:
                 if p.is_file() and not p.is_symlink():
                     found.add(p.resolve())
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
     return found
 
@@ -3817,7 +3817,7 @@ def _trial_output_count(sandbox: Path, kind: str) -> int:
                     # prefer identical output merely because its marker sits in
                     # the stage directory instead of the sandbox root.
                     continue
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
             rel = p.relative_to(root)
             if rel.parts and rel.parts[0] in _TRIAL_SEEDED_DIRS:
@@ -3903,7 +3903,7 @@ def use_best_failed_trial(ctx: Ctx, rec: dict) -> bool:
     trial_name = chosen.name
     try:
         same = chosen.resolve() == active.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         same = False
     if not same:
         # Keep the last attempt as evidence, then put the chosen trial in the
