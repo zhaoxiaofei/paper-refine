@@ -129,6 +129,11 @@ A finished decision can be certified, provisional or blocked; a blocked decision
 * Python 3.9+ (the pipeline and both companion tools are standard-library only,
   except that `pairwise_scores.py` imports `openpyxl` to write its workbook; the
   pipeline itself and score collection do not need it).
+* On Linux, `bubblewrap` (`bwrap`) when a cold-start review declares a verifier:
+  the orchestrator re-runs that agent-written script in a private, read-only
+  mount/network/PID namespace. If the jail cannot be built the verifier is NOT
+  run and the attempt fails (a verifier is optional — omit it, or install
+  bubblewrap).
 * An agent CLI for the stage sessions. The new pair selects the two axes
   independently: `--agent-harness dsh|gpt-codex|claude-code` (default `dsh`)
   and `--agent-model deepseek-flash|gpt-sol|gpt-terra|claude-opus|claude-sonnet|
@@ -334,6 +339,7 @@ evidence pack.
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
 | `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. `--judge-manual` stages the judge prompts for a human, and `--judge-agent-cmd JSON` overrides the judge command |
 | `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
+| `--tolerate-fail` / `--no-tolerate-fail` (`setup`, `run`) | collection mode (default: off): a stage that exhausts its retries is printed `TOLERATED_FAIL` and its BEST FAILED TRIAL (most required output files, then fewest FAIL messages) is used so the pipeline continues; the decision stays PROVISIONAL and is never certified. The strict default keeps the round incomplete and exits 3 |
 | `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
 | `--skip-hash` (every command except `selfcheck` and `adopt-sweep`) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
@@ -345,7 +351,7 @@ evidence pack.
 | 0 | success (`decide`: certified decision; `run`: every configured round complete) |
 | 1 | a run failed / the process hit an error |
 | 2 | nothing to decide yet, or a usage error |
-| 3 | a round is incomplete (progress saved; resume with `run`) |
+| 3 | a round is incomplete (progress saved; resume with `run`); with `--tolerate-fail` a stage that exhausted its retries and had a usable trial is a `TOLERATED_FAIL` warning and `run` exits 0 instead |
 | 4 | a valid stopping point that is not a certified answer: `decide --require-complete` on a provisional decision, or `redline` with failed renders (when a tool was used) |
 | 5 | `decide` found integrity problems, (with `--format-gate`) high-severity formatting problems, or (with `--require-ready`) package-level readiness findings |
 
@@ -952,6 +958,9 @@ same rules, tested — see "Execution profiles" below),
 `--enable-deletions|--disable-deletions` (`setup` records the policy; `run`/`run-decide`
 may override it for one invocation; both are ENABLED by default, the historical
 behaviour — see "Content-edit policy" below),
+`--enable-soft-deletions|--disable-soft-deletions` (the middle deletion
+policy: both kinds stay enabled, only the documented removable units may be
+removed; OFF by default — see "Content-edit policy" below),
 `--cold-start-review {on,off}`
 (the independent discovery session; ON by default, `--no-cold-start-review` turns it off,
 `set-cold-start-review off` flips an existing root), `--submit-code {off,on}`
@@ -1374,6 +1383,53 @@ digest-verified), and `final_clean_version_<root name>/` is still published — 
 the package is a provisional hand-off, never a signed panel verdict.
 `--package-winner` still works once every configured round is complete; it says
 plainly that it is packaging an unjudged champion.
+
+## `TOLERATED_FAIL` (`--tolerate-fail`): use the best failed trial when a stage exhausts its retries
+
+`--tolerate-fail` (paired with `--no-tolerate-fail`) is OFF by default. When it
+is on, a run that exhausts its retry budget does not terminate the invocation:
+the run's **best failed trial** is used as that stage's result.
+
+* **Which trial.** The candidates are the run's archived failed attempts
+  (`runs/<run>_try<N>_failed/`) plus its current failed sandbox. They are ordered
+  by the number of required output files the attempt produced in the stage's own
+  output area (`revised/`, `rewritten/`, `integrated/`, `guided_review/`,
+  `cold_start_review/`, `audit/`, `judge_review/`, `concerns/`, `response/`),
+  then by the fewest FAIL messages, then by the latest attempt. A trial is
+  usable only when it reached the stage's completion signal (the marker, or the
+  judge's scores file) and produced at least one output file; a trial that
+  stopped before the signal is not a candidate.
+* **What is used.** The chosen trial is moved into the run's active sandbox and
+  the run becomes `done` with a `tolerated_fail` record
+  (`trial`, `outputs`, `fail_messages`); its `postcheck.ok` and its attempt
+  archives stay as evidence. The stages that depend on it continue on that
+  output, so a collection harness gets the most complete attempt instead of
+  losing the row.
+* **It is never a clean result.** The round record carries
+  `tolerated_fail.failed_runs`, its `certified` is `false`, and `decide` adds a
+  gate problem: any decision whose round used a tolerated trial is
+  `PROVISIONAL` and is never certified. An auto-promoted round promotes the
+  trial it used (still auto-promoted and provisional); a judge round may score
+  the resulting package, but the verdict is not certified (rule 10).
+* **No usable trial means strict.** If every failed attempt produced no required
+  output, the run stays a hard `FAIL`; the round stays incomplete and `run`
+  exits 3 even with the flag. The flag never invents output.
+
+`setup` records the policy in `pipeline_config.json` only when the pair is
+passed; `run` can override it for one invocation. A root written by the earlier
+`--almost-fail` feature carries `almost_fail: on|off`; it is read as the same
+policy, and `decide` still recognizes its recorded base fallback for that old
+root. The console word is `TOLERATED_FAIL`; the run record's `status` is `done`
+(so downstream stages can run) and `postcheck.ok` remains `false`.
+
+```bash
+# collection mode: use the best failed trial when a stage exhausts its retries
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --champion-select revise --tolerate-fail
+python paper_pipeline.py run --root ./paper_rounds
+# override back to the strict path for one invocation
+python paper_pipeline.py run --root ./paper_rounds --no-tolerate-fail
+```
 
 ## Evidence is not submission text: `raw_data/` and the review-feedback areas
 
@@ -2313,9 +2369,12 @@ operator names):
   (`"verifier": {script, computed, shows}`); findings without a computation are evidence rows like
   any other finding;
 * **the orchestrator re-runs every declared verifier at postcheck time** and compares the last
-  stdout line with the declared `computed` value (`cold_start_review/REPRODUCTION.md`). A mismatch (or
-  a missing script / non-zero exit / empty output / timeout) FAILS the attempt — a computation the
-  cold-start review cannot reproduce is a correctness blocker, not a finding;
+  stdout line with the declared `computed` value (`cold_start_review/REPRODUCTION.md`). The
+  verifier is agent-written code, so it runs in a read-only bubblewrap jail (private namespaces,
+  no network, no `$HOME`, the sandbox read-only at `/sandbox`, a writable `/tmp` only). A mismatch
+  (or a missing script / non-zero exit / empty output / timeout / unavailable jail) FAILS the
+  attempt — a computation the cold-start review cannot reproduce is a correctness blocker, not a
+  finding, and it is never run with host access;
 * every finding is an **`X-9xx` row** (the reserved cold-start-review block) of the same standing as the
   discovery round's `X-*` findings: it is merged into the frozen
   `guided_review/round2/findings_extra.json` of the auditor and every reviser (the source review sandbox
@@ -2454,9 +2513,9 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | review | 125 KB | 55 KB | 56% |
 | cold_start_review | 63 KB | 27 KB | 56% |
 | audit | 91 KB | 48 KB | 47% |
-| revise | 121 KB | 67 KB | 44% |
-| integrate | 112 KB | 59 KB | 47% |
-| rewrite | 104 KB | 60 KB | 42% |
+| revise | 122 KB | 68 KB | 44% |
+| integrate | 112 KB | 60 KB | 47% |
+| rewrite | 104 KB | 61 KB | 41% |
 | judge | 104 KB | 74 KB | 29% |
 | revision_audit | 38 KB | 16 KB | 57% |
 | revision_repair | 36 KB | 11 KB | 69% |
@@ -2466,7 +2525,7 @@ The profile is recorded at `setup` and frozen into the root (rule 11): a `medium
 those prompts is the one frozen beside it. `sync-code` and `retry` preserve the recorded policy. A
 root created before this feature carries no key and runs `high`.
 
-## Content-edit policy (`--disable-insertions`, `--disable-deletions`)
+## Content-edit policy (`--disable-insertions`, `--disable-deletions`, `--enable-soft-deletions`)
 
 By default the pipeline behaves exactly as it always has at the UNIT level: a revision may add
 prose, remove prose, or rewrite a sentence in place. The shared fact-survival gate (D8) still
@@ -2531,6 +2590,36 @@ it for one invocation without rewriting the root. It is OFF by default and the
 off path is byte-identical to the pre-feature pipeline: the prompt block is the
 verbatim legacy function, the stage records and the postcheck messages are
 unchanged, and no key is written to `pipeline_config.json`.
+
+### Soft deletions (`--enable-soft-deletions`)
+
+The middle policy between the two above. It exists because some revisions
+genuinely require a removal — a duplicated sentence, a leaked prompt or
+instruction block, an unresolved placeholder, an internal working note — while
+a sentence that carries a claim does not: that defect is corrected in place,
+and deleting the sentence silently drops the claim.
+
+* insertions and deletions stay ENABLED (this is not `--disable-deletions`), so
+  the genuinely removable units can still go;
+* the revise/rewrite/integrate/bounded-repair prompts state that only the
+  documented removable units may disappear, and that a claim-bearing unit must
+  be corrected in place or recorded `manual-required` with the text left in the
+  package;
+* the postcheck enforces it on the delivered package: a missing unit is accepted
+  when it is a duplicate whose other copy survives, a unit whose content tokens
+  are fully present in one delivered sentence (a merge), a prompt/instruction/
+  placeholder artifact, or the orchestrator's own pointer removal; every other
+  missing unit fails the attempt and the retry asks for the in-place correction.
+
+It is a pair (`--enable-soft-deletions` /
+`--disable-soft-deletions`), accepted by `setup` and `run`, OFF by default,
+and recorded in `pipeline_config.json` only when it was passed. With the mode
+off, the default permissive path and the other two modes are byte-identical.
+
+Independently of the unit policy, the removal accounting still applies: a
+finding whose quoted sentence is removed may not be recorded as `fixed` in the
+revision ledger — the ledger says `manual-required` with the removed claim, so
+the author decides (the postcheck re-reads every finding's evidence sentence).
 
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
 
@@ -3160,7 +3249,7 @@ a clean panel. Each round's judge wave is followed by ITS OWN audit (two
 rounds produce two audits; `decide` only back-fills a round that has no audit
 yet). The LLM conflict auditor is OFF by default: only the mechanical conflicts
 are written, and every row keeps `origin: mechanical`. `--conflict-agent
-{codex-lite|codex|claude|dsh|qwen|dots}` / `--conflict-agent-cmd JSON` (or the audit-specific
+{codex-lite|codex|claude|dsh|qwen|dots|manual}` / `--conflict-agent-cmd JSON` (or the audit-specific
 `PAPER_CONFLICT_AGENT_CMD`) turn the LLM pass on for that invocation; its
 semantic candidates are schema-checked and merged, never trusted blindly
 (`--no-conflict-agent` and `--conflict-agent manual` keep it off). The separate
@@ -3626,7 +3715,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 251 suites (a few
+any failure. They are independent, so run them in parallel — 255 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
@@ -3710,8 +3799,9 @@ compatibility for a root with no `venue`/`article_type` key.
 
 ## Backward-compatibility removals (2026-10-25)
 
-This tree deliberately keeps **no** compatibility aliases. The breaking changes
-an older command line or root can hit:
+This tree deliberately keeps **no** compatibility aliases, with the single
+documented exception below. The breaking changes an older command line or root
+can hit:
 
 * input areas have ONE canonical name each: `non_revised/` and `raw_data/`.
   `non-revised/` and `raw_figs/` are refused by `setup` and by every command
@@ -3723,6 +3813,10 @@ an older command line or root can hit:
 * the boolean `strict_artifacts` / `strict_dispositions` config keys are no
   longer read; the current key is the three-valued `artifact_policy`.
 * `set-revision-mode none` is removed; the mode is `continue`.
+* `--almost-fail` / `--no-almost-fail` are accepted as HIDDEN aliases of
+  `--tolerate-fail` / `--no-tolerate-fail` (the previous spelling of the same
+  policy; `setup` and `run` both accept them). The canonical spelling is
+  `--tolerate-fail`; the aliases are suppressed from `--help`.
 * a root without `judge_salt` is refused when a judge token is needed; there is
   no unsalted fallback.
 * `paper_pipeline.py` and `paper_docx_format.py` are now thin loaders over

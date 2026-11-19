@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 05/21 of the pipeline -- executed by the
+# Part 05/22 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -4000,9 +4000,10 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     # different invocation's override.
     _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     _prefer_ok = prefer_rewrite_for_sandbox(ctx, ctx.run(rid), prompt)
+    _rem_ok = soft_deletions_for_sandbox(ctx, ctx.run(rid), prompt)
     if (not prompt.is_file()
             or not prompt_content_edit_policy_matches(prompt, _ins_ok, _del_ok,
-                                                      _prefer_ok)):
+                                                      _prefer_ok, _rem_ok)):
         _copy_session_tools(sb)
         # write_text_atomic: a crash mid-write must never leave a truncated
         # PROMPT.md behind for a later invocation to trust.
@@ -4021,10 +4022,11 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                                 execution_profile=execution_profile_of(ctx),
                                                 insertions_allowed=_ins_ok,
                                                 deletions_allowed=_del_ok,
-                                                prefer_rewrite=_prefer_ok))
+                                                prefer_rewrite=_prefer_ok,
+                                                soft_deletions=_rem_ok))
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
-    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok)
+    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok, _rem_ok)
     if _policy_rec is None:
         rec.pop("content_edit_policy", None)
     else:
@@ -5421,9 +5423,10 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     prompt = sb / "PROMPT.md"
     _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     _prefer_ok = prefer_rewrite_for_sandbox(ctx, ctx.run(rid), prompt)
+    _rem_ok = soft_deletions_for_sandbox(ctx, ctx.run(rid), prompt)
     if (not prompt.is_file()
             or not prompt_content_edit_policy_matches(prompt, _ins_ok, _del_ok,
-                                                      _prefer_ok)):
+                                                      _prefer_ok, _rem_ok)):
         _copy_session_tools(sb)
         write_text_atomic(prompt, revise_prompt(sb, rid, r, index=int(str(vid)[1:]) - 1,
                                                total=n,
@@ -5441,11 +5444,12 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                guided_review_off=not guided_review_enabled(ctx),
                                                insertions_allowed=_ins_ok,
                                                deletions_allowed=_del_ok,
-                                               prefer_rewrite=_prefer_ok))
+                                               prefer_rewrite=_prefer_ok,
+                                               soft_deletions=_rem_ok))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
     rec["seeded_skeletons"] = skeleton_seed
-    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok)
+    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok, _rem_ok)
     if _policy_rec is None:
         rec.pop("content_edit_policy", None)
     else:
@@ -5521,9 +5525,10 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     prompt = sb / "PROMPT.md"
     _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     _prefer_ok = prefer_rewrite_for_sandbox(ctx, ctx.run(rid), prompt)
+    _rem_ok = soft_deletions_for_sandbox(ctx, ctx.run(rid), prompt)
     if (not prompt.is_file()
             or not prompt_content_edit_policy_matches(prompt, _ins_ok, _del_ok,
-                                                      _prefer_ok)):
+                                                      _prefer_ok, _rem_ok)):
         _copy_session_tools(sb)
         write_text_atomic(prompt, integrate_prompt(sb, rid, r, self_id, other_ids,
                                                   caption_limit=caption_limit_of(ctx),
@@ -5537,11 +5542,12 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                                                   execution_profile=execution_profile_of(ctx),
                                                   insertions_allowed=_ins_ok,
                                                   deletions_allowed=_del_ok,
-                                                  prefer_rewrite=_prefer_ok))
+                                                  prefer_rewrite=_prefer_ok,
+                                                  soft_deletions=_rem_ok))
     rec = ctx.register(rid, "integrate", r, f"runs/{rid}", self_id=self_id,
                        other_ids=other_ids, pool_ids=pool, produces=vid,
                        field_ids=other_ids, discovery_ids=list(disc["ids"]))
-    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok)
+    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok, _rem_ok)
     if _policy_rec is None:
         rec.pop("content_edit_policy", None)
     else:

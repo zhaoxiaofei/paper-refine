@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 07/21 of the pipeline -- executed by the
+# Part 07/22 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1429,6 +1429,26 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # could force an artifact for a finding nobody had to act on and the
     # session's own pre-flight disagreed with the gate (F05).
     frozen_all = findings_from_sandbox(sb, sandbox_audit_record(sb))
+    # REMOVAL ACCOUNTING. Insertions and deletions are ON by default and stay
+    # the reviser's call, so a removed sentence is not failed here. What IS
+    # failed is a ledger that reports the removal as `fixed`: the package does
+    # not contain that repair, and the run would then self-report a claim it no
+    # longer carries (a run certified fixes for findings whose quoted sentences
+    # had been deleted). A removal recorded as
+    # `manual-required`/`discarded` passes with a warning that carries the
+    # removed claim to the author. The audit's fact gate is numeric/identifier
+    # only, so this anchors on the finding itself.
+    _removals = finding_removal_problems(
+        sb / "base", rev, frozen_all,
+        # No id filter: `frozen_all` is the SANDBOX's audited copy, which can
+        # legitimately differ from the run record's id list. Filtering the
+        # status map by the run record would leave a sandbox-only id with no
+        # status and read an honest `manual-required` row as a missing one.
+        final_status=revision_ledger_final_status(rev),
+        exempt_removed=pipeline_removed_sentences(rec, with_document=True))
+    _removal_errs, _removal_warns = finding_removal_messages(_removals, f"{REVISED_DIR}/")
+    errs.extend(_removal_errs)
+    warns.extend(_removal_warns)
     checks_in = {str(f.get("check") or "").strip().upper() for f in frozen_all}
     if "M26" in checks_in:
         style = rev / "work"
@@ -1485,12 +1505,14 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # the delivered sentences must still correspond to the base's.
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     _edit_prefer = prefer_rewrite_allowed(ctx, rec)
+    _edit_removable = soft_deletions_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "base", rev, "revise",
                                       exempt_removed=pipeline_removed_sentences(
                                           rec, with_document=True),
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del,
-                                      prefer_rewrite=_edit_prefer))
+                                      prefer_rewrite=_edit_prefer,
+                                      soft_deletions=_edit_removable))
     if fact_survival_required(_edit_ins, _edit_del):
         # No mode that permits a deletion has a unit-level check on it, so this
         # is the gate that stops a deletion from taking a value or identifier
@@ -1836,12 +1858,14 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     restrip_after_backfill(ctx, rec, out, warns)
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     _edit_prefer = prefer_rewrite_allowed(ctx, rec)
+    _edit_removable = soft_deletions_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "self", out, "integrate",
                                       exempt_removed=pipeline_removed_sentences(
                                           rec, with_document=True),
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del,
-                                      prefer_rewrite=_edit_prefer))
+                                      prefer_rewrite=_edit_prefer,
+                                      soft_deletions=_edit_removable))
     if fact_survival_required(_edit_ins, _edit_del):
         errs.extend(fact_preservation_problems(
             sb / "self", out, "integrate",
@@ -2020,12 +2044,14 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     restrip_after_backfill(ctx, rec, sb / REWRITTEN_DIR, warns)
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     _edit_prefer = prefer_rewrite_allowed(ctx, rec)
+    _edit_removable = soft_deletions_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "base", sb / REWRITTEN_DIR, "rewrite",
                                       exempt_removed=pipeline_removed_sentences(
                                           rec, with_document=True),
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del,
-                                      prefer_rewrite=_edit_prefer))
+                                      prefer_rewrite=_edit_prefer,
+                                      soft_deletions=_edit_removable))
     if fact_survival_required(_edit_ins, _edit_del):
         errs.extend(fact_preservation_problems(
             sb / "base", sb / REWRITTEN_DIR, "rewrite",
@@ -6591,13 +6617,16 @@ def pipeline_removed_sentences(rec: dict, with_document: bool = False) -> list:
 def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                           stage: str = "", exempt_removed=None,
                           insertions_allowed=None, deletions_allowed=None,
-                          prefer_rewrite=None) -> list:
-    """Fail a package that inserts/deletes content under the strict policy.
+                          prefer_rewrite=None, soft_deletions=None) -> list:
+    """Fail a package that inserts/deletes content against the active policy.
 
-    Returns [] immediately when both kinds are enabled: the default pipeline
-    does no extra work and behaves exactly as before. The check is only about
-    the delivered PACKAGE (a sentence's presence), never about how the agent
-    described the edit, so a correct in-place repair passes.
+    Returns [] immediately when both kinds are enabled and no deletion mode is
+    on: the default pipeline does no extra work and behaves exactly as before.
+    With `--enable-soft-deletions` it also runs with both kinds enabled, but
+    only the deletions of the documented removable units are accepted. The
+    check is only about the delivered PACKAGE (a sentence's presence), never
+    about how the agent described the edit, so a correct in-place repair
+    passes.
 
     `exempt_removed` is a list of sentences the orchestrator itself removed
     before this check (the PKG-2 dangling-reference repair). They are excluded
@@ -6611,6 +6640,13 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
     document` is allowed, and a marker the base carries is exempt from the
     deletion comparison under `readme`/`off` (the placeholder rule requires its
     removal there).
+
+    `soft_deletions` is the MIDDLE policy: both kinds stay enabled, but
+    only the documented removable units may disappear (a duplicate whose other
+    copy survives, a leaked prompt/instruction, a placeholder, an internal
+    artifact, or the orchestrator's own pointer removal). A unit that carries a
+    claim is corrected in place; deleting it fails the attempt. This is what
+    `--enable-soft-deletions` sets; it is off by default.
     """
     insert = (insertions_enabled(ctx) if insertions_allowed is None
               else bool(insertions_allowed))
@@ -6618,7 +6654,13 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
               else bool(deletions_allowed))
     prefer = (prefer_rewrite_over_deletion(ctx) if prefer_rewrite is None
               else bool(prefer_rewrite))
-    if insert and delete:
+    # `soft_deletions_allowed`, not the same-named helper: this
+    # function's own parameter shadows the module-level reader.
+    removable = (soft_deletions_allowed(ctx)
+                 if soft_deletions is None
+                 else bool(soft_deletions))
+    scope = "none" if not delete else ("removable" if removable else "all")
+    if insert and scope == "all":
         return []
     base_package, candidate_package = Path(base_package), Path(candidate_package)
     if not base_package.is_dir() or not candidate_package.is_dir():
@@ -6667,6 +6709,14 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
         base_units.append(u)
     missing, added = _match_content_units(base_units, cand_units)
     problems = []
+    # THE MIDDLE POLICY: a removal is allowed only for a documented removable
+    # unit. The matcher consumes copies one-to-one, so a surviving duplicate is
+    # not in `missing` only for the copy it matched; the second base occurrence
+    # of an identical sentence is still listed and its norm is in the candidate.
+    policy_name = ("--disable-deletions" if scope == "none"
+                   else "--enable-soft-deletions")
+    if scope == "removable" and missing:
+        missing = soft_deletion_missing_units(missing, cand_units, exempt_removed)
     if skipped:
         names = ", ".join(sorted(set(skipped))[:6])
         problems.append(
@@ -6674,11 +6724,23 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
             f"content-edit policy (corrupt, oversized or unreadable): {names}"
             + (" ..." if len(set(skipped)) > 6 else "")
             + ". The policy is UNENFORCED on those files; repair or remove them before retrying.")
-    if not delete and missing:
-        if prefer:
+    if scope != "all" and missing:
+        if scope == "removable":
             problems.append(
                 f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
-                f"delivered package although --disable-deletions is in force. REWRITE the "
+                f"delivered package although --enable-soft-deletions is in force. This mode "
+                f"allows removing only a duplicate whose other copy survives, a leaked "
+                f"prompt/instruction, a placeholder, an internal artifact, a merge-covered "
+                f"unit or the pipeline's own pointer; the unit(s) below carry content, so "
+                f"correct them IN PLACE with the "
+                f"right value (a deletion is not a repair) or record the finding "
+                f"`manual-required` and leave the unit in the package: "
+                + "; ".join(_content_unit_example(u) for u in missing[:5])
+                + (" ..." if len(missing) > 5 else ""))
+        elif prefer:
+            problems.append(
+                f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
+                f"delivered package although {policy_name} is in force. REWRITE the "
                 f"missing unit in place rather than recording it as manual-required while an "
                 f"honest rewrite exists (a deletion is not a repair): "
                 + "; ".join(_content_unit_example(u) for u in missing[:5])
@@ -6686,7 +6748,7 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
         else:
             problems.append(
                 f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
-                f"delivered package although --disable-deletions is in force (a deletion is not a "
+                f"delivered package although {policy_name} is in force (a deletion is not a "
                 f"repair): " + "; ".join(_content_unit_example(u) for u in missing[:5])
                 + (" ..." if len(missing) > 5 else ""))
     if not insert and added:
@@ -6698,12 +6760,12 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
             + ". Correct the existing unit in place instead of adding prose; if a finding can "
               "only be resolved by new text, record it as manual-required/unable and leave the "
               "unit unchanged.")
-    if not delete:
+    if scope != "all":
         removed_cites = _citation_removed_keys(base_package, candidate_package)
         if removed_cites:
             problems.append(
                 f"{label}{len(removed_cites)} citation key(s) disappeared from a surviving "
-                f"statement although --disable-deletions is in force (a removed citation is "
+                f"statement although {policy_name} is in force (a removed citation is "
                 f"a deletion): " + ", ".join(sorted(removed_cites)[:8])
                 + (" ..." if len(removed_cites) > 8 else "")
                 + ". Restore the citation, or replace it with the corrected key in place.")
@@ -6716,10 +6778,10 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
             + (" ..." if len(ref_added) > 3 else "")
             + ". A reference entry is a content unit; add it only through the documented "
               "correction route.")
-    if not delete and ref_removed:
+    if scope != "all" and ref_removed:
         problems.append(
             f"{label}{len(ref_removed)} reference entr{'y' if len(ref_removed) == 1 else 'ies'} "
-            f"present in the base bibliography are MISSING although --disable-deletions is in "
+            f"present in the base bibliography are MISSING although {policy_name} is in "
             f"force: " + "; ".join(x[:120] for x in ref_removed[:3])
             + (" ..." if len(ref_removed) > 3 else "")
             + ". A removed reference is a deletion; restore it or replace it in place.")
@@ -7670,96 +7732,6 @@ def fact_preservation_problems(base_package: Path, candidate_package: Path,
     if pair_added:
         problems.append(_fact_pair_added_message(pair_added, label))
     return problems
-
-
-def deletion_row_fact_loss_problems(sandbox: Path, rows, full_by_ref=None) -> list:
-    """Per-row backstop: an `OK — no fact is lost` row that DID lose a value.
-
-    The revision audit's dispositions are the pipeline's own record of what a
-    deletion cost. A row disposed `OK — <why no fact is lost>` while the value
-    it carried appears nowhere in `revised/`'s own prose is a false record,
-    whatever the revise stage was told. The compliant dispositions already
-    exist: `fact removed — RP-xxx` (with a plan row) and `manual-required`.
-
-    `full_by_ref` maps the seeded occurrence id to the FULL paragraph text: the
-    table cell is display-truncated to a fixed budget, so checking only the
-    visible cell would miss a value beyond the cut (a false negative).
-    """
-    package = Path(sandbox) / REVISED_DIR
-    if not package.is_dir():
-        return []
-    surviving = _fact_survival_keys(_content_unit_sentences(package))
-    problems = []
-    for row in rows or ():
-        disposition = str(row.get("disposition") or "").strip()
-        if not re.match(r"(?i)^OK\s*[\u2014\u2013:-]", disposition):
-            continue
-        paragraph = str((full_by_ref or {}).get(str(row.get("#") or "").strip())
-                        or row.get("paragraph") or "")
-        lost = _fact_survival_lost_tokens(paragraph, surviving)
-        if not lost:
-            continue
-        problems.append(
-            f"row {str(row.get('#') or '?').strip()} is disposed "
-            f"{disposition[:60]!r} but the value(s) {', '.join(sorted(set(lost)))} it carried "
-            f"appear nowhere in {REVISED_DIR}/'s own prose: `OK — no fact is lost` is not "
-            f"available for a deleted paragraph whose value has no surviving manuscript "
-            f"carrier (a hand-off-only value is `manual-required`, not `OK`). Dispose it as "
-            f"`fact removed — RP-xxx` (and add the row to REPAIR_PLAN.json), or as "
-            f"`manual-required — <what the author must restore>`.")
-    return problems
-
-
-def _deletion_disposition_ok(value, allow_nothing_removed: bool = True) -> bool:
-    """Does a DELETED_PARAGRAPHS disposition use the seeded vocabulary?
-
-    The seed's instructions name exactly three shapes: `OK — <why no fact is
-    lost>`, `manual-required`, and `fact removed — RP-xxx`. The shared
-    `disposition_artifact_problems` only rejects empty/boilerplate cells, so a
-    single `x` used to pass the deletion-fact gate without disposing anything.
-
-    `allow_nothing_removed` is true ONLY for the seed's own empty-table row
-    (`expected_rows == 0`, id `-`). On a real deleted row the phrase says the
-    opposite of what happened, so it is not a reason and cannot dispose it
-    (F191).
-    """
-    text = str(value or "").strip()
-    if not text:
-        return False
-    ok = re.match(r"(?i)^OK\s*[\u2014\u2013:-]\s*(.+)$", text)
-    if ok:
-        # The seeded instruction asks for `OK — <why no fact is lost>`, not
-        # merely "some character after the dash": one non-space character
-        # (`OK — x`) used to dispose a deleted fact-bearing paragraph. Require
-        # an actual reason (>= 4 words), the smallest bar that still admits the
-        # documented short closures (`OK — duplicate; no fact lost`).
-        reason = ok.group(1).strip()
-        # The seed's own empty-table row is `OK — nothing removed`: there is no
-        # deleted paragraph to explain, so it is not the one-character closure
-        # this check exists to reject -- but only THAT row may use it.
-        if reason.lower() in ("nothing removed", "no rows removed"):
-            return bool(allow_nothing_removed)
-        words = re.findall(r"[^\s]+", reason)
-        # A short closure that says where the content went ("OK - moved to
-        # Methods", "OK - merged into Results", "OK - now in Table 2") is a real
-        # reason too. A section WORD alone is not: the old regex accepted
-        # "OK - x methods" and even the negation "OK - no results" while
-        # rejecting "OK - x", so two-word filler could close a deleted fact
-        # (F091). The words must therefore name a section AND say the content
-        # moved there.
-        if len(words) >= 3 and re.search(
-                r"(?i)\b(?:moved|merged|folded|relocated|integrated|reported|restated|"
-                r"included|placed|put|now)\b[^.;\n]{0,30}"
-                r"\b(?:methods?|results?|discussion|introduction|abstract|"
-                r"table\s*\d+|figure\s*\d+|paragraph\s*\d+|supplementary)\b",
-                reason):
-            return True
-        return len(words) >= 4
-    if re.match(r"(?i)^manual-required\b", text):
-        return True
-    if re.match(r"(?i)^fact\s+removed\s*[\u2014\u2013:-]\s*RP-\d+\b", text):
-        return True
-    return False
 
 
 def deletion_audit_problems(sb: Path, expected_rows: int = None,
@@ -9746,6 +9718,17 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                                                      "revised/revision_report.json")
             errs.extend(lerrs)
             warns.extend(lwarns)
+            # Pre-flight parity for the removal accounting: the postcheck fails
+            # a ledger that reports a removed finding sentence as `fixed`. The
+            # pre-flight reports the same verdict as a warning because it cannot
+            # see the orchestrator's own dangling-reference removals (they live
+            # in the run record, not in the sandbox); the postcheck is
+            # authoritative.
+            _removals = finding_removal_problems(
+                sb / "base", d, frozen,
+                final_status=revision_ledger_final_status(d))
+            _rerr, _rwarn = finding_removal_messages(_removals, "revised/")
+            warns.extend(_rerr + _rwarn)
             # PRE-FLIGHT PARITY for the two postcheck families that failed the
             # neohet reviser: deliverable validation and the "no new finding-tier
             # family" regression. The postcheck runs both; a selfcheck that omits

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/21 of the pipeline -- executed by the
+# Part 09/22 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -412,7 +412,7 @@ def cmd_setup(args) -> None:
     # all are refused HERE, before a root is built:
     #   * a concern-scoped revision already replaces the guided review;
     #   * a split review is two guided-review sessions;
-    #   * no probe means literally nothing produces findings;
+    #   * --cold-start-review off means literally nothing produces findings;
     #   * a polish round reviews the surface only, and it is a guided review.
     if str(getattr(args, "guided_review", GUIDED_REVIEW_DEFAULT)).lower() == "off":
         if scoped_mode_restore is not None:
@@ -925,6 +925,19 @@ def cmd_setup(args) -> None:
     _prefer = getattr(args, "prefer_rewrite_over_deletion", None)
     if _prefer is not None:
         ctx.cfg["prefer_rewrite_over_deletion"] = "on" if _prefer else "off"
+    # The middle deletion policy: both kinds stay enabled, only the documented
+    # removable units may be deleted. Only an explicit flag writes a key, so a
+    # setup that does not use the mode keeps the historical config bytes.
+    _removable = getattr(args, "soft_deletions", None)
+    if _removable is not None:
+        ctx.cfg["soft_deletions"] = "on" if _removable else "off"
+    # The failure policy. Off is the historical strict path, so a setup that
+    # does not name the pair writes NO key and keeps the byte-identical
+    # pipeline_config.json. `run --tolerate-fail/--no-tolerate-fail`
+    # overrides this record for one invocation without rewriting the root.
+    _tol = getattr(args, "tolerate_fail", None)
+    if _tol is not None:
+        ctx.cfg["tolerate_fail"] = "on" if _tol else "off"
     if round_indices:
         # Traceability: pipeline round k follows built-in schedule round
         # round_indices[k-1]. The recorded per-round lists below already carry
@@ -1208,6 +1221,17 @@ def cmd_setup(args) -> None:
         "off": "the detector still runs and is recorded, but never fails an attempt",
     }[artifact_policy]
     print(f"[setup] artifact policy:         {artifact_policy}: {_art_note}")
+    _tol_recorded = "on" if tolerate_fail_of(ctx) else "off"
+    if tolerate_fail_of(ctx):
+        _tol_note = ("a stage that exhausts its retry budget is printed as TOLERATED_FAIL and "
+                     "its BEST FAILED TRIAL (most required output files, then fewest FAIL "
+                     "messages) is used, so the pipeline continues on the most complete "
+                     "attempt; the result stays PROVISIONAL, never certified")
+    else:
+        _tol_note = ("a stage that exhausts its retry budget FAILS and leaves the round "
+                     "incomplete (`run` exits 3); pass --tolerate-fail to use its best failed "
+                     "trial instead")
+    print(f"[setup] tolerate-fail policy:   {_tol_recorded}: {_tol_note}")
     print(f"[setup] per-round winners:       {root}/round<r>_winner/  (digest-verified against "
           f"the content-addressed pins)")
     # WHICH CODE THIS ROOT WILL RUN (2026-10-16): `setup` froze the script that
@@ -3364,6 +3388,19 @@ def cmd_set_revision_mode(args) -> None:
             f"       Re-run `set-revision-mode {mode_arg} --force` if the change is intended.")
     named = [str(x) for x in (getattr(args, "journal_feedback", None) or []) if str(x).strip()]
     info = JOURNAL_MODES[mode_arg]
+    # The same refusal `setup` applies: a feedback-consuming mode replaces the
+    # guided review with the concerns ledger, and the guided review is the
+    # session that reconciles every concern. The setter used to have no such
+    # check, so a root created with `--no-guided-review` could be switched to
+    # transfer/resubmit/llm and leave the letter unanswered (F84).
+    if info["feedback"]:
+        if str((ctx.cfg or {}).get("guided_review")
+               or GUIDED_REVIEW_DEFAULT).lower() == "off":
+            die(f"revision mode {mode_arg!r} reads an editors'/reviewers' letter, but this "
+                f"root was created with --no-guided-review: the guided review is the "
+                f"session that reconciles every concern, so switching would leave the "
+                f"letter unanswered. Re-create the root with the guided review ON, or "
+                f"choose a mode that reads no feedback.", code=2)
     if info["feedback"] and mode_arg != JOURNAL_MODE_LLM:
         # Resolve/validate ONLY for a mode that reads a journal letter. A
         # no-feedback mode (init/continue) documents the flag as ignored, and
@@ -3700,6 +3737,67 @@ def cmd_run(args) -> bool:
                for r in range(1, ctx.rounds_count() + 1))
 
 
+def _invocation_failure_state(ctx: Ctx, rounds=None) -> tuple:
+    """(tolerated_ids, hard_ids) for this invocation's runs.
+
+    A tolerated run is `done` (its best failed trial was promoted), so it is
+    listed separately; a run still `failed` is a hard FAIL (no usable trial, or
+    the policy is off). `rounds` restricts the scan to those round plans; None
+    scans every run record (the journal finalization's response run is not in a
+    round plan).
+    """
+    ids = []
+    if rounds is None:
+        ids = [r["id"] for r in ctx.runs()]
+    else:
+        for r in rounds:
+            ids += [e["id"] for e in round_run_plan(ctx, r)]
+            # `round_run_plan` deliberately excludes the judge wave and the
+            # journal response run, but a judge that exhausted its budget with
+            # no usable trial is a HARD failure of this invocation: leaving it
+            # out made `--tolerate-fail` exit 0 ("no hard FAIL remains") over a
+            # panel that never judged the round (F101).
+            ids += [rec["id"] for rec in ctx.runs(kind="judge", round_no=r)]
+            _response = ctx.run(rid_response(r))
+            if _response is not None:
+                ids.append(_response["id"])
+    tolerated, hard = [], []
+    for rid in dict.fromkeys(ids):
+        rec = ctx.run(rid) or {}
+        if rec.get("status") == "done" and rec.get("tolerated_fail"):
+            tolerated.append(rid)
+        elif rec.get("status") == "failed":
+            # A run that never started, or is pending/stale, is incomplete,
+            # not a FAIL: the collection mode still lets such an invocation
+            # exit 0, while a failed run with no usable trial stays strict.
+            hard.append(rid)
+    return tolerated, hard
+
+
+def _invocation_may_exit_zero(ctx: Ctx, rounds=None) -> bool:
+    """Should an incomplete invocation exit 0 (collection mode)?
+
+    A hard FAIL (a run whose retries were exhausted with no usable trial) always
+    keeps the invocation strict. A tolerated stage (best failed trial used), or
+    -- for an incomplete selection with no failure at all -- the enabled
+    collection mode, lets it exit 0; the result stays PROVISIONAL.
+    """
+    tolerated, hard = _invocation_failure_state(ctx, rounds)
+    if hard:
+        return False
+    return bool(tolerated) or tolerate_fail_of(ctx)
+
+
+def _tolerated_invocation_note(ctx: Ctx, rounds=None) -> str:
+    tolerated, _hard = _invocation_failure_state(ctx, rounds)
+    if tolerated:
+        return (f"{TOLERATED_FAIL_STATUS}: {', '.join(tolerated)} exhausted its retries; "
+                f"the best failed trial was used, so the invocation continues but the "
+                f"result is PROVISIONAL, never certified")
+    return ("no hard FAIL remains; this incomplete invocation is a collection-mode warning "
+            "(exit 0), not a completed run")
+
+
 def _cmd_run_locked(ctx: Ctx, args) -> None:
     # Scalar CLI validation comes BEFORE backend discovery, root-state changes
     # and other runtime checks: an invalid --timeout must produce its usage
@@ -3756,6 +3854,22 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     ctx._prefer_rewrite_override = (
         getattr(args, "prefer_rewrite_over_deletion")
         if getattr(args, "_prefer_rewrite_over_deletion_explicit", False) else None)
+    ctx._soft_deletions_override = (
+        getattr(args, "soft_deletions")
+        if getattr(args, "_soft_deletions_explicit", False) else None)
+    # The failure policy is a run property like the content-edit policy: an
+    # explicit pair overrides the root's record for THIS invocation, and an
+    # absent pair keeps it. The module-level flag lets the console helpers that
+    # have no `ctx` (the labels around a failed attempt) use the same mode.
+    ctx._tolerate_fail_override = getattr(args, "tolerate_fail", None)
+    set_tolerate_fail_active(tolerate_fail_of(ctx))
+    _tol_note = ("on -- a stage that exhausts its retries is printed as TOLERATED_FAIL and its "
+                 "BEST FAILED TRIAL is used (most required output files, then fewest FAIL "
+                 "messages); the pipeline continues on it, the decision stays PROVISIONAL and "
+                 "is never certified, and this invocation exits 0"
+                 if tolerate_fail_of(ctx) else
+                 "off -- an exhausted stage FAILS and leaves the round incomplete (exit 3)")
+    print(f"[run] failure policy: {_tol_note}")
     _edit_note = content_edit_policy_note(ctx)
     if _edit_note:
         print(f"[run] content-edit policy: {_edit_note}")
@@ -4178,6 +4292,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         "attempts_per_run": retries + 1,
         "retry_backoff": retry_backoff,
         "retry_backoff_max": retry_backoff_max,
+        "tolerate_fail": "on" if tolerate_fail_of(ctx) else "off",
         "set": utcnow()}
     ctx.save_state()
     retry_note = (f"attempts/run={retries + 1} (retries={retries}, exponential backoff "
@@ -4287,6 +4402,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 print(f"[run] the {journal_mode_of(ctx)} revision is incomplete; progress is "
                       f"saved. Resume with `run --root {ctx.root}` or reset one run with "
                       f"`retry --run <ID>`.")
+                if _invocation_may_exit_zero(ctx, [1]):
+                    print(f"[run] {_tolerated_invocation_note(ctx, [1])}.")
+                    return
                 sys.exit(3)
         if only is not None:
             print(f"[run] --only {getattr(args, 'only', None)!r}: the response letter and "
@@ -4304,6 +4422,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             print(f"[run] the {journal_mode_of(ctx)} revision itself is complete, but the "
                   f"response/submission stage did not finish; re-run `run` (or "
                   f"`retry --run {rid_response(1)}`) to finish it.")
+            if _invocation_may_exit_zero(ctx):
+                print(f"[run] {_tolerated_invocation_note(ctx)}.")
+                return
             sys.exit(3)
         summarize(ctx)
         return
@@ -4351,6 +4472,10 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             print(f"[run] round {r} is incomplete; progress is saved. Resume with "
                   f"`run --root {ctx.root}` (a fresh invocation grants every failed run a "
                   f"fresh retry budget) or reset a single run with `retry --run <ID>`.")
+            if _invocation_may_exit_zero(ctx, [r]):
+                print(f"[run] {_tolerated_invocation_note(ctx, [r])}. "
+                      f"Nothing after it was driven.")
+                break
             sys.exit(3)
         # C28: the pre-registered no-progress stop. A round whose champion is its
         # own base (A1) demonstrably improved nothing, and under this measurement
@@ -4415,7 +4540,10 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 summarize(ctx)
                 print(f"[run] the rounds are complete, but the journal finalization did not "
                       f"finish; re-run `run` (or `retry --run {rid_response(R)}`) to finish it.")
-                sys.exit(3)
+                if _invocation_may_exit_zero(ctx):
+                    print(f"[run] {_tolerated_invocation_note(ctx)}.")
+                else:
+                    sys.exit(3)
         else:
             print(f"[run] journal mode {journal_mode_of(ctx)!r}: the response letter and the "
                   f"submission package are assembled once EVERY round is complete; finish the "
@@ -4450,7 +4578,11 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             print(f"[run] --only {getattr(args, 'only', None)!r} selected no session of the "
                   f"round(s) that still need work ({', '.join(str(r) for r in covered_pending)}): "
                   f"nothing was started in this invocation.")
-            sys.exit(3)
+            if _invocation_may_exit_zero(ctx, covered_pending):
+                print(f"[run] {TOLERATED_FAIL_STATUS}: the empty selection is an "
+                      f"incomplete invocation, not a hard FAIL (exit 0).")
+            else:
+                sys.exit(3)
         print(f"[run] --only {getattr(args, 'only', None)!r}: round(s) "
               f"{', '.join(str(r) for r in selected) or '(none)'} of {R} are already complete -- "
               f"nothing to do in this invocation")
@@ -4459,9 +4591,19 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
               f"{R} champion is the final answer once every configured round is complete. "
               f"Next: python {Path(sys.argv[0]).name} run --root {ctx.root} "
               f"(or `decide` when all rounds are done)")
-    else:
+    elif all(ctx.round_rec(r).get("status") == "done" for r in range(1, R + 1)):
         print(f"[run] round {R} champion is the final answer. "
               f"Next: python {Path(sys.argv[0]).name} decide --root {ctx.root}")
+    else:
+        pending = [r for r in range(1, R + 1) if ctx.round_rec(r).get("status") != "done"]
+        if tolerate_fail_of(ctx):
+            print(f"[run] {TOLERATED_FAIL_STATUS}: round(s) {', '.join(str(r) for r in pending)} "
+                  f"are still incomplete; this invocation is a collection-mode warning "
+                  f"(exit 0), but no champion is the final answer yet. Resume with `run` "
+                  f"(or `retry --run <ID>`).")
+        else:
+            print(f"[run] round(s) {', '.join(str(r) for r in pending)} are still incomplete; "
+                  f"resume with `run` (or `retry --run <ID>`) before `decide`.")
 
 
 def summarize(ctx: Ctx) -> None:

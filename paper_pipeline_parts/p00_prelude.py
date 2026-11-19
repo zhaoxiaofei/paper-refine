@@ -1,4 +1,4 @@
-# Part 00/21 of the pipeline -- the shared prelude, executed by the loader
+# Part 00/22 of the pipeline -- the shared prelude, executed by the loader
 # before every other part.
 from __future__ import annotations
 

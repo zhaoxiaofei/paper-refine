@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 17/21 of the pipeline -- executed by the
+# Part 17/22 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -18,7 +18,10 @@ USAGE_EXAMPLES = """usage:
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]   (default: both enabled)
           [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
-          (default: off) copy the pristine corpus read-only, record its SHA-256 manifest, and
+          [--enable-soft-deletions] [--disable-soft-deletions]
+          [--tolerate-fail] [--no-tolerate-fail]
+          (default: prefer-rewrite off, strict failures) copy the pristine corpus read-only,
+          record its SHA-256 manifest, and
           create pipeline_config.json + state.json (no sandboxes are built yet).
           --venue selects the VENUE PROFILE whose submission rules every stage
           enforces (default: nature-biotechnology, this pipeline's pre-venue
@@ -110,8 +113,11 @@ USAGE_EXAMPLES = """usage:
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]
           [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
+          [--enable-soft-deletions] [--disable-soft-deletions]
+          [--tolerate-fail] [--no-tolerate-fail]
           (default: the root's recorded policy; both enabled unless `setup` disabled one;
-           prefer-rewrite off unless `setup` recorded it on or this invocation's flag sets it)
+           prefer-rewrite off; tolerate-fail off unless `setup` recorded it on or
+           this invocation's flag sets it)
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent-harness dsh|gpt-codex|claude-code] [--agent-model NAME_OR_URL]
           [--agent-model-api-key KEY] [--agent-model-name MODEL]
@@ -136,7 +142,14 @@ USAGE_EXAMPLES = """usage:
           attempt, capped by --retry-backoff-max; 0 = retry immediately). If the
           judge panel is still incomplete after the retries, the round is left
           pending (reports/round<r>_panel_gaps.json) instead of being decided on
-          the reduced panel.
+          the reduced panel. --tolerate-fail keeps a failed stage from
+          terminating the invocation: when all its retries are exhausted, the
+          trial with the most required output files (ties: fewest FAIL
+          messages) is used as that stage's result, printed as TOLERATED_FAIL,
+          and the pipeline continues on it. The result is PROVISIONAL / NOT
+          CERTIFIED (a panel round is never certified with a tolerated stage;
+          an auto-promoted round promotes the trial it used), and `run` exits
+          0. It is OFF by default and `run` can override the root's record.
           --judge-manual/--judge-agent-cmd select the judge backend without
           changing the production pair (it is the largest wave), e.g. to run
           judges on a cheaper CLI than the production stages.
@@ -491,6 +504,22 @@ def add_content_edit_policy_opts(parser: argparse.ArgumentParser,
                         action=ContentEditPolicyAction, const=False, default=None,
                         help="use the historical deletion-only manual-required fallback "
                              "(the default)")
+    # THE MIDDLE POLICY: between --disable-deletions (nothing may go) and the
+    # permissive default (any unit may go). Both kinds stay enabled, so a
+    # duplicate, a leaked prompt or a placeholder can still be removed; a unit
+    # that carries a claim, value, definition or citation may not.
+    parser.add_argument("--enable-soft-deletions",
+                        dest="soft_deletions",
+                        action=ContentEditPolicyAction, const=True, default=None,
+                        help="allow deletions only of the documented removable units "
+                             "(a duplicate whose other copy survives, a leaked "
+                             "prompt/instruction, a placeholder, an internal artifact); a "
+                             "claim-bearing unit must be corrected in place or recorded "
+                             "manual-required (benchmark-only middle policy)")
+    parser.add_argument("--disable-soft-deletions",
+                        dest="soft_deletions",
+                        action=ContentEditPolicyAction, const=False, default=None,
+                        help="allow any content unit to be deleted, as before (the default)")
 
 
 CHAMPION_SELECT_HELP = (
@@ -847,7 +876,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "`guided_review`, the run id `r<r>_guided_review` and the area "
                          "`guided_review/`. Refused with a concern-scoped revision mode, "
                          "with --review-split, "
-                         "with the probe off (no finding source would remain) and outside a "
+                         "with `--cold-start-review off` (no finding source would remain) "
+                         "and outside a "
                          "full-scope round")
     ps.add_argument("--no-guided-review",
                     dest="guided_review", action="store_const",
@@ -918,6 +948,23 @@ def build_parser() -> argparse.ArgumentParser:
                          "`--strict-artifacts` means `on`")
     ps.add_argument("--fix-artifacts", dest="artifact_policy", action="store_const", const="fix",
                     help="same as --strict-artifacts fix")
+    ps.add_argument("--tolerate-fail", dest="tolerate_fail",
+                    action="store_const", const=True, default=None,
+                    help="keep a stage that exhausts its retries from terminating the "
+                         "invocation: use that run's BEST FAILED TRIAL (most required output "
+                         "files produced, then fewest FAIL messages), print it as "
+                         "TOLERATED_FAIL, and continue with its output. The result stays "
+                         "PROVISIONAL and is never certified. OFF by default (a failed stage "
+                         "leaves the round incomplete and `run` exits 3). `setup` records it; "
+                         "`run` can override it for one invocation")
+    ps.add_argument("--no-tolerate-fail", dest="tolerate_fail",
+                    action="store_const", const=False,
+                    help="use the strict failure path (the default; same as omitting the pair)")
+    # The previous spelling of the same policy; kept as a hidden alias.
+    ps.add_argument("--almost-fail", dest="tolerate_fail",
+                    action="store_const", const=True, help=argparse.SUPPRESS)
+    ps.add_argument("--no-almost-fail", dest="tolerate_fail",
+                    action="store_const", const=False, help=argparse.SUPPRESS)
 
     decide_opts = argparse.ArgumentParser(add_help=False)  # shared by decide / run-decide
     decide_opts.add_argument("--package-winner", action="store_true",
@@ -1004,6 +1051,22 @@ def build_parser() -> argparse.ArgumentParser:
     add_content_edit_policy_opts(run_opts, default=True)   # config unless explicitly passed
     run_opts.add_argument("--champion-select", choices=list(CHAMPION_SELECT_MODES),
                           default=None, metavar="MODE", help=CHAMPION_SELECT_HELP)
+    run_opts.add_argument("--tolerate-fail", dest="tolerate_fail",
+                          action="store_const", const=True, default=None,
+                          help="override the root's failure policy for this invocation: when a "
+                               "run exhausts its retries, use its BEST FAILED TRIAL (most "
+                               "required output files, then fewest FAIL messages) as the stage's "
+                               "result and continue with it. The stage prints TOLERATED_FAIL; "
+                               "the decision stays PROVISIONAL and is never certified. Default: "
+                               "the root's policy (strict FAIL unless setup recorded it)")
+    run_opts.add_argument("--no-tolerate-fail", dest="tolerate_fail",
+                          action="store_const", const=False,
+                          help="use the strict failure path for this invocation (overrides a "
+                               "root that recorded --tolerate-fail)")
+    run_opts.add_argument("--almost-fail", dest="tolerate_fail",
+                          action="store_const", const=True, help=argparse.SUPPRESS)
+    run_opts.add_argument("--no-almost-fail", dest="tolerate_fail",
+                          action="store_const", const=False, help=argparse.SUPPRESS)
     run_opts.add_argument("--jobs", type=int, default=DEFAULTS["jobs"],
                     help=f"concurrent agent sessions (default: {DEFAULTS['jobs']})")
     run_opts.add_argument("--timeout", type=int, default=None,

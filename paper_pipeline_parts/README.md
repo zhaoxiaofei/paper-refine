@@ -23,6 +23,7 @@ it executes is a real Python file (each carries
 | `p11_defect_audit.py` | the diagnostic LLM defect audit |
 | `p12_conflicts_decide.py` | package-hygiene scans, PKG-2 repair, decision report, `decide`, `status`, `trend` |
 | `p20_judge_conflicts.py` | the cross-judge conflict audit (split from `p12` to keep every part under 10,000 lines) |
+| `p21_removal_accounting.py` | removal accounting: soft-deletion unit filter, finding-removal ledger gate, and the revision-ledger final-status reader (split from `p06`/`p07` to keep every part under 10,000 lines) |
 | `p13_redlines.py` | tracked-changes generation |
 | `p14_tracking.py` | difference-tracking copies and persistent renders |
 | `p15_pdf.py` | PDF rendering |

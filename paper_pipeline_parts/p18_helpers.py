@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 18/21 of the pipeline -- executed by the loader AFTER the command
+# Part 18/22 of the pipeline -- executed by the loader AFTER the command
 # functions, in the loader's own module globals. These are pure helpers
 # (no module-level side effects): the lower-numbered parts call them at
 # runtime, so they may live after the CLI definitions. Split out of
