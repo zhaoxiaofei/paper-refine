@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 17/21 of the pipeline -- executed by the
+# Part 17/22 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -18,6 +18,7 @@ USAGE_EXAMPLES = """usage:
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]   (default: both enabled)
           [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
+          [--enable-soft-deletions] [--disable-soft-deletions]
           [--tolerate-fail] [--no-tolerate-fail]
           (default: prefer-rewrite off, strict failures) copy the pristine corpus read-only,
           record its SHA-256 manifest, and
@@ -112,6 +113,7 @@ USAGE_EXAMPLES = """usage:
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]
           [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
+          [--enable-soft-deletions] [--disable-soft-deletions]
           [--tolerate-fail] [--no-tolerate-fail]
           (default: the root's recorded policy; both enabled unless `setup` disabled one;
            prefer-rewrite off; tolerate-fail off unless `setup` recorded it on or
@@ -502,6 +504,22 @@ def add_content_edit_policy_opts(parser: argparse.ArgumentParser,
                         action=ContentEditPolicyAction, const=False, default=None,
                         help="use the historical deletion-only manual-required fallback "
                              "(the default)")
+    # THE MIDDLE POLICY: between --disable-deletions (nothing may go) and the
+    # permissive default (any unit may go). Both kinds stay enabled, so a
+    # duplicate, a leaked prompt or a placeholder can still be removed; a unit
+    # that carries a claim, value, definition or citation may not.
+    parser.add_argument("--enable-soft-deletions",
+                        dest="soft_deletions",
+                        action=ContentEditPolicyAction, const=True, default=None,
+                        help="allow deletions only of the documented removable units "
+                             "(a duplicate whose other copy survives, a leaked "
+                             "prompt/instruction, a placeholder, an internal artifact); a "
+                             "claim-bearing unit must be corrected in place or recorded "
+                             "manual-required (benchmark-only middle policy)")
+    parser.add_argument("--disable-soft-deletions",
+                        dest="soft_deletions",
+                        action=ContentEditPolicyAction, const=False, default=None,
+                        help="allow any content unit to be deleted, as before (the default)")
 
 
 CHAMPION_SELECT_HELP = (

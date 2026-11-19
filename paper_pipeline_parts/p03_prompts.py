@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 03/21 of the pipeline -- executed by the
+# Part 03/22 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -987,19 +987,67 @@ not create revised/, do not edit base/ or non_revised/, and do not ask the user 
 """
 
 
+def _soft_deletions_policy_lines() -> list:
+    """The MIDDLE content-edit policy: deletions of removable units only.
+
+    Between `--disable-deletions` (nothing may go) and the historical
+    permissive default (any unit may go). It exists because some revisions
+    genuinely require a removal -- a verbatim duplicate, a leaked prompt, a
+    placeholder -- while a sentence that carries a claim does not: the defect is
+    corrected in place, and deleting the sentence silently drops the claim.
+    """
+    return [
+        "SOFT DELETIONS ARE LIMITED TO REMOVABLE UNITS.",
+        "",
+        "A content UNIT is a sentence, a paragraph, a heading, a caption, or one",
+        "table/figure row. The base package (`base/`, or `self/` for an integration)",
+        "is the reference set.",
+        "",
+        "YOU MAY REMOVE ONLY: a verbatim duplicate whose other copy survives; a",
+        "leaked model prompt, instruction or internal working note; an unresolved",
+        "placeholder (`[CITE]`, `TBD`, `XXX`, lorem ipsum); a unit whose content is",
+        "fully present in one delivered sentence (a merge); or a pointer-only",
+        "sentence the orchestrator itself removes. A hand-off marker the placeholder",
+        "rule requires is a scaffold, not manuscript content.",
+        "",
+        "YOU MAY NOT REMOVE a unit that carries a claim, value, number, measurement,",
+        "definition, method step, limitation, result, conclusion, citation,",
+        "identifier or author-metadata field. Correct it in place with the right",
+        "value: deleting it is not a repair and leaves the claim with no carrier.",
+        "When no honest in-place correction exists, record the finding",
+        "`manual-required` and LEAVE the unit in the package.",
+        "",
+        "THE ORCHESTRATOR ENFORCES THIS MECHANICALLY: its postcheck compares the",
+        "delivered package with the base and fails a deletion that is not one of the",
+        "removable units above.",
+        "",
+    ]
+
+
 def content_edit_policy_block(insertions_allowed: bool = True,
                               deletions_allowed: bool = True,
-                              prefer_rewrite: bool = False) -> str:
+                              prefer_rewrite: bool = False,
+                              soft_deletions: bool = False) -> str:
     """The benchmark-only content-edit policy block.
 
-    The OFF path is the verbatim pre-feature function (`_legacy_…`): when the
-    prefer-rewrite mode is not enabled, the prompt bytes are identical to the
-    pipeline before the mode existed. Only the ON path adds the extra
-    prefer-rewrite text; the strict directions are unchanged.
+    The OFF path is the verbatim pre-feature function (`_legacy_…`): when no
+    mode is enabled, the prompt bytes are identical to the pipeline before the
+    feature existed. The strict directions are unchanged; each mode only adds
+    its own text. `--enable-soft-deletions` adds the middle section on top of
+    whichever block the other modes produced (a strict `NO DELETIONS` run does
+    not need it: nothing may be removed at all).
     """
-    if not prefer_rewrite:
-        return _legacy_content_edit_policy_block(insertions_allowed, deletions_allowed)
-    return _prefer_rewrite_policy_block(insertions_allowed, deletions_allowed)
+    if prefer_rewrite:
+        base = _prefer_rewrite_policy_block(insertions_allowed, deletions_allowed)
+    else:
+        base = _legacy_content_edit_policy_block(insertions_allowed, deletions_allowed)
+    if not soft_deletions or not deletions_allowed:
+        return base
+    section = "\n".join(_soft_deletions_policy_lines())
+    if base:
+        return base.rstrip("\n") + "\n\n" + section
+    return ("=== CONTENT-EDIT POLICY (operator benchmark constraint) ===\n\n"
+            + section)
 
 
 def _legacy_content_edit_policy_block(insertions_allowed: bool = True,
@@ -1284,7 +1332,8 @@ def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
 
 def prompt_content_edit_policy_matches(prompt: Path, insertions_allowed: bool = True,
                                         deletions_allowed: bool = True,
-                                        prefer_rewrite: bool = False) -> bool:
+                                        prefer_rewrite: bool = False,
+                                        soft_deletions: bool = False) -> bool:
     """Does an already-materialized PROMPT.md state the CURRENT policy?
 
     Prompt files are written once, when a sandbox is materialized. If the
@@ -1299,16 +1348,20 @@ def prompt_content_edit_policy_matches(prompt: Path, insertions_allowed: bool = 
     if text is None:
         return False
     has_block = "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===" in text
-    if insertions_allowed and deletions_allowed and not prefer_rewrite:
+    if (insertions_allowed and deletions_allowed and not prefer_rewrite
+            and not soft_deletions):
         return not has_block
     if not has_block:
         return False
     # The block names each forbidden direction exactly once, in its own
-    # `NO INSERTIONS:` / `NO DELETIONS:` paragraph, and the prefer mode once in
-    # its heading. A strict prompt without the heading is the old policy.
+    # `NO INSERTIONS:` / `NO DELETIONS:` paragraph, the prefer mode once in its
+    # heading, and the middle mode once in its own heading. A strict prompt
+    # without the heading is the old policy.
     return (("NO INSERTIONS:" in text) == (not insertions_allowed)
             and ("NO DELETIONS:" in text) == (not deletions_allowed)
-            and (("PREFER REWRITE OVER DELETION." in text) == prefer_rewrite))
+            and (("PREFER REWRITE OVER DELETION." in text) == prefer_rewrite)
+            and (("SOFT DELETIONS ARE LIMITED TO REMOVABLE UNITS." in text)
+                 == bool(soft_deletions and deletions_allowed)))
 
 
 def content_edit_policy_from_prompt(prompt: Path):
@@ -1362,6 +1415,39 @@ def prefer_rewrite_for_sandbox(ctx, rec, prompt: Path) -> bool:
     return prefer_rewrite_over_deletion(ctx)
 
 
+def soft_deletions_from_prompt(prompt: Path):
+    """Does an existing PROMPT.md state the removable-only deletion policy, or None.
+
+    A prompt without the policy block is the historical default (off); a prompt
+    with the block states the mode in its `SOFT DELETIONS ARE LIMITED TO
+    REMOVABLE UNITS.` heading. A missing/unreadable prompt returns None so the
+    caller can fall back to the invocation.
+    """
+    text = read_text_bounded(prompt)
+    if text is None:
+        return None
+    if "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===" not in text:
+        return False
+    return "SOFT DELETIONS ARE LIMITED TO REMOVABLE UNITS." in text
+
+
+def soft_deletions_for_sandbox(ctx, rec, prompt: Path) -> bool:
+    """The removable-only deletion policy an already-materialized sandbox used.
+
+    The same binding rule as the other two policy axes: the run record wins,
+    then the prompt the sandbox carries, then the current invocation.
+    """
+    policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
+    if isinstance(policy, dict) and "soft_deletions" in policy:
+        return content_edit_prefer_flag(policy["soft_deletions"])
+    prompt = Path(prompt)
+    if prompt.is_file():
+        from_prompt = soft_deletions_from_prompt(prompt)
+        if from_prompt is not None:
+            return from_prompt
+    return soft_deletions(ctx)
+
+
 def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
     """The policy an already-materialized sandbox was prompted under.
 
@@ -1388,16 +1474,18 @@ def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
 
 def apply_content_edit_policy(text: str, insertions_allowed: bool = True,
                               deletions_allowed: bool = True,
-                              prefer_rewrite: bool = False) -> str:
+                              prefer_rewrite: bool = False,
+                              soft_deletions: bool = False) -> str:
     """Fill the policy placeholder WITHOUT perturbing a default prompt.
 
     The placeholder sits on its own line after the prior-attempt block. When
-    both kinds are allowed the block is empty and the whole placeholder LINE is
-    removed, so the default prompt is byte-identical to the pre-feature one
-    (the hard constraint: defaults must not change behaviour or output).
+    both kinds are allowed and no mode is on the block is empty and the whole
+    placeholder LINE is removed, so the default prompt is byte-identical to the
+    pre-feature one (the hard constraint: defaults must not change behaviour or
+    output).
     """
     block = content_edit_policy_block(insertions_allowed, deletions_allowed,
-                                      prefer_rewrite)
+                                      prefer_rewrite, soft_deletions)
     if block:
         return text.replace("@@CONTENT_EDIT_POLICY@@", block)
     return text.replace("@@CONTENT_EDIT_POLICY@@\n", "")
@@ -1621,6 +1709,13 @@ Explicit requirements that override skill defaults where they conflict:
      shipped. Resolve every Section/Table/Figure pointer against the object it names and read that
      object; a pointer whose target does not carry the claim is corrected to the right number,
      never deleted.
+     Where the content-edit policy allows a deletion, removing a sentence is a permitted
+     revision choice (a strict `NO DELETIONS` block above overrides this). What is not permitted
+     is accounting for the removal as a repair.
+     If a finding's quoted sentence is no longer in the package, record that finding
+     `manual-required` (not `fixed`), with the removed claim and its location in the manual list,
+     so the author decides. The revise postcheck re-reads every finding's evidence sentence and
+     fails a `fixed` row whose sentence is gone.
 
 @@REWRITE_PARITY@@
 
@@ -3943,7 +4038,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                   guided_review_off: bool = False,
                   insertions_allowed: bool = True,
                   deletions_allowed: bool = True,
-                  prefer_rewrite: bool = False) -> str:
+                  prefer_rewrite: bool = False,
+                  soft_deletions: bool = False) -> str:
     """Phase 2 prompt: $paper-revise, consuming the round's frozen guided_review/ copy."""
     prof = _as_profile(venue)
     audit_block = ("""
@@ -3976,7 +4072,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite)
+                                     prefer_rewrite, soft_deletions)
     text = apply_rewrite_parity(text, "revise")
     text = apply_hierarchy_reconcile(text, "revise")
     text = apply_evidence_integrity(text, "revise")
@@ -4377,7 +4473,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                      insertions_allowed: bool = True,
                      deletions_allowed: bool = True,
-                     prefer_rewrite: bool = False) -> str:
+                     prefer_rewrite: bool = False,
+                     soft_deletions: bool = False) -> str:
     """Integration prompt: self/ reworked with ALL the other pool members.
 
     One run per pool member (there are no pairwise arms): the base stays the
@@ -4404,7 +4501,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite)
+                                     prefer_rewrite, soft_deletions)
     text = text.replace("@@DISCOVERY_PARITY@@",
                         discovery_parity_integrate_block(discovery_ids, discovery_dropped))
     text = render_venue_tokens(text, prof)
@@ -4452,7 +4549,8 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                    execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                    insertions_allowed: bool = True,
                    deletions_allowed: bool = True,
-                   prefer_rewrite: bool = False) -> str:
+                   prefer_rewrite: bool = False,
+                   soft_deletions: bool = False) -> str:
     """The rewrite prompt: one of the round's M rewritten candidates.
 
     Staged FIRST in the round (before the review), and it is a CANDIDATE like
@@ -4481,7 +4579,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite)
+                                     prefer_rewrite, soft_deletions)
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
     text = apply_m20(text, prof)
@@ -4724,6 +4822,7 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
                           insertions_allowed: bool = True,
                           deletions_allowed: bool = True,
                           prefer_rewrite: bool = False,
+                          soft_deletions: bool = False,
                           author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """The REVISION AUDITOR prompt: audit the revision, write the repair plan only.
 
@@ -4739,7 +4838,7 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@PLACEHOLDER_RULE@@",
                      placeholder_rule_text(author_to_complete)))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite)
+                                     prefer_rewrite, soft_deletions)
     # The audit is a full session: it gets the shared decision rules, the source
     # hierarchy and the context-budget rule -- but NOT the general review's
     # adopted-sweeps checklist. This role's object is the REVISION's own delta
@@ -4822,6 +4921,7 @@ def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int,
                            insertions_allowed: bool = True,
                            deletions_allowed: bool = True,
                            prefer_rewrite: bool = False,
+                           soft_deletions: bool = False,
                            author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """The BOUNDED REPAIR prompt: re-validate the plan, apply only confirmed rows."""
     text = (REVISION_REPAIR_DIRECTIVES
@@ -4832,7 +4932,7 @@ def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int,
             .replace("@@PLACEHOLDER_RULE@@",
                      placeholder_rule_text(author_to_complete)))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite)
+                                     prefer_rewrite, soft_deletions)
     shared = shared_blocks()
     text = apply_hierarchy_reconcile(text + shared, "revision_repair")
     text = with_context_budget(text)

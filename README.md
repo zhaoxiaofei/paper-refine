@@ -949,6 +949,9 @@ same rules, tested — see "Execution profiles" below),
 `--enable-deletions|--disable-deletions` (`setup` records the policy; `run`/`run-decide`
 may override it for one invocation; both are ENABLED by default, the historical
 behaviour — see "Content-edit policy" below),
+`--enable-soft-deletions|--disable-soft-deletions` (the middle deletion
+policy: both kinds stay enabled, only the documented removable units may be
+removed; OFF by default — see "Content-edit policy" below),
 `--cold-start-review {on,off}`
 (the independent discovery session; ON by default, `--no-cold-start-review` turns it off,
 `set-cold-start-review off` flips an existing root), `--submit-code {off,on}`
@@ -2509,7 +2512,7 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | review | 125 KB | 55 KB | 56% |
 | cold_start_review | 63 KB | 27 KB | 56% |
 | audit | 91 KB | 48 KB | 47% |
-| revise | 121 KB | 67 KB | 44% |
+| revise | 122 KB | 68 KB | 44% |
 | integrate | 112 KB | 60 KB | 47% |
 | rewrite | 104 KB | 61 KB | 41% |
 | judge | 104 KB | 74 KB | 29% |
@@ -2521,7 +2524,7 @@ The profile is recorded at `setup` and frozen into the root (rule 11): a `medium
 those prompts is the one frozen beside it. `sync-code` and `retry` preserve the recorded policy. A
 root created before this feature carries no key and runs `high`.
 
-## Content-edit policy (`--disable-insertions`, `--disable-deletions`)
+## Content-edit policy (`--disable-insertions`, `--disable-deletions`, `--enable-soft-deletions`)
 
 By default the pipeline behaves exactly as it always has at the UNIT level: a revision may add
 prose, remove prose, or rewrite a sentence in place. The shared fact-survival gate (D8) still
@@ -2586,6 +2589,36 @@ it for one invocation without rewriting the root. It is OFF by default and the
 off path is byte-identical to the pre-feature pipeline: the prompt block is the
 verbatim legacy function, the stage records and the postcheck messages are
 unchanged, and no key is written to `pipeline_config.json`.
+
+### Soft deletions (`--enable-soft-deletions`)
+
+The middle policy between the two above. It exists because some revisions
+genuinely require a removal — a duplicated sentence, a leaked prompt or
+instruction block, an unresolved placeholder, an internal working note — while
+a sentence that carries a claim does not: that defect is corrected in place,
+and deleting the sentence silently drops the claim.
+
+* insertions and deletions stay ENABLED (this is not `--disable-deletions`), so
+  the genuinely removable units can still go;
+* the revise/rewrite/integrate/bounded-repair prompts state that only the
+  documented removable units may disappear, and that a claim-bearing unit must
+  be corrected in place or recorded `manual-required` with the text left in the
+  package;
+* the postcheck enforces it on the delivered package: a missing unit is accepted
+  when it is a duplicate whose other copy survives, a unit whose content tokens
+  are fully present in one delivered sentence (a merge), a prompt/instruction/
+  placeholder artifact, or the orchestrator's own pointer removal; every other
+  missing unit fails the attempt and the retry asks for the in-place correction.
+
+It is a pair (`--enable-soft-deletions` /
+`--disable-soft-deletions`), accepted by `setup` and `run`, OFF by default,
+and recorded in `pipeline_config.json` only when it was passed. With the mode
+off, the default permissive path and the other two modes are byte-identical.
+
+Independently of the unit policy, the removal accounting still applies: a
+finding whose quoted sentence is removed may not be recorded as `fixed` in the
+revision ledger — the ledger says `manual-required` with the removed claim, so
+the author decides (the postcheck re-reads every finding's evidence sentence).
 
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
 
@@ -3681,7 +3714,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 254 suites (a few
+any failure. They are independent, so run them in parallel — 255 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/21 of the pipeline -- executed by the
+# Part 09/22 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -931,6 +931,12 @@ def cmd_setup(args) -> None:
     _prefer = getattr(args, "prefer_rewrite_over_deletion", None)
     if _prefer is not None:
         ctx.cfg["prefer_rewrite_over_deletion"] = "on" if _prefer else "off"
+    # The middle deletion policy: both kinds stay enabled, only the documented
+    # removable units may be deleted. Only an explicit flag writes a key, so a
+    # setup that does not use the mode keeps the historical config bytes.
+    _removable = getattr(args, "soft_deletions", None)
+    if _removable is not None:
+        ctx.cfg["soft_deletions"] = "on" if _removable else "off"
     # The failure policy. Off is the historical strict path, so a setup that
     # does not name the pair writes NO key and keeps the byte-identical
     # pipeline_config.json. `run --tolerate-fail/--no-tolerate-fail`
@@ -3810,6 +3816,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     ctx._prefer_rewrite_override = (
         getattr(args, "prefer_rewrite_over_deletion")
         if getattr(args, "_prefer_rewrite_over_deletion_explicit", False) else None)
+    ctx._soft_deletions_override = (
+        getattr(args, "soft_deletions")
+        if getattr(args, "_soft_deletions_explicit", False) else None)
     # The failure policy is a run property like the content-edit policy: an
     # explicit pair overrides the root's record for THIS invocation, and an
     # absent pair keeps it. The module-level flag lets the console helpers that

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 08/21 of the pipeline -- executed by the
+# Part 08/22 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -3977,12 +3977,14 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                       deletion_audit_markdown(_deleted_rows))
     _audit_ins, _audit_del = content_edit_policy_allowed(ctx, rec)
     _audit_prefer = prefer_rewrite_allowed(ctx, rec)
+    _audit_removable = soft_deletions_allowed(ctx, rec)
     write_text_atomic(sb / REVISION_AUDIT_PROMPT_FILE,
                       revision_audit_prompt(sb, rec["id"], r,
                                             execution_profile=execution_profile_of(ctx),
                                             insertions_allowed=_audit_ins,
                                             deletions_allowed=_audit_del,
                                             prefer_rewrite=_audit_prefer,
+                                            soft_deletions=_audit_removable,
                                             author_to_complete=author_to_complete_mode_of(ctx)))
     # The revision audit is documented READ-ONLY on every input its prompt
     # names -- base/, revised/, guided_review/, audit/, raw_data/ and code/ -- and may
@@ -4072,12 +4074,14 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     ctx.save_state()
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     _edit_prefer = prefer_rewrite_allowed(ctx, rec)
+    _edit_removable = soft_deletions_allowed(ctx, rec)
     write_text_atomic(sb / REVISION_REPAIR_PROMPT_FILE,
                       revision_repair_prompt(sb, rec["id"], r, len(rows),
                                              execution_profile=execution_profile_of(ctx),
                                              insertions_allowed=_edit_ins,
                                              deletions_allowed=_edit_del,
                                              prefer_rewrite=_edit_prefer,
+                                             soft_deletions=_edit_removable,
                                              author_to_complete=author_to_complete_mode_of(ctx)))
     print(f"  [revision-repair] {rec['id']}: one bounded repair pass")
     res2 = _run_aux_session(sb, rec, cmd, timeout, REVISION_REPAIR_PROMPT_FILE,

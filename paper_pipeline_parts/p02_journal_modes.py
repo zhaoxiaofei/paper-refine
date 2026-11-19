@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 02/21 of the pipeline -- executed by the
+# Part 02/22 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -2132,6 +2132,7 @@ _CONTENT_EDIT_OFF = ("off", "disabled", "disable", "false", "no", "0", "forbidde
 _CONTENT_EDIT_ON = ("on", "true", "yes", "1", "enabled")
 
 PREFER_REWRITE_OVER_DELETION = "prefer_rewrite_over_deletion"
+SOFT_DELETIONS = "soft_deletions"
 
 
 def content_edit_flag(value, default: bool = True) -> bool:
@@ -2186,6 +2187,66 @@ def prefer_rewrite_over_deletion(ctx=None) -> bool:
         # benchmark-only mode on by accident (the historical default is off).
         return raw.strip().lower() in _CONTENT_EDIT_ON
     return bool(raw)
+
+
+def soft_deletions(ctx=None) -> bool:
+    """Is the removable-only deletion policy on for this invocation?
+
+    THE MIDDLE CONTENT-EDIT POLICY. Insertions and deletions stay enabled, so a
+    verbatim duplicate, a leaked prompt/instruction, an unresolved placeholder
+    or an internal artifact can still be removed; a unit that carries a claim,
+    value, definition, method step, limitation or citation may not be deleted --
+    it is corrected in place, or carried to the manual list.
+
+    Off by default: the historical permissive policy (both kinds allowed, any
+    unit) is unchanged, so a run that does not name this mode keeps its exact
+    behaviour. Precedence: the invocation override, then the root's
+    pipeline_config.json, then off. Recognise only the explicit ON spellings,
+    like prefer-rewrite.
+    """
+    override = (getattr(ctx, "_soft_deletions_override", None)
+                if ctx is not None else None)
+    if override is not None:
+        return bool(override)
+    cfg = (getattr(ctx, "cfg", None) or {}) if ctx is not None else {}
+    raw = cfg.get(SOFT_DELETIONS, False)
+    if isinstance(raw, str):
+        return raw.strip().lower() in _CONTENT_EDIT_ON
+    return bool(raw)
+
+
+def soft_deletions_allowed(ctx=None, rec=None) -> bool:
+    """Is the removable-only deletion policy on for a stage that started under `rec`?
+
+    Same binding rule as `content_edit_policy_allowed`: a stage record carrying
+    `content_edit_policy` was prompted under that policy, and a later
+    invocation must not judge it under a different one.
+    """
+    policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
+    if isinstance(policy, dict) and SOFT_DELETIONS in policy:
+        return content_edit_prefer_flag(policy[SOFT_DELETIONS])
+    return soft_deletions(ctx)
+
+
+def deletion_scope(ctx=None, rec=None) -> str:
+    """`none` | `removable` | `all` -- what a delivered package may drop.
+
+    `none`      -- --disable-deletions: no content unit may disappear.
+    `removable` -- --enable-soft-deletions: only the documented removable
+                   units (a duplicate copy, a leaked prompt/instruction, a
+                   placeholder, a pointer the orchestrator itself removes) may
+                   go; a claim-bearing unit may not.
+    `all`       -- the default permissive policy: any unit may go.
+
+    `none` wins over `removable` (a strict root cannot be relaxed by adding the
+    middle flag), and `removable` wins over the default.
+    """
+    _ins, dele = content_edit_policy_allowed(ctx, rec)
+    if not dele:
+        return "none"
+    if soft_deletions_allowed(ctx, rec):
+        return "removable"
+    return "all"
 
 
 def _content_edit_enabled(ctx, kind: str, default: bool = True) -> bool:
@@ -2315,25 +2376,30 @@ def prefer_rewrite_allowed(ctx=None, rec=None) -> bool:
     return prefer_rewrite_over_deletion(ctx)
 
 
-def content_edit_policy_record(ctx, ins, dele, prefer) -> dict | None:
+def content_edit_policy_record(ctx, ins, dele, prefer, soft=False) -> dict | None:
     """The run-record dict a stage needs, or None for the default.
 
     A stage is bound to the policy its PROMPT stated, which can differ from the
     current invocation's (a resumed package keeps the policy it was produced
-    under). The default (both kinds allowed, prefer off) needs no record; every
-    other combination records `insertions`/`deletions` and the prefer flag when
-    it is on OR when it differs from the current invocation (a stage prompted
-    with the mode OFF must not be judged under a later run's mode ON). A strict
-    record without the mode keeps its old shape when the current mode is off.
+    under). The default (both kinds allowed, prefer off, any-unit deletions)
+    needs no record; every other combination records `insertions`/`deletions`
+    and the prefer / soft-deletion flag when it is on OR when it differs from
+    the current invocation (a stage prompted with a mode OFF must not be judged
+    under a later run's mode ON). A strict record without the modes keeps its
+    old shape when the current modes are off.
     """
     current_prefer = prefer_rewrite_over_deletion(ctx)
-    current = (insertions_enabled(ctx), deletions_enabled(ctx), current_prefer)
-    bound = (bool(ins), bool(dele), bool(prefer))
-    if bound == current and ins and dele and not prefer:
+    current_soft = soft_deletions(ctx)
+    current = (insertions_enabled(ctx), deletions_enabled(ctx),
+               current_prefer, current_soft)
+    bound = (bool(ins), bool(dele), bool(prefer), bool(soft))
+    if bound == current and ins and dele and not prefer and not soft:
         return None
     record = {"insertions": bool(ins), "deletions": bool(dele)}
     if prefer or prefer != current_prefer:
         record[PREFER_REWRITE_OVER_DELETION] = bool(prefer)
+    if soft or soft != current_soft:
+        record[SOFT_DELETIONS] = bool(soft)
     return record
 
 
@@ -2341,7 +2407,8 @@ def content_edit_policy_note(ctx=None) -> str:
     """A short operator-facing description, or "" for the default policy."""
     ins, dele = insertions_enabled(ctx), deletions_enabled(ctx)
     prefer = prefer_rewrite_over_deletion(ctx)
-    if ins and dele and not prefer:
+    soft = soft_deletions(ctx)
+    if ins and dele and not prefer and not soft:
         return ""
     parts = []
     if not ins:
@@ -2350,6 +2417,8 @@ def content_edit_policy_note(ctx=None) -> str:
         parts.append("deletions OFF")
     if prefer:
         parts.append("prefer rewrite over deletion")
+    if soft and dele:
+        parts.append("soft deletions (removable units only)")
     return ", ".join(parts) + " (benchmark-only content-edit policy)"
 
 

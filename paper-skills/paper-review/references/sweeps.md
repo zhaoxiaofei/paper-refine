@@ -479,6 +479,25 @@ legend self-contained?
 - legend not self-contained: references the main text for n, error bars, or test definitions
 - figure file present in the directory but not referenced by the manuscript, and vice versa
 
+**Wrong label, not a missing item — run this before filing "called out but
+never defined".** A call-out names a display that does not exist, and the
+sentence says what that display shows ("Figure 2 shows the treatment response the
+abstract summarises"). Ask which DEFINED item carries that content: the
+treatment response is what the Results attribute to Figure 1, and the sample
+positions are Table 1's rows. If one does, the object is not missing — the
+NUMBER is wrong. File it as a label mismatch under the same class and fix the
+number; never delete the sentence that carries the call-out, and never report
+the object as absent.
+
+The mirror direction is the same class. A caption that names a different
+quantity than the body sentence attributes to the same display ("Figure 1.
+Biomass" where the text and the Results report grain yield) is a
+WRONG CAPTION, not a missing figure file: compare the caption's head noun with
+the quantity the body states for that display, and correct the caption (the
+body's claim decides when the two disagree). A missing figure FILE is a
+packaging item; it does not dispose the caption's wording, and "legend present,
+file absent" is not a clean legend.
+
 ## M4 — Numbers & metrics sweep (script-assisted: `extract_numbers.py`)
 
 **Purpose:** the long-range conflict class — the same labelled metric (p, n,
