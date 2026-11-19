@@ -185,7 +185,30 @@ def _own_completion_signal(sb: Path, kind: str, name: str, rec: dict):
     """
     if (sb / name).is_file():
         data = read_json(sb / name, revive=False, lenient=True)   # agent-written
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict) or not data:
+            # An empty object is not a completion claim (and `_marker_checks`
+            # reports the missing `status` once a real marker exists). The root
+            # is authoritative for a NON-empty signal, but it must still name
+            # this run/stage: a stale marker left by another stage/run in a
+            # reused sandbox used to satisfy the detector (F023).
+            return None
+        if name == MARKER_FILE:
+            # A root marker may omit `stage` (the run's own context identifies
+            # the stage, see `_marker_checks`); a WRONG stage or run_id is
+            # another run's property. `status` is deliberately not required
+            # here: a `failed` marker is this attempt's terminal signal and
+            # must reach the postcheck to be recorded and retried, while a
+            # missing/invalid status is reported there.
+            stage = data.get("stage")
+            if stage is not None and stage != rec.get("kind"):
+                return None
+            if data.get("run_id") not in (None, rec.get("id")):
+                return None
+        elif not _signal_names_this_run(data, rec, name):
+            # A judge sheet must name this run (or the issued target); an
+            # anonymous sheet is not adoptable (F189), root or stray.
+            return None
+        return data
     stray = stray_signal_path(sb, kind, name)
     if stray is None:
         return None
@@ -1596,7 +1619,16 @@ LEDGER_FINAL_RE = re.compile(
 
 
 def _ledger_final_status(row) -> str:
-    """The row's final edit outcome, or "" (a different column from `verdict`)."""
+    """The row's final edit outcome, or "" (a different column from `verdict`).
+
+    An explicit final-status column that carries a NON-vocabulary value fails
+    closed: `{"final_status": "not fixed", "status": "fixed"}` used to fall
+    through to `status` and read as `fixed` (F048). Only when no final-status
+    column is set at all may the `verdict` column supply the outcome, because a
+    one-column row whose verdict is `manual-required`/`clarification` is that
+    outcome (F046) -- `confirmed` and the other re-verification verdicts are
+    not final-status tokens and stay "".
+    """
     for key in ("final_status", "final status", "status", "disposition"):
         val = re.sub(r"\s+", " ", str((row or {}).get(key) or "").strip())
         if not val:
@@ -1604,7 +1636,13 @@ def _ledger_final_status(row) -> str:
         m = LEDGER_FINAL_RE.match(val)
         if m:
             return re.sub(r"[\s_]+", "-", m.group(1).lower())
-    return ""
+        # The FIRST present final-status column decides. A present but
+        # non-vocabulary value must not silently fall through to a
+        # lower-priority column that happens to read `fixed`.
+        return ""
+    verdict = re.sub(r"\s+", " ", str((row or {}).get("verdict") or "").strip())
+    m = LEDGER_FINAL_RE.match(verdict)
+    return re.sub(r"[\s_]+", "-", m.group(1).lower()) if m else ""
 
 
 def _ledger_row_counts(ledger, wanted=()) -> dict:
@@ -2485,136 +2523,6 @@ def _toml_inline_table_values(raw: str):
     return out
 
 
-def mcp_server_spec(name: str) -> dict:
-    """{command, args} for one configured MCP server, {} when unreadable.
-
-    The operator's own `~/.codex/config.toml` entry is the authority (same
-    regex-scoped read as `mcp_server_configured`): the orchestrator must drive
-    EXACTLY the server the agent sessions are configured with.
-    """
-    try:
-        text = codex_config_path().read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    quoted = re.escape(name)
-    # A legal trailing comment (`[mcp_servers.x] # note`) does not unconfigure
-    # the server: with `\]\s*$` the header never matched, so a configured server
-    # probed as absent.
-    header = re.compile(r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
-                        + quoted + r"'|" + quoted + r")\s*\]\s*(?:#.*)?$", re.MULTILINE)
-    # The header itself is a line of TOML STRUCTURE: a `[mcp_servers.x]` line
-    # inside another entry's multi-line string does not configure a server. The
-    # mask keeps every offset, so the body slice still indexes the real text.
-    m = header.search(_toml_unquoted_mask(text))
-    if not m:
-        return {}
-    rest = text[m.end():]
-    # The entry's body ends at the next table header, and its keys are found by
-    # a line regex -- but neither a header nor a key can legally live inside a
-    # TOML string or comment. Mask those bodies first (same length, same
-    # offsets) so an `args` value carrying a `command = "evil"` line is not
-    # read as the executable (F011), and a `[section]` line inside that string
-    # does not truncate the body and hide the real `command`.
-    masked_rest = _toml_unquoted_mask(rest)
-    nxt = re.search(r"^\s*\[", masked_rest, re.MULTILINE)
-    body = rest[:nxt.start()] if nxt else rest
-    keys = masked_rest[:nxt.start()] if nxt else masked_rest
-    cm = re.search(r"^[ \t]*command[ \t]*=[ \t]*", keys, re.MULTILINE)
-    if not cm:
-        return {}
-    got = _toml_string_at(body, cm.end())
-    if got is None or not got[0].strip():
-        return {}
-    # The TOML basic string decodes its escapes: `command = "C:\\Program
-    # Files\\node.exe"` names `C:\Program Files\node.exe`, and the raw
-    # `C:\\Program Files\\node.exe` never started on Windows.
-    command = os.path.expanduser(got[0])
-    args = []
-    am = re.search(r"^\s*args\s*=\s*", keys, re.MULTILINE)
-    if am:
-        raw = _toml_array_at(body, am.end())
-        if raw is None:
-            # The `args` KEY is present but its value is not a readable TOML
-            # array (an unterminated array, `args = "server.js"`, a malformed
-            # quote). That is UNREADABLE, never "configured with no arguments":
-            # leaving `args` empty launched the server with no argv at all --
-            # the silent wrong configuration the block below claims to prevent
-            # (F113). The `_toml_array_values` failure path returns {} for the
-            # same reason.
-            return {}
-    else:
-        raw = None
-    if raw is not None:
-        values = _toml_array_values(raw)
-        if values is None:
-            # A malformed entry is UNREADABLE, never "configured with no
-            # arguments": `json.loads` alone rejects TOML's own literal strings
-            # (`args = ['a']`) and TOML's trailing comma (`["a", "b",]`), and
-            # the old `except ValueError: args = []` then launched the server
-            # with no argv at all -- the silent wrong configuration
-            # `_toml_array_at` exists to prevent. Returning {} makes the caller
-            # report the entry instead of using it half-read.
-            return {}
-        args = values
-    spec = {"command": command, "args": args}
-    # `scripts/README-codex-mcp.md` lists command,args,env,cwd as the SAME
-    # fields in a Codex MCP entry. Dropping env/cwd launched the orchestrator's
-    # server with the pipeline's environment and working directory instead of
-    # the operator's configured one (F28).
-    wm = re.search(r"^[ \t]*cwd[ \t]*=[ \t]*", keys, re.MULTILINE)
-    if wm:
-        cwd_got = _toml_string_at(body, wm.end())
-        if cwd_got is None:
-            return {}
-        spec["cwd"] = os.path.expanduser(cwd_got[0])
-    em = re.search(r"^[ \t]*env[ \t]*=[ \t]*", keys, re.MULTILINE)
-    if em:
-        raw_env = _toml_inline_table_at(body, em.end())
-        env_values = _toml_inline_table_values(raw_env) if raw_env is not None else None
-        if env_values is None:
-            return {}                   # a malformed env block: unreadable entry
-        spec["env"] = env_values
-    if "env" not in spec:
-        # TOML also allows a subtable form: `[mcp_servers.<name>.env]` followed
-        # by `KEY = "value"` lines. It configures the same field, so ignoring it
-        # would keep launching with the pipeline's environment.
-        env_header = re.compile(
-            r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
-            + quoted + r"'|" + quoted + r")\s*\.\s*env\s*\]\s*(?:#.*)?$",
-            re.MULTILINE)
-        eh = env_header.search(text)
-        if eh:
-            rest_env = text[eh.end():]
-            next_hdr = re.search(r"^\s*\[", rest_env, re.MULTILINE)
-            env_body = rest_env[:next_hdr.start()] if next_hdr else rest_env
-            values = {}
-            for raw_line in env_body.splitlines():
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    return {}
-                key_part, value_part = line.split("=", 1)
-                key_part, value_part = key_part.strip(), value_part.strip()
-                if key_part[:1] in "\"'":
-                    key_got = _toml_string_at(key_part, 0)
-                    if key_got is None or key_got[1] != len(key_part):
-                        return {}
-                    key = key_got[0]
-                elif re.fullmatch(r"[A-Za-z0-9_.\-]+", key_part):
-                    key = key_part
-                else:
-                    return {}
-                if value_part[:1] in "\"'":
-                    val_got = _toml_string_at(value_part, 0)
-                    if val_got is None:
-                        return {}
-                    value = val_got[0]
-                else:
-                    value = value_part.split("#", 1)[0].strip()
-                values[key] = value
-            spec["env"] = values
-    return spec
 
 
 def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
@@ -6180,10 +6088,67 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     file names are kept, so references stay valid); a file the original does not
     have is removed.
     """
+    name = raw_data_dirname(cand_dir)
+    area = cand_dir / name
     src = ctx.pristine / raw_data_dirname(ctx.pristine)
     if not src.is_dir():
-        return {"present": False, "files": 0, "restored": [], "dropped": [],
-                "failures": []}
+        # The pristine corpus carries NO raw-data area, so there is nothing this
+        # package could have inherited: a candidate `raw_data/` is a FABRICATED
+        # read-only input area. The old early return never looked at the
+        # candidate, so a stage could create one and ship it unreported (F063).
+        # Scan and drop every entry, and fail: an INPUT area that does not exist
+        # in the original may not be created by a stage.
+        dropped, failures = [], []
+        if area.is_symlink() or (area.exists() and not area.is_dir()):
+            try:
+                area.unlink()
+                dropped.append(name)
+            except OSError as e:
+                failures.append(f"could not remove fabricated {name}: {e}")
+        elif area.is_dir():
+            mode_plan = make_tree_writable(area)
+            try:
+                links = []
+                raw_data_entries(cand_dir, symlinks=links)
+                for rel in links:
+                    p = cand_dir / rel
+                    try:
+                        if p.is_symlink() or p.exists():
+                            p.unlink()
+                        dropped.append(rel)
+                    except OSError as e:
+                        failures.append(f"could not remove fabricated {rel}: {e}")
+                # Re-scan after the links are gone: a directory link could hide
+                # files the walker refuses to follow into, and those go with the
+                # link.
+                for rel in sorted(raw_data_entries(cand_dir)):
+                    p = cand_dir / rel
+                    try:
+                        if p.is_file() or p.is_symlink():
+                            p.unlink()
+                            dropped.append(rel)
+                    except OSError as e:
+                        failures.append(f"could not remove fabricated {rel}: {e}")
+            finally:
+                restore_modes(mode_plan)
+            for d in sorted([p for p in area.rglob("*") if p.is_dir()],
+                            key=lambda p: len(p.parts), reverse=True):
+                try:
+                    d.rmdir()              # only empty directories disappear
+                except OSError:
+                    pass
+            with contextlib.suppress(OSError):
+                area.rmdir()
+        if dropped:
+            warns.append(
+                f"READ-ONLY raw data: {len(dropped)} entr(y/ies) under {name}/ were removed "
+                f"-- the pristine original has NO raw-data area, so the package may not create "
+                f"one (an input area is copied from the original, never authored)")
+            failures.append(
+                f"{name}/ is not an input of this corpus (the pristine original has no "
+                f"raw-data area); the package may not create it")
+        return {"present": False, "files": 0, "restored": [], "dropped": dropped,
+                "failures": failures}
     gaps, want_failures = [], []
     want = raw_data_entries(ctx.pristine, gaps=gaps, failures=want_failures)
     if gaps or want_failures:
@@ -6198,8 +6163,6 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     # arbitrary files under raw_data/ whenever the author's directory is empty
     # (F119). The rest of this function then sees every candidate entry as an
     # extra and drops it.
-    name = raw_data_dirname(cand_dir)
-    area = cand_dir / name
     if area.is_symlink():
         # The sandbox INPUT links this area to the canonical copy; a package
         # that carries the link onward must be verified, never written through.

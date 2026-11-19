@@ -1179,164 +1179,6 @@ def _m30_seed_reference_state(sb: Path) -> tuple:
     return [], False, str(pin)
 
 
-def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
-    """(errs, warns) for the M30 source-hierarchy reconciliation record.
-
-    The evidence is the stage's own seeded ledger: every row disposed means the
-    revision looked at the written value AND its producer, so an empty
-    disposition cell means the comparison the finding rests on was never
-    recorded (rule E12).
-
-    WHERE THE ROWS LIVE was ambiguous and cost the 2026-11-01 revise arm its
-    second attempt. The seed is `work/<name>` in the SANDBOX (`decide` writes it
-    next to PROMPT.md), but the stage's deliverables are all under the package,
-    so one reviser disposed `revised/work/<name>` (53/53 rows answered) while
-    the postcheck read the untouched sandbox copy and failed it on "53 of 165
-    ... EMPTY". The check therefore reads BOTH copies and judges the disposed
-    one; a run that answered either copy did the work. The message names which
-    copy was read.
-
-    The old message also reported `len(block_problems)` as "N undisposed
-    row(s)" and then pasted 80 characters of the first problem into it,
-    truncated mid-word, producing
-      "still carries 1 undisposed row(s) (53 of 165 row(s) have an EMPTY
-       disposition cell (every seeded row must be dispos)"
-    -- a count of problems labelled as a count of rows, an unbalanced
-    parenthesis and a cut word, which is what reached the operator's log.
-    """
-    m30_ids = [str(f.get("id") or "").strip() for f in frozen_all
-               if str(f.get("check") or "").strip().upper() == "M30"]
-    errs, warns = [], []
-    if not m30_ids:
-        return errs, warns
-    candidates = []
-    if pkg:
-        package_copy = Path(sb) / pkg / M30_HIERARCHY_REL
-        if package_copy.is_file():
-            candidates.append((f"{pkg}/{M30_HIERARCHY_REL}", package_copy))
-    sandbox_copy = Path(sb) / M30_HIERARCHY_REL
-    if sandbox_copy.is_file():
-        candidates.append((M30_HIERARCHY_REL, sandbox_copy))
-    if not candidates:
-        looked_for = ([f"{pkg}/{M30_HIERARCHY_REL}"] if pkg else []) + [M30_HIERARCHY_REL]
-        warns.append(f"the frozen review carries {len(m30_ids)} M30 source-hierarchy "
-                     f"finding(s) but no {' or '.join(looked_for)} exists: rule E12 requires the "
-                     f"written side to be aligned with the authoritative producer, with the "
-                     f"reconciling reason recorded")
-        return errs, warns
-    judged, judged_state, judged_score, states = None, None, None, {}
-    for label, path in candidates:
-        try:
-            state = _m30_ledger_state(path)
-        except Exception as e:                                      # noqa: BLE001
-            warns.append(f"{label}: could not be read ({type(e).__name__}: {e}); the M30 rows "
-                         f"there stay unverified")
-            continue
-        states[label] = state
-        # The DISPOSED copy is the reviser's answer: a stale seed left empty
-        # beside a filled package copy is not a defect (and the reverse is the
-        # case this check was written for). Ordering: a copy that still holds
-        # seeded candidate rows is evidence of the check; one with none (an
-        # empty or unparsed file) must never beat it just because it has nothing
-        # left to report. Among copies that hold such rows, the one with the
-        # fewest empty dispositions wins (a tie keeps the package copy, listed
-        # first).
-        score = (0 if state["actionable"] else 1, state["empty"])
-        if judged_score is None or score < judged_score:
-            judged, judged_state, judged_score = label, state, score
-    if judged_state is None:
-        return errs, warns
-    sandbox_state = states.get(M30_HIERARCHY_REL)
-    if (judged != M30_HIERARCHY_REL and sandbox_state
-            and sandbox_state["actionable"]
-            and sandbox_state["empty"] == sandbox_state["actionable"]):
-        # The reviser answered the package copy and left the seed in place. That
-        # is accepted (the work is done), but the record should say which copy
-        # was judged so nobody reads the untouched seed as the evidence.
-        warns.append(f"{judged} was judged; the sandbox seed {M30_HIERARCHY_REL} is still "
-                     f"undisposed ({sandbox_state['empty']} of "
-                     f"{sandbox_state['actionable']} row(s) EMPTY)")
-    if not judged_state["readable"]:
-        # A zero-byte, unreadable or table-less ledger is missing EVIDENCE, not
-        # a clean ledger: the old all-zero state returned no error and silently
-        # removed the gate (F02).
-        errs.append(
-            f"{judged} exists but carries no readable M30 table (zero-byte, over the byte "
-            f"budget, a symlink/non-regular file, or no markdown table): the source-hierarchy "
-            f"reconciliation is unverified. Restore the seeded table and dispose every row.")
-        return errs, warns
-    actionable, empty = judged_state["actionable"], judged_state["empty"]
-    # ROW IDENTITY: a candidate copy that drops seeded rows cannot pass on the
-    # strength of the one row it kept. The old score compared only
-    # (has actionable rows, empty count), so a one-row package copy with a
-    # filled disposition beat a full seed with three empty rows and the gate
-    # reported nothing (F01). The reference is the identity PIN the orchestrator
-    # wrote BESIDE the sandbox, not the live seed file -- that file is also the
-    # documented answer ("dispose every seeded row in place"), so a rewrite of it
-    # (or of both it and the ledger) used to pass the check it was supposed to
-    # fail (R04/F39). The live sandbox seed is the fallback only for a
-    # PROMPT-less unit fixture.
-    judged_keys = set(judged_state["rows"])
-    reference_rows, reference_available, reference_label = _m30_seed_reference_state(sb)
-    if not reference_available:
-        if (Path(sb) / "PROMPT.md").is_file():
-            # Every real session sandbox carries PROMPT.md, and the seed pin is
-            # written beside it. If the pin is gone/unreadable the identity
-            # check CANNOT run: report that instead of silently trusting the
-            # agent-writable live copy (F39).
-            errs.append(
-                f"{judged}: the M30 seed reference {reference_label} is missing, "
-                f"unreadable or carries no hierarchy rows, so the seeded row identities "
-                f"cannot be checked. Restore the evidence pin (or re-run the stage): "
-                f"the identity check is not skipped.")
-            reference_rows = []
-        else:
-            # A unit fixture / legacy sandbox without an evidence pin: fall back
-            # to the live sandbox seed (the pre-R04 behaviour).
-            reference_rows = (sandbox_state["rows"]
-                              if (judged != M30_HIERARCHY_REL and sandbox_state
-                                  and sandbox_state["readable"]) else [])
-            reference_label = M30_HIERARCHY_REL
-    dropped = [k for k in reference_rows if k not in judged_keys]
-    if dropped:
-        errs.append(
-            f"{judged} is missing {len(dropped)} of the {len(reference_rows)} seeded M30 "
-            f"row(s) recorded in {reference_label} that name a candidate producer: "
-            f"{len(dropped)} seeded row(s) were DROPPED instead of disposed. Copy every "
-            f"seeded row into the answer and dispose it in place (`OK -- ...` / "
-            f"`contradiction -- ...` / `unable -- ...`).")
-    if actionable and empty == actionable:
-        # None of the rows that actually need a comparison was disposed: the
-        # check was not run at all, not merely left one row short. Fail the
-        # attempt (the retry prompt carries this message) instead of accepting
-        # the warning the evaluation run ignored.
-        errs.append(
-            f"{judged} still carries {empty} of {actionable} seeded row(s) with a candidate "
-            f"producer whose disposition cell is EMPTY: an M30 finding's fix must record the "
-            f"producer it reconciled against (rule E12). Dispose every such row in place -- "
-            f"`OK -- <the reconciling reason>`, `contradiction -- <finding id>` or "
-            f"`unable -- <what is missing>` -- in the ledger you were given.")
-    else:
-        # EVERY block problem is now an ERROR, not a warning: an empty or
-        # boilerplate disposition recorded no comparison, and the gate exists to
-        # enforce exactly that (F03). The old code downgraded boilerplate to a
-        # warning and never looked at an arbitrary non-empty cell at all.
-        detail = "; ".join(str(p) for p in judged_state["block_problems"][:3])
-        if judged_state["block_problems"]:
-            more = len(judged_state["block_problems"]) - 3
-            errs.append(
-                f"{judged}: {len(judged_state['block_problems'])} disposition problem(s) -- "
-                f"{detail}" + (f" (and {more} more)" if more > 0 else "")
-                + ". Every seeded row needs its own disposition: `OK -- <the reconciling "
-                  "reason>`, `contradiction -- <finding id>` or `unable -- <what is missing>`.")
-        if judged_state["bad_dispositions"]:
-            quotes = "; ".join(repr(x[:80]) for x in judged_state["bad_dispositions"][:3])
-            errs.append(
-                f"{judged}: {len(judged_state['bad_dispositions'])} non-empty disposition "
-                f"cell(s) do not use the documented shape ({quotes}): an arbitrary value is "
-                f"not a recorded comparison. Use `OK -- ...`, `contradiction -- ...` or "
-                f"`unable -- ...`.")
-    return errs, warns
 
 
 def postcheck_revise(ctx: Ctx, rec: dict):
@@ -5688,26 +5530,45 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None,
     # second base occurrence (F130).
     revised_counts = {rel: Counter(parts)
                       for rel, parts in revised_paras.items()}
-    revised_join = {rel: " ".join(parts) for rel, parts in revised_paras.items()}
+    # The remainder of a paragraph after the pipeline's own sentence removal is
+    # compared as a STANDALONE paragraph, never as a raw substring of the joined
+    # document: unrelated text used to satisfy the substring test (F052).
+    revised_para_sets = {rel: set(parts) for rel, parts in revised_paras.items()}
     exempt = {}
-    for document, sentence in exempt_removed or ():
-        norm = _deleted_para_norm(sentence)
-        if norm:
-            exempt.setdefault(str(document), []).append(norm)
+    exempt_any = Counter()
+    for item in exempt_removed or ():
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            document, sentence = item[0], item[1]
+            norm = _deleted_para_norm(sentence)
+            if norm:
+                exempt.setdefault(str(document), Counter())[norm] += 1
+        else:
+            norm = _deleted_para_norm(item)
+            if norm:
+                exempt_any[norm] += 1
     rows, seen = [], set()
     for rel, line, text in deletion_audit_paragraphs(base, skipped=skipped):
         norm = _deleted_para_norm(text)
         low = norm
-        removed_here = exempt.get(rel, [])
-        if any(low == sentence for sentence in removed_here):
+        removed_here = exempt.get(rel, Counter())
+        # Consume ONE occurrence per recorded pipeline removal: replacing every
+        # occurrence made a second, session-deleted identical copy vanish too
+        # (F052).
+        if removed_here.get(low, 0) > 0:
+            removed_here[low] -= 1
+            continue
+        if exempt_any.get(low, 0) > 0:
+            exempt_any[low] -= 1
             continue
         if removed_here:
             remaining = low
-            for sentence in removed_here:
-                remaining = remaining.replace(sentence, " ")
+            for sentence, count in list(removed_here.items()):
+                for _ in range(count):
+                    remaining = remaining.replace(sentence, " ", 1)
             remaining = _deleted_para_norm(remaining)
             if remaining != low and (
-                    not remaining or remaining in revised_join.get(rel, "")):
+                    not remaining
+                    or remaining in revised_para_sets.get(rel, ())):
                 # The rest of the paragraph survives: the only deleted text was
                 # the pipeline's own dangling-reference sentence.
                 continue
@@ -5973,7 +5834,12 @@ def _markdown_table_data_rows(raw: str, first_line: int) -> list:
 
 
 def _content_paragraph_rows(raw: str, first_line: int) -> list:
-    """[(line, text)] for one blank-line block, with its marker lines removed.
+    """[(line, text, is_row)] for one blank-line block, marker lines removed.
+
+    `is_row` is decided HERE, where the table structure is still visible: a real
+    Markdown table block or LaTeX tabular row is a row, while ordinary prose
+    that happens to contain a vertical bar (`The mean |t| was 2.1`) is not
+    (F187).
 
     A Markdown `# Methods` or LaTeX `\\section{Methods}` line and its prose are
     one blank-line block. Skipping the block because its FIRST line is a heading
@@ -5986,7 +5852,7 @@ def _content_paragraph_rows(raw: str, first_line: int) -> list:
     if _nonblank and all(ln.strip().startswith("|") for ln in _nonblank):
         rows = _markdown_table_data_rows(raw, first_line)
         if rows:
-            return rows
+            return [(ln, body, True) for ln, body in rows]
     if "\\begin{tabular}" in str(raw or ""):
         # A LaTeX tabular row is a content unit, exactly like a Markdown table
         # row. As one paragraph, deleting a row left a similar paragraph and
@@ -6006,21 +5872,21 @@ def _content_paragraph_rows(raw: str, first_line: int) -> list:
             if row:
                 rows.append((first_line + i, row))
         if rows:
-            return rows
+            return [(ln, body, True) for ln, body in rows]
     norm = _deleted_para_norm(raw)
     if len(norm) < _CONTENT_UNIT_MIN_CHARS and not _short_text_carries_fact(norm):
         return []
     if not _DELETED_PARA_SKIP_RE.match(norm):
-        return [(first_line, norm)]
+        return [(first_line, norm, False)]
     dropped, rest = _strip_nonprose_block(raw)
     if (len(rest) < _CONTENT_UNIT_MIN_CHARS and not _short_text_carries_fact(rest)) \
             or _DELETED_PARA_SKIP_RE.match(rest):
         return []
-    return [(first_line + dropped, rest)]
+    return [(first_line + dropped, rest, False)]
 
 
-def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
-    """[(document, line, paragraph)] for the strict policy's sentence scan.
+def _content_unit_paragraphs_meta(package: Path, skipped: list = None) -> list:
+    """[(document, line, paragraph, meta)] for the strict policy's sentence scan.
 
     The same submission-surface rule as `deletion_audit_paragraphs`, but every
     prose paragraph counts, not only the >=30-character ones the deletion audit
@@ -6028,6 +5894,10 @@ def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
     unit, and the policy must see it. Headings, reference entries, evidence
     areas, workflow scratch, bookkeeping files and files the package's own
     README declares not submitted stay out.
+
+    `meta` carries the structure the sentence splitter would lose: `is_row` for
+    a real Markdown/LaTeX/DOCX table row (F187) and `in_references` for a unit
+    that sits in the document's reference list (F149).
 
     `skipped` (when a list is passed) collects the submitted files the scan
     could NOT read (corrupt/oversized). Silently ignoring them made the policy
@@ -6065,20 +5935,29 @@ def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
                 if skipped is not None:
                     skipped.append(rel)
                 continue
+            in_references = False
             for index, (text, style) in enumerate(paras, 1):
+                para = _deleted_para_norm(text)
+                if para and _REFERENCE_HEADING_RE.search(para):
+                    in_references = True
+                elif re.match(r"(?i)^heading\s*\d*$", str(style or "").strip()):
+                    in_references = False
                 if re.match(r"(?i)^heading\s*\d*$", str(style or "").strip()):
                     continue
-                para = _deleted_para_norm(text)
-                if len(para) >= _CONTENT_UNIT_MIN_CHARS \
+                if (len(para) >= _CONTENT_UNIT_MIN_CHARS
+                        or _short_text_carries_fact(para)) \
                         and not _DELETED_PARA_SKIP_RE.match(para):
-                    rows.append((rel, index, para))
+                    rows.append((rel, index, para,
+                                 {"is_row": False, "in_references": in_references}))
             # The ROW is the content unit: individual cells are short fragments
-            # the >=8-char floor drops (F192).
+            # the >=8-char floor drops (F192). The row shape is known here, so
+            # a short row ("9 | 9") is kept as a row rather than dropped by the
+            # prose floor before `_content_unit_sentences` can see it (F056).
             for index, trow in enumerate(_docx_table_rows(p), len(paras) + 1):
                 para = _deleted_para_norm(trow)
-                if len(para) >= _CONTENT_UNIT_MIN_CHARS \
-                        and not _DELETED_PARA_SKIP_RE.match(para):
-                    rows.append((rel, index, para))
+                if para and not _DELETED_PARA_SKIP_RE.match(para):
+                    rows.append((rel, index, para,
+                                 {"is_row": True, "in_references": in_references}))
         elif ext in (".rtf", ".doc", ".odt"):
             # An editable format this scan cannot parse must not disappear
             # silently: record it so the caller fails closed (F198/F142).
@@ -6092,16 +5971,39 @@ def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
                 if skipped is not None:
                     skipped.append(rel)
                 continue
+            in_references = False
             for start, para in _text_paragraphs_with_lines(text):
                 line = text[:start].count("\n") + 1
-                rows.extend((rel, ln, body)
-                            for ln, body in _content_paragraph_rows(para, line))
+                _nonblank = [ln for ln in para.splitlines() if ln.strip()]
+                _first = _nonblank[0].strip() if _nonblank else ""
+                if _REFERENCE_HEADING_RE.search(_first):
+                    in_references = True
+                elif re.match(r"(?i)^(?:#{1,6}\s|\\(?:sub)*section)", _first):
+                    # A new section ends the reference list.
+                    in_references = False
+                rows.extend((rel, ln, body,
+                             {"is_row": bool(is_row),
+                              "in_references": in_references})
+                            for ln, body, is_row
+                            in _content_paragraph_rows(para, line))
     if skipped is not None:
         # Same accounting as the deletion audit: a submitted file symlink or an
         # unreadable directory is a scan gap, never "no content" (F197).
         skipped.extend(_gaps)
         skipped.extend(_links)
     return rows
+
+
+def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
+    """[(document, line, paragraph)] -- the historical three-field view.
+
+    `_content_unit_paragraphs_meta` carries the structure the sentence splitter
+    needs (`is_row`, `in_references`); callers that only read paragraph text
+    keep the established tuple shape.
+    """
+    return [(rel, line, text)
+            for rel, line, text, _meta
+            in _content_unit_paragraphs_meta(package, skipped=skipped)]
 
 
 def _content_unit_sentences(package: Path, skipped: list = None) -> list:
@@ -6115,7 +6017,7 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
     ("This is false.") while dropping bare fragments.
     """
     units = []
-    for rel, line, paragraph in _content_unit_paragraphs(package, skipped=skipped):
+    for rel, line, paragraph, meta in _content_unit_paragraphs_meta(package, skipped=skipped):
         if _is_handoff_marker(paragraph):
             # A hand-off marker can contain an internal sentence boundary
             # ("[AUTHOR TO COMPLETE: Add the grant number. It is printed on the
@@ -6124,13 +6026,16 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
             sentences = [paragraph]
         else:
             sentences = _content_sentence_parts(paragraph)
+        # The row shape comes from the paragraph reader, where the table
+        # structure still exists (F187): a prose sentence containing a vertical
+        # bar is NOT a table row.
+        is_row = bool(meta.get("is_row"))
         for sentence_index, sentence in enumerate(sentences):
             text = re.sub(r"\s+", " ", str(sentence or "")).strip()
             # A TABLE ROW is a structural content unit even when every cell is
             # short (`9 | 9`): the prose character/word floor dropped it, so a
             # fabricated data row could be added under --disable-insertions
             # (F241).
-            is_row = bool(re.fullmatch(r"[^|]+(?:\s*\|\s*[^|]+)+", text))
             if len(text) < _CONTENT_UNIT_MIN_CHARS \
                     and not (is_row or _short_text_carries_fact(text)):
                 continue
@@ -6139,7 +6044,8 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
                 continue
             unit = {"document": rel, "line": int(line or 0), "text": text,
                     "norm": text.lower().strip(), "sentence_index": sentence_index,
-                    "tokens": set(tokens)}
+                    "tokens": set(tokens),
+                    "in_references": bool(meta.get("in_references"))}
             if is_row:
                 unit["cells"] = tuple(c.strip() for c in text.split("|"))
             units.append(unit)
@@ -6248,8 +6154,8 @@ def _match_content_unit_pairs(base_units: list, cand_units: list) -> tuple:
     #    (F05); a multi-sentence paragraph shares one line, so the sentence
     #    ordinal is the anchor (F047). It is deliberately narrow: the slot is
     #    trusted only when the same paragraph already has a verbatim match (so
-    #    the paragraph is demonstrably aligned) or the two units share content;
-    #    an unrelated single same-line sentence still fails.
+    #    the paragraph is demonstrably aligned) AND the two units share real
+    #    content; an unrelated single same-line sentence still fails (F001).
     fuzzy_left = []
     _anchors_done = set()
     exact_paragraphs = {(base["document"], base["line"])
@@ -6276,7 +6182,7 @@ def _match_content_unit_pairs(base_units: list, cand_units: list) -> tuple:
         if similarity >= _CONTENT_UNIT_MATCH \
                 or (base_keys & cand_keys) \
                 or (len(shared) >= 2 and similarity >= 0.35) \
-                or paragraph_aligned \
+                or (paragraph_aligned and similarity >= 0.35) \
                 or (base_nums & cand_nums and similarity >= 0.40):
             unmatched.discard(same_pos[0])
             pairs.append((base, cand))
@@ -6347,8 +6253,12 @@ _AUTHOR_YEAR_PAREN_RE = re.compile(
     r"(?:\s+(?:et\s+al\.?|and\s+[A-Z][A-Za-z'\u2019.\-]+))?"
     r"\s*,\s*(?P<y>(?:19|20)\d{2})[a-z]?")
 _AUTHOR_YEAR_NARRATIVE_RE = re.compile(
-    r"\b(?P<a>[A-Z][A-Za-z'\u2019.\-]+)(?:\s+et\s+al\.?)?\s*"
-    r"\((?P<y>(?:19|20)\d{2})[a-z]?\)")
+    r"\b(?P<a>[A-Z][A-Za-z'\u2019.\-]+)"
+    # A bare `Word (YYYY)` is ordinary prose ("Baseline (2019) values ...",
+    # "However (2019) ..."), not a citation (F008). Require a real narrative
+    # citation cue: `et al.` or a second named author.
+    r"(?:\s+et\s+al\.?|\s+and\s+[A-Z][A-Za-z'\u2019.\-]+)"
+    r"\s*\((?P<y>(?:19|20)\d{2})[a-z]?\)")
 
 
 def _prose_citation_keys(text) -> set:
@@ -6678,6 +6588,15 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                 cand_marker_norms.remove(u["norm"])
                 continue
         base_units.append(u)
+    # The exemption list is consumed ABOVE. Hand the soft-deletion helper only
+    # the leftovers: re-applying the raw list let it excuse the same removal a
+    # second time, so the second identical copy of a sentence could be deleted
+    # with no signal (F004).
+    remaining_exempt = [norm for norm, count in exempt_text.items()
+                        for _ in range(count)]
+    remaining_exempt += [(doc, norm)
+                         for (doc, norm), count in exempt_document.items()
+                         for _ in range(count)]
     missing, added = _match_content_units(base_units, cand_units)
     # A reference-entry correction the entry comparator accepted (ratio >=
     # 0.80) must not be re-reported as a missing+added prose unit: the two
@@ -6696,7 +6615,13 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
         kept = []
         for unit in units:
             norm = _deleted_para_norm(unit.get("text")).lower()
-            if len(norm) >= _DELETED_PARA_MIN and any(norm in e for e in entries):
+            # Only a unit that IS part of the reference list can be covered by
+            # a corrected entry: an ordinary prose sentence that happens to be
+            # a substring of some bibliography entry used to be dropped too
+            # (F149).
+            if (len(norm) >= _DELETED_PARA_MIN
+                    and unit.get("in_references")
+                    and any(norm in e for e in entries)):
                 continue
             kept.append(unit)
         return kept
@@ -6712,7 +6637,9 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
     policy_name = ("--disable-deletions" if scope == "none"
                    else "--enable-soft-deletions")
     if scope == "removable" and missing:
-        missing = soft_deletion_missing_units(missing, cand_units, exempt_removed)
+        missing = soft_deletion_missing_units(
+            missing, cand_units, remaining_exempt,
+            allow_marker_delete=allow_marker_delete)
     if skipped:
         names = ", ".join(sorted(set(skipped))[:6])
         problems.append(
@@ -6849,7 +6776,7 @@ _FACT_SURVIVAL_UNITS = frozenset("""
 % \u2030 \u00b0C \u00b0F
 m cm mm um \u00b5m nm km ft yd mi
 g mg ug \u00b5g ng pg kg
-L l mL ml uL \u00b5L cL dL nL
+L l mL ml uL \u00b5L \u00b5l \u03bcl cL dL nL
 M mM uM \u00b5M nM pM mol mmol umol \u00b5mol nmol pmol
 s ms us \u00b5s ns min h hr hrs d day days wk week weeks mo month months yr year years
 Pa kPa MPa GPa Hz kHz MHz GHz V mV kV W kW MW A mA uA \u00b5A J kJ MJ
@@ -6864,8 +6791,8 @@ Da kDa bp kb Mb Gb nt rpm
 _FACT_SURVIVAL_UNIT_ALIASES = {
     # Volume
     "ml": ("ml", "mL", "milliliter", "milliliters", "millilitre", "millilitres"),
-    "ul": ("ul", "uL", "\u00b5L", "\u03bcL", "microliter", "microliters",
-           "microlitre", "microlitres"),
+    "ul": ("ul", "uL", "\u00b5L", "\u03bcL", "\u00b5l", "\u03bcl",
+           "microliter", "microliters", "microlitre", "microlitres"),
     "l": ("l", "L", "liter", "liters", "litre", "litres"),
     "dl": ("dl", "dL", "deciliter", "deciliters", "decilitre", "decilitres"),
     "cl": ("cl", "cL", "centiliter", "centiliters", "centilitre", "centilitres"),
@@ -7703,14 +7630,20 @@ def _fact_loss_message(lost, label: str) -> str:
 
 
 def _fact_exempt_sets(exempt_removed):
-    exempt_text, exempt_document = set(), set()
+    """(text Counter, (document, text) Counter) of pipeline removals.
+
+    Counters, not sets: one recorded removal exempts ONE base occurrence. A set
+    exempted every identical copy, so deleting a second number-bearing copy took
+    the last value with no fact-loss report (F005).
+    """
+    exempt_text, exempt_document = Counter(), Counter()
     for s in (exempt_removed or ()):
         if isinstance(s, (tuple, list)) and len(s) == 2:
             doc, sentence = s
             if str(sentence or "").strip():
-                exempt_document.add((str(doc), _deleted_para_norm(sentence).lower()))
+                exempt_document[(str(doc), _deleted_para_norm(sentence).lower())] += 1
         elif str(s or "").strip():
-            exempt_text.add(_deleted_para_norm(s).lower())
+            exempt_text[_deleted_para_norm(s).lower()] += 1
     return exempt_text, exempt_document
 
 
@@ -7719,7 +7652,8 @@ def fact_preservation_problems(base_package: Path, candidate_package: Path,
     """Problems where a deleted base sentence took a value/identifier with it.
 
     `exempt_removed` honours the same exemptions the content-edit policy uses
-    (the pipeline's own packaging removals), so a required removal never trips
+    (the pipeline's own packaging removals), consumed one-to-one so one removal
+    does not exempt every identical copy; a required removal then never trips
     this check.
     """
     base_package, candidate_package = Path(base_package), Path(candidate_package)
@@ -7727,14 +7661,22 @@ def fact_preservation_problems(base_package: Path, candidate_package: Path,
         return []
     exempt_text, exempt_document = _fact_exempt_sets(exempt_removed)
     skipped = []
-    base_units = [u for u in _content_unit_sentences(base_package, skipped=skipped)
-                  if u["norm"] not in exempt_text
-                  and (u["document"], u["norm"]) not in exempt_document
-                  # An author hand-off placeholder is not a fact-bearing
-                  # sentence: in `readme`/`off` its removal is REQUIRED, and
-                  # treating that removal as a lost fact made the documented
-                  # placeholder rule unrepairable (F194).
-                  and not _is_handoff_marker(u["text"])]
+    base_units = []
+    for u in _content_unit_sentences(base_package, skipped=skipped):
+        if _is_handoff_marker(u["text"]):
+            # An author hand-off placeholder is not a fact-bearing sentence: in
+            # `readme`/`off` its removal is REQUIRED, and treating that removal
+            # as a lost fact made the documented placeholder rule unrepairable
+            # (F194).
+            continue
+        doc_key = (u["document"], u["norm"])
+        if exempt_text.get(u["norm"], 0) > 0:
+            exempt_text[u["norm"]] -= 1
+            continue
+        if exempt_document.get(doc_key, 0) > 0:
+            exempt_document[doc_key] -= 1
+            continue
+        base_units.append(u)
     cand_units = [u for u in _content_unit_sentences(candidate_package, skipped=skipped)
                   if not _is_handoff_marker(u["text"])]
     missing, _added = _match_content_units(base_units, cand_units)

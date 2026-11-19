@@ -435,6 +435,33 @@ PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
 # file), so a partial or stale bundle is visible to `status`/`sync-code`.
 PIPELINE_ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent-common")
 MANUSCRIPT_WORDS_FILE = "paper-skills/paper-review/scripts/manuscript_words.py"
+# Every ordered part is required: a directory-only preflight passed a parts tree
+# missing p21 (or any other file) and the pipeline failed later with a NameError.
+# Keep this list in step with `_load_parts`'s glob.
+PIPELINE_REQUIRED_PARTS = (
+    "paper_pipeline_parts/p00_prelude.py",
+    "paper_pipeline_parts/p01_venues.py",
+    "paper_pipeline_parts/p02_journal_modes.py",
+    "paper_pipeline_parts/p03_prompts.py",
+    "paper_pipeline_parts/p04_utils.py",
+    "paper_pipeline_parts/p05_state_corpus.py",
+    "paper_pipeline_parts/p06_postchecks.py",
+    "paper_pipeline_parts/p07_stage_quality_journal.py",
+    "paper_pipeline_parts/p08_selection_driver.py",
+    "paper_pipeline_parts/p09_setup.py",
+    "paper_pipeline_parts/p10_reports.py",
+    "paper_pipeline_parts/p11_defect_audit.py",
+    "paper_pipeline_parts/p12_conflicts_decide.py",
+    "paper_pipeline_parts/p13_redlines.py",
+    "paper_pipeline_parts/p14_tracking.py",
+    "paper_pipeline_parts/p15_pdf.py",
+    "paper_pipeline_parts/p16_retry.py",
+    "paper_pipeline_parts/p17_cli.py",
+    "paper_pipeline_parts/p18_helpers.py",
+    "paper_pipeline_parts/p19_profiles.py",
+    "paper_pipeline_parts/p20_judge_conflicts.py",
+    "paper_pipeline_parts/p21_removal_accounting.py",
+)
 PIPELINE_REQUIRED_ASSET_FILES = (
     "agent-common/agent_common/model_runtime.py",
     "agent-common/agent_common/llm_retry.py",

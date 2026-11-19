@@ -246,9 +246,11 @@ def test_f126_reference_correction_prose() -> None:
     url = "https://example.org/" + ("a" * 400)
     base, cand = pair(
         "f126_",
-        {"ms.md": "# References\n\nSmith J, Doe A, 2020, Short title, " + url + "\n"},
-        {"ms.md": "# References\n\nBrown K, Roe B, 2024, Other note additional "
-                  "detail text, " + url + "\n"})
+        # A genuine in-place correction shares the identity (first author +
+        # year); a different-author/different-year entry is a FABRICATED
+        # replacement, which F150 of the 2026-11-19 wave now refuses to pair.
+        {"ms.md": "# References\n\nSmith J, Doe A, 2020, Short titel, " + url + "\n"},
+        {"ms.md": "# References\n\nSmith J, Doe A, 2020, Short title, " + url + "\n"})
     added, removed = pp._reference_entry_changes(base, cand)
     got = pp.content_edit_problems(None, base, cand, "revise",
                                    insertions_allowed=False, deletions_allowed=False)

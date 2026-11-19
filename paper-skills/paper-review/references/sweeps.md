@@ -988,7 +988,9 @@ rule | severity | location | evidence | fix kind | disposition.
   page/figure Minor, several pages or a whole section Major, an unusable
   artifact Critical) — never a cosmetic `formatting` row; a corrupt or
   undeliverable artifact is `correctness`
-- legend line spacing that is not single (`w:line=240`), or legend paragraph
+- legend line spacing that contradicts the venue's own template/profile (a
+  venue that records no spacing rule must not be measured against a blanket
+  single-spacing default; report the gap instead), or legend paragraph
   spacing that differs between figures → finding
 - a heading without `keepNext`/`keepLines`, or heading runs whose direct size
   contradicts the heading style → finding

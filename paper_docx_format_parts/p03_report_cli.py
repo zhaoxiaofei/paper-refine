@@ -1261,7 +1261,20 @@ def format_note(info) -> str:
 # --------------------------------------------------------------------------
 
 def apply_edits(xml: str, edits: list) -> str:
-    for start, end, new in sorted(edits, key=lambda e: -e[0]):
+    # Back-to-front splicing is correct only for NON-OVERLAPPING ranges. An
+    # overlapping/contained range used to be applied against coordinates the
+    # earlier splice had already shifted, silently deleting the bytes between
+    # the two edits (field unlink, fix_document and bibliography repair all use
+    # this shared writer). Keep the first-started range of each group -- of two
+    # sharing a start the WIDER one, so a containing range owns its contents --
+    # and drop the ranges it subsumes or partially overlaps, exactly as
+    # `rewrite_text_spans` resolves its overlapping edits.
+    accepted = []
+    for start, end, new in sorted(edits, key=lambda e: (e[0], -e[1])):
+        if accepted and start < accepted[-1][1]:
+            continue
+        accepted.append((start, end, new))
+    for start, end, new in reversed(accepted):
         xml = xml[:start] + new + xml[end:]
     return xml
 
@@ -1443,7 +1456,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
     # moves onto the next body paragraph, even when that paragraph only holds
     # a drawing with a text box.
     manual_breaks = set()
-    for _ in range(50):
+    # No fixed 50-iteration cap: every pass deletes one target (or marks a
+    # text-box break manual), so the loop ends when no break-only paragraph
+    # remains. The old `range(50)` silently left the rest unrepaired and filed
+    # no cap/gap row, so a document with 51+ break-only paragraphs shipped
+    # residual explicit page-break paragraphs.
+    while True:
         plist = paragraphs(xml, include_empty_hosts=True)
         table_paras = _table_paragraph_indices(xml, plist)
         text_box_paras = _text_box_paragraph_indices(xml, plist)
@@ -2578,7 +2596,19 @@ _DIRECT_FORMAT_PATTERNS = (
     r"<w:sz(?=[\s/>])[^>]*/>",
     r"<w:szCs(?=[\s/>])[^>]*/>",
 )
-_SECT_RE = re.compile(r"<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>")
+# A tracked property change records the value BEFORE the edit. Its nested
+# `w:pPr`/`w:rPr` is revision history, never live formatting, so the direct
+# properties inside it must survive every template restyle.
+_REVISION_RECORD_RE = re.compile(
+    r"<w:(?P<tag>pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|"
+    r"sectPrChange|numberingChange)(?=[\s/>])[^>]*/>"
+    r"|<w:(?P<open>pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|"
+    r"sectPrChange|numberingChange)(?=[\s>])[\s\S]*?</w:(?P=open)>")
+# The template side must read a section exactly like the manuscript side: a
+# legal self-closing `<w:sectPr .../>` is an empty section, and a lazy match
+# ended at the NESTED close of a `w:sectPrChange`, returning an unbalanced
+# prefix whose obsolete geometry was then adopted.
+_SECT_RE = SECT_READ_RE
 _RELS_TAG_RE = re.compile(r"<Relationship\b[^>]*>")
 
 
@@ -2677,12 +2707,29 @@ def _style_index(styles_xml: str) -> tuple:
 
 
 def _strip_direct_format(para: str) -> tuple:
-    """(fragment, removed_count): drop direct props that defeat a template style."""
+    """(fragment, removed_count): drop direct props that defeat a template style.
+
+    The `*PrChange` records are split out first: their nested property bag is
+    the value BEFORE the edit, so rewriting it destroyed the tracked change's
+    old-format record (and counted it as a live style fix). Only the live
+    segments between records are stripped.
+    """
     removed = 0
-    for pat in _DIRECT_FORMAT_PATTERNS:
-        para, n = re.subn(pat, "", para)
-        removed += n
-    return para, removed
+
+    def strip_live(text: str) -> str:
+        nonlocal removed
+        for pat in _DIRECT_FORMAT_PATTERNS:
+            text, n = re.subn(pat, "", text)
+            removed += n
+        return text
+
+    out, pos = [], 0
+    for m in _REVISION_RECORD_RE.finditer(para):
+        out.append(strip_live(para[pos:m.start()]))
+        out.append(m.group(0))              # history: left byte-identical
+        pos = m.end()
+    out.append(strip_live(para[pos:]))
+    return "".join(out), removed
 
 
 def _remap_style_refs(xml: str, mapping: dict) -> tuple:
@@ -2698,6 +2745,19 @@ def _remap_style_refs(xml: str, mapping: dict) -> tuple:
                                   f'w:val="{_xml_attr_value(new)}"')
 
     return _STYLE_REF_RE.sub(sub, xml), count[0]
+
+
+def _live_sect_pr(sect: str) -> str:
+    """`sect` with every `w:sectPrChange` record blanked, length preserved.
+
+    The tracked-change record carries the section properties BEFORE the edit in
+    its own nested `<w:sectPr>`; that section is not attached to the document
+    any more. Reading geometry or header/footer references from it adopted the
+    old revision's values, and a spliced replacement rewrote the history while
+    the live section kept no geometry. Blanking (rather than deleting) keeps
+    every offset usable for the caller's splice.
+    """
+    return _SECT_CHANGE_RE.sub(lambda m: " " * len(m.group(0)), sect)
 
 
 def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
@@ -2725,7 +2785,7 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
              "pgSz", "pgMar", "paperSrc", "pgBorders", "lnNumType", "pgNumType", "cols",
              "formProt", "vAlign", "noEndnote", "titlePg", "textDirection", "bidi",
              "rtlGutter", "docGrid", "printerSettings", "sectPrChange")
-    tpl_sect = t_sects[-1].group(0)
+    tpl_sect = _live_sect_pr(t_sects[-1].group(0))
     geo = {tag: elem(tpl_sect, tag) for tag in ("pgSz", "pgMar", "cols", "docGrid")}
     geo = {k: v for k, v in geo.items() if v}
     if not geo:
@@ -2736,20 +2796,33 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
             # Expand the empty section first: the geometry children belong
             # INSIDE it, and a splice before the tag's `/>` would orphan them.
             body = body[:body.rfind("/>")].rstrip() + ">" + "</w:sectPr>"
+        # Every lookup/splice below is against the LIVE section only: the
+        # nested `w:sectPr` of a `w:sectPrChange` is revision history (F195).
+        masked = _live_sect_pr(body)
         for tag in ("pgSz", "pgMar", "cols", "docGrid"):
-            el = elem(body, tag)
+            el = elem(masked, tag)
             new_el = geo.get(tag)
             if el and new_el:
-                body = body.replace(el, new_el, 1)
+                at = masked.find(el)
+                if at >= 0:
+                    body = body[:at] + new_el + body[at + len(el):]
+                    masked = masked[:at] + new_el + masked[at + len(el):]
             elif new_el:
-                pos = body.rfind("</w:sectPr>")
+                pos = masked.rfind("</w:sectPr>")
+                # `w:sectPrChange` is the LAST child in schema order, so a
+                # missing geometry element must land BEFORE it, never after
+                # (the masked scan cannot see the record's own tag).
+                change = _SECT_CHANGE_RE.search(body)
+                if change is not None:
+                    pos = min(pos, change.start())
                 idx = order.index(tag)
-                for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", body):
+                for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", masked):
                     name = m.group(1)
                     if name in order and order.index(name) > idx:
                         pos = min(pos, m.start())
                         break
                 body = body[:pos] + new_el + body[pos:]
+                masked = masked[:pos] + new_el + masked[pos:]
         return body
 
     for m in reversed(m_sects):                     # backwards: offsets stay valid

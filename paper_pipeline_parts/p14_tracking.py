@@ -392,6 +392,14 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
             else:
                 new_body.append(copy.deepcopy(_note_para(
                     "[no textual difference found between the two documents]")))
+        # CT_Body requires the body-level `w:sectPr` to be the LAST child. The
+        # copied candidate body carries it before the notes appended above, so
+        # the fallback wrote a w:p AFTER the sectPr -- schema-invalid OOXML that
+        # Word refuses, while the fallback recorded ok=True (F015). Move the
+        # section properties back to the end; everything else keeps its order.
+        for sect in [c for c in list(new_body) if c.tag == _w("sectPr")]:
+            new_body.remove(sect)
+            new_body.append(sect)
         body.clear()
         for child in list(new_body):
             body.append(child)
@@ -1431,8 +1439,12 @@ def tracking_readme(manifest: dict) -> str:
     if not skipped:
         L.append("- (none)")
     for r, vid, s in skipped:
-        L.append(f"- r{r} {vid}: {s.get('base_rel') or s.get('revised_rel') or ''} "
-                 f"({s.get('baseline')}) -- {s['reason']}")
+        # The table rows above go through `_md_cell`; these bullets interpolated
+        # the reason RAW, so an OSError or a tool's stderr carrying a newline
+        # injected extra Markdown lines (F019). Escape path and reason alike.
+        L.append(f"- r{r} {vid}: "
+                 f"{_md_cell(s.get('base_rel') or s.get('revised_rel') or '', 80)} "
+                 f"({_md_cell(s.get('baseline'))}) -- {_md_cell(s['reason'], 240)}")
     L += ["", "## Notes", ""] + [f"- {n}" for n in manifest.get("notes") or []]
     L.append("")
     return "\n".join(L)

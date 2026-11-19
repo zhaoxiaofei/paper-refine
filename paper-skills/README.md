@@ -274,7 +274,7 @@ paper-skills/
 ├── paper-revise/
 │   ├── SKILL.md                     # R0–V pipeline, hard rules
 │   ├── references/ledger.md         # A1–A9 artifact specs
-│   ├── references/edit_rules.md     # E1–E12, P1, C
+│   ├── references/edit_rules.md     # E1–E13, P1, C
 │   └── scripts/revision_token.py    # the 7-char content-hash version token
 └── prompts/                         # standalone prompt fallbacks
     ├── identify_issues.prompt.md

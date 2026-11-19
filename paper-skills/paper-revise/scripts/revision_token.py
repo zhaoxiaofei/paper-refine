@@ -117,7 +117,12 @@ AUX_NAME_RE = re.compile(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi]
 EVIDENCE_DIRS = {"raw_data", "human_review_feedback", "llm_review_feedback"}
 
 # "-a" / "_v2" / "_V2" / "-4f3a9c1" at the very end of a stem (the version slot).
-TOKEN_RE = re.compile(r"^(?P<base>.*?)[-_](?P<tok>[0-9a-f]{7}|[A-Za-z]|[vV]\d+)$")
+# The legacy single-letter alternative is LOWERCASE only: the legacy increments
+# were "-a"/"-b"-style arm letters, while an uppercase trailing letter is an
+# IDENTITY label (`Appendix_A.docx`, `Figure_B.pdf`, `sample-A.txt`) and must
+# not be renamed to `Appendix_<token>.docx` nor stripped from the hashed bytes
+# (F171).
+TOKEN_RE = re.compile(r"^(?P<base>.*?)[-_](?P<tok>[0-9a-f]{7}|[a-z]|[vV]\d+)$")
 HEX7_RE = re.compile(r"[0-9a-f]{7}")
 
 

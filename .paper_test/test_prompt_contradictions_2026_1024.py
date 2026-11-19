@@ -168,9 +168,9 @@ check("C21 improvement rows accept the full check-id range",
       and "(M1-M20 / J1-J4)" not in pipeline_src)
 
 # ---------------------------------------------------------------- C22
-check("C22 revise directives use E1-E12",
-      "rules E1-E12" in pipeline_src and "rules E1-E6" not in pipeline_src
-      and "rules E1–E12" in pipeline_src and "rules E1–E6" not in pipeline_src)
+check("C22 revise directives use E1-E13",
+      "rules E1-E13" in pipeline_src and "rules E1-E6" not in pipeline_src
+      and "rules E1–E13" in pipeline_src and "rules E1–E6" not in pipeline_src)
 
 # ---------------------------------------------------------------- C23
 check("C23 language pass gates claim calibration on a frozen finding",

@@ -1382,7 +1382,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="also set the target journal, atomically with the venue change")
     psv.add_argument("--article-type", default=None, metavar="ID",
                      help="also select the article type (see `set-article-type`); a type the "
-                          "new venue's profile does not carry falls back to that profile's "
+                          "new venue's profile does not carry is rejected, while a type "
+                          "recorded from the old profile falls back to the new profile's "
                           "default with a note")
     psv.add_argument("--profile", default=None, metavar="FILE",
                      help=f"install a venue profile JSON into "

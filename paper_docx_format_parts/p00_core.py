@@ -327,7 +327,11 @@ OTHER_REVISION_MARK_RE = re.compile(
     r"pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|sectPrChange|"
     r"numberingChange)(?=[\s/>])")
 DRAWING_RE = re.compile(r"<w:(?:drawing|pict|object|txbxContent)(?=[\s/>])")
-PAGEBREAK_RE = re.compile(r"<w:br[^>]*w:type=\"page\"[^>]*/?>")
+# OOXML is XML: `w:type = "page"` (spaces around `=`) and
+# `w:type='page'` (single quotes) are legal spellings Word accepts. The old
+# double-quote-only, no-space pattern read neither, so `_break_only_paragraph`
+# and the FMT-S1 scanner reported the document clean and never repaired it.
+PAGEBREAK_RE = re.compile(r"<w:br\b[^>]*\bw:type\s*=\s*[\"']page[\"']")
 # A figure legend LABEL. The vocabulary matches the display rules' own caption
 # labels (see DISPLAY_CAPTION_* below): the plain "Fig. 2 |"/"Figure 1." form
 # plus the numbered supplementary forms the venues collect in a legends area --

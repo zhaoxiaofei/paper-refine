@@ -191,6 +191,57 @@ def is_disabled_evidence_rel(rel_path: str) -> bool:
     return False
 
 
+def enclosing_pipeline_root(path: str):
+    """The nearest ancestor carrying a pipeline root's markers, or None.
+
+    `setup` writes `state.json` and `pipeline_config.json` at the ROOT; a stage
+    sandbox (`<root>/runs/<rid>/...`) is inside it. Used only to prove that an
+    evidence link resolves to THIS root's canonical store, never to follow an
+    arbitrary link.
+    """
+    cur = os.path.abspath(path)
+    while True:
+        if (os.path.isfile(os.path.join(cur, "state.json"))
+                or os.path.isfile(os.path.join(cur, "pipeline_config.json"))):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def is_canonical_evidence_link(path: str, root: str = None) -> bool:
+    """True when `path` is a top-level link to THIS root's canonical evidence store.
+
+    `ensure_pristine_input` creates a sandbox's evidence areas as RELATIVE
+    symlinks to `<root>/non_revised/<area>`, and the skill's documented
+    SUBMISSION_DIR (`./non_revised`) is exactly that layout. Skipping every
+    directory link made the evidence inventory EMPTY there: M30 could not read
+    the raw data and the concern ledger lost the editors'/reviewers' feedback
+    (F173).
+
+    A link is followed only when its resolved target IS
+    `<root>/non_revised/<area>`, is a directory, and stays inside `root`; every
+    other link is still skipped (its target may be outside the package).
+    """
+    if not root:
+        return False
+    try:
+        if not os.path.islink(path) or not os.path.isdir(path):
+            return False
+        name = os.path.basename(os.path.normpath(path))
+        if name not in EVIDENCE_DIRNAMES:
+            return False
+        root_real = os.path.realpath(root)
+        target = os.path.realpath(path)
+        canonical = os.path.realpath(os.path.join(root_real, "non_revised", name))
+    except OSError:
+        return False
+    if not os.path.isdir(target) or target != canonical:
+        return False
+    return target == root_real or target.startswith(root_real + os.sep)
+
+
 def is_original_submission_rel(rel_path: str) -> bool:
     """True for a path inside `human_review_feedback/original_submission/`."""
     parts = rel_path.replace("\\", "/").split("/")
@@ -1101,7 +1152,11 @@ def main():
     files = []
     skipped_links = []
     skipped_special = []
-    for root, dirs, names in os.walk(sub):
+    pipeline_root = enclosing_pipeline_root(sub)
+    # followlinks=True is safe here because the loop below keeps ONLY a
+    # top-level canonical evidence link; every other linked directory is
+    # pruned before os.walk can descend it (F173).
+    for root, dirs, names in os.walk(sub, followlinks=True):
         kept_dirs = []
         for d in sorted(dirs):
             dp = os.path.join(root, d)
@@ -1114,6 +1169,11 @@ def main():
                 # os.walk(followlinks=False) does not descend into a linked
                 # directory, but naming it in the warning keeps the omission
                 # visible instead of silently dropping part of the submission.
+                # The ONE exception is the canonical evidence link
+                # ensure_pristine_input creates (F173): follow it.
+                if root == sub and is_canonical_evidence_link(dp, pipeline_root):
+                    kept_dirs.append(d)
+                    continue
                 skipped_links.append(os.path.relpath(dp, sub))
                 continue
             if not is_disabled_evidence_rel(os.path.relpath(dp, sub)):

@@ -746,6 +746,24 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         if explicit_article_types else None
     top_limits = _clean_length_limits(out.get("length_limits"), "length_limits",
                                       problems) if explicit_article_types else None
+    # A venue-level abstract/main-text block written next to an article_types
+    # table is the venue-wide fallback for a type that states NO number for
+    # that section. Only the cover-letter block used to be inherited, so M19
+    # enforced no limit at all on such a profile.
+    if top_limits is not None:
+        _type_limits = default_entry.get("length_limits")
+        if not isinstance(_type_limits, dict):
+            _type_limits = {"source": "",
+                            "abstract": {"base": None, "relaxation": None},
+                            "main_text": {"base": None, "relaxation": None}}
+            default_entry["length_limits"] = _type_limits
+        for _section in ("abstract", "main_text"):
+            _type = _type_limits.get(_section) or {}
+            _top = top_limits.get(_section) or {}
+            if (_type.get("base") is None and _type.get("relaxation") is None
+                    and (_top.get("base") is not None
+                         or _top.get("relaxation") is not None)):
+                _type_limits[_section] = copy.deepcopy(_top)
     if default_entry["captions"] is not None:
         clean_captions = copy.deepcopy(default_entry["captions"])
     elif top_captions is not None:

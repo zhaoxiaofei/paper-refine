@@ -3939,8 +3939,13 @@ def best_failed_trial(ctx: Ctx, rec: dict):
         outputs = _trial_output_count(sandbox, kind, rec)
         if outputs <= 0:
             continue
-        known_record = isinstance(record, dict) and bool(record)
-        errors = (record or {}).get("errors") or [] if known_record else []
+        # A known record must carry the diagnostics `record_attempt()` writes.
+        # A truncated record.json that still parses (`{"attempt": 1}`) has no
+        # `errors` key: reading that as an empty list gave it 0 FAIL messages,
+        # so it beat a real attempt with errors on the tie-break (F021).
+        known_record = (isinstance(record, dict) and bool(record)
+                        and isinstance(record.get("errors"), list))
+        errors = (record.get("errors") if known_record else []) or []
         # A missing/corrupt record.json is UNKNOWN, never "zero FAIL messages":
         # scoring it as 0 made an interrupted archive win the tie-break over a
         # real attempt with errors (F107).

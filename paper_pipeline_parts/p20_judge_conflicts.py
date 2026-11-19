@@ -45,8 +45,16 @@ _JUDGE_CONFLICT_TOKEN_RE = re.compile(r"[a-z][a-z0-9_.\-/]{2,}")
 # The sign is part of the value: "-12" and "12" are a real contradiction.
 # A leading-dot decimal (".05") has no digit before the point; accept it as a
 # numeric token too, or `p = .05` vs `p = .50` stays invisible.
+# The SIGNED alternative deliberately has no lookbehind: the old single
+# alternation tested `(?<![\w.])` BEFORE the optional sign, so a minus glued to
+# a word character ("x−12") failed the signed match and restarted at "12",
+# losing the sign (F087). The sign is unambiguous when it is present, so the
+# token starts at the sign; only an UNSIGNED number is boundary-checked (that
+# is what keeps "M4"/"STAR2.7.5c" out). U+2212 (minus) and U+2013 (en dash, as
+# manuscripts type a range) are both accepted, then normalized to "-".
 _JUDGE_CONFLICT_NUMBER_RE = re.compile(
-    r"(?<![\w.])([-\u2212]?(?:\d[\d,]*(?:\.\d+)?|\.\d+))")
+    r"([-\u2212\u2013])(\d[\d,]*(?:\.\d+)?|\.\d+)"
+    r"|(?<![\w.])(\d[\d,]*(?:\.\d+)?|\.\d+)")
 # A small integer is a COUNT when the text marks it as one: "n = 5", "5
 # samples", "12 patients". The magnitude floor below still drops a BARE small
 # integer (a figure/check id, a section number, "Table 2"), but no longer every
@@ -86,7 +94,8 @@ def _conflict_numbers(text, floor: float = 10.0) -> set:
     text = str(text or "")
     out = set()
     for m in _JUDGE_CONFLICT_NUMBER_RE.finditer(text):
-        tok = m.group(1).replace("\u2212", "-").rstrip(",").replace(",", "")
+        raw = (m.group(1) + m.group(2)) if m.group(1) else m.group(3)
+        tok = raw.replace("\u2212", "-").replace("\u2013", "-").rstrip(",").replace(",", "")
         try:
             v = float(tok)
         except ValueError:
@@ -448,7 +457,7 @@ def _judge_conflict_counts(conflicts: list) -> dict:
     return counts
 
 
-def round_judge_opinions(ctx: Ctx, r: int, field=None) -> list:
+def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) -> list:
     """Every resolved directed comparison of one round's (newest) judge sheets.
 
     Mirrors aggregate_round's sheet selection: the newest valid sheet per
@@ -463,6 +472,10 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None) -> list:
     comparison as out-of-field and certify an empty panel as "0 conflicts"
     (2026-10-06, neohetero-04to05-1006-0354-47c5306 round 1: 16 sheets and 112
     comparisons -> 0 opinions).  `None` falls back to the record's own field.
+
+    When `coverage` is a dict it is filled with the extraction accounting:
+    how many listed comparisons were extracted, and why the rest were dropped.
+    A caller must not present a PARTIAL extraction as a complete audit (F028).
     """
     r = int(r)
     rrec = ctx.round_rec(r)
@@ -489,6 +502,13 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None) -> list:
                                              str(x.get("id")))):
         newest[(rec.get("target_id"), rec.get("judge_index"))] = rec
     opinions = []
+    listed = 0
+    unreadable_sheets = 0
+    dropped = {}
+
+    def _drop(reason):
+        dropped[reason] = dropped.get(reason, 0) + 1
+
     for _slot, rec in sorted(newest.items(),
                              key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
         target = str(rec.get("target_id"))
@@ -496,17 +516,33 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None) -> list:
             continue
         sj = rec.get("scores")
         if not isinstance(sj, dict):
+            unreadable_sheets += 1
             continue
         lm = rec.get("label_map") or {}
         for comp in sj.get("comparisons") or []:
+            listed += 1
             if not isinstance(comp, dict):
+                _drop("not_a_mapping")
                 continue
             label = comp.get("opponent_label")
             score = comp.get("score")
             opp = lm.get(_norm_opponent_label(label))
-            if opp is None or str(opp) not in field_ids or opp == target or not is_int(score):
+            if opp is None:
+                _drop("unresolved_opponent_label")
+                continue
+            if str(opp) not in field_ids:
+                # An opponent deduplicated out of this round's field: not a
+                # coverage gap for THIS field, but counted for transparency.
+                _drop("out_of_field")
+                continue
+            if opp == target:
+                _drop("self_comparison")
+                continue
+            if not is_int(score):
+                _drop("missing_score")
                 continue
             if not (SCORE_MIN <= score <= SCORE_MAX):
+                _drop("out_of_range_score")
                 continue
             opinions.append({
                 "judge_run": str(rec.get("id") or ""),
@@ -523,6 +559,18 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None) -> list:
                                if isinstance(it, dict)],
                 "checks": comp.get("checks") if isinstance(comp.get("checks"), dict) else {},
             })
+    if isinstance(coverage, dict):
+        inapplicable = int(dropped.get("out_of_field") or 0)
+        unusable = max(0, (listed - len(opinions)) - inapplicable)
+        coverage.update({
+            "sheets_selected": len(newest),
+            "sheets_unreadable": unreadable_sheets,
+            "comparisons_listed": listed,
+            "comparisons_extracted": len(opinions),
+            "comparisons_dropped": listed - len(opinions),
+            "dropped": dict(sorted(dropped.items())),
+            "complete": bool(unusable == 0 and unreadable_sheets == 0),
+        })
     return opinions
 
 
@@ -696,6 +744,14 @@ def judge_conflicts_markdown(data: dict) -> str:
         "After fixing a sheet's input, re-judge it with `retry --run <ID>` and re-decide.",
         "",
     ]
+    cov = data.get("coverage") or {}
+    if cov:
+        lines.append(
+            F"Coverage: {cov.get('comparisons_extracted', 0)} of "
+            F"{cov.get('comparisons_listed', 0)} listed directed comparison(s) were auditable"
+            + ("" if cov.get("complete", True)
+               else F" -- dropped: {cov.get('dropped')}"))
+        lines.append("")
     if not conflicts:
         lines.append("No cross-judge conflicts were detected for this round.")
         return "\n".join(lines) + "\n"
@@ -773,6 +829,33 @@ def write_judge_conflicts_todo(ctx: Ctx) -> Path:
     return p
 
 
+def _judge_conflict_rules_fingerprint() -> str:
+    """A hash of the code and constants that turn opinions into conflicts.
+
+    The report cache used to key only on the opinions, so a pipeline update that
+    changed the detector's rules silently reused the old report (F027). Hashing
+    the detector's own source (and the constants it reads) makes the cache key
+    see that change without a hand-maintained version to forget to bump.
+    """
+    import inspect
+
+    pieces = [VERSION, repr(JUDGE_CONFLICT_KINDS), repr(JUDGE_CONFLICT_SEVERITIES),
+              repr(_JUDGE_CONFLICT_SEV_RANK), repr(_JUDGE_CONFLICT_STOPWORDS),
+              _JUDGE_CONFLICT_TOKEN_RE.pattern, _JUDGE_CONFLICT_NUMBER_RE.pattern,
+              _SMALL_COUNT_BEFORE_RE.pattern, _SMALL_COUNT_NOUN_RE.pattern]
+    for fn in (detect_round_judge_conflicts, _merge_judge_conflicts,
+               _conflict_numbers, _conflict_tokens, _conflict_similarity,
+               _conflict_item_text, _conflict_item_cell, _conflict_item_severity,
+               _conflict_items_similar, _small_integer_is_count):
+        try:
+            pieces.append(inspect.getsource(fn))
+        except (OSError, TypeError):
+            # A frozen/zip-loaded copy may not expose its source; the function's
+            # name still separates the rule set, and VERSION moves with a release.
+            pieces.append(getattr(fn, "__name__", "?"))
+    return hashlib.sha256("\0".join(pieces).encode("utf-8")).hexdigest()
+
+
 def write_round_judge_conflicts(ctx: Ctx, r: int, agg: dict = None, agent_cmd: list = None,
                                 timeout: int = None, use_agent: bool = True,
                                 force: bool = False) -> dict:
@@ -787,7 +870,8 @@ def write_round_judge_conflicts(ctx: Ctx, r: int, agg: dict = None, agent_cmd: l
     r = int(r)
     round_field = [str(v) for v in ((agg or {}).get("field")
                                     or ctx.round_rec(r).get("field") or [])]
-    opinions = round_judge_opinions(ctx, r, field=round_field)
+    coverage = {}
+    opinions = round_judge_opinions(ctx, r, field=round_field, coverage=coverage)
     # Never certify an empty audit as "0 conflicts": a root whose judge sheets
     # are done but whose directed comparisons cannot be extracted (missing
     # field / label_map / scores) must fail loudly instead of writing the same
@@ -803,14 +887,30 @@ def write_round_judge_conflicts(ctx: Ctx, r: int, agg: dict = None, agent_cmd: l
                 F"directed comparison could be extracted (field carries "
                 F"{len(round_field)} member(s); check the runs' scores/label_map); "
                 F"refusing to write a 0-conflict report from an empty audit input")
+    # A PARTIAL extraction is the same silent-coverage lie one step smaller: a
+    # few readable comparisons used to be written as a complete audit while the
+    # dropped sheets/comparisons went uncounted (F028). Refuse a short
+    # extraction; out-of-field comparisons are not applicable, not a gap.
+    if not coverage.get("complete", True):
+        raise RuntimeError(
+            F"round {r}: only {coverage.get('comparisons_extracted')} of "
+            F"{coverage.get('comparisons_listed')} listed directed comparison(s) could be "
+            F"audited (dropped: {coverage.get('dropped')}; "
+            F"{coverage.get('sheets_unreadable')} unreadable in-field sheet(s)); refusing to "
+            F"write a PARTIAL conflict report as if the panel were fully audited")
     mechanical = detect_round_judge_conflicts(opinions)
     payload = {
         "run": ctx.root.name, "round": r, "generated": utcnow(),
         "field": round_field,
         "opinions": opinions, "candidate_conflicts": mechanical,
+        "coverage": coverage,
     }
+    rules_fingerprint = _judge_conflict_rules_fingerprint()
     fingerprint = hashlib.sha256(
-        json.dumps(_json_safe(opinions), sort_keys=True, ensure_ascii=False)
+        json.dumps({"opinions": _json_safe(opinions),
+                    "detector": VERSION,
+                    "rules": rules_fingerprint},
+                   sort_keys=True, ensure_ascii=False)
         .encode("utf-8")).hexdigest()[:16]
     json_path = ctx.reports_dir / F"round{r}_judge_conflicts.json"
     existing = read_json(json_path, revive=False, lenient=True)
@@ -834,6 +934,9 @@ def write_round_judge_conflicts(ctx: Ctx, r: int, agg: dict = None, agent_cmd: l
     data = {
         "run": ctx.root.name, "round": r, "generated": utcnow(),
         "input_fingerprint": fingerprint,
+        "detector": VERSION,
+        "rules_fingerprint": rules_fingerprint,
+        "coverage": coverage,
         "judges": sorted({o.get("judge_run") for o in opinions if o.get("judge_run")}),
         "opinions": len(opinions),
         "counts": counts, "conflicts": conflicts,
@@ -1284,12 +1387,28 @@ def backfill_round_raw_scores(ctx: Ctx) -> list:
     return out
 
 
-def score_model_doc(ctx=None) -> dict:
+def _score_model_floor(ctx, floor) -> int:
+    """The RECORDED floor when usable, else the live config (as select_champion does)."""
+    if floor is None:
+        return tiebreak_defect_floor_of(ctx)
+    try:
+        return max(0, int(floor))
+    except (TypeError, ValueError):
+        return tiebreak_defect_floor_of(ctx)
+
+
+def score_model_doc(ctx=None, floor=None, dedup=None) -> dict:
     """The machine-readable description of how a round is scored and ranked.
 
     Factored out of build_decision_report so the score model is one object with
     one definition (decision.json, the report and the tests all read it) instead
     of a dict literal buried in a larger literal.
+
+    `floor`/`dedup` are the values the decision ACTUALLY ranked with (a
+    re-derived round's RECORDED floor/dedup mode). When omitted (the pure
+    documentation call) they fall back to the live configuration; a decision
+    must pass them, or a later config edit makes decision.json's score_model
+    contradict the ranking it describes (F029).
     """
     return {
         "scores_per_version": "2*judges*(|field|-1) "
@@ -1341,8 +1460,8 @@ def score_model_doc(ctx=None) -> dict:
                                 f"over the pair's 2*judges directed scores is significant at "
                                 f"{VS_ORIGINAL_ALPHA}; with so few scores NEITHER rule is "
                                 f"well-powered, and every row reports its wins/losses/ties and p",
-        "tiebreak_defect_floor": tiebreak_defect_floor_of(ctx),
-        "dedup_mode": dedup_mode_of(ctx),
+        "tiebreak_defect_floor": _score_model_floor(ctx, floor),
+        "dedup_mode": (dedup_mode_of(ctx) if dedup is None else str(dedup)),
         "tiebreaks": ["ordered per-cell defect census over the adaptive "
                       "severity_tier_category prefix at the walk's stopping point, each cell a "
                       "separate lexicographic rung (fatal->critical->major->minor, tier order, "

@@ -777,15 +777,23 @@ def duplicate_submission_role_rows(root: Path, limit: int = 20) -> list:
         key = _duplicate_role_key(p.name)
         if not key:
             continue
-        groups.setdefault((Path(rel).parent.as_posix(), key, p.suffix.lower()), []).append(rel)
-    for (parent, key, ext), files in sorted(groups.items()):
+        # Group by ROLE and extension across the WHOLE submitted set: the old
+        # key included the parent directory, so a stale copy of one role in
+        # another directory was never compared (F085). Different extensions
+        # stay separate on purpose -- a PDF render beside its editable source is
+        # a normal pair, not a duplicate role.
+        groups.setdefault((key, p.suffix.lower()), []).append(rel)
+    for (key, ext), files in sorted(groups.items()):
         if len(files) < 2:
             continue
+        parents = sorted({Path(f).parent.as_posix() for f in files})
+        where = (f"in {parents[0]!r}" if len(parents) == 1
+                 else "across " + ", ".join(repr(p) for p in parents))
         rows.append({
             "rule": "PKG-26", "severity": "high", "fix": "manual",
             "file": files[0], "reference": ", ".join(files[1:]),
             "detail": (f"the submitted set carries {len(files)} {ext} files for one "
-                       f"document role ({key!r}) in {parent!r}: {', '.join(files)}. One is a stale "
+                       f"document role ({key!r}) {where}: {', '.join(files)}. One is a stale "
                        f"pre-revision/source copy; the reader cannot tell which is current, "
                        f"and a journal upload carries both. Keep the current version and "
                        f"remove or rename the stale copy out of the submitted set.")})
@@ -897,7 +905,10 @@ def declared_placeholder_paths(root: Path, extra=()) -> dict:
             seen.add(key)
             uniq.append(key)
     out["patterns"] = uniq
-    for p in sorted(_iter_tree_files(root)):
+    # The canonical `raw_data/` (and feedback) area is a SYMLINK in the normal
+    # sandbox layout: without following it the declared placeholder globs are
+    # invisible and every role is told there are none (F086).
+    for p in sorted(_iter_tree_files(root, follow_dir_links=True)):
         if not p.is_file():
             continue
         rel = p.relative_to(root).as_posix()
@@ -944,7 +955,9 @@ def detect_placeholder_copies(root: Path, area_names=None,
     # size collides with another file's are worth hashing. A corpus with a few
     # hundred distinct evidence files pays almost no hashing cost.
     by_size = {}
-    for p in _iter_tree_files(root):
+    # Follow the canonical evidence-area symlink: identical-byte placeholder
+    # copies under raw_data/ are otherwise invisible (F086).
+    for p in _iter_tree_files(root, follow_dir_links=True):
         if not p.is_file():
             continue
         try:
@@ -1781,18 +1794,34 @@ FORM_STOP_TOKENS = {
     "extension", "benchmark", "software",
     "compute", "environment", "intel", "xeon", "gold", "cpu", "ghz",
     "recorded", "seven", "eight", "nine", "ten", "four", "five", "six",
+    # Inventory lead-ins are not tools (F074): "The following tools were used"
+    # used to contribute the bogus token "following".
+    "following", "tools", "tool", "programs", "program", "packages", "package",
+    "libraries", "library", "we", "applied", "employed", "listed",
 }
 
 
 def _tool_tokens(text: str) -> set:
     """Tool-like tokens of a software paragraph: the first token of each entry
-    (comma-, semicolon- or sentence-delimited), connectives removed."""
+    (comma-, semicolon-, colon-, `and`/`&`- or sentence-delimited), with the
+    inventory lead-in removed and a trailing version separated from the name."""
     out = set()
+    body = str(text or "")
     # A sentence boundary ends an entry list too: "STAR 2.7.5c. The extension
     # benchmark additionally used bedtools (bamtobed)" carries TWO tools, and
     # splitting on commas alone kept only STAR.
-    body = re.sub(r"(?<=[.!?])\s+", ";", str(text or ""))
-    for chunk in re.split(r"[,;]", body):
+    body = re.sub(r"(?<=[.!?])\s+", ";", body)
+    # The lead-in names the LIST, not a tool: "The following tools were used:
+    # bedtools, samtools and STAR" used to yield "following" (bogus) while the
+    # colon kept bedtools and STAR inside the same chunk (F074). Remove the
+    # lead-in, then split on the colon as an entry delimiter.
+    body = re.sub(
+        r"(?i)^\s*(?:we\s+)?(?:the\s+)?(?:following\s+)?"
+        r"(?:tools?|software|programs?|packages?|libraries)\s+"
+        r"(?:were|was|are|is|have\s+been|has\s+been)?\s*"
+        r"(?:used|applied|employed|listed)?\s*[:\-]?\s*",
+        "", body)
+    for chunk in re.split(r"[,;:]|\band\b|&", body):
         c = chunk.strip()
         c = re.sub(r"^(?:and|the|with|used|using|additionally|including|also|has|have|"
                    r"were|was|of|in|on|at|by|as|or)\s+", "", c, flags=re.I)
@@ -1800,8 +1829,16 @@ def _tool_tokens(text: str) -> set:
                    flags=re.I)
         c = re.sub(r"^(?:used|using|with)\s+", "", c, flags=re.I)
         m = re.match(r"([A-Za-z][A-Za-z0-9_+.\-]{2,30})", c)
-        if m and m.group(1).lower() not in FORM_STOP_TOKENS:
-            out.add(m.group(1))
+        if not m:
+            continue
+        name = m.group(1).rstrip(".-")
+        # STAR2.7.5c -> STAR, FastQC0.11.9 -> FastQC: a glued version is not
+        # part of the tool name, or the form's "STAR (2.7.5c)" never matches.
+        vm = re.match(r"^([A-Za-z][A-Za-z0-9_+\-]*?[A-Za-z])(\d+(?:\.\d+)+\w*)$", name)
+        if vm and len(vm.group(1)) >= 2:
+            name = vm.group(1)
+        if name.lower() not in FORM_STOP_TOKENS:
+            out.add(name)
     return out
 
 
@@ -1969,6 +2006,11 @@ def _package_document_texts(root: Path, texts=None) -> list:
     # PDFs, table sources), not a prose surface: parsing its PDFs added seconds
     # per scan and produced no claim.
     areas = {str(a).lower() for a in EVIDENCE_DIRNAMES} | {"supplementary_source_files"}
+    # `code/` is revision content but NEVER a submitted prose surface (F078):
+    # its notes/README must not be read as a manuscript. The package's OWN
+    # submitted-set declaration is the other authority -- a file the README
+    # says is not submitted must not be scanned as prose either.
+    _decl, is_submitted = declared_submission_filter(root)
     for p in sorted(_iter_tree_files(root)):
         if not p.is_file():
             continue
@@ -1979,7 +2021,9 @@ def _package_document_texts(root: Path, texts=None) -> list:
             rel = p.relative_to(root).as_posix()
         except ValueError:
             continue
-        if rel.split("/", 1)[0].lower() in areas:
+        if rel.split("/", 1)[0].lower() in areas or is_code_rel(rel):
+            continue
+        if not is_submitted(rel):
             continue
         if is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
             continue
@@ -2030,6 +2074,18 @@ METHOD_SELECTION_RE = re.compile(
     r"raised|adjusted|set)[^.]{0,120}"
     r"(?:empirically|to match|because the default|on the cell-line|on the [^.]{0,40}"
     r"datasets|from the [^.]{0,30}datasets)")
+# Selecting a parameter on the TRAINING data is the compliant case the form's
+# no-overlap claim describes (F079). Only a selection on evaluation/test data
+# (or an unqualified/empirical selection) contradicts it.
+_SELECTED_ON_TRAIN_RE = re.compile(
+    r"(?i)\b(?:selected|chosen|tuned|optimized|optimised|calibrated|relaxed|lowered|"
+    r"raised|adjusted|set)\b[^.]{0,120}?\b(?:on|using|from)\s+(?:the\s+)?"
+    r"(?:[a-z0-9\-]+\s+){0,3}?training\s+(?:data|datasets?|set|sets)\b")
+_SELECTED_ON_EVAL_RE = re.compile(
+    r"(?i)\b(?:selected|chosen|tuned|optimized|optimised|calibrated|relaxed|lowered|"
+    r"raised|adjusted|set)\b[^.]{0,120}?\b(?:on|using|from)\s+(?:the\s+)?"
+    r"(?:[a-z0-9\-]+\s+){0,3}?(?:evaluation|test|held-?out|validation)\s+"
+    r"(?:data|datasets?|set|sets)\b")
 
 
 def scan_form_method_conflicts(root: Path, texts=None, limit: int = 8) -> list:
@@ -2056,6 +2112,11 @@ def scan_form_method_conflicts(root: Path, texts=None, limit: int = 8) -> list:
                     continue
                 if not re.search(r"(?i)\b(?:threshold|parameter|cutoff|cut-off|"
                                  r"configuration|setting)s?\b", s):
+                    continue
+                if _SELECTED_ON_TRAIN_RE.search(s) and not _SELECTED_ON_EVAL_RE.search(s):
+                    # "parameters were selected on the training datasets" is the
+                    # protocol the form's claim requires, not a contradiction
+                    # (F079). A selection on evaluation/test data still flags.
                     continue
                 rows.append({
                     "rule": "PKG-17", "severity": "high", "fix": "manual",
@@ -2153,8 +2214,19 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
                         best_metric, best_score = met, score
                 if best_metric is None or best_score < 2:
                     continue
-                means = {meth: sum(vals.values()) / len(vals)
-                         for meth, vals in by_metric[best_metric].items() if vals}
+                # Compare every method over the SAME dataset set: a method
+                # measured on one easy dataset used to outrank one measured on
+                # ten and flip a correct "highest average" claim (F080). The
+                # common intersection is the only honest grid; with no shared
+                # dataset there is nothing to compare.
+                per_method = by_metric[best_metric]
+                common = (set.intersection(*(set(v) for v in per_method.values()))
+                          if per_method else set())
+                if not common:
+                    continue
+                means = {meth: sum(vals[d] for d in common) / len(common)
+                         for meth, vals in per_method.items()
+                         if common <= set(vals)}
                 if len(means) < 2:
                     continue
                 claimed_key = re.sub(r"[^a-z0-9]+", "", claimed)
@@ -2181,7 +2253,8 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
                     "detail": (f"the text says {m.group(1).strip()!r} gave the highest average "
                                f"{m.group(2).strip()[:60]!r}, but the shipped grid {grel} ranks "
                                f"{top_method!r} above it on that metric ({top_mean:.3f} vs "
-                               f"{claimed_mean:.3f})."
+                               f"{claimed_mean:.3f}) over the {len(common)} dataset(s) every "
+                               f"listed method reports."
                                + (" The sentence cites a figure whose numbers are not shipped, "
                                   "so the claim cannot be checked against the package -- name "
                                   "the surface and ship its numbers."
@@ -2537,9 +2610,13 @@ def _numbered_reference_titles(paras: list) -> dict:
                 out.setdefault(num, rest)
             current = None
             continue
-        bare = re.match(r"^\s*(\d{1,4})\.\s*$", text)
+        bare = re.match(r"^\s*(?:\[(\d{1,4})\]|(\d{1,4})[.)]?)\s*$", text)
         if bare:
-            current = int(bare.group(1)) if in_refs else None
+            # A marker line may be "1.", "1)" or a bare "1" (a Word numbered
+            # list). Only the period form was read, so a "1)" marker line made
+            # the whole reference list parse as {} and the citation check
+            # silently inspect nothing (F075).
+            current = int(bare.group(1) or bare.group(2)) if in_refs else None
             if current is not None:
                 out.setdefault(current, "")
             continue
@@ -2577,6 +2654,22 @@ def scan_single_cell_citation_mismatch(root: Path, texts=None, limit: int = 8) -
             continue
         refs = _numbered_reference_titles(paras)
         if not refs:
+            # A references heading whose entries could not be parsed (an
+            # author-year list, or an unsupported marker shape) leaves the whole
+            # numbered-citation class UNCHECKED. `continue` used to hide that
+            # (F075); record the gap so the run does not read as clean.
+            if any(REF_HEADING_RE.match(p or "") for p in paras):
+                rows.append({
+                    "rule": "PKG-23", "severity": "low", "fix": "manual",
+                    "advisory": True, "coverage_gap": True,
+                    "file": rel, "line": 1, "reference": "reference list",
+                    "detail": ("a references heading is present but no numbered "
+                               "reference entry could be parsed, so the "
+                               "citation-numbering class was NOT checked in this "
+                               "document; verify the numbering by hand or record the "
+                               "list in a supported numbered form")})
+                if len(rows) >= limit:
+                    return rows
             continue
         for s in _sentences("\n".join(paras)):
             if not SINGLE_CELL_RE.search(s):
@@ -5610,11 +5703,16 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     })
     _fmt_z = _format_module()
     zot_before = {}
+    # A DOCX the Zotero scan could not read is a COVERAGE GAP, not "no live
+    # fields": readiness must name it under a flatten request instead of
+    # reporting the document clean (F081).
+    zotero_scan_gaps = {}
     if _fmt_z is not None and hasattr(_fmt_z, "zotero_report_for_docx"):
         for q in _docx_files_under(tmp):
             try:
                 _zrep = _fmt_z.zotero_report_for_docx(q)
-            except Exception:                                      # noqa: BLE001
+            except Exception as e:                                 # noqa: BLE001
+                zotero_scan_gaps[q.name] = f"{type(e).__name__}: {e}"
                 continue
             zot_before[q.name] = int((_zrep.get("counts") or {}).get("zotero", 0))
     format_fix = {
@@ -5633,13 +5731,16 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         for q in _docx_files_under(tmp):
             try:
                 _zrep = _fmt_z.zotero_report_for_docx(q)
-            except Exception:                                      # noqa: BLE001
+            except Exception as e:                                 # noqa: BLE001
+                zotero_scan_gaps.setdefault(q.name, f"{type(e).__name__}: {e}")
                 continue
             _n = (_zrep.get("counts") or {}).get("zotero", 0)
             if _n:
                 hygiene["zotero_live_fields"].append({"file": q.name, "fields": int(_n)})
             elif zot_before.get(q.name):
                 hygiene["zotero_unlinked"]["documents"].append(q.name)
+    hygiene["zotero_scan_gaps"] = [
+        {"file": name, "error": err} for name, err in sorted(zotero_scan_gaps.items())]
     # Package hygiene: the by-product names are stripped above; what REMAINS is
     # scanned for internal material (PKG-1) and every shipped PDF for an
     # unfilled/blank artifact (FMT-PDF1..3). These are reported, never silently
@@ -6697,6 +6798,17 @@ def package_readiness(final_clean: dict, residuals: dict = None,
     """
     hyg = (final_clean or {}).get("hygiene") or {}
     findings = []
+    # No published package means there is nothing to be ready. The hygiene map
+    # of a `{"skipped": ...}` record is empty, so this function used to produce
+    # no findings and return submission_ready=True while the sibling readme
+    # said the package was NOT published (F025). That contradiction could even
+    # satisfy `--require-ready`.
+    _skip_reason = (final_clean or {}).get("skipped")
+    if _skip_reason:
+        findings.append({
+            "rule": "PUB-1", "document": "",
+            "detail": (f"no final_clean_version package was published ({_skip_reason}); "
+                       f"there is no package to assess for submission readiness")})
     _atc = _atc_mode(author_to_complete)
     for it in ((residuals or {}).get("items") or []):
         it = str(it)
@@ -6946,6 +7058,16 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                            f"format_fix=off), so they were left live rather than frozen with "
                            f"unverified numbering; refresh it in Word/Zotero and re-run, or "
                            f"flatten it manually and re-verify")})
+        for r in hyg.get("zotero_scan_gaps") or []:
+            # The scan never saw these bytes, so it cannot say they carry no live
+            # fields. Reporting them as clean is the silent-coverage defect (F081).
+            findings.append({
+                "rule": "FMT-Z7", "document": r.get("file"),
+                "detail": (f"the Zotero live-field scan could not read this document "
+                           f"({r.get('error')}), so the flatten gate never inspected it: "
+                           f"whether live citation fields remain is UNKNOWN. Open it in "
+                           f"Word/Zotero, refresh/flatten and re-verify, or fix the read "
+                           f"failure and re-run")})
     # REV-1/REV-2: the champion's OWN open items. A package whose revision stage
     # handed the author work is not "ready" merely because the mechanical gates
     # are clean -- the 2026-10-15 audit of the two clean packages was exactly
@@ -8235,6 +8357,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     evid_changed, evid_missing = evidence_integrity(ctx)
     advisories = decide_advisories(ctx)
     rounds_data, problems = [], []
+    # A cross-judge conflict audit that could not run is a COVERAGE GAP, not a
+    # console warning: the round's manual-check list did not happen, so the
+    # decision must carry `judge_conflicts.ok=false` and may not be certified
+    # (F026).
+    judge_conflict_failures = []
     problems.extend(f"evidence: {e}" for e in evid_changed)
     if not pok:
         problems.append(f"integrity: the pristine original CHANGED ({pdetail}); every judge's "
@@ -8374,6 +8501,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                   f"({_cfc.get('total', 0)} conflict(s): {_cfc.get('blocker', 0)} blocker, "
                   f"{_cfc.get('major', 0)} major, {_cfc.get('minor', 0)} minor)")
         except Exception as e:                                       # noqa: BLE001
+            _jcf = f"round {r}: the cross-judge conflict audit FAILED ({type(e).__name__}: {e})"
+            judge_conflict_failures.append(_jcf)
             print(f"[decide] round {r} WARNING: judge-conflict audit failed: {e}")
         # The same guard `run` applies before deciding a round: a shrunk panel must
         # never be certified. `run` refuses to decide; `decide` must refuse to sign.
@@ -8606,6 +8735,13 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # champion exists there is nothing to publish, and the readme records the
     # skip reason.
     gate_problems = []
+    # A failed cross-judge conflict audit means the required manual-check list
+    # was never produced for that round. `decide` used to print a WARNING and
+    # carry on to a certified decision (F026); it now blocks certification.
+    for _jcf in judge_conflict_failures:
+        gate_problems.append(
+            f"{_jcf}; the required cross-judge manual checks were NOT produced, so "
+            f"the decision cannot be certified")
     if _tol_note:
         gate_problems.append(_tol_note)
     if getattr(args, "format_gate", False) and format_problems:
@@ -8733,6 +8869,10 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         "config": ctx.cfg,
         "integrity": integrity,
         "problems": problems,
+        # The cross-judge conflict audit is a required manual check; `ok: false`
+        # records that it did not run for at least one round (F026).
+        "judge_conflicts": {"ok": not judge_conflict_failures,
+                            "failures": list(judge_conflict_failures)},
         "certification": certification,
         "judge_provider": ctx.state.get("judge_provider") or {},
         "stopped_early": _stopped or None,
@@ -8742,7 +8882,14 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         "residual_gate": bool(getattr(args, "residual_gate", DEFAULT_RESIDUAL_GATE)),
         "residuals": residuals,
         "readiness": readiness,
-        "score_model": score_model_doc(ctx),
+        # The score model must document the ranking THIS decision re-derived:
+        # a re-derived past round ranks under its RECORDED floor/dedup mode, so
+        # reading today's config here contradicted the decision it describes
+        # (F029).
+        "score_model": score_model_doc(
+            ctx,
+            floor=(final["stored"] or {}).get("tiebreak_defect_floor"),
+            dedup=(final["stored"] or {}).get("dedup_mode")),
         "rounds": [{"round": rd["round"],
                     "field": rd["agg"]["field"],
                     "field_size": rd["agg"]["field_size"],

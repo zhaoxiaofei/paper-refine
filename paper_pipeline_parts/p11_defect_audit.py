@@ -130,12 +130,26 @@ def _normalize_defect_audit(data, valid_ids) -> dict:
 _DEFECT_AUDIT_FILLER_RE = re.compile(
     r"(?i)^(?:ok|okay|yes|y|done|checked|clean|good|fine|pass|passed|true|false|"
     r"nil|null|no|none|n/?a|na|tbd|todo|unknown|x)[.!]?$")
+# The regex above is anchored to the WHOLE reason, so a repeated filler token
+# ("x x x", "ok ok ok", "n/a n/a") slipped past it and only had to carry three
+# alphanumeric characters. Match the same vocabulary per word instead.
+_DEFECT_AUDIT_FILLER_TOKEN_RE = re.compile(
+    r"(?i)^(?:ok|okay|yes|y|done|checked|clean|good|fine|pass|passed|true|false|"
+    r"nil|null|no|none|n/?a|na|tbd|todo|unknown|x)[.!]?$")
 
 
 def _defect_audit_reason_ok(reason) -> bool:
     """Is this audit reason a usable basis rather than a placeholder token?"""
     text = " ".join(str(reason or "").split()).strip(" \t.;:,—-–")
     if not text or _DEFECT_AUDIT_FILLER_RE.match(text):
+        return False
+    # A basis names what was checked and why the label holds. After the filler
+    # words are dropped, one repeated content word is still no basis, so require
+    # two distinct content words (F099).
+    words = [w for w in text.split()
+             if not _DEFECT_AUDIT_FILLER_TOKEN_RE.match(w)]
+    content = [w for w in words if re.search(r"[A-Za-z0-9]", w)]
+    if len({w.lower() for w in content}) < 2:
         return False
     return len(re.findall(r"[A-Za-z0-9]", text)) >= 3
 
@@ -174,6 +188,43 @@ def _defect_audit_coverage(data, valid_ids, verdicts) -> dict:
             "empty_reasons": sorted(no_reason)}
 
 
+def _defect_audit_coverage_incomplete(coverage: dict) -> bool:
+    """True when the coverage record leaves any row unlabelled or unexplained."""
+    return any(coverage.get(k) for k in
+               ("missing", "duplicate_ids", "invalid_labels", "empty_reasons"))
+
+
+def _defect_audit_incomplete_reason(coverage: dict) -> str:
+    bits = []
+    for key, word in (("missing", "unlabelled"), ("duplicate_ids", "duplicate"),
+                      ("invalid_labels", "invalid-label"),
+                      ("empty_reasons", "no-reason")):
+        if coverage.get(key):
+            bits.append(f"{len(coverage[key])} {word}")
+    return "the audit is incomplete: " + ", ".join(bits)
+
+
+def _defect_audit_answer_error(answer: Path) -> str:
+    """None for an absent/safe answer; an error string for a link/non-regular file.
+
+    The audit sandbox is agent-writable.  `Path.exists` and `shutil.copyfile`
+    FOLLOW a symlink, so an audit.json pointing at a host file used to be copied
+    into reports/.../audit.previous.json (F108).  lstat + S_ISREG refuses the
+    link itself, before anything opens the target.
+    """
+    try:
+        st = os.lstat(answer)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"audit.json could not be inspected ({e}); refusing it"
+    if not stat.S_ISREG(st.st_mode):
+        return "audit.json is not a regular file (a symlink/FIFO is refused)"
+    if st.st_nlink != 1:
+        return f"audit.json has {st.st_nlink} links (a multiply-linked answer is refused)"
+    return None
+
+
 def run_defect_audit_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
                            timeout: int = None) -> tuple:
     """Run the LLM defect audit; returns ({defect_id: (label, reason)}, info).
@@ -199,27 +250,47 @@ def run_defect_audit_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
     write_text_atomic(sb / "PROMPT.md",
                       _defect_audit_prompt(r, len(payload.get("defects") or [])))
     answer = sb / "audit.json"
-    try:
-        if answer.exists():
-            # Keep the PREVIOUS submission before this attempt replaces it: a
-            # partial/failed audit is still evidence of what the agent checked,
-            # and the failure path records its coverage (F169).
-            shutil.copyfile(answer, sb / "audit.previous.json")
-    except OSError:
-        pass
-    try:
-        if answer.exists():
-            answer.unlink()
-    except OSError:
-        pass
-    rec = {"id": F"defect_audit_round{int(r)}", "kind": "defect_audit",
-           "attempts_done": 0}
     # Honour the operator's timeout: the old `max(60, ...)` silently raised a
     # 10-30 s smoke timeout to 60 s (and a >1 h one was silently cut), so the
     # recorded attempt did not reflect the requested limit. 0 means "no
     # timeout" exactly as it does on the run path; only a missing value takes
     # the documented default.
     seconds = int(timeout) if timeout is not None else 1800
+
+    def _refuse(error: str) -> tuple:
+        return {}, {"used": True, "command": [str(x) for x in cmd], "rc": None,
+                    "error": error, "duration": 0.0,
+                    "timeout_requested": timeout, "timeout": seconds,
+                    "sandbox": str(sb), "ok": False}
+
+    answer_error = _defect_audit_answer_error(answer)
+    if answer_error:
+        return _refuse(answer_error)
+    if answer.exists():
+        try:
+            # Keep the PREVIOUS submission before this attempt replaces it: a
+            # partial/failed audit is still evidence of what the agent checked,
+            # and the failure path records its coverage (F169). Read through a
+            # no-follow descriptor so a planted link cannot exfiltrate its target.
+            previous = read_regular_file(answer, MAX_JSON_BYTES)
+            write_bytes_atomic(sb / "audit.previous.json", previous)
+        except OSError:
+            pass
+        # The unlink is the CREATION BARRIER: the old answer must be gone before
+        # the agent runs, or an agent that writes nothing leaves the previous
+        # run's verdicts to be read as this attempt's answer (F102).
+        try:
+            answer.unlink()
+        except OSError as e:
+            return _refuse(
+                f"the previous audit.json could not be removed ({e}); refusing "
+                f"to read it as this attempt's answer")
+        if answer.exists():
+            return _refuse(
+                "the previous audit.json still exists after removal; refusing "
+                "to read it as this attempt's answer")
+    rec = {"id": F"defect_audit_round{int(r)}", "kind": "defect_audit",
+           "attempts_done": 0}
     res = _execute_attempt_in(sb, rec, [str(x) for x in cmd], seconds,
                               prompt_name="PROMPT.md", log_name="_agent.log",
                               archive_marker=False)
@@ -227,6 +298,11 @@ def run_defect_audit_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
             "error": res.get("error"), "duration": round(float(res.get("dur") or 0.0), 1),
             "timeout_requested": timeout, "timeout": seconds,
             "sandbox": str(sb)}
+    answer_error = _defect_audit_answer_error(answer)
+    if answer_error:
+        info["error"] = answer_error
+        info["ok"] = False
+        return {}, info
     data = read_json(answer, revive=False, lenient=True)
     if not isinstance(data, (dict, list)):
         info["error"] = info.get("error") or "the agent wrote no parseable audit.json"
@@ -238,21 +314,14 @@ def run_defect_audit_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
     coverage = _defect_audit_coverage(data, valid, verdicts)
     info["verdicts"] = len(verdicts)
     info["coverage"] = coverage
-    incomplete = any(coverage[k] for k in
-                     ("missing", "duplicate_ids", "invalid_labels", "empty_reasons"))
+    incomplete = _defect_audit_coverage_incomplete(coverage)
     info["partial"] = bool(verdicts) and incomplete
     info["ok"] = bool(verdicts) and not incomplete
     if not verdicts:
         info["error"] = info.get("error") or "the agent labelled no defect row"
     elif incomplete:
-        bits = []
-        for key, word in (("missing", "unlabelled"), ("duplicate_ids", "duplicate"),
-                          ("invalid_labels", "invalid-label"),
-                          ("empty_reasons", "no-reason")):
-            if coverage[key]:
-                bits.append(f"{len(coverage[key])} {word}")
         info["error"] = (info.get("error")
-                         or "the audit is incomplete: " + ", ".join(bits))
+                         or _defect_audit_incomplete_reason(coverage))
     return verdicts, info
 
 
@@ -605,6 +674,32 @@ def write_defect_audit_reports(ctx: Ctx, r: int, agg: dict, labelled: list,
     return out
 
 
+_AUDITED_DEFECT_REPORT_SUFFIXES = (
+    "defects.csv", "issue_census.csv", "issue_matrix.csv",
+    "issue_cumulative.csv", "raw_scores.csv", "dedup_audit.json",
+)
+
+
+def _remove_audited_defect_reports(ctx: Ctx, r: int) -> list:
+    """Delete this round's TP-only family so a FAILED audit cannot leave a stale
+    successful-looking record behind (F101).
+
+    The family is diagnostic only and is rewritten from scratch by the next
+    successful audit, so removing it loses no judged data.
+    """
+    removed = []
+    for suffix in _AUDITED_DEFECT_REPORT_SUFFIXES:
+        p = ctx.reports_dir / f"round{int(r)}_auditedTP_{suffix}"
+        try:
+            if p.is_symlink() or p.exists():
+                p.unlink()
+                removed.append(str(p))
+        except OSError as e:                                     # noqa: BLE001
+            print(f"[defect-audit] WARNING: could not remove the stale audited "
+                  f"report {p}: {e}")
+    return removed
+
+
 def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
                              agent_cmd: list = None, timeout: int = None,
                              force: bool = False, use_agent: bool = True) -> dict:
@@ -651,6 +746,7 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
         .encode("utf-8")).hexdigest()[:16]
     meta_path = ctx.reports_dir / f"round{int(r)}_defect_audit.json"
     existing = read_json(meta_path, revive=False, lenient=True)
+    valid_ids = {str(x.get("defect_id")) for x in rows if isinstance(x, dict)}
     if isinstance(existing, dict) and not force \
             and existing.get("input_fingerprint") == fingerprint \
             and existing.get("ok"):
@@ -665,6 +761,44 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
                 # rows, so this is the hand-edited/stale-metadata path).
             verdicts[str(v["defect_id"])] = (label, str(v.get("reason") or ""))
         labelled = apply_defect_audit(rows, verdicts)
+        # `ok: true` alone is not proof: a hand-edited/stale record can still be
+        # missing a label or a usable reason. Recompute the SAME coverage the
+        # live path uses, and never rebuild the TP-only family from an incomplete
+        # stored audit (F100).
+        coverage = _defect_audit_coverage(
+            {"verdicts": existing.get("verdicts") or []}, valid_ids, verdicts)
+        if _defect_audit_coverage_incomplete(coverage):
+            _remove_audited_defect_reports(ctx, r)
+            reason = _defect_audit_incomplete_reason(coverage)
+            try:
+                write_json_atomic(meta_path, {
+                    "run": ctx.root.name, "round": r, "generated": utcnow(),
+                    "input_fingerprint": fingerprint, "ok": False,
+                    "partial": bool(verdicts), "rows": len(rows),
+                    "tp": sum(1 for x in labelled if x["audit_label"] == "TP"),
+                    "fp": sum(1 for x in labelled if x["audit_label"] == "FP"),
+                    "unverified": sum(1 for x in labelled
+                                      if x["audit_label"] == "UNVERIFIED"),
+                    "incomplete": sum(1 for x in labelled if not x["audit_label"]),
+                    "agent": existing.get("agent") or {},
+                    "coverage": coverage, "reason": reason,
+                    "verdicts": [{"defect_id": x["defect_id"],
+                                  "label": x["audit_label"],
+                                  "reason": x["audit_reason"]}
+                                 for x in labelled if x["audit_label"]]})
+            except OSError as e:                                 # noqa: BLE001
+                print(f"[defect-audit] WARNING: could not record the incomplete "
+                      f"stored audit at {meta_path}: {e}")
+            return {"used": True, "reused": True, "ok": False,
+                    "partial": bool(verdicts), "rows": len(rows),
+                    "tp": sum(1 for x in labelled if x["audit_label"] == "TP"),
+                    "fp": sum(1 for x in labelled if x["audit_label"] == "FP"),
+                    "unverified": sum(1 for x in labelled
+                                      if x["audit_label"] == "UNVERIFIED"),
+                    "incomplete": sum(1 for x in labelled if not x["audit_label"]),
+                    "labelled": labelled,
+                    "agent": existing.get("agent") or {},
+                    "coverage": coverage, "reason": reason}
         audited = audited_defect_agg(ctx, r, agg, labelled)
         # Self-healing reuse: rewrite the (deterministic) TP-only family from the
         # stored verdicts, so a deleted/partial audited file is restored without
@@ -695,6 +829,11 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
         # (F-028). Record it ON DISK too (ok False), so a later `decide` can tell
         # "audited and failed" from "never audited" and the submitted verdicts
         # are not lost when the next attempt clears the sandbox (F169).
+        # A previous SUCCESS left its TP-only family on disk; remove it first, or
+        # the failed record and a successful-looking family contradict each other
+        # and a later reader can take the stale family as this attempt's result
+        # (F101).
+        _remove_audited_defect_reports(ctx, r)
         reason = info.get("error") or "the audit returned no verdict"
         try:
             write_json_atomic(meta_path, {

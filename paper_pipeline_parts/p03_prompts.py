@@ -37,8 +37,8 @@ coverage you must guarantee on top of the full workflow.
 ATTACHED_PHASE1 = """## Phase 1 — $paper-review (identification only; never modify any file in "non_revised/")
 
 Run the complete review workflow as specified by the skill: Phase 0 setup (corpus conversion and
-inventory via convert_corpus.py), the EXHAUSTIVE MANDATORY mechanical sweeps M1–M17, the judgment
-passes J1–J4, and the discovery round D0–D5 — including its proposal of new sweeps for issue
+inventory via convert_corpus.py), the EXHAUSTIVE MANDATORY mechanical sweeps M1–M36, the judgment
+passes J1–J5, and the discovery round D0–D5 — including its proposal of new sweeps for issue
 classes the checklist itself misses. Adhere to the skill's core discipline throughout:
 ENUMERATE → ARTIFACT → AUDIT → REPORT for every mechanical check; every instance gets a row in
 its artifact table (a sweep with zero findings is invalid without a fully disposed artifact); one
@@ -112,7 +112,7 @@ Proceed immediately after finishing Phase 1 (which found issues) without asking 
 Run the complete revision workflow as specified by the skill — R0 through V5 — including
 the programmatic A1 ledger (every finding ID from findings.json and findings_extra.json must
 appear exactly once; "not addressed" is not a status), the CAREFUL re-verification of every finding
-with a recorded verdict and rationale, the sequenced edit plan, the edit rules E1–E12, consistency
+with a recorded verdict and rationale, the sequenced edit plan, the edit rules E1–E13, consistency
 propagation P1 with the conflict-priority order, the code-revision step C if source code is in
 scope, and validation V1–V5 (round-trip integrity, diff locality with no unmapped hunks, full
 mechanical rescan of the revised corpus, checksum re-verification of the untouched originals,
@@ -1587,7 +1587,7 @@ the artifacts landing in ./revised. Read the skill's SKILL.md and its references
   R2  copy the editable documents into revised/ (doc/docx/tex/bib/md/txt/xlsx; never pdf/png).
       revised/ already exists with the seeded ledger and language-pass files: copy INTO it,
       never delete or recreate it first.
-  R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E12; P propagation A6
+  R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E13; P propagation A6
       (supplementary tables > supplementary figures/notes > main figures & legends > Methods >
       main text > abstract > cover letter) for every corrected number/label/term/claim; C code
       revisions if in scope; V1-V5 validation (round-trip integrity, diff locality with no unmapped

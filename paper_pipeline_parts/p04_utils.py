@@ -413,7 +413,14 @@ def pipeline_identity() -> dict:
 
 
 def asset_dir_digest(base_dir: Path, name: str):
-    """One digest for a frozen asset directory (None when it is absent).
+    """One digest for a frozen asset directory.
+
+    None means ABSENT; the distinct `<unreadable>` sentinel means the directory
+    exists but could not be hashed. Conflating the two recorded an unreadable
+    frozen bundle exactly like a trimmed checkout, and the drift readers skip
+    falsy recorded hashes, so a root that could not verify its own code ran
+    anyway (F136). The sentinel is a truthy string that never equals a sha256,
+    so `root_pipeline_staleness`/`refuse_foreign_pipeline` report the drift.
 
     Every shipped file is hashed, not just `*.py`: the skills pack's prompts and
     reference tables change a stage's behaviour as much as a script does. Only
@@ -425,6 +432,15 @@ def asset_dir_digest(base_dir: Path, name: str):
     dirp = Path(base_dir) / name
     if not dirp.is_dir():
         return None
+    # `Path.rglob` SWALLOWS a PermissionError while listing a subtree, so an
+    # unreadable subdirectory produced a complete-looking digest over the rest
+    # of the tree (N-g8-2/F136). Probe completeness with os.walk, whose onerror
+    # runs; a readable tree is unchanged, so recorded digests stay identical.
+    _walk_errors: list = []
+    for _root, _dirs, _files in os.walk(dirp, onerror=_walk_errors.append):
+        pass
+    if _walk_errors:
+        return "<unreadable>"
     try:
         paths = sorted(p for p in dirp.rglob("*")
                        if p.is_file()
@@ -438,7 +454,7 @@ def asset_dir_digest(base_dir: Path, name: str):
             digest.update(sha256_file(p).encode("ascii"))
         return digest.hexdigest()
     except OSError:
-        return None
+        return "<unreadable>"
 
 
 def module_manifest(base_dir: Path) -> dict:
@@ -1431,6 +1447,13 @@ def corpus_tree_manifest(dirp: Path) -> dict:
     """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
+    if Path(dirp).is_symlink():
+        # A corpus directory that is ITSELF a link is not the corpus the caller
+        # named: hashing the link target's files made an outside tree this
+        # version's identity, which could then be pinned and published (F142).
+        # The sibling `hash_manifest` refuses the same root; an empty manifest
+        # is the refusal (a manifest has no error channel).
+        return {"files": {}, "count": 0}
     gaps = []
     paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True, gaps=gaps)
              if not _is_aux_doc(p.name)]
@@ -1494,6 +1517,11 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
     pin's bytes and reports any legacy residue.
     """
     if not dirp.is_dir():
+        return {"files": {}, "count": 0}
+    if Path(dirp).is_symlink():
+        # A materialized corpus that is ITSELF a link is not a materialized
+        # corpus: the walk would record the target tree's files as this pin's
+        # identity (F142). Refuse it exactly like `hash_manifest` does.
         return {"files": {}, "count": 0}
 
     def keep(p: Path) -> bool:
@@ -1662,6 +1690,20 @@ def _write_anchor_for(parent: Path):
     return anchor
 
 
+def _unfolded_parent(path: Path) -> Path:
+    """`path`'s parent with its ORIGINAL components (and `..`) preserved.
+
+    `os.path.abspath` collapses `..` TEXTUALLY, but the kernel resolves a
+    symlink BEFORE the `..` that follows it: for `root/sb/link/../x` (link ->
+    outside) abspath names `root/sb`, so an ancestor walk built on it checks
+    `root/sb` and never sees `link`, while the write lands in the link target's
+    parent. Walking this unfolded form sees every traversed component (F128).
+    A relative path is anchored at the CWD without normalizing it.
+    """
+    path = Path(path)
+    return (path if path.is_absolute() else Path.cwd() / path).parent
+
+
 def _refuse_symlinked_parent(path: Path) -> Path:
     """Refuse a write that traverses a symlinked directory.
 
@@ -1684,11 +1726,19 @@ def _refuse_symlinked_parent(path: Path) -> Path:
     path = Path(path)
     parent = Path(os.path.abspath(str(path))).parent
     anchor = _write_anchor_for(parent)
-    probe = parent
+    probe = _unfolded_parent(path)
     while True:
-        if probe != anchor and probe.is_symlink():
+        probe_abs = Path(os.path.abspath(str(probe)))
+        if anchor is not None:
+            if probe_abs == anchor:
+                break                   # the anchor itself is operator plumbing
+            try:
+                probe_abs.relative_to(anchor)
+            except ValueError:
+                break                   # above the registered root: ditto
+        if probe.is_symlink():
             raise OSError(f"refusing to write through symlinked directory {probe}")
-        if probe == anchor or probe.parent == probe:
+        if probe.parent == probe:
             break
         probe = probe.parent
     return path
@@ -1734,9 +1784,17 @@ def _refuse_symlinked_read_parent(path: Path) -> Path:
     parent = Path(os.path.abspath(str(path))).parent
     anchor = _write_anchor_for(parent)
     root = anchor if anchor is not None else _enclosing_run_root(parent)
-    probe = parent
+    probe = _unfolded_parent(path)          # keep `..` AFTER a link visible (F128)
     while True:
-        if probe != anchor and probe.is_symlink():
+        probe_abs = Path(os.path.abspath(str(probe)))
+        if probe_abs == anchor:
+            break                   # the anchor itself is operator plumbing
+        if root is not None and probe_abs != root:
+            try:
+                probe_abs.relative_to(root)
+            except ValueError:
+                break               # above the run root: operator plumbing
+        if probe.is_symlink():
             if not is_evidence_rel(probe.name):
                 allowed = False
             elif root is None:
@@ -1748,7 +1806,7 @@ def _refuse_symlinked_read_parent(path: Path) -> Path:
                 allowed = is_canonical_evidence_link(probe, root)
             if not allowed:
                 raise OSError(f"refusing to read through symlinked directory {probe}")
-        if probe == root or probe.parent == probe:
+        if probe_abs == root or probe.parent == probe:
             break
         probe = probe.parent
     return path
@@ -1927,7 +1985,19 @@ def write_json_atomic(path: Path, obj, mode: int = None) -> None:
     tmp = tmp_path_for(path)
 
     def do(f) -> None:
-        json.dump(_json_safe(obj), f, indent=2, ensure_ascii=False)
+        safe = _json_safe(obj)
+        text = json.dumps(safe, indent=2, ensure_ascii=False)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            # A file NAME Python decoded with surrogateescape (an agent created
+            # an invalid-UTF-8 name) cannot be encoded as raw UTF-8. Re-serialise
+            # with ASCII escapes: `\udcff` is a valid JSON escape and json.loads
+            # returns the same surrogate string, so the manifest/state is
+            # recorded instead of aborting the save (F130). A normal object
+            # keeps the previous byte-for-byte output.
+            text = json.dumps(safe, indent=2, ensure_ascii=True)
+        f.write(text)
 
     _atomic_write_bytes(tmp, path, do, mode=mode)
 
@@ -3388,163 +3458,6 @@ def _cover_letter_row(lines: list, doc: str, limits: dict = None, profile=None) 
                         f"{total_max}-word cap" if total_max is not None else ""))}
 
 
-def scan_lengths_in_sources(sources: list, profile=None) -> dict:
-    """Abstract/main-text word counts over [(dir, prefix, excluded_top)] sources.
-
-    A code-side PROXY for the agents' M19 sweep: it reports what it can measure
-    and says "not verified"/"skipped" where it cannot. It never gates candidate
-    ranking, but an over-cap FINAL published package is reported by readiness.
-    The caps and their provenance come from the venue profile: a profile without
-    caps (the shipped `generic` one) yields counts with `cap: null` and
-    `over_limit: false`, which is what the note and the decision report print.
-    """
-    prof = _as_profile(profile)
-    limits = prof.length_limits()
-    source = prof.length_limits_source
-    # A document named for the run's OWN article type is that type's
-    # manuscript: its opening salutation (a Letter to the Editor) must not
-    # divert the count to the cover-letter preference.
-    manuscript_names = _normalized_article_type_names(prof)
-    # Which display captions this venue leaves out: figure legends always for
-    # "figure-legends", table captions only when "table-captions" is named.
-    # Passing the selected kinds (rather than one global caption list) keeps a
-    # profile that excludes only one of them from subtracting the other.
-    _excludes = set(prof.main_text_excludes())
-    caption_kinds = tuple(
-        kind for kind, section in (("figure", "figure-legends"),
-                                   ("table", "table-captions"))
-        if section in _excludes)
-    overrides = corpus_source_overrides(sources)
-    rows, unparsed, skipped, rendered, docs = [], [], [], [], set()
-    unreadable = []
-    for i, (src, prefix, excluded) in enumerate(sources):
-        if not src.is_dir():
-            continue
-        # Multi-file LaTeX: a master .tex carries only \input/\include lines and
-        # its children carry the prose. Cache every source and remember which
-        # files are INCLUDED by another, so the master counts the expanded text
-        # and a child is not counted a second time on its own (F36).
-        tex_cache, tex_included = {}, set()
-        src_gaps = []
-        for q in _iter_tree_files(src, gaps=src_gaps):
-            if q.suffix.lower() not in LENGTH_TEX_EXTS:
-                continue
-            qtext = read_text_bounded(q)
-            if qtext is None:
-                continue
-            tex_cache[q.resolve()] = qtext
-            for inc in TEX_INCLUDE_RE.finditer(strip_tex_comment(qtext)):
-                child = _tex_include_path(q.parent, inc.group(1))
-                if child is not None and child != q.resolve():
-                    tex_included.add(child)
-        for p in _iter_tree_files(src, gaps=src_gaps):
-            # `_iter_tree_files` is the corpus walker: a file symlink is not
-            # package content (copy_into refuses it), so a scan that followed
-            # one verified a corpus the materializer never produced.
-            if _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
-                    or is_non_submitted_readme_name(p.name):
-                continue
-            rel = p.relative_to(src).as_posix()
-            if excluded and excluded_corpus_component(rel, excluded):
-                continue
-            if is_code_rel(prefix + rel):
-                # `code/` is not manuscript prose (see scan_captions_in_sources).
-                continue
-            if (prefix + rel) in overrides[i]:
-                continue                      # a later source provides this path
-            if is_non_manuscript_rel(rel):
-                # Evidence areas and feedback/response documents are never
-                # counted against the article's word limits (M19 measures the
-                # submission's abstract, body and cover letter only).
-                continue
-            doc = prefix + rel
-            ext = p.suffix.lower()
-            if docx_document_role(p.name, manuscript_names) == "supp":
-                skipped.append(doc)         # supplementary text is not under the article caps
-                continue
-            lines, caption_spans, abstract_end = None, [], None
-            if ext in LENGTH_DOCX_EXTS:
-                # Frontiers' counting source excludes the CONTENTS of tables and
-                # boxes; a profile that says so must not count cell paragraphs
-                # as main text (F08).
-                paras = _docx_paragraphs(p, include_tables="table-contents" not in _excludes)
-                if paras is None:
-                    unparsed.append(doc)
-                    continue
-                lines = paras
-                # A wrapped DOCX legend is usually split over several
-                # paragraphs. `_caption_units` sees one paragraph at a time, so
-                # only its first line was excluded and the continuation was
-                # charged to the article cap (F04). The line-oriented reader
-                # merges continuations with the SAME rules the text extractor
-                # uses.
-                caption_spans = [(a, b) for _, _, a, b
-                                 in _caption_units_from_lines(paras, with_spans=True,
-                                                              kinds=caption_kinds)]
-            elif ext in LENGTH_TEX_EXTS:
-                if p.resolve() in tex_included:
-                    skipped.append(doc)     # counted in the master that includes it
-                    continue
-                text = tex_cache.get(p.resolve())
-                if text is None:
-                    # The cache loop skips a .tex whose read_text_bounded()
-                    # returned None; the old "" default then counted that
-                    # unreadable manuscript as an EMPTY source within every
-                    # cap. An unreadable source is a NAMED gap, exactly like
-                    # the .md/.txt branch below (F103).
-                    unparsed.append(doc)
-                    continue
-                expanded = _tex_expand_includes(text, p.parent, source=p)
-                for inc in TEX_INCLUDE_RE.finditer(expanded):
-                    unparsed.append(f"{doc}: unresolved include {inc.group(1)}")
-                lines, caption_spans, abstract_end = _tex_length_scan(expanded)
-            elif ext in LENGTH_TEXT_EXTS:
-                text = read_text_bounded(p)
-                if text is None:
-                    # An unreadable manuscript source is a NAMED gap, not an
-                    # empty rendering (F65).
-                    unparsed.append(doc)
-                    continue
-                lines = text.splitlines()
-                caption_spans = [(a, b) for _, _, a, b
-                                 in _caption_units_from_lines(lines, with_spans=True,
-                                                              kinds=caption_kinds)]
-            elif ext in LENGTH_UNPARSED_EXTS:
-                unparsed.append(doc)
-                continue
-            elif ext in LENGTH_RENDERED_EXTS:
-                skipped.append(doc)         # a rendering, not an editable source
-                rendered.append(doc)
-                continue
-            else:
-                continue
-            if _is_cover_letter_lines(lines, p.name, manuscript_names):
-                docs.add(doc)
-                rows.append(_cover_letter_row(lines, doc, limits=limits, profile=prof))
-                continue
-            found = _length_rows_for_lines(lines, doc, caption_spans=caption_spans,
-                                           abstract_end=abstract_end, limits=limits,
-                                           counting=prof.counting,
-                                           whole_doc_as_main=bool(
-                                               _name_is_article_type_manuscript(
-                                                   p.name, manuscript_names)))
-            if not found:
-                skipped.append(doc)
-                continue
-            docs.add(doc)
-            rows.extend(found)
-        # An unreadable subdirectory hides its documents from the walk; name it
-        # so the note can tell "no manuscript" from "nothing readable" (F049).
-        unreadable.extend(prefix + g for g in src_gaps)
-    over = [r for r in rows if r["over_limit"]]
-    return {"limits": limits, "counting": prof.counting, "source": source,
-            "venue": prof.id,
-            "rows": rows, "count": len(rows), "over_limit": over,
-            "unparsed": sorted(set(unparsed)), "skipped": sorted(set(skipped)),
-            "rendered": sorted(set(rendered)),
-            "needs_manual": sorted(set(rendered)) if not rows else [],
-            "documents": sorted(docs), "checked": bool(rows),
-            "unreadable_dirs": sorted(set(unreadable))}
 
 
 def length_note(info) -> str:
@@ -7863,10 +7776,18 @@ def _lookup_cache(ctx: Ctx) -> dict:
 
 
 def _lookup_cache_store(ctx: Ctx, cache: dict) -> None:
+    """Best-effort cache write: the lookup batch's contract is "never fatal".
+
+    `except OSError` alone let a companion module's non-JSON value (a set, a
+    bytes payload) or a non-UTF-8 string raise TypeError/UnicodeEncodeError out
+    of `_lookup_batch` and abort the stage's materialization (F138). The cache
+    is an optimisation, so every writer failure is swallowed here.
+    """
     try:
         (ctx.root / "reports").mkdir(parents=True, exist_ok=True)
         write_json_atomic(ctx.root / LOOKUP_CACHE_REL, cache)
-    except OSError:
+    except (OSError, TypeError, ValueError):
+        # UnicodeError is a ValueError; the cache is never worth a stage.
         pass
 
 
@@ -9466,12 +9387,22 @@ def judge_token_for(ctx: "Ctx", r: int, vid: str) -> str:
 
 
 def iqr_of(vals: list) -> float:
+    """The panel's inter-quartile range; UNCOMPUTABLE is the WORST value.
+
+    The champion key compares IQR lower-better, so the old blanket `return 0.0`
+    on any exception handed a malformed panel (NaN/Infinity/non-numeric score)
+    the best attainable value and outranked a valid candidate, with no gap
+    recorded (F137). A non-finite result (a NaN score does not always raise) is
+    unusable in the same way. Both return +inf, which every order key ranks
+    after a real IQR (and after the `None` 99.0 fallback).
+    """
     if len(vals) >= 2:
         try:
             q = statistics.quantiles(vals, n=4, method="inclusive")
-            return float(q[2] - q[0])
-        except Exception:
-            pass
+            value = float(q[2] - q[0])
+        except Exception:                                        # noqa: BLE001
+            return float("inf")
+        return value if math.isfinite(value) else float("inf")
     return 0.0
 
 
@@ -9789,9 +9720,13 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
     too (bottom-up): an empty directory is still a directory the next round
     would carry, and leaving it contradicts this sweep's own contract (F082).
 
-    Returns `{"removed": [rel, ...], "kept_in_evidence": [rel, ...]}`.
+    Returns `{"removed": [rel, ...], "kept_in_evidence": [rel, ...],
+    "failed": [{path, error}, ...]}`. A non-empty `failed` list RAISES after
+    the sweep: a junk file still in the tree must never be reported as gone,
+    because the caller then records the corpus digest and a clean sweep while
+    the file ships (F145).
     """
-    out = {"removed": [], "kept_in_evidence": []}
+    out = {"removed": [], "kept_in_evidence": [], "failed": []}
     dirp = Path(dirp)
     if dirp.is_symlink():
         # `rglob` would descend through a root link and `unlink()` the target's
@@ -9810,7 +9745,12 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
             continue
         try:
             q.unlink()
-        except OSError:
+        except FileNotFoundError:
+            pass                          # already gone: nothing left to ship
+        except OSError as e:
+            # Never `continue` silently: the path would be in neither list, and
+            # the stage would certify a sweep that left the junk in place.
+            out["failed"].append({"path": rel, "error": f"{type(e).__name__}: {e}"})
             continue
         out["removed"].append(rel)
     # A __pycache__ directory this sweep emptied is residue with no content:
@@ -9829,6 +9769,11 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
                 cache.rmdir()
         except OSError:
             continue
+    if out["failed"]:
+        raise OSError(
+            "the non-shippable-file sweep could not remove "
+            + ", ".join(f"{f['path']} ({f['error']})" for f in out["failed"])
+            + "; the package still carries file(s) no submission may ship")
     return out
 
 
@@ -9843,18 +9788,37 @@ def strip_stage_non_shippable(sb: Path, pkg_dir: Path) -> dict:
     (the delivery report's existing consumer) and adds the code area separately.
     """
     sb, pkg_dir = Path(sb), Path(pkg_dir)
-    out = {"removed": [], "kept_in_evidence": [], "package": {},
+    out = {"removed": [], "kept_in_evidence": [], "failed": [], "package": {},
            "code": {}}
+
+    def _sweep_half(path: Path, prefix: str) -> dict:
+        """Sweep one corpus half; a failed unlink is collected, then raised.
+
+        The helper raises AFTER attempting every removal and names the paths in
+        its message; the half is still reported here so the other half runs and
+        the caller sees one complete failure record instead of a partial sweep.
+        """
+        try:
+            return strip_non_shippable_files_in_dir(path)
+        except OSError as e:
+            out["failed"].append({"path": prefix.rstrip("/") or ".", "error": str(e)})
+            return {"error": str(e), "removed": [], "kept_in_evidence": []}
+
     if pkg_dir.is_dir():
-        out["package"] = strip_non_shippable_files_in_dir(pkg_dir)
+        out["package"] = _sweep_half(pkg_dir, "")
         out["removed"].extend(out["package"].get("removed") or [])
         out["kept_in_evidence"].extend(out["package"].get("kept_in_evidence") or [])
     code = sb / CODE_DIR
     if code.is_dir():
-        out["code"] = strip_non_shippable_files_in_dir(code)
+        out["code"] = _sweep_half(code, CODE_DIR + "/")
         out["removed"].extend(f"{CODE_DIR}/{rel}" for rel in (out["code"].get("removed") or []))
         out["kept_in_evidence"].extend(
             f"{CODE_DIR}/{rel}" for rel in (out["code"].get("kept_in_evidence") or []))
+    if out["failed"]:
+        raise OSError(
+            "the stage's non-shippable-file sweep could not remove "
+            + ", ".join(f"{f['path']} ({f['error']})" for f in out["failed"])
+            + "; the package still carries file(s) no submission may ship")
     return out
 
 

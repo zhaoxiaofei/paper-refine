@@ -50,7 +50,13 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
             frags.append((m.start(), m.end(),
                           unesc(tok[tok.find(">") + 1:tok.rfind("<")]), tok))
     text = "".join(f[2] for f in frags)
-    edits = sorted((s, e, r) for s, e, r in edits if 0 <= s <= e <= len(text) and (e > s or r))
+    edits = [(s, e, r) for s, e, r in edits
+             if 0 <= s <= e <= len(text) and (e > s or r)]
+    # A STABLE sort on position only: including the replacement text in the
+    # key (the old `sorted((s, e, r) ...)`) reordered two zero-length
+    # insertions anchored at one offset lexicographically instead of leaving
+    # them in caller order.
+    edits.sort(key=lambda edit: (edit[0], edit[1]))
     if not edits:
         return para, []
     # Overlapping edits: keep the first-started of each group (the sort is by
@@ -157,8 +163,11 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
             # returned unchanged. It belongs BEFORE the break in text order.
             _ins = zero_insertions(local)
             if _ins:
-                pieces.append('<w:r><w:t xml:space="preserve">' + esc(_ins)
-                              + "</w:t></w:r>")
+                # A BARE `w:t`, never a nested `w:r`: the break/symbol is
+                # already inside a run (CT_R cannot contain another run), so
+                # wrapping the insertion in one produced schema-invalid OOXML
+                # while `applied` still reported the edit as done.
+                pieces.append('<w:t xml:space="preserve">' + esc(_ins) + "</w:t>")
             # The break is consumed by an edit that covers its position. An
             # EMPTY replacement consumes it too (the old `if covered` treated
             # "" as "no edit" and left the break in place); and a replacement
@@ -179,8 +188,11 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
             # has no `carry()` call of its own.
             _ins = zero_insertions(local)
             if _ins:
-                pieces.append('<w:r><w:t xml:space="preserve">' + esc(_ins)
-                              + "</w:t></w:r>")
+                # A BARE `w:t`, never a nested `w:r`: the break/symbol is
+                # already inside a run (CT_R cannot contain another run), so
+                # wrapping the insertion in one produced schema-invalid OOXML
+                # while `applied` still reported the edit as done.
+                pieces.append('<w:t xml:space="preserve">' + esc(_ins) + "</w:t>")
             # The one placeholder character is part of the paragraph text; an
             # edit that covers it consumes it, otherwise the glyph survives.
             cover = next(((s, e, r) for s, e, r, is_edit in keep
@@ -6179,7 +6191,11 @@ def _bib_record_for_entry(entry_text: str, records: list):
 
 
 def _iter_wt_elements(para: str):
-    for m in re.finditer(r"<w:t(?:\s[^>]*)?>.*?</w:t>", para, re.S):
+    # The opening arm must NOT match a self-closing `<w:t .../>`: without the
+    # `(?<!/)` guard `<w:t />` was read as an opening element and the lazy body
+    # ran to the NEXT `</w:t>`, so live markup became "text" and was escaped
+    # into the replacement. `TEXT_RE`/`_text_fragments` already carry the guard.
+    for m in re.finditer(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>", para, re.S):
         inner = m.group(0)
         text = unesc(inner[inner.find(">") + 1:inner.rfind("<")])
         yield m.start(), m.end(), text
@@ -6243,6 +6259,16 @@ def _replace_text_in_para(para: str, old: str, new: str):
         return None
     tail = last[3][tail_off:]
     if len(touched) > 1:
+        # `joined` concatenates only `w:t` contents, so a match can cross a
+        # `<w:br>/<w:cr>/<w:tab>/<w:sym>/<w:noBreakHyphen>` between two text
+        # elements. The replacement would land in the first element and the
+        # token would stay where it was, relocating the break to the end of the
+        # match. Refuse the edit instead of reordering the paragraph.
+        for dm in _FRAG_OR_BREAK_RE.finditer(para):
+            if not (first[1] <= dm.start() < last[1]):
+                continue
+            if not dm.group(0).startswith("<w:t"):
+                return None
         # The run that OWNS the w:t is the enclosing `<w:r>`: `w:rPr` lives
         # there, never inside the `w:t` span, so the old `<w:rPr" in
         # para[s:e]` test could not fire -- a multi-run match happily dropped

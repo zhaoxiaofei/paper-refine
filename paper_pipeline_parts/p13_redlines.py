@@ -646,12 +646,18 @@ def _pPr_for(bp, rp, counter: list, ts: str):
     and reject-all produced the revised style (F252). `w:pPrChange` is the
     OOXML representation Word writes for exactly this change.
     """
-    pr = rp.find(_w("pPr")) if rp.find(_w("pPr")) is not None else bp.find(_w("pPr"))
-    if pr is None:
+    rp_pr = rp.find(_w("pPr"))
+    bp_pr = bp.find(_w("pPr"))
+    if rp_pr is None and bp_pr is None:
         return None
-    pr = copy.deepcopy(pr)
-    old = bp.find(_w("pPr"))
-    if _ppr_bytes(pr) != _ppr_bytes(old):
+    # The LIVE pPr is the REVISED one; when the revision removed the pPr
+    # entirely the live form is an EMPTY pPr. Falling back to the base pPr here
+    # compared a copy of the base with the base, emitted no w:pPrChange and
+    # resurrected a style the revision had deleted: accept-all kept the heading
+    # (F014).
+    pr = copy.deepcopy(rp_pr) if rp_pr is not None else ET.Element(_w("pPr"))
+    old = bp_pr
+    if _ppr_bytes(rp_pr) != _ppr_bytes(old):
         for existing in pr.findall(_w("pPrChange")):
             pr.remove(existing)
         change = _track_change("pPrChange", counter, ts)
@@ -1193,6 +1199,23 @@ def redline_minimal_weight(base: Path, revised: Path) -> dict:
     return {"ins": ins, "del": dele}
 
 
+def _docx_body_paragraph_texts(path: Path):
+    """Every body paragraph's text (table cells included), or None if unreadable.
+
+    Used only to recognise an UNMARKED COPY of one of the two inputs: a
+    zero-markup file whose text inventory is exactly one input's proves the
+    backend never compared the pair (F016).
+    """
+    try:
+        _, root = _docx_root(path)
+        body = root.find(_w("body"))
+        return ([_para_text(p) for p in body.iter(_w("p"))]
+                if body is not None else [])
+    except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError,
+            AttributeError, RuntimeError):
+        return None
+
+
 def redline_fidelity(base: Path, revised: Path, out: Path) -> dict:
     """How faithful `out` is, as far as a code-side check can tell.
 
@@ -1217,11 +1240,30 @@ def redline_fidelity(base: Path, revised: Path, out: Path) -> dict:
     own_w = max(0, marked_w - base_w)
     minimal_w = minimal["ins"] + minimal["del"]
     over = bool(minimal_w) and own_w > max(3 * minimal_w, minimal_w + 200)
+    # The opposite failure of over-marking is marking NOTHING: the pair's own
+    # minimal weight proves the two documents differ, so a readable output with
+    # zero own w:ins/w:del is suspicious. The decisive case is an output whose
+    # text inventory is one of the INPUTS unchanged: the backend copied an input
+    # instead of comparing the pair (a no-op compare, or the arguments in the
+    # wrong order). The old result carried only `over_marked`, so such a copy
+    # passed the only gate and was announced as the tracked copy (F016). The
+    # copy is named, not just the count, so the caller cannot reject a writer
+    # that legitimately reports an un-representable difference.
+    under = bool(minimal_w) and own_w == 0
+    copied_input = None
+    if under:
+        out_texts = _docx_body_paragraph_texts(out)
+        if out_texts is not None:
+            for _label, _src in (("base", base), ("revised", revised)):
+                if out_texts == _docx_body_paragraph_texts(_src):
+                    copied_input = _label
+                    break
     return {"marked_words": marked_w, "minimal_words": minimal_w,
             "marked_ins": marked["ins"], "marked_del": marked["del"],
             "minimal_ins": minimal["ins"], "minimal_del": minimal["del"],
             "base_marked_words": base_w, "own_marked_words": own_w,
-            "over_marked": over}
+            "over_marked": over, "under_marked": under,
+            "unmarked_input_copy": copied_input}
 
 
 def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
@@ -1421,6 +1463,22 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         # result is kept when every backend over-marks.
         fidelity = redline_fidelity(base, revised, out)
         last["fidelity"] = fidelity
+        copied = fidelity.get("unmarked_input_copy")
+        if copied and not last.get("non_paragraph_changed"):
+            # A readable file with NO markup whose text is an INPUT unchanged is
+            # not a tracked-changes document: nothing was compared (a no-op
+            # compare, or the arguments in the wrong order). Fail the attempt so
+            # the next backend is tried and a pair with no usable redline is
+            # reported FAILED instead of announced as tracked. A writer that
+            # says it could not represent the difference (the built-in writer's
+            # non_paragraph_changed table caveat) keeps its documented warning
+            # behaviour.
+            last["ok"] = False
+            last["detail"] = ("the backend wrote a readable .docx with no w:ins/w:del "
+                              f"markup for {fidelity['minimal_words']} word(s) of real "
+                              f"change: an unmarked copy of the {copied} document is not "
+                              "a tracked-changes document")
+            continue
         if fidelity["over_marked"]:
             _over = (f"over-marked redline: "
                      f"{fidelity.get('own_marked_words', fidelity['marked_words'])} "
@@ -1504,8 +1562,15 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
 
 
 def _md_table_cell(text) -> str:
-    """One Markdown table/bullet text: a pipe or newline cannot break the row."""
-    return " ".join(str(text or "").split()).replace("|", "\\|")
+    """One Markdown table/bullet text: a pipe or newline cannot break the row.
+
+    Escaping only `|` left a literal backslash before a pipe with an EVEN run of
+    backslashes, which a reader takes as an escaped backslash followed by a real
+    cell separator -- the exact defect the shared p04 helper documents and fixes.
+    Normalise the whitespace here (the README's old behaviour) and delegate the
+    escaping, so the two writers cannot diverge again (F018).
+    """
+    return md_table_cell(" ".join(str(text or "").split()))
 
 
 def _md_code(text) -> str:
@@ -1818,12 +1883,27 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
     ok_n = sum(1 for v in manifest["versions"] for c in v["comparisons"] if c["ok"])
     fail_n = sum(1 for v in manifest["versions"] for c in v["comparisons"]
                  if not c["ok"] and not c.get("skipped"))
+    # A requested version that was never materialized produces ZERO comparison
+    # rows, so fail_n stayed 0 and `redline --version w99` printed "0 failed"
+    # and exited 0 -- an operator could not tell a real run from one that did
+    # nothing (F034). The version must exist in at least one selected round.
+    selected_rounds = set(rounds or range(1, ctx.rounds_count() + 1))
+    have_versions = {(v.get("round"), str(v.get("version")))
+                     for v in manifest["versions"]
+                     if v.get("round") in selected_rounds
+                     and str(v.get("status") or "") != "not materialized"}
+    missing_versions = ([vid for vid in versions
+                         if not any(ver == vid for _r, ver in have_versions)]
+                        if versions is not None else [])
     skip_n = sum(1 for v in manifest["versions"] for c in v["comparisons"] if c.get("skipped"))
     warn_n = sum(1 for v in manifest["versions"] for c in v["comparisons"] if c.get("warning"))
     print(f"[redline] {ok_n} tracked-changes docx written, {fail_n} failed"
           + (f", {skip_n} skipped (tool=none)" if skip_n else "")
           + (f", {warn_n} with caveats (see README)" if warn_n else ""))
+    if missing_versions:
+        print(f"[redline] {len(missing_versions)} requested version(s) were never materialized "
+              f"in the selected round(s): {', '.join(missing_versions)}")
     print(f"[redline] manifest: {ctx.root / REDLINE_DIRNAME / 'manifest.json'}")
     print(f"[redline] summary:  {ctx.root / REDLINE_DIRNAME / 'README.md'}")
-    if fail_n and args.tool != "none":
+    if (fail_n or missing_versions) and args.tool != "none":
         sys.exit(4)

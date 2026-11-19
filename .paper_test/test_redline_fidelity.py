@@ -94,16 +94,35 @@ def body_views(docx: Path):
         a, r = [], []
         for ch in list(p):
             if ch.tag == W + "ins":
-                a.append("".join(t.text or "" for t in ch.iter(W + "t")))
+                a.append(_inline_tokens(ch, W + "t"))
             elif ch.tag == W + "del":
-                r.append("".join(t.text or "" for t in ch.iter(W + "delText")))
+                r.append(_inline_tokens(ch, W + "delText"))
             else:
-                for t in ch.iter(W + "t"):
-                    a.append(t.text or "")
-                    r.append(t.text or "")
+                a.append(_inline_tokens(ch, W + "t"))
+                r.append(_inline_tokens(ch, W + "t"))
         accept.append("".join(a))
         reject.append("".join(r))
     return plain, accept, reject
+
+
+def _inline_tokens(el, text_tag):
+    """One element's inline content, keeping marks the text-only view lost.
+
+    A lost ``w:br``/``w:tab``/``w:drawing`` used to compare equal because only
+    ``w:t``/``w:delText`` was collected; the shape of the paragraph changed
+    while every check stayed green.
+    """
+    out = []
+    for node in el.iter():
+        if node.tag == text_tag:
+            out.append(node.text or "")
+        elif node.tag == W + "br":
+            out.append("<br>")
+        elif node.tag == W + "tab":
+            out.append("<tab>")
+        elif node.tag == W + "drawing":
+            out.append("<drawing>")
+    return "".join(out)
 
 
 def flat(texts):

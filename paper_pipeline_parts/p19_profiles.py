@@ -340,7 +340,13 @@ def _stage_rules_rel(sb: Path, stage: str) -> str:
             if head is None:
                 # Over the agent-output budget (or no longer a regular file):
                 # treat it as another stage's/unusable file rather than reading
-                # the whole thing into memory before slicing.
+                # the whole thing into memory before slicing. An auxiliary
+                # stage must still get its OWN sidecar: returning the reviser's
+                # relative path let it overwrite the reviser's paged file
+                # (PR6F7-036).
+                if stage in ("revision_audit", "revision_repair"):
+                    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(stage)).strip("_") or "stage"
+                    return f"{PROFILE_INSTRUCTIONS_DIR}/PROFILE_RULES_{safe}.md"
                 return PROFILE_RULES_REL
             if f"_Stage: {stage}_" not in head[:4096]:
                 safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(stage)).strip("_") or "stage"

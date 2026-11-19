@@ -210,6 +210,18 @@ def run_bounded(argv, timeout, cwd=None, env=None):
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 pass
+        except BaseException:
+            # Ctrl-C (KeyboardInterrupt) and every other non-timeout exception
+            # out of wait() used to abandon the child: it leads its OWN
+            # session, so the tool and its grandchildren kept running after the
+            # orchestrator stopped (F129). Kill the whole group, reap it, and
+            # let the exception propagate.
+            _kill_process_group(proc)
+            try:
+                proc.wait(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            raise
         for t in readers:
             t.join(timeout=10)
         # A grandchild that escaped the group can keep a pipe open; closing our
@@ -518,7 +530,17 @@ def _reference_entries_in_lines(lines, entries: set) -> set:
         if _REFERENCE_HEADING_RE.search(stripped):
             in_refs = True
             continue
-        if in_refs and re.match(r"(?i)^(?:#{1,6}\s|\\(?:sub)?section)", stripped):
+        if in_refs and (re.match(r"(?i)^(?:#{1,6}\s|\\(?:sub)?section)", stripped)
+                        or (is_heading_line(stripped)
+                            # A reference entry can itself be heading-shaped
+                            # ("WHO 2020"); a year means ENTRY, not heading.
+                            and not re.search(r"\b(?:18|19|20)\d{2}\b", stripped))):
+            # A plain-text/.rst/.html/DOCX heading carries no Markdown `#` or
+            # LaTeX `\section` marker, so a following Methods list item was
+            # collected as a reference entry and reported as an added/removed
+            # reference (F007). `is_heading_line` is the pipeline's heading
+            # detector; the DOCX reader additionally prefixes a style-based
+            # heading with `# ` (see _reference_entry_keys).
             in_refs = False
             continue
         if not in_refs:
@@ -579,27 +601,79 @@ def _reference_entry_keys(package: Path) -> set:
         elif ext == ".docx":
             paras = _docx_paragraphs_with_styles(p, include_notes=True)
             if paras:
-                _reference_entries_in_lines((line for line, _style in paras), entries)
+                # A Word heading carries a STYLE, not a Markdown marker; a
+                # numbered/differently spelled style heading would not look
+                # like a heading in its text alone. Mark it so the shared scan
+                # ends the reference list on it (F007).
+                _reference_entries_in_lines(
+                    (("# " + line) if str(style or "").startswith("Heading") else line
+                     for line, style in paras), entries)
     return entries
+
+
+_REFERENCE_DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s,;]+", re.I)
+_REFERENCE_ARXIV_RE = re.compile(r"\barxiv:\s*(\d{4}\.\d{4,5})", re.I)
+_REFERENCE_YEAR_RE = re.compile(r"\b(?:18|19|20)\d{2}\b")
+
+
+def _reference_entry_identity(entry: str) -> tuple:
+    """Identity evidence that two rendered reference entries name the SAME work.
+
+    Similarity alone is NOT a correction: "Smith J. ... 2020" and "Brown K. ...
+    2020" pair at ratio 0.87, so a fabricated replacement was hidden from the
+    added/removed reference gate (F150). Pair only when the entries share a
+    DOI/arXiv id, or the same first-author token AND year. A `key:` entry (a
+    .tex `\\bibitem`) is identified by the key itself: a changed key is a
+    removal + insertion, never an in-place correction.
+    """
+    text = str(entry or "").strip().lower()
+    if not text:
+        return ("", None)
+    if text.startswith("key:"):
+        return ("key", text)
+    doi = _REFERENCE_DOI_RE.search(text)
+    if doi:
+        return ("doi", doi.group(0).rstrip(".,;)]}"))
+    arxiv = _REFERENCE_ARXIV_RE.search(text)
+    if arxiv:
+        return ("arxiv", arxiv.group(1))
+    year = _REFERENCE_YEAR_RE.search(text)
+    if year is None:
+        return ("", None)
+    body = re.sub(r"^\s*(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}[.)])\s+", "", text)
+    first = re.split(r"[\s,;]+", body, 1)[0]
+    if not first:
+        return ("", None)
+    return ("author-year", (first, year.group(0)))
 
 
 def _reference_entry_corrections(base_package: Path, candidate_package: Path) -> tuple:
     """(pairs, added, removed) for the reference lists of one package pair.
 
-    A typo/author-year fix changes one entry's text; a removed entry is paired
-    with a very similar added one (ratio >= 0.80) so an in-place correction is
-    not reported as delete+add. The pairs are returned because the PROSE
-    comparison must exclude the same correction: it used to re-report a
-    corrected entry as a missing+added content unit even though this comparator
-    accepted it (F126).
+    A typo fix changes one entry's text; a removed entry is paired with a very
+    similar added one (ratio >= 0.80) so an in-place correction is not reported
+    as delete+add. Similarity is not sufficient on its own: the pair must also
+    carry IDENTITY evidence for the same work (see
+    `_reference_entry_identity`), or a fabricated replacement (Smith -> Brown)
+    is accepted as a correction and never reaches the gate (F150). The pairs
+    are returned because the PROSE comparison must exclude the same correction:
+    it used to re-report a corrected entry as a missing+added content unit even
+    though this comparator accepted it (F126).
     """
     base = _reference_entry_keys(base_package)
     cand = _reference_entry_keys(candidate_package)
     added, removed = sorted(cand - base), sorted(base - cand)
     pairs = []
     for old in list(removed):
+        old_id = _reference_entry_identity(old)
+        if not old_id[0]:
+            # No identity evidence: a similar-looking new entry must not hide
+            # this removal.
+            continue
         best, score = None, 0.0
         for new in added:
+            if _reference_entry_identity(new) != old_id:
+                continue
             ratio = difflib.SequenceMatcher(None, old, new).ratio()
             if ratio > score:
                 best, score = new, ratio
@@ -711,15 +785,29 @@ def _docx_paragraphs_with_styles(path: Path, include_tables: bool = True,
     mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     try:
         with zipfile.ZipFile(path) as z:
+            # A per-part cap does not bound the PACKAGE: a small DOCX with
+            # thousands of compressible header parts (or parts that together
+            # declare hundreds of MiB) forced the whole decompression on every
+            # scan. Charge the entry count and the DECLARED decompressed total
+            # before reading anything (F132).
+            infos = z.infolist()
+            if len(infos) > MAX_DOCX_ENTRIES:
+                return None
+            if sum(info.file_size for info in infos) > MAX_DOCX_TOTAL_BYTES:
+                return None
             data = _docx_xml_part(z, "word/document.xml")
-            _hf_names = [n for n in z.namelist()
-                         if re.match(r"word/(?:header|footer)[A-Za-z0-9_\-]*\.xml$", n)]
-            note_data = [_docx_xml_part(z, name) for name in
-                         ("word/footnotes.xml", "word/endnotes.xml")]
-            # F202: header/footer prose was invisible to the content and fact
-            # gates; read the parts too (the visible-paragraph walker skips
-            # Fallback branches).
-            note_data += [_docx_xml_part(z, name) for name in _hf_names]
+            note_data = []
+            if include_notes:
+                _hf_names = [n for n in z.namelist()
+                             if re.match(r"word/(?:header|footer)[A-Za-z0-9_\-]*\.xml$", n)]
+                note_data = [_docx_xml_part(z, name) for name in
+                             ("word/footnotes.xml", "word/endnotes.xml")]
+                # F202: header/footer prose was invisible to the content and fact
+                # gates; read the parts too (the visible-paragraph walker skips
+                # Fallback branches). Only when the caller asked for notes:
+                # materializing and parsing them for a body-only read was pure
+                # decompression surface (F132).
+                note_data += [_docx_xml_part(z, name) for name in _hf_names]
         if data is None:
             return None
         root = ET.fromstring(data)
@@ -1244,9 +1332,13 @@ def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
     if isinstance(raw, (list, tuple, set)):
         text = ", ".join(str(x) for x in raw)
         parts = [str(x) for x in raw]
+        raw_text = text
+        had_selection_text = bool(text)
     else:
-        text = str(raw).strip()
+        raw_text = str(raw)
+        text = raw_text.strip()
         parts = re.split(r"[,\s]+", text)
+        had_selection_text = bool(raw_text)
     spec = OnlySpec()
     spec.raw = text
     for part in parts:
@@ -1379,6 +1471,12 @@ def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
             _add_session_token(spec, None, token, part, flag)
             continue
         spec.stages.update(parse_only_stages_for(token, part, flag))
+    if not spec and had_selection_text:
+        # A non-empty selection that consumed no token (',', ' ', ',,'): the
+        # caller treats a falsy spec as "no selection" and used to run the
+        # WHOLE pipeline from a typo or an empty shell expansion (F131). Only
+        # an absent/empty flag means everything.
+        die(f"{flag}: {raw_text!r} names no round or stage", code=2)
     return spec if spec else None
 
 
@@ -1935,8 +2033,12 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
                 break
     if ok:
         return info
-    if dst.exists():
-        rmtree_force(dst, ignore_errors=True)
+    if dst.exists() and not rmtree_force(dst, ignore_errors=True):
+        # copy_into overwrites by NAME but never deletes a stale entry, so a
+        # wipe that failed must not be merged into a "rebuilt" copy (F146).
+        raise RuntimeError(
+            f"refusing to rebuild {dst}: the stale tree could not be removed, so "
+            f"copying into it would merge stale content with the fresh copy")
     dst.mkdir(parents=True, exist_ok=True)
     copy_into(ctx.pristine, dst, exclude_top_only=set(areas), root=ctx.root)
     for name in areas:
@@ -2024,6 +2126,7 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     if dst.is_symlink():
         raise OSError(f"refusing to copy into a symlinked destination directory {dst}")
     skipped = []
+    skipped_special = []
     # A symlinked SOURCE ROOT was followed even though every entry inside it is
     # checked individually: `src.iterdir()` traversed the link and copied the
     # target tree (agent-writable run output is passed as `src`). Refuse it
@@ -2056,6 +2159,19 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
             if os.path.islink(full):
                 skipped.append(full)
                 out.add(name)
+                continue
+            try:
+                mode = os.lstat(full).st_mode
+            except OSError:
+                skipped_special.append(full)
+                out.add(name)
+                continue
+            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                # A FIFO/socket/device is not package content. copytree raises
+                # a raw shutil.Error on a named pipe and left a partially
+                # built destination behind (F135); record the skip instead.
+                skipped_special.append(full)
+                out.add(name)
         return sorted(out)
 
     for entry in sorted(src.iterdir()):
@@ -2084,11 +2200,20 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
             shutil.copytree(entry, target, dirs_exist_ok=True, ignore=_ignore)
         elif entry.is_file():
             shutil.copy2(entry, target)
+        else:
+            # A top-level non-regular entry cannot be copied; name it rather
+            # than silently dropping it from the corpus (F135).
+            skipped_special.append(str(entry))
     if skipped:
         print(f"warning: skipped {len(skipped)} symlink(s) while copying {src} -> {dst} "
               f"(a link is not package content; its target may be outside the package): "
               + ", ".join(sorted(str(s) for s in skipped)[:5])
               + (" ..." if len(skipped) > 5 else ""), file=sys.stderr)
+    if skipped_special:
+        print(f"warning: skipped {len(skipped_special)} non-regular file(s) while copying "
+              f"{src} -> {dst} (a FIFO/socket/device is not package content): "
+              + ", ".join(sorted(str(s) for s in skipped_special)[:5])
+              + (" ..." if len(skipped_special) > 5 else ""), file=sys.stderr)
     if normalize_mtime:
         # One timestamp for the whole view (the copy just completed, so any
         # moment is honest); an mtime a judge can read is a provenance leak.
@@ -2142,8 +2267,10 @@ def ensure_copy(src: Path, dst: Path, **kw) -> bool:
                 if not is_bookkeeping_name(Path(rel).name)}
     if dir_matches(dst, want):
         return False
-    if dst.exists():
-        rmtree_force(dst, ignore_errors=True)
+    if dst.exists() and not rmtree_force(dst, ignore_errors=True):
+        raise RuntimeError(
+            f"refusing to rebuild {dst}: the stale tree could not be removed, so "
+            f"copying into it would merge stale content with the fresh copy")
     copy_into(src, dst, **kw)
     return True
 
@@ -2153,8 +2280,10 @@ def ensure_corpus_dir(ctx: "Ctx", r: int, vid: str, dst: Path) -> bool:
     want = corpus_manifest(ctx, r, vid).get("files") or {}
     if dir_matches(dst, want):
         return False
-    if dst.exists():
-        rmtree_force(dst, ignore_errors=True)
+    if dst.exists() and not rmtree_force(dst, ignore_errors=True):
+        raise RuntimeError(
+            f"refusing to rebuild {dst}: the stale tree could not be removed, so "
+            f"building the corpus into it would merge stale content with the fresh copy")
     build_corpus_dir(ctx, r, vid, dst)
     return True
 
@@ -2204,11 +2333,63 @@ def _same_file_bytes(a: Path, b: Path) -> bool:
         return False
 
 
+def _pid_alive_windows(pid: int) -> bool:
+    """Windows liveness probe that NEVER signals the process it tests.
+
+    CPython's `os.kill(pid, 0)` on Windows opens the process with
+    PROCESS_ALL_ACCESS and calls `TerminateProcess(handle, sig)` for every
+    signal except CTRL_C_EVENT/CTRL_BREAK_EVENT, so the old probe KILLED the
+    lock holder it was deciding about (F133). Open a synchronize-only handle
+    instead and wait on it for zero milliseconds: the handle is signaled only
+    when the process has terminated.
+
+    Any failure opens are treated as "alive": a permission error means the
+    process exists for another user, and a probe that cannot tell must never
+    let a stale-lock check steal a live lock.
+    """
+    if pid <= 0:
+        return False
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        open_process.restype = ctypes.c_void_p
+        wait_for_single = kernel32.WaitForSingleObject
+        wait_for_single.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        wait_for_single.restype = ctypes.c_ulong
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+    except (ImportError, AttributeError, OSError):
+        return True
+    # SYNCHRONIZE is what WaitForSingleObject needs and is the least privilege
+    # that answers "is it still running": the handle carries no
+    # PROCESS_TERMINATE, so this probe cannot kill the process it tests.
+    handle = open_process(0x1000 | 0x00100000, 0, int(pid))
+    if not handle:
+        err = ctypes.get_last_error()
+        # ERROR_INVALID_PARAMETER: no such process. ERROR_ACCESS_DENIED: the
+        # process exists but belongs to another user (still alive).
+        return err != 87
+    try:
+        result = wait_for_single(handle, 0)
+        # WAIT_OBJECT_0 (0) means the process has TERMINATED. WAIT_TIMEOUT
+        # (0x102) means it is still running; any other result (WAIT_FAILED) is
+        # unknown, and an unknown probe must read as alive so a live lock is
+        # never stolen.
+        return result != 0
+    finally:
+        close_handle(handle)
+
+
 def pid_alive(pid: int) -> bool:
     """Is a process with this pid running (best effort, POSIX + Windows)?
 
     Used only to decide whether a lock file is STALE: a permission error means
     the process exists but belongs to another user, which still counts as alive.
+    On Windows the POSIX `os.kill(pid, 0)` probe is replaced by a handle wait:
+    that call TERMINATES the process it is asked about (F133).
     """
     try:
         pid = int(pid)
@@ -2220,6 +2401,8 @@ def pid_alive(pid: int) -> bool:
         # os.kill() raises OverflowError for a pid outside C long/pid_t; a
         # malformed lock file must read as stale, not abort the command.
         return False
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -2227,12 +2410,466 @@ def pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     except OSError:
-        # On Windows os.kill(pid, 0) raises OSError for an existing process in
-        # some shells; fall back to "assume alive" so a live lock is never stolen.
-        return os.name == "nt"
+        # A POSIX signal-0 probe that failed for any other reason cannot tell
+        # us the process is gone; never steal a live lock.
+        return False
     return True
 
 
 def die(msg: str, code: int = 1):
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+# ---- moved from paper_pipeline_parts/p04_utils.py to keep every ordered part under 10,000 lines ----
+def scan_lengths_in_sources(sources: list, profile=None) -> dict:
+    """Abstract/main-text word counts over [(dir, prefix, excluded_top)] sources.
+
+    A code-side PROXY for the agents' M19 sweep: it reports what it can measure
+    and says "not verified"/"skipped" where it cannot. It never gates candidate
+    ranking, but an over-cap FINAL published package is reported by readiness.
+    The caps and their provenance come from the venue profile: a profile without
+    caps (the shipped `generic` one) yields counts with `cap: null` and
+    `over_limit: false`, which is what the note and the decision report print.
+    """
+    prof = _as_profile(profile)
+    limits = prof.length_limits()
+    source = prof.length_limits_source
+    # A document named for the run's OWN article type is that type's
+    # manuscript: its opening salutation (a Letter to the Editor) must not
+    # divert the count to the cover-letter preference.
+    manuscript_names = _normalized_article_type_names(prof)
+    # Which display captions this venue leaves out: figure legends always for
+    # "figure-legends", table captions only when "table-captions" is named.
+    # Passing the selected kinds (rather than one global caption list) keeps a
+    # profile that excludes only one of them from subtracting the other.
+    _excludes = set(prof.main_text_excludes())
+    caption_kinds = tuple(
+        kind for kind, section in (("figure", "figure-legends"),
+                                   ("table", "table-captions"))
+        if section in _excludes)
+    overrides = corpus_source_overrides(sources)
+    rows, unparsed, skipped, rendered, docs = [], [], [], [], set()
+    unreadable = []
+    for i, (src, prefix, excluded) in enumerate(sources):
+        if not src.is_dir():
+            continue
+        # Multi-file LaTeX: a master .tex carries only \input/\include lines and
+        # its children carry the prose. Cache every source and remember which
+        # files are INCLUDED by another, so the master counts the expanded text
+        # and a child is not counted a second time on its own (F36).
+        tex_cache, tex_included = {}, set()
+        src_gaps = []
+        for q in _iter_tree_files(src, gaps=src_gaps):
+            if q.suffix.lower() not in LENGTH_TEX_EXTS:
+                continue
+            qtext = read_text_bounded(q)
+            if qtext is None:
+                continue
+            tex_cache[q.resolve()] = qtext
+            for inc in TEX_INCLUDE_RE.finditer(strip_tex_comment(qtext)):
+                child = _tex_include_path(q.parent, inc.group(1))
+                if child is not None and child != q.resolve():
+                    tex_included.add(child)
+        for p in _iter_tree_files(src, gaps=src_gaps):
+            # `_iter_tree_files` is the corpus walker: a file symlink is not
+            # package content (copy_into refuses it), so a scan that followed
+            # one verified a corpus the materializer never produced.
+            if _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
+                    or is_non_submitted_readme_name(p.name):
+                continue
+            rel = p.relative_to(src).as_posix()
+            if excluded and excluded_corpus_component(rel, excluded):
+                continue
+            if is_code_rel(prefix + rel):
+                # `code/` is not manuscript prose (see scan_captions_in_sources).
+                continue
+            if (prefix + rel) in overrides[i]:
+                continue                      # a later source provides this path
+            if is_non_manuscript_rel(rel):
+                # Evidence areas and feedback/response documents are never
+                # counted against the article's word limits (M19 measures the
+                # submission's abstract, body and cover letter only).
+                continue
+            doc = prefix + rel
+            ext = p.suffix.lower()
+            if docx_document_role(p.name, manuscript_names) == "supp":
+                skipped.append(doc)         # supplementary text is not under the article caps
+                continue
+            lines, caption_spans, abstract_end = None, [], None
+            if ext in LENGTH_DOCX_EXTS:
+                # Frontiers' counting source excludes the CONTENTS of tables and
+                # boxes; a profile that says so must not count cell paragraphs
+                # as main text (F08).
+                paras = _docx_paragraphs(p, include_tables="table-contents" not in _excludes)
+                if paras is None:
+                    unparsed.append(doc)
+                    continue
+                lines = paras
+                # A wrapped DOCX legend is usually split over several
+                # paragraphs. `_caption_units` sees one paragraph at a time, so
+                # only its first line was excluded and the continuation was
+                # charged to the article cap (F04). The line-oriented reader
+                # merges continuations with the SAME rules the text extractor
+                # uses.
+                caption_spans = [(a, b) for _, _, a, b
+                                 in _caption_units_from_lines(paras, with_spans=True,
+                                                              kinds=caption_kinds)]
+            elif ext in LENGTH_TEX_EXTS:
+                if p.resolve() in tex_included:
+                    skipped.append(doc)     # counted in the master that includes it
+                    continue
+                text = tex_cache.get(p.resolve())
+                if text is None:
+                    # The cache loop skips a .tex whose read_text_bounded()
+                    # returned None; the old "" default then counted that
+                    # unreadable manuscript as an EMPTY source within every
+                    # cap. An unreadable source is a NAMED gap, exactly like
+                    # the .md/.txt branch below (F103).
+                    unparsed.append(doc)
+                    continue
+                expanded = _tex_expand_includes(text, p.parent, source=p)
+                for inc in TEX_INCLUDE_RE.finditer(expanded):
+                    unparsed.append(f"{doc}: unresolved include {inc.group(1)}")
+                lines, caption_spans, abstract_end = _tex_length_scan(expanded)
+            elif ext in LENGTH_TEXT_EXTS:
+                text = read_text_bounded(p)
+                if text is None:
+                    # An unreadable manuscript source is a NAMED gap, not an
+                    # empty rendering (F65).
+                    unparsed.append(doc)
+                    continue
+                lines = text.splitlines()
+                caption_spans = [(a, b) for _, _, a, b
+                                 in _caption_units_from_lines(lines, with_spans=True,
+                                                              kinds=caption_kinds)]
+            elif ext in LENGTH_UNPARSED_EXTS:
+                unparsed.append(doc)
+                continue
+            elif ext in LENGTH_RENDERED_EXTS:
+                skipped.append(doc)         # a rendering, not an editable source
+                rendered.append(doc)
+                continue
+            else:
+                continue
+            if _is_cover_letter_lines(lines, p.name, manuscript_names):
+                docs.add(doc)
+                rows.append(_cover_letter_row(lines, doc, limits=limits, profile=prof))
+                continue
+            found = _length_rows_for_lines(lines, doc, caption_spans=caption_spans,
+                                           abstract_end=abstract_end, limits=limits,
+                                           counting=prof.counting,
+                                           whole_doc_as_main=bool(
+                                               _name_is_article_type_manuscript(
+                                                   p.name, manuscript_names)))
+            if not found:
+                skipped.append(doc)
+                continue
+            docs.add(doc)
+            rows.extend(found)
+        # An unreadable subdirectory hides its documents from the walk; name it
+        # so the note can tell "no manuscript" from "nothing readable" (F049).
+        unreadable.extend(prefix + g for g in src_gaps)
+    over = [r for r in rows if r["over_limit"]]
+    return {"limits": limits, "counting": prof.counting, "source": source,
+            "venue": prof.id,
+            "rows": rows, "count": len(rows), "over_limit": over,
+            "unparsed": sorted(set(unparsed)), "skipped": sorted(set(skipped)),
+            "rendered": sorted(set(rendered)),
+            "needs_manual": sorted(set(rendered)) if not rows else [],
+            "documents": sorted(docs), "checked": bool(rows),
+            "unreadable_dirs": sorted(set(unreadable))}
+
+
+# ---- moved from paper_pipeline_parts/p06_postchecks.py to keep every ordered part under 10,000 lines ----
+def mcp_server_spec(name: str) -> dict:
+    """{command, args} for one configured MCP server, {} when unreadable.
+
+    The operator's own `~/.codex/config.toml` entry is the authority (same
+    regex-scoped read as `mcp_server_configured`): the orchestrator must drive
+    EXACTLY the server the agent sessions are configured with.
+    """
+    try:
+        text = codex_config_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    quoted = re.escape(name)
+    # A legal trailing comment (`[mcp_servers.x] # note`) does not unconfigure
+    # the server: with `\]\s*$` the header never matched, so a configured server
+    # probed as absent.
+    header = re.compile(r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
+                        + quoted + r"'|" + quoted + r")\s*\]\s*(?:#.*)?$", re.MULTILINE)
+    # The header itself is a line of TOML STRUCTURE: a `[mcp_servers.x]` line
+    # inside another entry's multi-line string does not configure a server. The
+    # mask keeps every offset, so the body slice still indexes the real text.
+    m = header.search(_toml_unquoted_mask(text))
+    if not m:
+        return {}
+    rest = text[m.end():]
+    # The entry's body ends at the next table header, and its keys are found by
+    # a line regex -- but neither a header nor a key can legally live inside a
+    # TOML string or comment. Mask those bodies first (same length, same
+    # offsets) so an `args` value carrying a `command = "evil"` line is not
+    # read as the executable (F011), and a `[section]` line inside that string
+    # does not truncate the body and hide the real `command`.
+    masked_rest = _toml_unquoted_mask(rest)
+    nxt = re.search(r"^\s*\[", masked_rest, re.MULTILINE)
+    body = rest[:nxt.start()] if nxt else rest
+    keys = masked_rest[:nxt.start()] if nxt else masked_rest
+    cm = re.search(r"^[ \t]*command[ \t]*=[ \t]*", keys, re.MULTILINE)
+    if not cm:
+        return {}
+    got = _toml_string_at(body, cm.end())
+    if got is None or not got[0].strip():
+        return {}
+    # The TOML basic string decodes its escapes: `command = "C:\\Program
+    # Files\\node.exe"` names `C:\Program Files\node.exe`, and the raw
+    # `C:\\Program Files\\node.exe` never started on Windows.
+    command = os.path.expanduser(got[0])
+    args = []
+    am = re.search(r"^\s*args\s*=\s*", keys, re.MULTILINE)
+    if am:
+        raw = _toml_array_at(body, am.end())
+        if raw is None:
+            # The `args` KEY is present but its value is not a readable TOML
+            # array (an unterminated array, `args = "server.js"`, a malformed
+            # quote). That is UNREADABLE, never "configured with no arguments":
+            # leaving `args` empty launched the server with no argv at all --
+            # the silent wrong configuration the block below claims to prevent
+            # (F113). The `_toml_array_values` failure path returns {} for the
+            # same reason.
+            return {}
+    else:
+        raw = None
+    if raw is not None:
+        values = _toml_array_values(raw)
+        if values is None:
+            # A malformed entry is UNREADABLE, never "configured with no
+            # arguments": `json.loads` alone rejects TOML's own literal strings
+            # (`args = ['a']`) and TOML's trailing comma (`["a", "b",]`), and
+            # the old `except ValueError: args = []` then launched the server
+            # with no argv at all -- the silent wrong configuration
+            # `_toml_array_at` exists to prevent. Returning {} makes the caller
+            # report the entry instead of using it half-read.
+            return {}
+        args = values
+    spec = {"command": command, "args": args}
+    # `scripts/README-codex-mcp.md` lists command,args,env,cwd as the SAME
+    # fields in a Codex MCP entry. Dropping env/cwd launched the orchestrator's
+    # server with the pipeline's environment and working directory instead of
+    # the operator's configured one (F28).
+    wm = re.search(r"^[ \t]*cwd[ \t]*=[ \t]*", keys, re.MULTILINE)
+    if wm:
+        cwd_got = _toml_string_at(body, wm.end())
+        if cwd_got is None:
+            return {}
+        spec["cwd"] = os.path.expanduser(cwd_got[0])
+    em = re.search(r"^[ \t]*env[ \t]*=[ \t]*", keys, re.MULTILINE)
+    if em:
+        raw_env = _toml_inline_table_at(body, em.end())
+        env_values = _toml_inline_table_values(raw_env) if raw_env is not None else None
+        if env_values is None:
+            return {}                   # a malformed env block: unreadable entry
+        spec["env"] = env_values
+    if "env" not in spec:
+        # TOML also allows a subtable form: `[mcp_servers.<name>.env]` followed
+        # by `KEY = "value"` lines. It configures the same field, so ignoring it
+        # would keep launching with the pipeline's environment.
+        env_header = re.compile(
+            r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
+            + quoted + r"'|" + quoted + r")\s*\.\s*env\s*\]\s*(?:#.*)?$",
+            re.MULTILINE)
+        eh = env_header.search(text)
+        if eh:
+            rest_env = text[eh.end():]
+            next_hdr = re.search(r"^\s*\[", rest_env, re.MULTILINE)
+            env_body = rest_env[:next_hdr.start()] if next_hdr else rest_env
+            values = {}
+            for raw_line in env_body.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    return {}
+                key_part, value_part = line.split("=", 1)
+                key_part, value_part = key_part.strip(), value_part.strip()
+                if key_part[:1] in "\"'":
+                    key_got = _toml_string_at(key_part, 0)
+                    if key_got is None or key_got[1] != len(key_part):
+                        return {}
+                    key = key_got[0]
+                elif re.fullmatch(r"[A-Za-z0-9_.\-]+", key_part):
+                    key = key_part
+                else:
+                    return {}
+                if value_part[:1] in "\"'":
+                    val_got = _toml_string_at(value_part, 0)
+                    if val_got is None:
+                        return {}
+                    value = val_got[0]
+                else:
+                    value = value_part.split("#", 1)[0].strip()
+                values[key] = value
+            spec["env"] = values
+    return spec
+
+
+# ---- moved from paper_pipeline_parts/p07_stage_quality_journal.py to keep every ordered part under 10,000 lines ----
+def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
+    """(errs, warns) for the M30 source-hierarchy reconciliation record.
+
+    The evidence is the stage's own seeded ledger: every row disposed means the
+    revision looked at the written value AND its producer, so an empty
+    disposition cell means the comparison the finding rests on was never
+    recorded (rule E12).
+
+    WHERE THE ROWS LIVE was ambiguous and cost the 2026-11-01 revise arm its
+    second attempt. The seed is `work/<name>` in the SANDBOX (`decide` writes it
+    next to PROMPT.md), but the stage's deliverables are all under the package,
+    so one reviser disposed `revised/work/<name>` (53/53 rows answered) while
+    the postcheck read the untouched sandbox copy and failed it on "53 of 165
+    ... EMPTY". The check therefore reads BOTH copies and judges the disposed
+    one; a run that answered either copy did the work. The message names which
+    copy was read.
+
+    The old message also reported `len(block_problems)` as "N undisposed
+    row(s)" and then pasted 80 characters of the first problem into it,
+    truncated mid-word, producing
+      "still carries 1 undisposed row(s) (53 of 165 row(s) have an EMPTY
+       disposition cell (every seeded row must be dispos)"
+    -- a count of problems labelled as a count of rows, an unbalanced
+    parenthesis and a cut word, which is what reached the operator's log.
+    """
+    m30_ids = [str(f.get("id") or "").strip() for f in frozen_all
+               if str(f.get("check") or "").strip().upper() == "M30"]
+    errs, warns = [], []
+    if not m30_ids:
+        return errs, warns
+    candidates = []
+    if pkg:
+        package_copy = Path(sb) / pkg / M30_HIERARCHY_REL
+        if package_copy.is_file():
+            candidates.append((f"{pkg}/{M30_HIERARCHY_REL}", package_copy))
+    sandbox_copy = Path(sb) / M30_HIERARCHY_REL
+    if sandbox_copy.is_file():
+        candidates.append((M30_HIERARCHY_REL, sandbox_copy))
+    if not candidates:
+        looked_for = ([f"{pkg}/{M30_HIERARCHY_REL}"] if pkg else []) + [M30_HIERARCHY_REL]
+        warns.append(f"the frozen review carries {len(m30_ids)} M30 source-hierarchy "
+                     f"finding(s) but no {' or '.join(looked_for)} exists: rule E12 requires the "
+                     f"written side to be aligned with the authoritative producer, with the "
+                     f"reconciling reason recorded")
+        return errs, warns
+    judged, judged_state, judged_score, states = None, None, None, {}
+    for label, path in candidates:
+        try:
+            state = _m30_ledger_state(path)
+        except Exception as e:                                      # noqa: BLE001
+            warns.append(f"{label}: could not be read ({type(e).__name__}: {e}); the M30 rows "
+                         f"there stay unverified")
+            continue
+        states[label] = state
+        # The DISPOSED copy is the reviser's answer: a stale seed left empty
+        # beside a filled package copy is not a defect (and the reverse is the
+        # case this check was written for). Ordering: a copy that still holds
+        # seeded candidate rows is evidence of the check; one with none (an
+        # empty or unparsed file) must never beat it just because it has nothing
+        # left to report. Among copies that hold such rows, the one with the
+        # fewest empty dispositions wins (a tie keeps the package copy, listed
+        # first).
+        score = (0 if state["actionable"] else 1, state["empty"])
+        if judged_score is None or score < judged_score:
+            judged, judged_state, judged_score = label, state, score
+    if judged_state is None:
+        return errs, warns
+    sandbox_state = states.get(M30_HIERARCHY_REL)
+    if (judged != M30_HIERARCHY_REL and sandbox_state
+            and sandbox_state["actionable"]
+            and sandbox_state["empty"] == sandbox_state["actionable"]):
+        # The reviser answered the package copy and left the seed in place. That
+        # is accepted (the work is done), but the record should say which copy
+        # was judged so nobody reads the untouched seed as the evidence.
+        warns.append(f"{judged} was judged; the sandbox seed {M30_HIERARCHY_REL} is still "
+                     f"undisposed ({sandbox_state['empty']} of "
+                     f"{sandbox_state['actionable']} row(s) EMPTY)")
+    if not judged_state["readable"]:
+        # A zero-byte, unreadable or table-less ledger is missing EVIDENCE, not
+        # a clean ledger: the old all-zero state returned no error and silently
+        # removed the gate (F02).
+        errs.append(
+            f"{judged} exists but carries no readable M30 table (zero-byte, over the byte "
+            f"budget, a symlink/non-regular file, or no markdown table): the source-hierarchy "
+            f"reconciliation is unverified. Restore the seeded table and dispose every row.")
+        return errs, warns
+    actionable, empty = judged_state["actionable"], judged_state["empty"]
+    # ROW IDENTITY: a candidate copy that drops seeded rows cannot pass on the
+    # strength of the one row it kept. The old score compared only
+    # (has actionable rows, empty count), so a one-row package copy with a
+    # filled disposition beat a full seed with three empty rows and the gate
+    # reported nothing (F01). The reference is the identity PIN the orchestrator
+    # wrote BESIDE the sandbox, not the live seed file -- that file is also the
+    # documented answer ("dispose every seeded row in place"), so a rewrite of it
+    # (or of both it and the ledger) used to pass the check it was supposed to
+    # fail (R04/F39). The live sandbox seed is the fallback only for a
+    # PROMPT-less unit fixture.
+    judged_keys = set(judged_state["rows"])
+    reference_rows, reference_available, reference_label = _m30_seed_reference_state(sb)
+    if not reference_available:
+        if (Path(sb) / "PROMPT.md").is_file():
+            # Every real session sandbox carries PROMPT.md, and the seed pin is
+            # written beside it. If the pin is gone/unreadable the identity
+            # check CANNOT run: report that instead of silently trusting the
+            # agent-writable live copy (F39).
+            errs.append(
+                f"{judged}: the M30 seed reference {reference_label} is missing, "
+                f"unreadable or carries no hierarchy rows, so the seeded row identities "
+                f"cannot be checked. Restore the evidence pin (or re-run the stage): "
+                f"the identity check is not skipped.")
+            reference_rows = []
+        else:
+            # A unit fixture / legacy sandbox without an evidence pin: fall back
+            # to the live sandbox seed (the pre-R04 behaviour).
+            reference_rows = (sandbox_state["rows"]
+                              if (judged != M30_HIERARCHY_REL and sandbox_state
+                                  and sandbox_state["readable"]) else [])
+            reference_label = M30_HIERARCHY_REL
+    dropped = [k for k in reference_rows if k not in judged_keys]
+    if dropped:
+        errs.append(
+            f"{judged} is missing {len(dropped)} of the {len(reference_rows)} seeded M30 "
+            f"row(s) recorded in {reference_label} that name a candidate producer: "
+            f"{len(dropped)} seeded row(s) were DROPPED instead of disposed. Copy every "
+            f"seeded row into the answer and dispose it in place (`OK -- ...` / "
+            f"`contradiction -- ...` / `unable -- ...`).")
+    if actionable and empty == actionable:
+        # None of the rows that actually need a comparison was disposed: the
+        # check was not run at all, not merely left one row short. Fail the
+        # attempt (the retry prompt carries this message) instead of accepting
+        # the warning the evaluation run ignored.
+        errs.append(
+            f"{judged} still carries {empty} of {actionable} seeded row(s) with a candidate "
+            f"producer whose disposition cell is EMPTY: an M30 finding's fix must record the "
+            f"producer it reconciled against (rule E12). Dispose every such row in place -- "
+            f"`OK -- <the reconciling reason>`, `contradiction -- <finding id>` or "
+            f"`unable -- <what is missing>` -- in the ledger you were given.")
+    else:
+        # EVERY block problem is now an ERROR, not a warning: an empty or
+        # boilerplate disposition recorded no comparison, and the gate exists to
+        # enforce exactly that (F03). The old code downgraded boilerplate to a
+        # warning and never looked at an arbitrary non-empty cell at all.
+        detail = "; ".join(str(p) for p in judged_state["block_problems"][:3])
+        if judged_state["block_problems"]:
+            more = len(judged_state["block_problems"]) - 3
+            errs.append(
+                f"{judged}: {len(judged_state['block_problems'])} disposition problem(s) -- "
+                f"{detail}" + (f" (and {more} more)" if more > 0 else "")
+                + ". Every seeded row needs its own disposition: `OK -- <the reconciling "
+                  "reason>`, `contradiction -- <finding id>` or `unable -- <what is missing>`.")
+        if judged_state["bad_dispositions"]:
+            quotes = "; ".join(repr(x[:80]) for x in judged_state["bad_dispositions"][:3])
+            errs.append(
+                f"{judged}: {len(judged_state['bad_dispositions'])} non-empty disposition "
+                f"cell(s) do not use the documented shape ({quotes}): an arbitrary value is "
+                f"not a recorded comparison. Use `OK -- ...`, `contradiction -- ...` or "
+                f"`unable -- ...`.")
+    return errs, warns

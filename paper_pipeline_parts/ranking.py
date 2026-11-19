@@ -265,6 +265,16 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
             trace.append(f"{label}: {st['author_placeholders']} pipeline hand-off placeholder(s) "
                          f"for the author -> reported only; a place-holder is a manual item, "
                          f"never a defect and never a score penalty")
+        absent_stats = [k for k in ("n", "median", "mean", "iqr") if k not in st]
+        if absent_stats:
+            # A complete/eligible-looking row from a legacy or partial stats
+            # provider used to raise KeyError while the rows were built, which
+            # aborted the whole pure core (F091). A row that cannot supply the
+            # ranking statistics is ineligible, with a trace, not a crash.
+            trace.append(f"{label}: complete row is missing panel statistic(s) "
+                         f"{absent_stats} -> ineligible: a legacy/partial stats provider "
+                         f"cannot be ranked")
+            continue
         eligible.append(cid)
     if not eligible:
         trace.append("no eligible rows: the champion falls back to A1_r (this round made no "
@@ -285,8 +295,8 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
         st = stats[row_id]
         rows.append({"id": cid, "rep": row_id, "is_base": bool(cid == A1_ID and base_rep),
                      "n": st["n"], "median": st["median"], "mean": st["mean"],
-                     "iqr": st["iqr"], "vs_original": st["vs_original"],
-                     "vs_base": st["vs_base"],
+                     "iqr": st["iqr"], "vs_original": st.get("vs_original"),
+                     "vs_base": st.get("vs_base"),
                      "digest": st.get("digest"),
                      "author_placeholders": st.get("author_placeholders"),
                      "issues": _issue_summary_from_census(row_id, census),
@@ -299,9 +309,23 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     # cell a separate rung); the median (then the mean, IQR and digest) is
     # the tie-break below it.
     rep_ids = sorted({str(t["rep"]) for t in rows})
-    cell_names, _matrix, cumulative = issue_matrix_and_cumulative(census, rep_ids)
-    prefix_cells = tiebreak_prefix_cells(cumulative, rep_ids, floor)
+    # A version absent from the census has NO measured defect row: substituting
+    # an all-zero row made it the cleanest candidate and let it outrank a version
+    # the panel recorded a fatal defect against (F090). Keep such a version out
+    # of the floor walk and leave its ordered census ABSENT, so
+    # champion_sort_key's missing-evidence sentinel (+inf, never zero) applies.
+    known_reps = [rid for rid in rep_ids if rid in (census or {})]
+    cell_names, _matrix, cumulative = issue_matrix_and_cumulative(census, known_reps)
+    prefix_cells = tiebreak_prefix_cells(cumulative, known_reps, floor)
     for t in rows:
+        if str(t["rep"]) not in (census or {}):
+            t["defect_prefix_total"] = None
+            t["defect_prefix_census"] = None
+            t["tiebreak_prefix_cells"] = prefix_cells
+            trace.append(f"{t['id']}: NO census row for this version -> its ordered defect "
+                         f"census is missing evidence (+inf), never a fabricated zero; it cannot "
+                         f"lead the ranking")
+            continue
         t["defect_prefix_total"] = (cumulative[str(t["rep"])][prefix_cells - 1]
                                     if prefix_cells else 0)
         # The leading key is the ordered census at the same prefix, not just

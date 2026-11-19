@@ -130,6 +130,36 @@ def _copy_evidence_no_follow(src_dir: Path, dst_dir: Path) -> list:
     return skipped
 
 
+def _evidence_nested_links(src_dir: Path) -> list:
+    """Relative paths of every symlink nested inside one evidence area."""
+    out = []
+    src_dir = Path(src_dir)
+    for p in sorted(src_dir.rglob("*")):
+        if p.is_symlink():
+            out.append(p.relative_to(src_dir).as_posix())
+    return out
+
+
+def _materialise_evidence(src_dir: Path, dst_dir: Path):
+    """Place one evidence area in the build tree without following nested links.
+
+    Symlinking the area is the fast path, but it also exposes every nested link
+    to the PDF compiler. When the area carries a nested link, copy it with the
+    no-follow helper instead and return the links that were skipped.
+    """
+    nested = _evidence_nested_links(src_dir)
+    if nested:
+        return _copy_evidence_no_follow(src_dir, dst_dir), True
+    try:
+        os.symlink(str(Path(src_dir).resolve()), str(dst_dir),
+                   target_is_directory=True)
+        return [], False
+    except OSError:
+        # A platform without symlinks: a real copy is the fallback (correct,
+        # only slower), never a silently missing file.
+        return _copy_evidence_no_follow(src_dir, dst_dir), True
+
+
 def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                       timeout: int = LATEX_COMPILE_TIMEOUT,
                       keep_aux: bool = False, link_evidence: bool = False) -> dict:
@@ -183,21 +213,17 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                 dst_dir = work / name
                 if not src_dir.exists() or dst_dir.exists():
                     continue
-                try:
-                    os.symlink(str(src_dir.resolve()), str(dst_dir),
-                               target_is_directory=True)
-                except OSError:
-                    # A platform without symlinks: a real copy is the fallback
-                    # (correct, only slower), never a silently missing file. A
-                    # NESTED link inside the area is skipped and named (see
-                    # _copy_evidence_no_follow): following it copied outside
-                    # content into the build tree and the compiled PDF.
-                    skipped_links.extend(_copy_evidence_no_follow(src_dir, dst_dir))
-                    if skipped_links:
-                        print(f"warning: skipped {len(skipped_links)} nested symlink(s) "
-                              f"while copying the evidence area {src_dir} into the PDF "
-                              f"build tree (a link is not build content): "
-                              + ", ".join(skipped_links[:5]), file=sys.stderr)
+                # A NESTED link inside the area must never reach the compiler:
+                # following it copied outside content into the build tree and
+                # the compiled PDF. The no-follow copy is used whenever the
+                # area carries one, so the symlink fast path is safe.
+                links, copied = _materialise_evidence(src_dir, dst_dir)
+                skipped_links.extend(links)
+                if links:
+                    print(f"warning: skipped {len(links)} nested symlink(s) "
+                          f"while copying the evidence area {src_dir} into the PDF "
+                          f"build tree (a link is not build content): "
+                          + ", ".join(links[:5]), file=sys.stderr)
         # The package may itself ship a PDF named like the compiled output (a
         # previous render). Leaving it in the build copy meant a compiler that
         # exited 0 WITHOUT writing anything still looked successful: the stale
@@ -241,7 +267,18 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         out = (stdout or b"").decode("utf-8", "replace") \
             + (stderr or b"").decode("utf-8", "replace")
         pdf = (work / rel).with_suffix(".pdf")
-        ok = bool(proc.returncode == 0 and pdf.is_file() and pdf.stat().st_size > 0)
+        # A non-empty file is not a render. The reuse path already refuses a
+        # file pdf_signature_problem() rejects; the first compile must apply
+        # the same check or the two runs disagree about the same artifact.
+        sig_problem = ""
+        if proc.returncode == 0:
+            if not pdf.is_file():
+                sig_problem = "latexmk exited 0 without writing a PDF"
+            elif pdf.stat().st_size <= 0:
+                sig_problem = "latexmk wrote an empty PDF"
+            else:
+                sig_problem = pdf_signature_problem(pdf) or ""
+        ok = bool(proc.returncode == 0 and not sig_problem)
         if ok:
             out_pdf.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(pdf, out_pdf)
@@ -264,7 +301,8 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         return {"ok": ok, "tool": "latexmk", "pages": _pdf_page_count(out_pdf) if ok else 0,
                 "error": (None if ok else
                           (errors[0] if errors
-                           else f"latexmk exited {proc.returncode} without a PDF")[:300]),
+                           else (sig_problem or
+                                 f"latexmk exited {proc.returncode} without a PDF"))[:300]),
                 "errors": errors, "skipped_links": skipped_links}
     except (OSError, subprocess.SubprocessError, shutil.Error) as e:    # noqa: BLE001
         return {"ok": False, "tool": "latexmk", "error": f"{type(e).__name__}: {e}",

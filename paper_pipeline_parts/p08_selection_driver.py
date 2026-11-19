@@ -172,8 +172,10 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
                 diags.setdefault("duplicate_comparisons", []).append(
                     f"{rec['id']}: {vid} vs {opp} is reported twice; the duplicate "
                     f"is ignored and the panel is incomplete")
+                # Only the SHEET's target is incomplete: the duplicate is this
+                # target's sheet defect and adds no score to either side, so the
+                # opponent's own directed counts stay exactly as expected (F095).
                 slot_problems.add(vid)
-                slot_problems.add(opp)
                 continue
             seen_opps.add(opp)
             census_obs.append((rec.get("id"), vid, opp, comp))
@@ -911,6 +913,28 @@ def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
             "captions": cap_info,
             "placeholders": placeholder_info_for(ctx, r, champ_id)}
     write_json_atomic(dst / "meta.json", meta)
+    # A round has ONE pin (the docstring's contract). Re-deciding the round with
+    # a DIFFERENT champion used to append a second pin for the same round while
+    # `build_field` adds every pin with round < r, so the superseded version
+    # re-entered later fields and could win again (F096). Drop every other pin
+    # for this round from the registry and archive its directory under
+    # pins/_superseded/ (evidence is kept, never deleted).
+    superseded_pins = [p for p in (ctx.state.get("pinned") or [])
+                       if p.get("id") != pid and int(p.get("round") or 0) == int(r)]
+    if superseded_pins:
+        for old in superseded_pins:
+            old_id = str(old.get("id") or "")
+            if _safe_state_segment(old_id):
+                old_dir = ctx.pins_dir / old_id
+                if old_dir.is_dir():
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    superseded = unique_path(
+                        ctx.pins_dir / "_superseded" / f"{old_id}.{stamp}")
+                    superseded.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(old_dir), str(superseded))
+        superseded_ids = {str(p.get("id") or "") for p in superseded_pins}
+        ctx.state["pinned"] = [p for p in (ctx.state.get("pinned") or [])
+                               if str(p.get("id") or "") not in superseded_ids]
     cur = find_pin(ctx, pid)
     if cur is None:
         ctx.state["pinned"].append(meta)

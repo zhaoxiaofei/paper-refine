@@ -48,7 +48,11 @@ def cmd_setup(args) -> None:
     # optional here: without it the venue profile's own default applies (0 for
     # a venue that publishes no legend number), and the resolved value is what
     # the config records.
-    venue_arg = str(getattr(args, "venue", None) or "").strip()
+    _raw_venue = getattr(args, "venue", None)
+    venue_arg = str(_raw_venue or "").strip()
+    if _raw_venue is not None and not venue_arg:
+        die("--venue needs a venue id; an explicitly empty value is not 'use the default'",
+            code=2)
     venue_profile_file = str(getattr(args, "venue_profile", None) or "").strip()
     journal_arg = str(getattr(args, "journal", None) or "").strip()
     if journal_arg:
@@ -57,7 +61,11 @@ def cmd_setup(args) -> None:
         # prompt) unvalidated, so a newline or an overlong name was accepted at
         # root creation and rejected only afterwards.
         journal_arg = _validate_journal_name(journal_arg)
-    article_arg = str(getattr(args, "article_type", None) or "").strip().lower()
+    _raw_article = getattr(args, "article_type", None)
+    article_arg = str(_raw_article or "").strip().lower()
+    if _raw_article is not None and not article_arg:
+        die("--article-type needs an article-type id; an explicitly empty value is not "
+            "'use the default'", code=2)
     strict_venue = bool(getattr(args, "strict_venue", False))
     if venue_profile_file:
         # A brand-new venue on a FRESH root: setup had no way to accept a
@@ -67,6 +75,9 @@ def cmd_setup(args) -> None:
         pf = Path(venue_profile_file).expanduser()
         if not pf.is_file():
             die(f"--venue-profile {venue_profile_file!r} is not a readable file", code=2)
+        if pf.is_symlink():
+            die(f"--venue-profile {venue_profile_file!r} is a symlink; pass the real file "
+                f"so the bytes validated here are the bytes installed", code=2)
         try:
             _pdata = json.loads(pf.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
@@ -809,7 +820,10 @@ def cmd_setup(args) -> None:
         try:
             _dest = root / VENUE_PROFILES_DIRNAME / f"{venue_profile.id}{VENUE_PROFILE_SUFFIX}"
             _dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(pf, _dest)
+            # Install the bytes that were VALIDATED, never re-open `pf`: a
+            # symlink/concurrent writer could swap the file between the check
+            # and this copy and the root would run unvalidated bytes.
+            write_json_atomic(_dest, _pdata)
             print(f"[setup] venue profile:           installed {venue_profile.id!r} from "
                   f"{venue_profile_file} into {VENUE_PROFILES_DIRNAME}/ (the new root is "
                   f"self-contained)")
@@ -1609,8 +1623,11 @@ def cmd_set_venue(args) -> None:
             if _profile_existed:
                 try:
                     _profile_prior = _profile_dest.read_bytes()
-                except OSError:
-                    _profile_prior = None
+                except OSError as e:
+                    # Without the prior bytes the rollback below cannot restore
+                    # the file it overwrites, so refuse before installing.
+                    die(f"cannot read the existing profile {_profile_dest}: {e}; "
+                        f"refusing to overwrite bytes that cannot be restored")
             write_json_atomic(_profile_dest, profile.to_dict())
             print(f"[set-venue] installed profile -> {_profile_dest}")
             profile = VenueProfile(profile.to_dict(),

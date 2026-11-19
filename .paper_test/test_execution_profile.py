@@ -52,12 +52,12 @@ FAILS = []
 #     python .paper_test/render_stage_prompts.py .
 # and paste the hashes here in the SAME commit that changes the prompts.
 GOLDEN = {
-    "review": "4a52ed4597cc60c1",
-    "review_split_a": "b528300e9d7f3678",
-    "review_scoped": "11af484765fe2cf3",
+    "review": "1dd0ec8dd618cae0",
+    "review_split_a": "2e03e24de3c985e4",
+    "review_scoped": "d299073b2e5de1b4",
     "cold_start_review": "8b78df5716c4577b",
     "audit": "056b6c7c07d97bf5",
-    "revise": "53276afa7c74e0dd",
+    "revise": "f18bea286d2fead4",
     "integrate": "61d713692350c281",
     "rewrite": "f9a51fdae40a28a1",
     "judge": "128279f2b2cdfeed",
@@ -221,8 +221,23 @@ def _joined_block_line(line: str, pool: str) -> bool:
     rule, and the medium render separates the two at the pointer/file boundary
     -- so the line counts as preserved when BOTH joined parts are present.
     """
+    # A line that is genuinely present -- even when a missing separator glued it
+    # to the previous block's last line -- is not a lost line. Require word
+    # boundaries so a short rule text inside a longer word does not count.
+    if re.search(r"(?<!\w)" + re.escape(line) + r"(?!\w)", pool):
+        return True
+    pool_lines = None
     for i in range(8, len(line) - 7):
-        if line[:i] in pool and line[i:] in pool:
+        head, tail = line[:i], line[i:]
+        if head not in pool or tail not in pool:
+            continue
+        # Membership ANYWHERE is too weak: any two unrelated fragments of the
+        # pool would then manufacture a "join" for a line that was really lost.
+        # A real block boundary leaves the head at the END of one pool line or
+        # the tail at the START of one; require at least one of those.
+        if pool_lines is None:
+            pool_lines = [ln.strip() for ln in pool.splitlines() if ln.strip()]
+        if any(ln.endswith(head) or ln.startswith(tail) for ln in pool_lines):
             return True
     return False
 
@@ -338,6 +353,12 @@ def test_medium_matches_high_rules() -> None:
           not _line_present("## Heading", {"#### Heading"}))
     check("rule 12: a trailing-whitespace trim is not a lost line",
           _line_present("rule text   ", {"rule text"}))
+    orphan_head = "ORCHESTR"
+    orphan_tail = "ATION DIRECTIVES — READ FIRST (these override anything below where they conflict):"
+    check("rule 12: two unrelated pool fragments are not a permitted block join",
+          not _joined_block_line(
+              orphan_head + orphan_tail,
+              "x" + orphan_head + "x\nx" + orphan_tail + "x"))
 
     flat = " ".join(contract.split())
     check("rule 12: the profile asserts no model/window property",
