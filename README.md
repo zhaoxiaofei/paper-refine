@@ -3428,27 +3428,38 @@ one instead:
   `dsh` preset, `dsh --profile headless --json --session-id <session-id> -`,
   the exact persisted session whose id its `--json` event stream named — the
   harness adopts a session by exact id only, so there is no `--continue`
-  equivalent and no id means no continuation). A custom
-  `--agent-cmd` has no known resume form and gets a fresh attempt as before; an
-  attempt that *finished* and was rejected on content is not continued either —
-  that is the retry/repair path's business;
+  equivalent and no id means no continuation). When the backend has no CLI
+  resume form (a custom `--agent-cmd`/`PAPER_AGENT_CMD`) the stage is still
+  continued: `resume_gate` returns the stage's OWN command and the continuation
+  runs as a FRESH process in the SAME sandbox, so every artifact on disk
+  survives and only the chat transcript is rebuilt (`last_resume.mode =
+  "sandbox"`). An attempt that *finished* and was rejected on content is not
+  continued either — that is the retry/repair path's business;
 * the continuation prompt names what stopped and what the postcheck said, and
-  tells the session to finish from where it is, marker last. A continuation that
-  clears the postcheck is recorded as the attempt that finished the stage
-  (`source: "continuation"`); one that does not is a failed attempt like any
-  other and the retry policy takes over;
+  tells the session to finish from where it is, marker last. A CLI continuation
+  says the context is still the session's; a SANDBOX continuation says the
+  transcript is not carried over and points at the sandbox instead. A
+  continuation that clears the postcheck is recorded as the attempt that
+  finished the stage (`source: "continuation"`); one that does not is a failed
+  attempt like any other and the retry policy takes over;
 * the budget is **at most 2 continuations per session id** (`resume_attempts`),
   counted across attempts, and the console says so when it is spent (`no
   continuation -- 2 continuation(s) already spent on this session (limit 2)`).
   `RESUME_PROMPT.md` is written into the sandbox for the session and removed
   afterwards; the continuation never replaces the scoped artifact repair, it runs
   before it.
-* a provider `413 Payload Too Large` / context-length failure is never
-  continued: resuming resends the oversized context and failed again in
-  `neohet-to15` and `cnb-to33`. It is recorded as `context_overflow` and the
-  retry budget goes straight to a fresh context. Every prompt now also carries a
-  context-budget rule, requiring bounded reads and contact-sheet-first visual
-  inspection (every page is still examined; only the byte transfer is bounded).
+* a provider `413 Payload Too Large` / context-length failure (and a session the
+  proxy stopped for looping) is never continued by RESUMING the CLI session:
+  `codex exec resume` resends the oversized context and failed again in
+  `neohet-to15` and `cnb-to33`. It is recorded as `context_overflow` / `runaway`
+  and continues in the SAME SANDBOX with a fresh process — which is exactly the
+  fresh context such a failure needs, and keeps the artifacts the stage already
+  wrote. Every prompt also carries a context-budget rule, requiring bounded
+  reads and contact-sheet-first visual inspection (every page is still examined;
+  only the byte transfer is bounded). The classifier reads the END of the
+  transcript (a bounded tail of each stream, not its 16 MiB head) and ignores
+  source lines the session merely printed, so a long session is classified by
+  what actually stopped it.
 
 ### `--strict-artifacts fix`: one scoped repair session instead of a full re-run
 
@@ -3714,7 +3725,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 266 suites (a few
+any failure. They are independent, so run them in parallel — 267 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

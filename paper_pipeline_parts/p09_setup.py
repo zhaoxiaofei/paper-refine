@@ -4270,12 +4270,22 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     retry_note = (f"attempts/run={retries + 1} (retries={retries}, exponential backoff "
                   f"{retry_backoff}s..{retry_backoff_max}s)"
                   if retries else "no automatic retry (--retries 0)")
+    # The label names the PRESET the run was configured with; a custom
+    # --agent-cmd/PAPER_AGENT_CMD replaces the executable that actually runs.
+    # Printing only the preset made the banner claim `agent=dsh/deepseek-flash`
+    # while the stages ran an entirely different command (recorded truthfully
+    # in run_policy.agent_model_ignored, but invisible in the log).
+    _agent_override = _agent_cmd_override(getattr(args, "agent_cmd", None), use_env=True)
+    _agent_shown = agent_label
+    if _agent_override:
+        _shown_cmd = " ".join(Path(str(x)).name for x in _agent_override[:2])[:90]
+        _agent_shown = f"{agent_label} [preset label; runs {_shown_cmd}]"
     print(f"[run] jobs={_jobs} timeout={timeout or 'none'}s "
           f"judge-timeout={judge_timeout or 'none'}s {retry_note} "
           f"rounds={ctx.rounds_count()} judges/version={judges_config_note(ctx)} "
           f"integrators={integrators_config_note(ctx)} "
           f"champion-select={champion_select_of(ctx)} "
-          f"agent={agent_label}")
+          f"agent={_agent_shown}")
     # The optional `docx` CLI is offered to every agent in every stage (see
     # DOCX_CLI_RULE). It is never required, but the operator should be able to
     # see from the run log whether the agents can actually reach it.

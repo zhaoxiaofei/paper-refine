@@ -409,7 +409,7 @@ from pathlib import Path
 #   sidecar string and degenerate intervals in a shipped source table all
 #   survived every layer in real runs -- and the discovery round's own probes
 #   had read the very table and reported "no anomalies".
-VERSION = "3.11.6"
+VERSION = "3.11.7"
 STATE_VERSION = 3
 # The driver executes these siblings; a root freezes all of them. Recording only
 # the driver let a root run new code with an old formatter (the round-2 case).

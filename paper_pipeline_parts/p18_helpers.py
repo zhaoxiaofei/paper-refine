@@ -94,6 +94,11 @@ def m30_seed_disposition(row) -> str:
 
 
 MAX_TOOL_OUTPUT_BYTES = 16 * 1024 * 1024
+# The last bytes of each agent stream, kept separately from the head above and
+# used ONLY for failure classification. A provider error, a guard sentence and
+# the CLI's dying words are at the END of the transcript; classifying the head
+# made the diagnosis depend on where in a >16 MiB transcript a phrase landed.
+EVIDENCE_TAIL_BYTES = 512 * 1024
 
 
 class ToolOutputOverBudget(Exception):

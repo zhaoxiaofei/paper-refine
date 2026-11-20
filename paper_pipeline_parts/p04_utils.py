@@ -5537,6 +5537,41 @@ def _email_verification_rows(pkg: Path) -> tuple:
     return records, problems
 
 
+def _edit_distance_at_most(left: str, right: str, limit: int = 2) -> bool:
+    """Whether two short strings differ by at most `limit` edits (banded).
+
+    Used for a one-or-two-character correction of an e-mail DOMAIN, where the
+    local part is identical: `uni-leipzig.dde` vs `uni-leipzig.de` is one insertion.
+    """
+    a, b = str(left or ""), str(right or "")
+    if abs(len(a) - len(b)) > limit:
+        return False
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > limit:
+            return False
+        prev = cur
+    return prev[-1] <= limit
+
+
+def _email_is_near_correction(removed: str, delivered: str) -> bool:
+    """Whether `delivered` is a small correction of `removed`, not another person.
+
+    The same local part and a domain within two edits. A corrected address
+    (`user@uni-leipzig.dde` replaced by the in-corpus `user@uni-leipzig.de`) used to be
+    reported as a REMOVED contact fact -- "never remove it to resolve a finding"
+    -- although the revision had done exactly the right thing.
+    """
+    r_local, _, r_dom = str(removed or "").casefold().partition("@")
+    d_local, _, d_dom = str(delivered or "").casefold().partition("@")
+    if not r_dom or not d_dom or not r_local or r_local != d_local:
+        return False
+    return _edit_distance_at_most(r_dom, d_dom, 2)
+
+
 def email_address_change_problems(before_sources, after_sources, pkg: Path,
                                   label: str, evidence_sources=()) -> tuple:
     """(errors, warnings): the package may not fabricate an e-mail address.
@@ -5576,6 +5611,12 @@ def email_address_change_problems(before_sources, after_sources, pkg: Path,
     for key in sorted(removed):
         addr = before[key]
         if _is_placeholder_email(addr) or key in verified_before:
+            continue
+        if any(_email_is_near_correction(addr, other) for other in after.values()):
+            # A one-or-two-character correction of the same address is a
+            # CORRECTION, not a deletion: `user@uni-leipzig.dde` ->
+            # `user@uni-leipzig.de` is the repair of a typo. The "deletion
+            # surface" warning is for an address that vanished.
             continue
         warns.append(
             f"{label}: the delivered package no longer carries e-mail address {addr!r}. An "

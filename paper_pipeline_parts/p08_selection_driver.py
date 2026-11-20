@@ -1620,16 +1620,26 @@ class _TurnCounter:
                 return
 
 
-def _read_stream_capped(stream, cap: int, on_chunk=None) -> tuple:
-    """(kept text, total characters read) for one agent pipe.
+def _read_stream_capped(stream, cap: int, on_chunk=None, tail_cap: int = 0) -> tuple:
+    """(kept text, total characters read, tail text) for one agent pipe.
 
     The overflow is DISCARDED as it arrives (the child is not blocked on a full
     pipe) and the caller is told the total so it can record the truncation. The
     agent's stdout/stderr used to be buffered whole by `communicate()`, so a
     verbose or looping agent could OOM the orchestrator or fill the root's disk
     with its transcript (F39).
+
+    `tail_cap` additionally keeps the LAST `tail_cap` characters. The head is
+    what the transcript log gets (the CLI banner and the session id live
+    there); the TAIL is what the failure classifier gets, because a provider
+    error, a guard sentence and the CLI's dying words are at the END. Reading
+    only the head made the diagnosis depend on where in a >16 MiB transcript a
+    phrase happened to land: two identical failures of a 39 MB and a 9 MB
+    session were classified differently.
     """
     kept, size = [], 0
+    tail: list = []
+    tail_len = 0
     try:
         while True:
             chunk = stream.read(65536)
@@ -1641,13 +1651,18 @@ def _read_stream_capped(stream, cap: int, on_chunk=None) -> tuple:
                     on_chunk(chunk)
             if size < cap:
                 kept.append(chunk[:cap - size])
+            if tail_cap > 0:
+                tail.append(chunk)
+                tail_len += len(chunk)
+                while len(tail) > 1 and tail_len - len(tail[0]) >= tail_cap:
+                    tail_len -= len(tail.pop(0))
             size += len(chunk)
     except (OSError, ValueError):
         pass
     finally:
         with contextlib.suppress(OSError, ValueError):
             stream.close()
-    return "".join(kept), size
+    return "".join(kept), size, ("".join(tail)[-tail_cap:] if tail_cap > 0 else "")
 
 
 def _terminate_agent_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
@@ -1985,6 +2000,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     started_at = utcnow()
     rec["last_attempt_started"] = started_at
     rc, out, err, exc = None, "", "", None
+    out_tail = err_tail = ""
     truncation = ""
     try:
         # Popen + a process GROUP, not subprocess.run: a timeout must kill the
@@ -2035,7 +2051,8 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
             def _pump(stream=stream, key=key):
                 captured[key] = _read_stream_capped(
                     stream, MAX_TOOL_OUTPUT_BYTES,
-                    turn_counter.feed if (key == "out" and turn_counter is not None) else None)
+                    turn_counter.feed if (key == "out" and turn_counter is not None) else None,
+                    tail_cap=EVIDENCE_TAIL_BYTES)
             reader = threading.Thread(target=_pump, daemon=True)
             reader.start()
             readers.append(reader)
@@ -2053,8 +2070,8 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         finally:
             service_stop.set()
             _unregister_active_agent(proc)
-        out, out_total = captured.get("out", ("", 0))
-        err, err_total = captured.get("err", ("", 0))
+        out, out_total, out_tail = captured.get("out", ("", 0, ""))
+        err, err_total, err_tail = captured.get("err", ("", 0, ""))
         dropped = []
         if out_total > len(out):
             dropped.append(f"stdout {out_total} chars -> {len(out)}")
@@ -2107,7 +2124,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         # then resumed the same oversized session. The patterns are anchored to
         # error-shaped lines, so scanning stdout does not flag a manuscript that
         # merely mentions "payload too large".
-        failure_kind = agent_failure_kind(out, err, exclude=agent_exclude)
+        failure_kind = agent_failure_kind(out_tail, err_tail, exclude=agent_exclude)
     if failure_kind == "context_overflow":
         exc = ("the agent request exceeded the provider's payload/context limit "
                "(HTTP 413 / request too large); a continuation would resend the same "
@@ -2115,7 +2132,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     elif failure_kind == "runaway":
         # The proxy stopped the session itself; keep its sentence, because it
         # names which cap tripped (turns, compactions, a repeated call).
-        exc = agent_runaway_reason(err, exclude=agent_exclude) or (
+        exc = agent_runaway_reason(err_tail, exclude=agent_exclude) or (
             "the agent session was stopped for looping instead of finishing the "
             "stage; a fresh attempt is required")
     if turn_cap_hit:
@@ -2545,8 +2562,9 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                 # 1) A STOPPED session (a stalled turn, a CLI timeout) is CONTINUED
                 # with its own context -- real work, not paperwork -- before
                 # anything else is tried.
-                argv, key, why = resume_gate(ctx, rec, cmd)
-                if argv and run_resume_session_now(ctx, rec, argv, key, why, timeout):
+                argv, key, why, mode = resume_gate(ctx, rec, cmd)
+                if argv and run_resume_session_now(ctx, rec, argv, key, why, timeout,
+                                                   mode=mode):
                     if ctx.run(rid)["status"] == "done":
                         continue
                 # 2) Before spending the next retry (and rebuilding the sandbox the
@@ -2750,7 +2768,7 @@ def _revision_plan_rows(sb: Path):
         if not isinstance(row, dict):
             return None
         rid = str(row.get("id") or "").strip()
-        rel = str(row.get("file") or "").strip()
+        rel = _package_rel_under_revised(str(row.get("file") or ""))
         if not rid or rid in seen or not rel:
             return None
         # A row must DESCRIBE the repair it authorizes. The prompt's contract is
@@ -2800,6 +2818,24 @@ def _unsafe_package_rel(rel: str) -> bool:
     """True when a plan row's `file` is not a path inside the revised package."""
     return bool(rel.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", rel)
                 or ".." in Path(rel).parts)
+
+
+def _package_rel_under_revised(value: str) -> str:
+    """A repair plan row's `file` as a path RELATIVE to `revised/`.
+
+    The auditor describes the package it audited, so it naturally writes
+    `revised/manuscript.md`; the repair session and the application audit both
+    name the same file `manuscript.md`. The audit compares the plan's rows with
+    the manifests of `revised/`, so an un-normalized `revised/` prefix made
+    every such row fail the coverage check with "changed without a confirmed
+    plan row naming it" even though the row named exactly that file. Both
+    spellings are accepted here; the stored row is always package-relative.
+    """
+    text = strip_leading_dot_slash(str(value or "").replace("\\", "/").strip())
+    prefix = (REVISED_DIR + "/").lower()
+    while text.lower().startswith(prefix):
+        text = text[len(REVISED_DIR) + 1:].lstrip("/")
+    return text
 
 
 def _revision_repair_ledger(sb: Path, rows: list, with_ids: bool = False):
@@ -4573,10 +4609,10 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                             continue
                 # ... then a repairable artifact-quality failure before the retry
                 # burns the attempt and rebuilds the sandbox it would repair.
-                argv, key, why = resume_gate(ctx, rec, cmd)
+                argv, key, why, mode = resume_gate(ctx, rec, cmd)
                 if argv and len(running) < max(1, int(jobs)) \
                         and start_resume_session(ctx, ex, running, resume_flight, rec,
-                                                 argv, key, why, timeout):
+                                                 argv, key, why, timeout, mode=mode):
                     continue
                 problems = repairable_artifact_failure(ctx, rec)
                 if problems and len(running) < max(1, int(jobs)) \

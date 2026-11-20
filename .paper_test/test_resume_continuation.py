@@ -18,9 +18,16 @@ a fresh attempt: the corpus it read and the plan it made stay in its context.
   * `resume_gate()` only continues an attempt that looks UNFINISHED (a process
     failure, or a postcheck error naming a deliverable that does not exist), and
     at most RESUME_ATTEMPT_LIMIT (2) times per session id.
+  * when the backend has no CLI resume form (a custom `--agent-cmd`, or a
+    failure a resumed CLI session can only repeat: an oversized context, a
+    loop), the gate continues the stage in the SAME sandbox by running its own
+    command again with the continuation prompt. Every artifact stays on disk;
+    only the chat transcript is rebuilt. That is what keeps a 9-hour stage from
+    being thrown away whenever the CLI cannot resume itself.
   * end to end, through a fake `codex` on PATH: a stalled stage is continued and
     the run completes with attempts [postcheck(failed), continuation(ok)]; a
-    session that keeps stalling is continued exactly twice and then fails.
+    session that keeps stalling is continued exactly twice and then fails; an
+    overflow is continued in the sandbox, never resent to the CLI.
 """
 from __future__ import annotations
 
@@ -138,13 +145,14 @@ def test_gate():
            "postcheck": {"ok": False, "errors": [MARK, LED], "warnings": []}}
     check("a stalled attempt (deliverables absent) is a continuation candidate",
           nb.resume_unfinished_reason(ctx, rec).startswith("the stage stopped before writing"))
-    argv, key, reason = nb.resume_gate(ctx, rec, cmd)
+    argv, key, reason, mode = nb.resume_gate(ctx, rec, cmd)
     check("the gate returns the resume argv and the session as the budget key",
-          argv == ["codex", "exec", "resume", SID, "-"] and key == SID and reason, str(argv))
+          argv == ["codex", "exec", "resume", SID, "-"] and key == SID and reason
+          and mode == "cli", str(argv))
     rec["resume_attempts"] = {SID: nb.RESUME_ATTEMPT_LIMIT}
-    argv2, _k, reason2 = nb.resume_gate(ctx, rec, cmd)
+    argv2, _k, reason2, mode2 = nb.resume_gate(ctx, rec, cmd)
     check("after the limit the gate refuses (a fresh attempt follows)",
-          argv2 == [] and reason2 == "")
+          argv2 == [] and reason2 == "" and mode2 == "")
     rec2 = dict(rec, postcheck={"ok": False,
                                 "errors": ["rewrite: REWRITE_REPORT.md declares level 'sentence' "
                                            "but this arm is 'structural' -- the round stages one "
@@ -159,11 +167,61 @@ def test_gate():
     check("the continuation prompt says what stopped, what failed and what to do",
           "CONTINUATION" in p and "Do NOT start over" in p
           and "Write the completion marker" in p and MARK in p and LED in p)
+    p_sandbox = nb.resume_prompt(rec, [MARK, LED], "the stage stopped before writing x",
+                                 used=0, resumed_cli=False)
+    check("a sandbox continuation does NOT promise the chat transcript",
+          "NOT carried over" in p_sandbox and "still yours" not in p_sandbox
+          and "same sandbox" in p_sandbox, p_sandbox[:400])
+
+
+def test_sandbox_backend_gate():
+    print()
+    print("== a backend with no CLI resume form continues in the SAME sandbox ==")
+    root = scratch("paper_resume_sandbox_")
+    sb = root / "runs" / "r1_a2_revise"
+    (sb / "revised").mkdir(parents=True)
+    ctx = nb.Ctx(root)
+    custom = ["python3", "/opt/agent/codex_qwen_agent.py"]
+    MARK = ("completion marker _pipeline_done.json missing (it is prompted as the very last "
+            "step; a non-empty output directory is NOT completion)")
+    rec = {"id": "r1_a2_revise", "kind": "revise", "round": 1,
+           "sandbox": "runs/r1_a2_revise", "status": "failed",
+           "agent_session_id": "",
+           "postcheck": {"ok": False, "errors": [MARK], "warnings": []}}
+    argv, key, reason, mode = nb.resume_gate(ctx, rec, custom)
+    check("a custom --agent-cmd continues from its OWN command and sandbox",
+          argv == custom and key == "__continue__" and reason and mode == "sandbox",
+          f"{argv} / {mode}")
+    check("the sandbox continuation is charged to the same per-attempt budget",
+          nb.RESUME_ATTEMPT_LIMIT > 0)
+    rec["resume_attempts"] = {"__continue__": nb.RESUME_ATTEMPT_LIMIT}
+    argv2, _k, _r, mode2 = nb.resume_gate(ctx, rec, custom)
+    check("the sandbox continuation is bounded like any other continuation",
+          argv2 == [] and mode2 == "")
+    # The flight record and the console must name HOW it continues: a sandbox
+    # continuation used to print "continuing session ..." (the mode never
+    # reached `_resume_mode_line`).
+    fresh = dict(rec, resume_attempts={})
+    prepared = nb.prepare_resume_session(ctx, fresh, custom, "__continue__",
+                                         "the stage stopped before writing x",
+                                         mode="sandbox")
+    check("the continuation record carries the sandbox mode",
+          bool(prepared) and prepared.get("mode") == "sandbox", str(prepared))
+    check("the sandbox continuation's console line says so",
+          "SAME SANDBOX" in nb._resume_mode_line(prepared, "__continue__"),
+          nb._resume_mode_line(prepared, "__continue__"))
+    cli_prepared = nb.prepare_resume_session(ctx, dict(rec, resume_attempts={}),
+                                             ["codex", "exec", "-"], SID,
+                                             "stalled", mode="cli")
+    check("a CLI continuation still names its session",
+          cli_prepared.get("mode") == "cli"
+          and "continuing session" in nb._resume_mode_line(cli_prepared, SID),
+          nb._resume_mode_line(cli_prepared, SID))
 
 
 def test_context_overflow_gate():
     print()
-    print("== a 413/context-limit failure is never continued ==")
+    print("== a 413/context-limit failure: never RESUMED, continued from the sandbox ==")
     for label, text in (
             ("status 413", "ERROR: unexpected status 413 Payload Too Large"),
             ("request entity", "<title>413 Request Entity Too Large</title>"),
@@ -226,17 +284,19 @@ def test_context_overflow_gate():
            "last_error": ("the agent request exceeded the provider's payload/context limit"),
            "last_failure_kind": "context_overflow",
            "postcheck": {"ok": False, "errors": [], "warnings": []}}
-    argv, key, reason = nb.resume_gate(ctx, rec, ["codex", "exec", "-"])
-    check("the gate refuses to resend the oversized session",
-          argv == [] and key == SID and reason == "", f"{argv} / {reason}")
+    argv, key, reason, mode = nb.resume_gate(ctx, rec, ["codex", "exec", "-"])
+    check("a 413 is never continued by RESENDING the same CLI session",
+          argv == ["codex", "exec", "-"] and key == SID and reason
+          and mode == "sandbox", f"{argv} / {mode}")
 
     rec_runaway = dict(rec, last_failure_kind="runaway",
                        last_error=("the agent session issued 1001 model turns "
                                    "(PAPER_EVAL_PAPER_REFINE_MAX_TURNS=1000); it "
                                    "is looping instead of finishing the stage"))
-    argv, key, reason = nb.resume_gate(ctx, rec_runaway, ["codex", "exec", "-"])
-    check("the gate does not resume a session that was stopped for looping",
-          argv == [] and key == SID and reason == "", f"{argv} / {reason}")
+    argv, key, reason, mode = nb.resume_gate(ctx, rec_runaway, ["codex", "exec", "-"])
+    check("a loop is not resumed either; it continues with a fresh process",
+          argv == ["codex", "exec", "-"] and key == SID and reason
+          and mode == "sandbox", f"{argv} / {mode}")
 
     prompts = (nb.review_prompt(Path("/tmp/sb"), "r1_guided_review", 1),
                nb.revise_prompt(Path("/tmp/sb"), "r1_a2_revise", 1),
@@ -270,7 +330,11 @@ MODE = os.environ.get("FAKE_CODEX_MODE", "finish")
 resumed = len(sys.argv) > 2 and sys.argv[1] == "exec" and sys.argv[2] == "resume"
 sys.stderr.write(f"OpenAI Codex v0.155.1\\n--------\\nsession id: {{SID}}\\n")
 prompt = sys.stdin.read()
-if not resumed:
+# A sandbox continuation runs the same command ONCE MORE, with the
+# continuation prompt on stdin: the CLI session is not resumed, but the
+# sandbox (and every artifact in it) is.
+continuation = resumed or "CONTINUATION - YOUR OWN SESSION STOPPED" in prompt
+if not continuation:
     if MODE == "overflow":
         sys.stderr.write("ERROR: unexpected status 413 Payload Too Large: length limit exceeded\\n")
         sys.exit(1)
@@ -418,7 +482,7 @@ def test_end_to_end_limit():
 
 def test_end_to_end_context_overflow():
     print()
-    print("== a 413 process failure goes straight to a fresh attempt ==")
+    print("== a 413 process failure continues in the SAME sandbox (never resent) ==")
     tmp = scratch("paper_resume_overflow_e2e_")
     root = make_root(tmp)
     proc = run_with_fake_codex(root, make_fake_codex(tmp / "bin"), "--retries", "1",
@@ -428,14 +492,19 @@ def test_end_to_end_context_overflow():
     rec = state["runs"]["r1_w1"]
     sources = [e.get("source") for e in rec.get("attempts_log") or []]
     resume_counts = list((root / "runs").glob("r1_w1*/_fake_resume_count"))
-    check("the oversized session is never continued",
-          not resume_counts and "no continuation" in out
-          and "provider already rejected" in out, out[-500:])
-    check("both failures are recorded as fresh process attempts",
-          sources.count("process") == 2 and "continuation" not in sources, str(sources))
-    check("the run record classifies the failure",
-          rec.get("last_failure_kind") == "context_overflow"
-          and "payload/context limit" in str(rec.get("last_error")), str(rec.get("last_error")))
+    check("the oversized session is not resent to the CLI",
+          "the CLI session is not continued" in out, out[-500:])
+    check("it is continued in the same sandbox with a fresh context",
+          "continuing in the SAME SANDBOX" in out and "fresh context" in out
+          and (root / "runs" / "r1_w1" / "_fake_resume_count").read_text() == "1"
+          and len(resume_counts) == 1, out[-500:])
+    check("the continuation finishes the stage from the files on disk",
+          rec.get("status") == "done" and sources == ["process", "continuation"],
+          f"{sources} {str((rec.get('postcheck') or {}).get('errors'))[:200]}")
+    _last = rec.get("last_resume") or {}
+    check("the run record classifies the failure and the continuation mode",
+          _last.get("mode") == "sandbox"
+          and "payload/context limit" in str(_last.get("reason") or ""), str(_last))
 
 
 def test_turn_cap() -> None:
@@ -495,6 +564,7 @@ def main() -> int:
         test_argv_forms()
         test_session_id_capture()
         test_gate()
+        test_sandbox_backend_gate()
         test_context_overflow_gate()
         test_turn_cap()
         test_end_to_end_continuation()
