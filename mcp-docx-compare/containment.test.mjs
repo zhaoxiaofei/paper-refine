@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { allowedRoots, containsPath } from './containment.mjs';
+import { allowedRoots, containsPath, containedSpawnPath } from './containment.mjs';
 
 const fails = [];
 function check(name, fn) {
@@ -68,6 +68,30 @@ try {
   check('a not-yet-existing output under a REAL directory is allowed', () => {
     const out = path.join(root, 'new-redline.docx');
     assert.equal(containsPath(out, allowedRoots(root)), true);
+  });
+  check('the spawn-time recheck says an unset root list is off (lexical)', () => {
+    assert.equal(containedSpawnPath(insideDoc, allowedRoots('')), path.resolve(insideDoc));
+  });
+  check('the spawn-time recheck refreshes the real path of an allowed file', () => {
+    assert.equal(containedSpawnPath(insideDoc, allowedRoots(root)),
+                 path.resolve(insideDoc));
+  });
+  check('the spawn-time recheck refuses a path swapped for an outside symlink', () => {
+    const swap = path.join(root, 'swap.docx');
+    writeFileSync(swap, 'x');
+    assert.equal(containsPath(swap, allowedRoots(root)), true);
+    // The check-then-spawn window: the checked regular file is replaced by a
+    // symlink pointing outside the root BEFORE the child would open it.
+    rmSync(swap);
+    symlinkSync(outsideDoc, swap);
+    assert.throws(() => containedSpawnPath(swap, allowedRoots(root)),
+                  /outside DOCX_MCP_ALLOWED_ROOTS/);
+  });
+  check('the spawn-time recheck refuses a dangling-symlink output', () => {
+    const dead = path.join(root, 'dead.docx');
+    symlinkSync(path.join(outside, 'missing.docx'), dead);
+    assert.throws(() => containedSpawnPath(dead, allowedRoots(root)),
+                  /dangling symlink/);
   });
   check('a set-but-empty root list fails closed instead of allowing anything', () => {
     assert.throws(() => allowedRoots(path.delimiter), /names no roots/);

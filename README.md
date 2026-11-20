@@ -65,7 +65,7 @@ checkouts — is installed by one script:
 source ./activate-deps.sh          # export PAPER_REFINE_ROOT / PAPER_REFINE_DEPS / ZOTERO_SKILL
 ```
 
-`install_dependencies.sh` writes only checkout-relative paths. `deps.env` records them and
+`install_dependencies.sh` writes only checkout-relative paths, except a dependency installed outside the checkout (the Zotero bridge), which `deps.env` records by absolute path. `deps.env` records them and
 `activate-deps.sh` resolves them for the current shell; no machine path is baked into a prompt
 or into the generated dependency files. (The harness MCP registrations necessarily name an
 absolute server path, because a harness starts its servers from its own working directory.) The
@@ -206,7 +206,7 @@ Everything lives under the root you passed to `setup`:
 | path | what it is |
 | --- | --- |
 | `reports/DECISION_REPORT.md` | the human-readable decision: each round's ranked table, the champion, the issue census, and every reported-only signal |
-| `reports/decision.json` | the same decision, machine-readable; its `score_model_doc` defines the scoring and ranking contract |
+| `reports/decision.json` | the same decision, machine-readable; its `score_model` defines the scoring and ranking contract |
 | `reports/round<r>_raw_scores.csv` | every directed score the panel produced, with the sheet it came from |
 | `reports/round<r>_issue_census.csv` | how many defects of each tier and severity every version carries (`own` vs `peer`), plus the sibling matrices the ranking walks |
 | `reports/round<r>_defects.csv` | WHICH defects: one row per defect the panel filed, with the version it belongs to, the comparison's target/opponent, the check id, the defect class, the severity and the sheet's own evidence sentence |
@@ -1237,7 +1237,7 @@ one session at a time:
 ```bash
 run --only r1_judge_w2_j1                    # one session: round 1, w2, judge 1
 run --only r2_judge_i1_j1                    # round 2's first integration arm
-run --only r1_judge_w2_j1,r1_judge_w2_j2     # two of w2's three judges
+run --only r1_judge_w2_j1,r1_judge_w2_j2     # two of w2's judges
 ```
 
 The selector is a **whitelist** (no selector = every session, the default):
@@ -1619,7 +1619,7 @@ producer, and a claim resting only on one is `unable -- placeholder input`. The
 real partner of a DECLARED placeholder stays evidence (declaring the ACT copy
 must not silence the HG008 original).
 
-### Package self-consistency: PKG-11 to PKG-24
+### Package self-consistency: PKG-11 to PKG-26
 
 Every scan below runs on each produced package and on every published copy, and
 its rows are seeded in the guided-review/audit/revision evidence pack. The table-
@@ -2151,7 +2151,7 @@ copied next to `PROMPT.md` in every session sandbox (including the judge's, whos
 prompt names the same command); it carries no per-run data, and the judge's copy
 is stamped with the view timestamp.
 
-### Zotero live-field parity + automatic repair (`zotero-check` / `zotero-refresh`) and package integrity (M31–M36, PKG-1, FMT-PDF1–4)
+### Zotero live-field parity + automatic repair (`zotero-check` / `zotero-refresh`) and package integrity (M31–M36, PKG-1, FMT-PDF1–7)
 
 A manuscript's citations are live Zotero fields: the numbers in the text and the
 order of the bibliography are CACHED results of the last citation-processor run,
@@ -2514,11 +2514,11 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | cold_start_review | 63 KB | 27 KB | 56% |
 | audit | 91 KB | 48 KB | 47% |
 | revise | 122 KB | 68 KB | 44% |
-| integrate | 112 KB | 60 KB | 47% |
-| rewrite | 104 KB | 61 KB | 41% |
-| judge | 104 KB | 74 KB | 29% |
+| integrate | 113 KB | 60 KB | 47% |
+| rewrite | 104 KB | 61 KB | 42% |
+| judge | 105 KB | 74 KB | 29% |
 | revision_audit | 38 KB | 16 KB | 57% |
-| revision_repair | 36 KB | 11 KB | 69% |
+| revision_repair | 36 KB | 11 KB | 70% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
@@ -3429,27 +3429,38 @@ one instead:
   `dsh` preset, `dsh --profile headless --json --session-id <session-id> -`,
   the exact persisted session whose id its `--json` event stream named — the
   harness adopts a session by exact id only, so there is no `--continue`
-  equivalent and no id means no continuation). A custom
-  `--agent-cmd` has no known resume form and gets a fresh attempt as before; an
-  attempt that *finished* and was rejected on content is not continued either —
-  that is the retry/repair path's business;
+  equivalent and no id means no continuation). When the backend has no CLI
+  resume form (a custom `--agent-cmd`/`PAPER_AGENT_CMD`) the stage is still
+  continued: `resume_gate` returns the stage's OWN command and the continuation
+  runs as a FRESH process in the SAME sandbox, so every artifact on disk
+  survives and only the chat transcript is rebuilt (`last_resume.mode =
+  "sandbox"`). An attempt that *finished* and was rejected on content is not
+  continued either — that is the retry/repair path's business;
 * the continuation prompt names what stopped and what the postcheck said, and
-  tells the session to finish from where it is, marker last. A continuation that
-  clears the postcheck is recorded as the attempt that finished the stage
-  (`source: "continuation"`); one that does not is a failed attempt like any
-  other and the retry policy takes over;
+  tells the session to finish from where it is, marker last. A CLI continuation
+  says the context is still the session's; a SANDBOX continuation says the
+  transcript is not carried over and points at the sandbox instead. A
+  continuation that clears the postcheck is recorded as the attempt that
+  finished the stage (`source: "continuation"`); one that does not is a failed
+  attempt like any other and the retry policy takes over;
 * the budget is **at most 2 continuations per session id** (`resume_attempts`),
   counted across attempts, and the console says so when it is spent (`no
   continuation -- 2 continuation(s) already spent on this session (limit 2)`).
   `RESUME_PROMPT.md` is written into the sandbox for the session and removed
   afterwards; the continuation never replaces the scoped artifact repair, it runs
   before it.
-* a provider `413 Payload Too Large` / context-length failure is never
-  continued: resuming resends the oversized context and failed again in
-  `neohet-to15` and `cnb-to33`. It is recorded as `context_overflow` and the
-  retry budget goes straight to a fresh context. Every prompt now also carries a
-  context-budget rule, requiring bounded reads and contact-sheet-first visual
-  inspection (every page is still examined; only the byte transfer is bounded).
+* a provider `413 Payload Too Large` / context-length failure (and a session the
+  proxy stopped for looping) is never continued by RESUMING the CLI session:
+  `codex exec resume` resends the oversized context and failed again in
+  `neohet-to15` and `cnb-to33`. It is recorded as `context_overflow` / `runaway`
+  and continues in the SAME SANDBOX with a fresh process — which is exactly the
+  fresh context such a failure needs, and keeps the artifacts the stage already
+  wrote. Every prompt also carries a context-budget rule, requiring bounded
+  reads and contact-sheet-first visual inspection (every page is still examined;
+  only the byte transfer is bounded). The classifier reads the END of the
+  transcript (a bounded tail of each stream, not its 16 MiB head) and ignores
+  source lines the session merely printed, so a long session is classified by
+  what actually stopped it.
 
 ### `--strict-artifacts fix`: one scoped repair session instead of a full re-run
 
@@ -3613,7 +3624,7 @@ Two layers keep it from growing like that: `compact_state()` replaces the
 redundant bulk with the counts, the corpus digest and the path of the full file
 before every save (`runs.<judge>.judge_evidence` -> `reports/judge_evidence_<id>.json`,
 `runs.<id>.evidence_after` -> `runs/<id>/CODE_SCANS_after.json`, `runs.<id>.format_fix`
--> `runs/<id>/FORMAT_FIX.json`; those copies were 56 MB of that registry, and the
+-> `runs/<id>/FORMAT_FIX_<id>.json`; those copies were 56 MB of that registry, and the
 root's registry drops to ~6 MB on its next save), and every save keeps the
 previous registry as `state.json.prev` — a hard link, so it costs no bytes or
 I/O. When a registry really cannot be read, the message says WHICH way it is
@@ -3636,7 +3647,7 @@ its four integration runs never started.
 |---|---|
 | `paper_pipeline.py` | thin loader for the orchestrator; it executes the ordered `paper_pipeline_parts/` in its own globals (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline / track) |
 | `paper_pipeline_parts/` | the orchestrator's implementation, split by domain (prelude, venues, journal modes, prompts, utilities, state/corpus, postchecks, stage quality, selection/driver, setup, reports, audits, conflicts/decide, redlines, tracking, PDF, retry, CLI) — every file is under 10,000 lines |
-| `agent-common/` | the required runtime submodule (`agent_common/model_runtime.py`, `llm_retry.py`, `llm_policy.json`, `model_catalog.json`); initialize it with `git submodule update --init --recursive` — the loader refuses to start without it |
+| `agent-common/` | the required runtime submodule (`agent_common/model_runtime.py`, `llm_retry.py`, `llm_policy.json`, `model_catalog.json`, `dsh_events.py`); initialize it with `git submodule update --init --recursive` — the loader refuses to start without it |
 | `pairwise_scores.py` | builds a per-round directed score workbook from `reports/round*_raw_scores.csv`; uses each judge's `own` frame and never invents the opposite direction from the derived `received` row |
 | `paper_docx_format.py` | thin loader for the OOXML style/formatting scanner, fixer and blank-page checker |
 | `paper_docx_format_parts/` | the formatter's implementation (core XML/field primitives, text rules, layout/edit rules, report + CLI) — every file is under 10,000 lines |
@@ -3715,7 +3726,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 255 suites (a few
+any failure. They are independent, so run them in parallel — 268 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

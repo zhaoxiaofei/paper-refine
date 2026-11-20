@@ -88,6 +88,13 @@ except ImportError:  # a test loader may not put the submodule root on sys.path
 
 from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
 from agent_common.chat import completion_budget, finish_reason_error, message_text
+
+# A redirect must never re-send the Bearer API key to another host. urllib's
+# default redirect handler reuses the original request's headers (Authorization
+# included), so a compromised or malicious endpoint could 302 one request to an
+# attacker host and capture the key. Refuse every 3xx: the handler returns None,
+# urllib raises HTTPError, and `_request` reports it as a transport error.
+_NO_REDIRECT_OPENER = urllib.request.build_opener(rt._NoRedirectHandler)
 # These scripts are also loaded by absolute filename by the test runner.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -216,13 +223,20 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
         data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
             try:
                 return resp.status, json.loads(raw), ""
             except ValueError:
                 return resp.status, raw, ""
     except urllib.error.HTTPError as e:
+        if 300 <= e.code < 400:
+            # `_NoRedirectHandler` turned the 3xx into an HTTPError. Never
+            # follow it (and never forward the Authorization header): report a
+            # transport error the caller retries/fails on.
+            return 0, None, (f"HTTP {e.code} redirect refused: the endpoint tried "
+                             f"to forward the request (and its credentials) to "
+                             f"another URL")
         raw = e.read().decode("utf-8", "replace")
         try:
             body = json.loads(raw)

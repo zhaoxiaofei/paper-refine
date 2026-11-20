@@ -33,7 +33,11 @@ def prepare_dsh_home(adapter: str) -> tuple:
     if not src.is_dir():
         return "", (f"the dsh profile is missing: {src}; install "
                     f"@deepseek-ai/dsh and create the headless profile"), None
-    tmp = Path(tempfile.mkdtemp(prefix=f"paper-{adapter}-dsh-"))
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix=f"paper-{adapter}-dsh-"))
+    except OSError as e:
+        return "", (f"cannot create a temporary dsh home ({e}); check TMPDIR and "
+                    f"the permissions of the dsh profile {src}"), None
     try:
         dst = tmp / "profiles" / "headless"
         dst.mkdir(parents=True, exist_ok=True)
@@ -51,6 +55,13 @@ def prepare_dsh_home(adapter: str) -> tuple:
         cred = home / ".credentials.yaml"
         if cred.is_file():
             shutil.copy2(cred, tmp / ".credentials.yaml")
+    except OSError as e:
+        # A read-only/partially copied profile is the documented clean-error
+        # case: the callers turn `error` into the install hint and exit 2. It
+        # must not escape as an uncaught traceback.
+        shutil.rmtree(tmp, ignore_errors=True)
+        return "", (f"cannot prepare a writable dsh home from {src}: {e}; fix "
+                    f"the profile's permissions or reinstall @deepseek-ai/dsh"), None
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise

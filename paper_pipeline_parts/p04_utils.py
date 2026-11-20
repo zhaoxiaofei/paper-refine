@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 04/22 of the pipeline -- executed by the
+# Part 04/23 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -2278,7 +2278,7 @@ def _decode_text_source(raw: bytes, errors: str = "replace") -> str:
     return raw.decode("utf-8", errors)
 
 
-def read_text_bounded(path: Path, errors: str = "replace"):
+def read_text_bounded(path: Path, errors: str = "replace", limit: int = None):
     """A UTF-8 text file inside the agent-output byte budget, or None.
 
     Agent-written TEXT artifacts (feedback, tables, MANUAL_STEPS, ...) were read
@@ -2287,15 +2287,20 @@ def read_text_bounded(path: Path, errors: str = "replace"):
     (the 2026-10-28 audit's F06). lstat/`S_ISREG` plus O_NOFOLLOW also refuse a
     planted FIFO/symlink at the path, and the OPEN descriptor is fstat'ed too so
     a swap between the lstat and the open cannot turn a FIFO into empty text.
+
+    `limit` is the caller's byte budget (default: MAX_JSON_BYTES). Package scans
+    pass PACKAGE_TEXT_BYTES_LIMIT so an agent-writable package file cannot make
+    the orchestrator read an arbitrarily large file.
     """
     path = Path(path)
+    cap = MAX_JSON_BYTES if limit is None else int(limit)
     fd = None
     try:
         _refuse_symlinked_read_parent(path)
         st = path.lstat()
         if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
             return None
-        if st.st_size > MAX_JSON_BYTES:
+        if st.st_size > cap:
             return None
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
                      | getattr(os, "O_NONBLOCK", 0))
@@ -2306,9 +2311,9 @@ def read_text_bounded(path: Path, errors: str = "replace"):
         # descriptor is the only thing the reader can trust, so check it exactly
         # as read_json does.
         fst = os.fstat(fd)
-        if not stat.S_ISREG(fst.st_mode) or fst.st_size > MAX_JSON_BYTES:
+        if not stat.S_ISREG(fst.st_mode) or fst.st_size > cap:
             return None
-        chunks, remaining = [], MAX_JSON_BYTES + 1
+        chunks, remaining = [], cap + 1
         while remaining > 0:
             chunk = os.read(fd, min(remaining, 1 << 20))
             if not chunk:
@@ -2324,7 +2329,7 @@ def read_text_bounded(path: Path, errors: str = "replace"):
                 os.close(fd)
             except OSError:
                 pass
-    if len(raw) > MAX_JSON_BYTES:
+    if len(raw) > cap:
         return None
     return _decode_text_source(raw, errors)
 

@@ -25,8 +25,10 @@ sources are read as LaTeX: the abstract environment's own `\end{abstract}` ends
 the abstract (paragraph breaks inside it do not), and `\caption`/`\captionof`
 text is a legend even though its "Figure N" label is added at typesetting time.
 
-The cover letter is counted twice: its PERSUADING part against the user's
-300-500-word preference, and its TOTAL content (salutation, body, disclosures
+The cover letter is counted twice: its PERSUADING part against the venue
+profile's own `cover_letter` bound (a range, or a one-sided `at most N` /
+`at least N`; the built-in 300-500-word preference applies only when the
+profile configures no cover-letter block), and its TOTAL content (salutation, body, disclosures
 and signature) against the profile's `cover_letter.total_max` when one is set;
 the shipped profiles record no total cap.
 
@@ -980,6 +982,11 @@ def main(argv=None) -> int:
         else:
             base_abstract = base_main = rel_abstract = rel_main = None
         cover_stated = isinstance(limits.get("cover_letter"), dict)
+        # A stated cover_letter block is authoritative even when it carries only
+        # ONE side: `{"max": 200}` means "at most 200 words" (README), so the
+        # missing side must stay None rather than inherit the built-in 300/500
+        # range (which produced "300-200 words" and a false OUTSIDE-PREFERENCE).
+        cover_configured = cover_stated
         cover = limits.get("cover_letter") or {}
         if not cover_stated and types:
             # The cover-letter preference is venue-wide: a type that states NO
@@ -998,8 +1005,10 @@ def main(argv=None) -> int:
             for candidate in types:
                 if isinstance(candidate, dict) and \
                         _article_type_id(candidate) == default_id:
-                    cover = ((candidate.get("length_limits") or {}).get("cover_letter")
-                             or cover)
+                    block = (candidate.get("length_limits") or {}).get("cover_letter")
+                    cover = block or cover
+                    if isinstance(block, dict):
+                        cover_configured = True
                     break
         def _profile_number(value, key):
             """A profile's numeric limit, or None (with a warning) when malformed."""
@@ -1014,8 +1023,14 @@ def main(argv=None) -> int:
                 return None
             return int(number) if number.is_integer() else number
 
-        cover_min = _profile_number(cover.get("min", cover_min), "cover_letter.min")
-        cover_max = _profile_number(cover.get("max", cover_max), "cover_letter.max")
+        if cover_configured:
+            # The block is authoritative: an absent (or null) side means "no
+            # bound on this side", not the built-in 300/500 default.
+            cover_min = _profile_number(cover.get("min"), "cover_letter.min")
+            cover_max = _profile_number(cover.get("max"), "cover_letter.max")
+        else:
+            cover_min = _profile_number(cover.get("min", cover_min), "cover_letter.min")
+            cover_max = _profile_number(cover.get("max", cover_max), "cover_letter.max")
         # A profile is authoritative: an absent total_max MEANS "no TOTAL cap"
         # (the pipeline's rule). The no-profile path has no built-in cap either,
         # so the total count is reported without one.

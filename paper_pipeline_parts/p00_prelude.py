@@ -1,4 +1,4 @@
-# Part 00/22 of the pipeline -- the shared prelude, executed by the loader
+# Part 00/23 of the pipeline -- the shared prelude, executed by the loader
 # before every other part.
 from __future__ import annotations
 
@@ -151,7 +151,7 @@ from pathlib import Path
 #     "over the limit" is never reported as "corrupt";
 #   * `compact_state()` drops the redundant BULK before every save: the full
 #     evidence packs stay where they are written (reports/judge_evidence_<id>.json,
-#     runs/<id>/CODE_SCANS_after.json, runs/<id>/FORMAT_FIX.json -- 56 MB of the
+#     runs/<id>/CODE_SCANS_after.json, runs/<id>/FORMAT_FIX_<id>.json -- 56 MB of the
 #     offending registry was copies of those) while the record keeps the counts,
 #     the corpus digest and the path; the registry of that root becomes ~6 MB on
 #     its next save;
@@ -302,11 +302,13 @@ from pathlib import Path
 #   pattern matches, so the 2026-11-13 brief-communication guided review was
 #   reported as "HTTP 413 / request too large" (and its continuation refused for
 #   that reason) when the agent proxy had stopped it at the 1000-turn guard. The
-#   scan now drops source lines (a leading `#` or a raw-string prefix) from
-#   stderr and classifies the proxy's own `runaway guard` sentence first, as
-#   `runaway`; `resume_gate` refuses that class and the attempt keeps the
-#   guard's own sentence as its error.
-#   A real 413 still classifies: a provider error is never a source comment.
+#   scan now drops whole PYTHON SOURCE lines (comments, string literals,
+#   assignments, statement keywords and calls -- a normal string continuation
+#   and `why = (...)` quote the spelling too) from stderr and classifies the
+#   proxy's own `runaway guard` sentence first, as `runaway`; `resume_gate`
+#   refuses that class and the attempt keeps the guard's own sentence as its
+#   error.
+#   A real 413 still classifies: a provider error is never a source line.
 # 3.11.1 -- THE COMPLETION MARKER IS A TOOL CALL, NOT A CLOSING MESSAGE. Every
 #   stage prompt already stated WHERE the marker goes; on 2026-11-12 the last of
 #   six revise attempts (three archived sandboxes) left a complete package
@@ -407,7 +409,7 @@ from pathlib import Path
 #   sidecar string and degenerate intervals in a shipped source table all
 #   survived every layer in real runs -- and the discovery round's own probes
 #   had read the very table and reported "no anomalies".
-VERSION = "3.11.4"
+VERSION = "3.11.7"
 STATE_VERSION = 3
 # The driver executes these siblings; a root freezes all of them. Recording only
 # the driver let a root run new code with an old formatter (the round-2 case).
@@ -433,6 +435,34 @@ PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
 # file), so a partial or stale bundle is visible to `status`/`sync-code`.
 PIPELINE_ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts", "agent-common")
 MANUSCRIPT_WORDS_FILE = "paper-skills/paper-review/scripts/manuscript_words.py"
+# Every ordered part is required: a directory-only preflight passed a parts tree
+# missing p21 (or any other file) and the pipeline failed later with a NameError.
+# Keep this list in step with `_load_parts`'s glob.
+PIPELINE_REQUIRED_PARTS = (
+    "paper_pipeline_parts/p00_prelude.py",
+    "paper_pipeline_parts/p01_venues.py",
+    "paper_pipeline_parts/p02_journal_modes.py",
+    "paper_pipeline_parts/p03_prompts.py",
+    "paper_pipeline_parts/p04_utils.py",
+    "paper_pipeline_parts/p05_state_corpus.py",
+    "paper_pipeline_parts/p06_postchecks.py",
+    "paper_pipeline_parts/p07_stage_quality_journal.py",
+    "paper_pipeline_parts/p08_selection_driver.py",
+    "paper_pipeline_parts/p09_setup.py",
+    "paper_pipeline_parts/p10_reports.py",
+    "paper_pipeline_parts/p11_defect_audit.py",
+    "paper_pipeline_parts/p12_conflicts_decide.py",
+    "paper_pipeline_parts/p13_redlines.py",
+    "paper_pipeline_parts/p14_tracking.py",
+    "paper_pipeline_parts/p15_pdf.py",
+    "paper_pipeline_parts/p16_retry.py",
+    "paper_pipeline_parts/p17_cli.py",
+    "paper_pipeline_parts/p18_helpers.py",
+    "paper_pipeline_parts/p19_profiles.py",
+    "paper_pipeline_parts/p20_judge_conflicts.py",
+    "paper_pipeline_parts/p21_removal_accounting.py",
+    "paper_pipeline_parts/p22_resume_continuation.py",
+)
 PIPELINE_REQUIRED_ASSET_FILES = (
     "agent-common/agent_common/model_runtime.py",
     "agent-common/agent_common/llm_retry.py",

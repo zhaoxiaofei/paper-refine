@@ -2248,11 +2248,13 @@ def cover_letter_page_row(path: Path, pages, source: str, max_pages: int = 2) ->
 # starts at the string's start, after a non-letter, or at a lower->UPPER
 # camelCase boundary ("plainLetter"), and it ends at a non-lowercase character
 # (so "coverage"/"newsletter"/"discovered" do not match, while "coverLetter"
-# and "plainLetter" do); the plural is allowed for `letter` so
+# and "plainLetter" do); the concatenated spellings `coverletter` and
+# `plainletter` are accepted in any case, matching the review scripts; the
+# plural is allowed for `letter` so
 # "cover_letters.docx" still names the letter.
 _WORD_EDGE = r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
 COVER_LETTER_NAME_RE = re.compile(
-    _WORD_EDGE + r"(?:[Cc]over|COVER|(?i:coverletter))(?![a-z])"
+    _WORD_EDGE + r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])"
     r"|" + _WORD_EDGE + r"(?:[Ll]etter|LETTER)s?(?![a-z])")
 NON_COVER_LETTER_NAME_RE = re.compile(
     r"response|repl(?:y|ies)|rebuttal|point[\s_-]?by[\s_-]?point|"

@@ -10,25 +10,14 @@
 // OOXML writer.
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { accessSync, constants, existsSync, lstatSync, mkdtempSync, rmSync } from 'node:fs';
+import { accessSync, constants, existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod/v4';
-import { allowedRoots, containedSpawnPath, containsPath, realOrResolved,
-         sameFile, stageContainedInput } from './containment.mjs';
-import { derivedOutput, inFlightKey } from './derived-output.mjs';
+import { allowedRoots, containedSpawnPath, containsPath, realOrResolved } from './containment.mjs';
+import { inFlightKey } from './derived-output.mjs';
 
-import { isWsl, runFile, killAllChildren } from './run-child.mjs';
-
-// F042: on SIGTERM/SIGINT the server kills its in-flight Word/COM tree
-// before exiting, so the Python driver's timeout does not orphan
-// bash -> PowerShell -> Word.
-const _shutdown = () => {
-  try { killAllChildren(); } catch { /* best effort */ }
-  process.exit(0);
-};
-process.on('SIGTERM', _shutdown);
-process.on('SIGINT', _shutdown);
+import { runFile } from './run-child.mjs';
 
 // The comparer script is NOT welded to one machine: an explicit env override
 // wins, then the repo-relative copy, then a sibling copy, then PATH. A
@@ -68,16 +57,6 @@ const inFlight = new Map();
 
 function isDocx(p) {
   return path.extname(p).toLowerCase() === '.docx';
-}
-
-// The wrapper records the WINDOWS pids it started here; the timeout path reads
-// them back to taskkill a Word/COM server the Unix group kill cannot reach. It
-// lives beside the output so both WSL and Windows can reach it; an empty string
-// means the normal process-group kill only (non-WSL, or no output yet).
-function windowsPidPath(outputPath) {
-  if (!outputPath || process.platform !== 'linux' || !isWsl()) return '';
-  return `${outputPath}.winpids-${process.pid}-${Date.now().toString(36)}-`
-       + Math.random().toString(36).slice(2);
 }
 
 serveStdio(() => {
@@ -151,70 +130,30 @@ serveStdio(() => {
       // caller gets a clear reason instead of a mysterious COM failure. The
       // comparison is made on the REAL paths: a symlinked alias of the input
       // names the same file the cleanup would delete.
-      // Identity, not spelling: on a case-sensitive filesystem `report.docx`
-      // and `Report.docx` are two files, and folding case refused the latter
-      // as "an input file" (F053). sameFile() compares device+inode when both
-      // exist and only folds case on win32 for a not-yet-created output.
+      const lc = (s) => s.toLowerCase();
       const realInputs = [absOriginal, absRevised].map((p) => realOrResolved(p));
-      if (absOutput && realInputs.some((p) => sameFile(absOutput, p))) {
+      if (absOutput && realInputs.some((p) => lc(absOutput) === lc(p))) {
         return {
           content: [{ type: 'text', text: `refused: outputPath must not be an input file: `
                                           + `${outputPath}` }],
           isError: true,
         };
       }
-      // The containment checks above judged paths the child has not opened
-      // yet. Re-resolving a path is not enough: the result is still a STRING,
-      // and a writer inside the root can swap it for an outside symlink between
-      // that check and the child's open (F14). When containment is on, the
-      // validated inputs are therefore copied into a private staging directory
-      // and the child receives THOSE copies; a later swap of the user's path
-      // cannot change what it reads. The output is written to the caller's path
-      // (the script removes a stale entry and renames its temp into place), and
-      // the derived default output is named here because the staged input is
-      // not the path the script would derive it from. When containment is unset
-      // the lexical paths are kept unchanged.
+      // RE-RESOLVE on the exact strings that are about to become argv: the
+      // containment checks above judged paths the child did not open yet, and a
+      // symlink swapped in between escaped the roots. `containedSpawnPath()`
+      // resolves again and returns the REAL path, so the child opens what was
+      // just validated; a swap is refused, not followed. When containment is
+      // unset the lexical paths are kept unchanged.
       let spawnOriginal = absOriginal;
       let spawnRevised = absRevised;
-      // Compute the documented DEFAULT output in the non-containment branch
-      // too (the converter already does). With containment off, spawnOutput
-      // used to stay "" when outputPath was omitted, so windowsPidPath("")
-      // returned "" and a WSL timeout killed no Windows pid while reporting
-      // the tree kill as successful (F045). derivedOutput() is the same name
-      // docxcompare.sh derives.
-      let spawnOutput = absOutput || derivedOutput(absOriginal, absRevised);
-      let realOriginal = absOriginal;
-      let realRevised = absRevised;
-      let stagingDir = '';
+      let spawnOutput = absOutput;
       if (ALLOWED_ROOTS.length) {
         try {
-          realOriginal = containedSpawnPath(absOriginal, ALLOWED_ROOTS);
-          realRevised = containedSpawnPath(absRevised, ALLOWED_ROOTS);
-          spawnOutput = absOutput
-            ? containedSpawnPath(absOutput, ALLOWED_ROOTS)
-            : derivedOutput(realOriginal, realRevised);
-          // The default output is a write of its own: contain it too.
-          spawnOutput = containedSpawnPath(spawnOutput, ALLOWED_ROOTS);
-          // The stage must be readable by the WINDOWS child. Its directory is
-          // the validated output's directory: Word writes the output there, so
-          // that path mapping is known to work (os.tmpdir() is not necessarily
-          // shared with Windows on WSL).
-          stagingDir = mkdtempSync(path.join(path.dirname(spawnOutput),
-                                             '.docx-mcp-compare-'));
-          // mkdtemp followed the path string: a directory component swapped
-          // after containedSpawnPath() would create the private stage (and the
-          // copied manuscripts) outside the roots. Verify where it really is
-          // before the child writes there (F046).
-          if (!containsPath(stagingDir, ALLOWED_ROOTS)) {
-            throw new Error(`the private staging directory ${stagingDir} is outside `
-                            + `DOCX_MCP_ALLOWED_ROOTS`);
-          }
-          spawnOriginal = stageContainedInput(realOriginal, ALLOWED_ROOTS,
-                                              stagingDir, 'original.docx');
-          spawnRevised = stageContainedInput(realRevised, ALLOWED_ROOTS,
-                                             stagingDir, 'revised.docx');
+          spawnOriginal = containedSpawnPath(absOriginal, ALLOWED_ROOTS);
+          spawnRevised = containedSpawnPath(absRevised, ALLOWED_ROOTS);
+          if (absOutput) spawnOutput = containedSpawnPath(absOutput, ALLOWED_ROOTS);
         } catch (error) {
-          if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });
           return {
             content: [{ type: 'text', text: `refused: ${error.message}` }],
             isError: true,
@@ -224,9 +163,6 @@ serveStdio(() => {
         // too, not hand a missing path to Word.
         for (const p of [spawnOriginal, spawnRevised]) {
           if (!existsSync(p)) {
-            // Every other refusal path removes the staging directory; this one
-            // leaked it plus both copied manuscripts (F74).
-            if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });
             return {
               content: [{ type: 'text', text: `refused: every input must be an existing `
                                               + `absolute .docx file: ${p}` }],
@@ -236,46 +172,22 @@ serveStdio(() => {
         }
       }
       const argv = [spawnOriginal, spawnRevised, ...(spawnOutput ? [spawnOutput] : [])];
-      // The server timer must fire BEFORE the caller's deadline: the Python
-      // redline budget is 900 s, so an equal server cap let the client kill the
-      // server first and skip runFile's WSL taskkill/diagnostics (F043).
-      // 870 s leaves 30 s for staging and for the server's own report.
-      const windowsPidFile = windowsPidPath(spawnOutput);
+      // 900_000 matches the orchestrator's redline budget
+      // (paper_pipeline.render_docx_visual(timeout=900) and the redline chain's
+      // own 900s); a smaller server-side cap would kill a slow-but-valid Word
+      // comparison before the caller's own timeout and silently downgrade the
+      // redline to a lower-fidelity fallback.
       const run = () => runFile(COMPARER, argv,
-                                  { timeout: 870_000, maxBuffer: 4 * 1024 * 1024,
-                                    windowsPidFile });
-      // Key on the REAL destination, not the random staging directory: two
-      // revised files that share a basename derive the same redline path, and
-      // two concurrent calls for the same input pair must still serialize.
-      const key = inFlightKey(realOriginal, realRevised, spawnOutput);
+                                  { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
+      // Key on the path the comparer will actually write, not the input pair:
+      // two revised files that share a basename derive the same redline path.
+      // `inFlightKey` also case-folds it (a case-insensitive destination).
+      const key = inFlightKey(spawnOriginal, spawnRevised, spawnOutput);
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(key, next);
-      let keepWindowsPidFile = false;
       try {
         const { stdout, stderr } = await next;
-        // The child wrote to a path validated before it ran; a writer inside
-        // the allowed root can swap a directory component in between and send
-        // the write outside DOCX_MCP_ALLOWED_ROOTS. Verify where the output
-        // actually landed, remove the stray file, and refuse instead of
-        // reporting a contained success (F046). A Node process cannot openat()
-        // for the child, so this detection is the enforcement point.
-        if (ALLOWED_ROOTS.length && spawnOutput && existsSync(spawnOutput)
-            && !containsPath(spawnOutput, ALLOWED_ROOTS)) {
-          let stray = '';
-          try { stray = realOrResolved(spawnOutput); } catch { stray = ''; }
-          if (stray) {
-            try {
-              if (lstatSync(stray).isFile()) rmSync(stray, { force: true });
-            } catch { /* already gone */ }
-          }
-          return {
-            content: [{ type: 'text', text: `refused: the output was written outside `
-                                            + `DOCX_MCP_ALLOWED_ROOTS (its path changed during `
-                                            + `the run): ${outputPath || spawnOutput}` }],
-            isError: true,
-          };
-        }
         return {
           content: [{
             type: 'text',
@@ -284,25 +196,15 @@ serveStdio(() => {
           }],
         };
       } catch (error) {
-        // Keep the pid file when the tree kill failed: those Windows pids are
-        // still alive and the file is the only record for taskkill (F82).
-        keepWindowsPidFile = /tree kill incomplete/.test(String(error.message || ''));
-        const pidNote = keepWindowsPidFile && windowsPidFile
-          ? `\n[windows pids retained for manual taskkill: ${windowsPidFile}]`
-          : '';
         return {
           content: [{
             type: 'text',
             text: `对比失败: ${error.message}\n标准输出: ${error.stdout ?? ''}\n`
-              + `标准错误: ${error.stderr ?? ''}${pidNote}`,
+              + `标准错误: ${error.stderr ?? ''}`,
           }],
           isError: true,
         };
       } finally {
-        if (windowsPidFile && !keepWindowsPidFile) {
-          try { rmSync(windowsPidFile, { force: true }); } catch { /* gone */ }
-        }
-        if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });
         if (inFlight.get(key) === next) inFlight.delete(key);
       }
     }
