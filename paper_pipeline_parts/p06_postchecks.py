@@ -1535,19 +1535,20 @@ def ledger_named_ids(ledger, wanted=()) -> set:
     r2_a2_revise both failed every attempt that way -- so the gate asks the only
     question it is about: does the payload name every frozen finding id?
 
-    An id counts when it appears as a JSON string that EQUALS a frozen id -- a
-    row field's value, a list element, or a mapping key -- at any nesting level.
-    Prose that merely mentions an id does not count, so a report object that
-    names no finding still fails the gate.
+    An id counts when it appears as a scalar that EQUALS a frozen id -- a row
+    field's value, a list element, or a mapping key -- at any nesting level. A
+    JSON number is coerced to its canonical string exactly like every other
+    ledger reader (`ledger_row_id`), so `{"id": 1, ...}` names frozen id "1"
+    (F096). Prose that merely mentions an id does not count, so a report object
+    that names no finding still fails the gate.
     """
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     named = set()
 
     def note(value):
-        if isinstance(value, str):
-            token = value.strip()
-            if token and (not want or token in want):
-                named.add(token)
+        token = ledger_row_id({"id": value})
+        if token and (not want or token in want):
+            named.add(token)
 
     _ID_LIST_KEYS = {"ids", "finding_ids", "named_ids", "coverage_ids", "named"}
 
@@ -1559,9 +1560,9 @@ def ledger_named_ids(ledger, wanted=()) -> set:
                 k = key.strip() if isinstance(key, str) else ""
                 if want and k in want:
                     named.add(k)                # {"F-001": {...}}
-                if k in ("id", "finding", "finding_id", "frozen_id") \
-                        and isinstance(value, str) and value.strip() in want:
-                    named.add(value.strip())    # {"id": "F-001", ...}
+                rid = ledger_row_id(node)       # {"id": "F-001"|1, ...}
+                if rid and (not want or rid in want):
+                    named.add(rid)
                 if isinstance(value, (dict, list, tuple)):
                     visit(value, depth + 1, k.lower() in _ID_LIST_KEYS)
         elif isinstance(node, (list, tuple)):
@@ -1645,6 +1646,28 @@ def _ledger_final_status(row) -> str:
     return re.sub(r"[\s_]+", "-", m.group(1).lower()) if m else ""
 
 
+def ledger_row_id(row) -> str:
+    """A ledger row's finding id, coercing a JSON number to its canonical string.
+
+    A frozen review may carry `id: 1`; the review validity check accepts any
+    object row, so every ledger reader must dispose that row. The readers used
+    to accept only a `str`, and a numeric id was silently skipped by all of them
+    (F096). A non-scalar value is still not an id.
+    """
+    if not isinstance(row, dict):
+        return ""
+    for key in ("id", "finding", "finding_id", "frozen_id"):
+        val = row.get(key)
+        if isinstance(val, str):
+            if val.strip():
+                return val.strip()
+        elif isinstance(val, int) and not isinstance(val, bool):
+            return str(val)
+        elif isinstance(val, float) and val.is_integer():
+            return str(int(val))
+    return ""
+
+
 def _ledger_row_counts(ledger, wanted=()) -> dict:
     """{finding id: number of ledger ROWS carrying a disposition for it}.
 
@@ -1655,18 +1678,11 @@ def _ledger_row_counts(ledger, wanted=()) -> dict:
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     counts = {}
 
-    def row_id(row):
-        for key in ("id", "finding", "finding_id", "frozen_id"):
-            val = row.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        return ""
-
     def visit(node, depth: int, keyed_id: str = ""):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
-            rid = row_id(node) or keyed_id
+            rid = ledger_row_id(node) or keyed_id
             if (not want or rid in want) and _ledger_row_verdict(node):
                 counts[rid] = counts.get(rid, 0) + 1
             for key, value in node.items():
@@ -1696,12 +1712,6 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     found = {}
 
-    def row_id(row: dict):
-        for key in ("id", "finding", "finding_id", "frozen_id"):
-            val = row.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        return ""
 
     _ID_LIST_KEYS = {"ids", "finding_ids", "named_ids", "coverage_ids", "named"}
 
@@ -1709,7 +1719,7 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
-            rid = row_id(node) or keyed_id
+            rid = ledger_row_id(node) or keyed_id
             verdict = _ledger_row_verdict(node)
             # The final edit outcome is a SECOND disposition column, so one
             # row's disposition is the (verdict, final) PAIR. `fixed` and
@@ -1761,18 +1771,11 @@ def _ledger_rows_without_explanation(ledger, wanted=()) -> dict:
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     bad = {}
 
-    def row_id(row):
-        for key in ("id", "finding", "finding_id", "frozen_id"):
-            val = row.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        return ""
-
     def visit(node, depth: int, keyed_id: str = ""):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
-            rid = row_id(node) or keyed_id
+            rid = ledger_row_id(node) or keyed_id
             if (not want or rid in want) and _ledger_row_verdict(node):
                 missing = []
 
@@ -1825,18 +1828,11 @@ def _ledger_rows_without_reverification(ledger, wanted=()) -> set:
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     bad = set()
 
-    def row_id(row):
-        for key in ("id", "finding", "finding_id", "frozen_id"):
-            val = row.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        return ""
-
     def visit(node, depth: int, keyed_id: str = ""):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
-            rid = row_id(node) or keyed_id
+            rid = ledger_row_id(node) or keyed_id
             if not want or rid in want:
                 raw_verdict = " ".join(str(node.get("verdict") or "").split())
                 has_final = any(str(node.get(k) or "").strip() for k in
@@ -6293,11 +6289,14 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
 
 
 def feedback_area_entries(dirp: Path, area_name: str, gaps: list = None,
-                          symlinks: list = None) -> dict:
+                          symlinks: list = None, failures: list = None) -> dict:
     """{corpus-relative path: sha256} for one review-feedback EVIDENCE area.
 
     No version-token normalisation here: the area is an INPUT whose file names
     never carry this package's naming evidence, so its identity is the path.
+    `failures` receives a file that could not be hashed: dropping it silently
+    made it absent from BOTH the pristine and the candidate map, so the
+    restore/drop pass could neither report nor repair it (F028).
     """
     out = {}
     area = Path(dirp) / area_name
@@ -6327,19 +6326,21 @@ def feedback_area_entries(dirp: Path, area_name: str, gaps: list = None,
         rel = p.relative_to(Path(dirp)).as_posix()
         try:
             out[rel] = sha256_file(p)
-        except OSError:
+        except OSError as e:
+            if failures is not None:
+                failures.append(f"{rel}: {e}")
             continue
     return out
 
 
-def human_feedback_entries(dirp: Path) -> dict:
+def human_feedback_entries(dirp: Path, failures: list = None) -> dict:
     """{corpus-relative path: sha256} for `dirp`'s human_review_feedback area."""
-    return feedback_area_entries(dirp, HUMAN_FEEDBACK_DIR)
+    return feedback_area_entries(dirp, HUMAN_FEEDBACK_DIR, failures=failures)
 
 
-def llm_feedback_entries(dirp: Path) -> dict:
+def llm_feedback_entries(dirp: Path, failures: list = None) -> dict:
     """{corpus-relative path: sha256} for `dirp`'s llm_review_feedback area."""
-    return feedback_area_entries(dirp, LLM_FEEDBACK_DIR)
+    return feedback_area_entries(dirp, LLM_FEEDBACK_DIR, failures=failures)
 
 
 def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
@@ -6359,17 +6360,71 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             "the LLM review findings whose false positives were filtered out")
     src = ctx.pristine / area_name
     if not src.is_dir():
-        return {"present": False, "files": 0, "restored": [], "dropped": [],
-                "failures": []}
-    gaps = []
-    want = feedback_area_entries(ctx.pristine, area_name, gaps=gaps)
-    if gaps:
+        # The pristine corpus carries NO feedback area, so a candidate copy is a
+        # FABRICATED read-only input. The early return never looked at the
+        # candidate, so a stage could create one and ship it unreported (F048).
+        # Mirror the raw-data sibling: scan, drop, warn and FAIL.
+        area = cand_dir / area_name
+        dropped, failures = [], []
+        if area.is_symlink() or (area.exists() and not area.is_dir()):
+            try:
+                area.unlink()
+                dropped.append(area_name)
+            except OSError as e:
+                failures.append(f"could not remove fabricated {area_name}: {e}")
+        elif area.is_dir():
+            mode_plan = make_tree_writable(area)
+            try:
+                links = []
+                feedback_area_entries(cand_dir, area_name, symlinks=links, failures=failures)
+                for rel in links:
+                    p = cand_dir / rel
+                    try:
+                        if p.is_symlink() or p.exists():
+                            p.unlink()
+                        dropped.append(rel)
+                    except OSError as e:
+                        failures.append(f"could not remove fabricated {rel}: {e}")
+                for rel in sorted(feedback_area_entries(cand_dir, area_name,
+                                                        failures=failures)):
+                    p = cand_dir / rel
+                    try:
+                        if p.is_file() or p.is_symlink():
+                            p.unlink()
+                            dropped.append(rel)
+                    except OSError as e:
+                        failures.append(f"could not remove fabricated {rel}: {e}")
+            finally:
+                restore_modes(mode_plan)
+            for d in sorted([p for p in area.rglob("*") if p.is_dir()],
+                            key=lambda p: len(p.parts), reverse=True):
+                try:
+                    d.rmdir()              # only empty directories disappear
+                except OSError:
+                    pass
+            with contextlib.suppress(OSError):
+                area.rmdir()
+        if dropped:
+            warns.append(
+                f"READ-ONLY {label} review feedback: {len(dropped)} entr(y/ies) under "
+                f"{area_name}/ were removed -- the pristine original has NO feedback area, "
+                f"so the package may not create one (an input area is copied from the "
+                f"original, never authored)")
+            failures.append(
+                f"{area_name}/ is not an input of this corpus (the pristine original has no "
+                f"{label} review-feedback area); the package may not create it")
+        return {"present": False, "files": 0, "restored": [], "dropped": dropped,
+                "failures": failures}
+    gaps, want_failures = [], []
+    want = feedback_area_entries(ctx.pristine, area_name, gaps=gaps,
+                                 failures=want_failures)
+    if gaps or want_failures:
         msg = (f"READ-ONLY {label} review feedback: the pristine feedback tree could not be "
-               f"read ({', '.join(gaps[:4])}); the restore/drop pass was SKIPPED rather than "
-               f"treating the partial walk as authoritative")
+               f"read ({', '.join((gaps + want_failures)[:4])}); the restore/drop pass was "
+               f"SKIPPED rather than treating the partial walk as authoritative")
         warns.append(msg)
         return {"present": True, "files": len(want), "restored": [], "dropped": [],
-                "failures": [msg]}
+                "failures": [msg] + list(want_failures)}
     # The pristine area EXISTS even when it carries no file. Returning early
     # here skipped the candidate scan, so a package could add arbitrary files
     # under an EMPTY feedback area (the raw-data sibling was fixed for the same
@@ -6397,7 +6452,7 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
     # then never filled, so the purge loop below was dead code (F161). A file
     # link whose target leaves the area, a directory link and a broken link are
     # all reported by the walker.
-    feedback_area_entries(cand_dir, area_name, symlinks=links)
+    feedback_area_entries(cand_dir, area_name, symlinks=links, failures=failures)
     mode_plan = make_tree_writable(area) if area.is_dir() else []
     restored, dropped = [], []
     try:
@@ -6435,7 +6490,7 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
                 failures.append(f"could not restore {dest.name}: {e}")
                 continue
             restored.append(rel)
-        for rel in sorted(feedback_area_entries(cand_dir, area_name)):
+        for rel in sorted(feedback_area_entries(cand_dir, area_name, failures=failures)):
             if rel in want or inside_squat(rel):
                 continue
             try:

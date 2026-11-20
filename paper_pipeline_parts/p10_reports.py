@@ -209,8 +209,11 @@ def _issue_file_agg(ctx: Ctx, r: int, agg: dict = None) -> tuple:
         field = [str(v) for v in (rec.get("field") or [])]
         # Re-aggregate with the mode the round was DECIDED with, not today's
         # config: a `--dedup-mode location` round back-filled here must produce
-        # the same census/dedup audit its decision read (F166).
-        agg = (aggregate_round(ctx, r, field, dedup=rec.get("dedup_mode"))
+        # the same census/dedup audit its decision read (F166). A legacy round
+        # that predates the record was decided with the historical default
+        # (`off`); passing None made `aggregate_round` read the LIVE config, so
+        # changing today's mode re-aggregated a past round under it (F035).
+        agg = (aggregate_round(ctx, r, field, dedup=rec.get("dedup_mode") or "off")
                if field else {"issue_census": {}, "field": []})
     return r, agg
 
@@ -278,8 +281,12 @@ def _defect_rows_by_reaggregation(ctx: Ctx, r: int) -> list:
     field = [str(v) for v in (rec.get("field") or [])]
     if not field:
         return []
+    # The defect list is the census's long form, so it must re-aggregate under
+    # the SAME historical mode: a legacy round (no recorded dedup_mode) was
+    # decided with the documented default "off", never today's live config
+    # (F035).
     return list(aggregate_round(ctx, int(r), field,
-                                dedup=rec.get("dedup_mode")).get("issue_rows") or [])
+                                dedup=rec.get("dedup_mode") or "off").get("issue_rows") or [])
 
 
 def write_round_defects(ctx: Ctx, r: int, agg: dict = None, name: str = None) -> Path:

@@ -5,8 +5,34 @@
 // running after the MCP tool has already returned failure -- a late Word/COM
 // process can then overwrite the output while a retry is using it. Spawning in
 // a new process group lets the timeout kill the group, not just the wrapper.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+
+// Kill the WHOLE process tree `child` started. POSIX uses a new process group;
+// Windows cannot (`detached` is false there), and `child.kill` reaches only the
+// bash wrapper, leaving powershell.exe/Word/COM alive to overwrite the output of
+// a retry. `taskkill /T /F` on the wrapper pid kills that tree. The runners are
+// injected so the behaviour is testable without starting Word.
+export function killProcessTree(child, options = {}) {
+  const platform = options.platform || process.platform;
+  const detached = options.detached !== undefined ? options.detached : platform !== 'win32';
+  const run = options.spawnSync || spawnSync;
+  const kill = options.kill || process.kill;
+  const pid = child && child.pid;
+  try {
+    if (platform === 'win32' && pid) {
+      run('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+      return;
+    }
+    if (detached && pid) {
+      kill(-pid, 'SIGKILL');
+      return;
+    }
+    if (child && typeof child.kill === 'function') child.kill('SIGKILL');
+  } catch {
+    // already gone
+  }
+}
 
 export function runFile(file, args, options = {}) {
   const { timeout = 0, maxBuffer = 4 * 1024 * 1024, ...spawnOptions } = options;
@@ -23,8 +49,7 @@ export function runFile(file, args, options = {}) {
     let overflow = '';
     const killGroup = () => {
       try {
-        if (detached && child.pid) process.kill(-child.pid, 'SIGKILL');
-        else child.kill('SIGKILL');
+        killProcessTree(child, { detached });
       } catch {
         // already gone
       }

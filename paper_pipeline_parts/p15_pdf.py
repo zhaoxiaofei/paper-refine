@@ -71,11 +71,15 @@ def latex_root_documents(dirp: Path, gaps: list = None) -> list:
             continue
         # Comments and verbatim bodies are not compiled source; a
         # `% \documentclass` or a sample inside verbatim is not a root (F74).
+        # Comments MUST be stripped FIRST: a commented-out `\begin{verbatim}`
+        # otherwise paired with a later commented `\end{verbatim}` and blanked
+        # a real `\documentclass` between them, so a real root was never
+        # detected or compiled (F061).
         # Every non-compiled region counts: the comment/lstlisting/minted
         # environments and inline \verb/\lstinline too, or a fragment whose
         # only `\documentclass` sits in one is compiled standalone (R08).
-        _visible = _TEX_NONCOMPILED_ENV_RE.sub("", head)
-        _visible = strip_tex_comment(_visible)
+        _visible = strip_tex_comment(head)
+        _visible = _TEX_NONCOMPILED_ENV_RE.sub("", _visible)
         _visible = _TEX_INLINE_VERB_RE.sub("", _visible)
         if re.search(r"\\documentclass\b", _visible):
             out.append(rel.as_posix())

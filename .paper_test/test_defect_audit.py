@@ -104,7 +104,7 @@ def stub_agent_code():
         "import json;"
         "d=json.load(open('defects.json'));"
         "v=[{'defect_id':x['defect_id'],'label':('FP' if i==0 else 'TP'),"
-        "'reason':'stub reason'} for i,x in enumerate(d['defects'])];"
+        "'reason':'`beta boundary row` absent at main.md:4'} for i,x in enumerate(d['defects'])];"
         "json.dump({'verdicts':v},open('audit.json','w'))"
     )
 

@@ -74,7 +74,7 @@ Write `audit.json` in this directory with EXACTLY this schema (no extra text):
 {{
   "verdicts": [
     {{"defect_id": "r{int(r)}-D0001", "label": "TP" | "FP" | "UNVERIFIED",
-      "reason": "<<= 40 words: what you checked and why the label holds>"}}
+      "reason": "<<= 40 words: what you checked (a file:line, a verbatim quote or a repeatable computation) and why the label holds>"}}
   ]
 }}
 Every defect_id from `defects.json` must appear exactly once, with label "TP", "FP" or "UNVERIFIED".
@@ -154,6 +154,33 @@ def _defect_audit_reason_ok(reason) -> bool:
     return len(re.findall(r"[A-Za-z0-9]", text)) >= 3
 
 
+# A DROP (an FP label) removes a defect row from the diagnostic TP-only report,
+# so its basis must be re-runnable: a file/path with a recognised extension, a
+# line/paragraph locator, a verbatim quote, a URL, or a repeatable computation.
+# Two content words of prose ("the rule says so") discharged a drop with no
+# evidence at all (F020). A bare `word/word` phrase ("the code/analysis path")
+# is prose, not a path: the file alternative below already accepts a real
+# evidence file (`raw_data/survival.tsv`, `code/analysis.py`), so there is no
+# separate directory alternative to satisfy the gate without evidence (F020).
+_DEFECT_AUDIT_EVIDENCE_RE = re.compile(
+    r"`[^`\n]{3,}`"                                     # `quoted text`
+    r"|(?<![\w`])[\"'][^\"'\n]{3,}[\"']"                # "quoted phrase"
+    r"|\b[\w./-]+\.(?:md|txt|tex|docx|doc|json|csv|tsv|py|bib|pdf|"
+    r"xlsx?|html?|xml|yml|yaml)\b"                      # a file
+    r"|\b(?:line|lines|p\.|page|paragraph|para|section|row|col(?:umn)?|"
+    r"table|figure)\s*\d+"                              # a locator
+    r"|:\d+\b|https?://\S+"                             # file:line / URL
+    r"|\b\d+(?:\.\d+)?\s*(?:%|vs\.?|versus|!=|≠|>|<)\s*"
+    r"(?:\d+(?:\.\d+)?\s*%?)?"                          # a comparison
+    r"|\b\d+\.\d+\b|\bn\s*=\s*\d+|\bp\s*[=<>]\s*0?\.\d+")  # a value
+
+
+def _defect_audit_drop_reason_ok(reason) -> bool:
+    """An FP drop needs the ordinary basis AND re-runnable evidence."""
+    return (_defect_audit_reason_ok(reason)
+            and bool(_DEFECT_AUDIT_EVIDENCE_RE.search(str(reason or ""))))
+
+
 def _defect_audit_coverage(data, valid_ids, verdicts) -> dict:
     """What the submitted audit did and did not cover.
 
@@ -179,6 +206,9 @@ def _defect_audit_coverage(data, valid_ids, verdicts) -> dict:
         label, reason = _defect_audit_row_label(item)
         if label is None:
             invalid.add(did)
+        elif label == "FP":
+            if not _defect_audit_drop_reason_ok(reason):
+                no_reason.add(did)
         elif not _defect_audit_reason_ok(reason):
             no_reason.add(did)
     return {"expected": len(valid_ids), "labelled": len(verdicts),
@@ -713,7 +743,11 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
     if agg is None:
         rec = ctx.round_rec(r)
         field = [str(v) for v in (rec.get("field") or [])]
-        agg = (aggregate_round(ctx, r, field, dedup=rec.get("dedup_mode"))
+        # The audit re-derives the same defect list as the census, so a legacy
+        # round uses the documented historical default "off" rather than
+        # today's live config (F035).
+        agg = (aggregate_round(ctx, r, field,
+                               dedup=rec.get("dedup_mode") or "off")
                if field else {"issue_rows": [], "field": []})
     rows = defect_list_rows(ctx, r, agg)
     if not rows:

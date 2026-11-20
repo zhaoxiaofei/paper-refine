@@ -296,8 +296,11 @@ def test_f074_tool_tokens():
 def test_f075_reference_markers_and_gap():
     refs = pp._numbered_reference_titles(
         ["References", "1)", "Nurk S. Telomere-to-telomere assembly.", "Science 2022."])
+    # F077 (2026-11-20) made a multi-paragraph entry keep every continuation,
+    # so assert that the '1)' marker STARTED entry 1, not that its later
+    # continuation was truncated (the old exact value encoded that defect).
     check("F075 a bare '1)' marker line starts a reference entry",
-          refs == {1: "Nurk S. Telomere-to-telomere assembly."}, str(refs))
+          refs.get(1, "").startswith("Nurk S. Telomere-to-telomere assembly."), str(refs))
     refs_bare = pp._numbered_reference_titles(
         ["References", "1", "Nurk S. Telomere-to-telomere assembly."])
     check("F075 a bare number marker line starts a reference entry",

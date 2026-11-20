@@ -31,18 +31,11 @@ def ledger_final_status_map(ledger, wanted=()) -> dict:
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     out = {}
 
-    def row_id(row: dict):
-        for key in ("id", "finding", "finding_id", "frozen_id"):
-            val = row.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        return ""
-
     def visit(node, depth: int, keyed_id: str = ""):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
-            rid = row_id(node) or keyed_id
+            rid = ledger_row_id(node) or keyed_id
             final = _ledger_final_status(node)
             if final and (not want or rid in want):
                 out.setdefault(rid, final)
@@ -191,7 +184,13 @@ def deletion_row_fact_loss_problems(sandbox: Path, rows, full_by_ref=None) -> li
 # IS a removal (a workflow artifact that was never manuscript content); a
 # deleted claim is not one of them.
 _EVIDENCE_ARTIFACT_RE = re.compile(
-    r"(?is)(?<![\w.])(?:TODO|TBD|FIXME|XXX|PLACEHOLDER)(?![\w.])"
+    # A placeholder TOKEN is an artifact only when the unit IS a placeholder:
+    # the token starts the unit (optionally bracketed/emphasised) and is
+    # followed by end-of-unit or punctuation. Matching it ANYWHERE exempted a
+    # real claim ("The XXX domain is required for binding.") from removal
+    # accounting (F031). `[CITE]` is unambiguous and stays unanchored.
+    r"(?im)^\s*(?:#{1,6}\s*)?[*_]*[\[(]?\s*"
+    r"(?:TODO|TBD|FIXME|XXX|PLACEHOLDER)\s*[\])]?[*_]*\s*(?:[.:;,!?\u2014\u2013-]|$)"
     r"|\[CITE\]|\blorem\s+ipsum\b"
     r"|^\s*(?:#{1,6}\s*)?(?:instruction|prompt|system|user)\s*:"
     # The instruction patterns are ANCHORED at the sentence start: an

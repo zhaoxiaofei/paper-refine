@@ -65,8 +65,16 @@ INTERNAL_ARTIFACT_RES = (
                 r"|\b(?:F|X|AU)-\d{2,4}\b")),
     ("a stage note that narrates HOW this package was produced",
      re.compile(r"(?i)\bthe pipeline'?s own (?:ledger|report|bookkeeping|hand-?off)\b"
-                r"|\b(?:review|judge|audit|integration|revise|rewrite) session\b"
-                r"|\bthis run'?s\b|\bthe decision, with its evidence\b"
+                # A bare "this run's" / "a review session" is ordinary Methods
+                # prose ("this run's temperature was 37 C", "a review session was
+                # held"). Require the pipeline-specific collocation the real
+                # stage notes use (F037).
+                r"|\bthis run'?s (?:ledger|report|bookkeeping|hand-?off|findings?|"
+                r"round record|stage record|sessions?)\b"
+                r"|\b(?:review|judge|audit|integration|revise|rewrite) "
+                r"(?:session|pass|wave) (?:filed|recorded|wrote|written|produced|"
+                r"reported|generated|ran|run|found|created|closed|says|notes?|listed)\b"
+                r"|\bthe decision, with its evidence\b"
                 r"|\bwhat the author must do\b")),
 )
 PACKAGE_TEXT_EXTS = (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".json", ".csv",
@@ -2605,10 +2613,14 @@ def _numbered_reference_titles(paras: list) -> dict:
             # A two-line entry OUTSIDE a section is the heading-less Zotero
             # form only; when the document HAS a references heading, a body
             # "1." + following sentence must not become entry 1.
-            if in_refs or (ref_start is None and (
-                    _ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest))):
+            accepted = in_refs or (ref_start is None and (
+                    _ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest)))
+            if accepted:
                 out.setdefault(num, rest)
-            current = None
+            # Inside a references section a multi-paragraph entry continues
+            # until the next entry marker; outside one, the next paragraph is
+            # body text and must not be swallowed (F077).
+            current = num if (accepted and in_refs) else None
             continue
         bare = re.match(r"^\s*(?:\[(\d{1,4})\]|(\d{1,4})[.)]?)\s*$", text)
         if bare:
@@ -2625,14 +2637,23 @@ def _numbered_reference_titles(paras: list) -> dict:
         if one:
             num = int(one.group(1) or one.group(2))
             rest = one.group(3).strip()
-            if in_refs and (_ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest)
-                            or re.match(r"^[A-Z][A-Za-z'’.-]+,?\s", rest)):
+            accepted = bool(in_refs and (
+                _ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest)
+                or re.match(r"^[A-Z][A-Za-z'’.-]+,?\s", rest)))
+            if accepted:
                 out.setdefault(num, rest)
-            current = None
+            # A one-line entry may also continue over paragraphs ("1. Nurk, S.
+            # et al. The complete sequence" / "of a human genome. ..."): keep
+            # `current` for an accepted entry so its continuation is appended,
+            # exactly like the bare-marker and two-line forms (F077).
+            current = num if accepted else None
             continue
         if current is not None and text.strip():
+            # Keep `current` set: a reference entry may run over several
+            # paragraphs, and only the next entry marker/heading ends it. The
+            # old code cleared it after ONE continuation, so everything after
+            # that was lost from the entry text the citation check reads (F077).
             out[current] = (out[current] + " " + text.strip()).strip()
-            current = None
     return out
 
 
@@ -3729,17 +3750,49 @@ def _spelled_number_is_count(text: str) -> bool:
     return False
 
 
+# A sentence can carry a substantive claim with NO number at all ("The
+# treatment improved survival, as described in raw_data/survival.tsv."). The
+# packaging repair may delete only a pointer-only sentence, so a reporting/
+# result verb or a comparative claim adjective is the evidence that content is
+# stated. File-action and pointer verbs (ran/used/produced/described/showed as
+# "as shown"/listed/printed...) are deliberately absent: "We ran code/x.py for
+# Figure S3." is framing for the reference and the removal contract keeps
+# deleting it (F073). The list is conservative on purpose -- holding a
+# pointer-only sentence is a missed mechanical repair, while deleting a claim
+# loses content (rule 2).
+_PKG2_CLAIM_RE = re.compile(
+    r"(?i)\b(?:improv(?:e|ed|es|ing)|increas(?:e|ed|es|ing)|"
+    r"decreas(?:e|ed|es|ing)|reduc(?:e|ed|es|ing)|lower(?:ed|s|ing)?|"
+    r"rais(?:e|ed|es|ing)|higher|greater|smaller|larger|longer|shorter|"
+    r"faster|slower|better|worse|similar|different|significan(?:t|tly)|"
+    r"demonstrat(?:e|ed|es|ing)|show(?:ed|s|ing)|found|observ(?:e|ed|es|ing)|"
+    r"associat(?:e|ed|es|ing)|correlat(?:e|ed|es|ing)|suggest(?:ed|s|ing)?|"
+    r"indicat(?:e|ed|es|ing)|support(?:ed|s|ing)?|confirm(?:ed|s|ing)?|"
+    r"requir(?:e|ed|es|ing)|enabl(?:e|ed|es|ing)|caus(?:e|ed|es|ing)|"
+    r"led|result(?:ed|s|ing)?|remain(?:ed|s|ing)?|became|becom(?:e|es|ing)|"
+    r"differ(?:ed|s|ing)?|outperform(?:ed|s|ing)?|exceed(?:ed|s|ing)?|"
+    r"declin(?:e|ed|es|ing)|rose|risen|fell|fallen|inhibit(?:ed|s|ing)?|"
+    r"promot(?:e|ed|es|ing)|express(?:ed|s|ing)?|mutat(?:e|ed|es|ing)?|"
+    r"predict(?:ed|s|ing)?|explain(?:ed|s|ing)?|reflect(?:ed|s|ing)?|"
+    r"represent(?:ed|s|ing)?|reveal(?:ed|s|ing)?|identif(?:y|ied|ies|ying)|"
+    r"detect(?:ed|s|ing)?|measur(?:e|ed|es|ing)|achiev(?:e|ed|es|ing))\b")
+
+
 def sentence_carries_scientific_fact(text: str) -> bool:
-    """True when a sentence carries a number outside a figure/table/section label.
+    """True when a sentence carries a number or another substantive claim.
 
     The PKG-2 mechanical removal is a packaging repair, not a finding
-    resolution: a sentence that carries a measured value, count, p-value or
-    other numeric fact must be rewritten by the revision, not silently deleted.
-    A bare label (`Figure S3`, `Table 2`, `Data S1`) is not a fact.
+    resolution: a sentence that carries a measured value, count, p-value, a
+    result claim or another numeric fact must be rewritten by the revision, not
+    silently deleted. A bare label (`Figure S3`, `Table 2`, `Data S1`) is not a
+    fact, and neither is a pointer-only sentence (`See figures/fig1.png for the
+    effect.`).
     """
     stripped = _FACT_LABEL_RE.sub(" ", str(text or ""))
     stripped = _FACT_DATA_LABEL_RE.sub(" ", stripped)
-    return bool(re.search(r"\d", stripped) or _spelled_number_is_count(stripped))
+    if re.search(r"\d", stripped) or _spelled_number_is_count(stripped):
+        return True
+    return bool(_PKG2_CLAIM_RE.search(stripped))
 
 
 def _pkg2_tex_argument_context(text: str, pos: int) -> bool:
@@ -3807,9 +3860,10 @@ def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
     `drop_sentences` with two text-document rules: a heading line the reference
     does not touch is never swallowed (a heading is not part of the sentence
     under it), so `Methods\\nWe ran code/analysis.py ...` loses only its second
-    line; and a sentence carrying a numeric fact is KEPT (returned in `held`)
-    so the caller can report it for a prose rewrite instead of deleting the
-    fact. A reference that is a document INCLUDE rather than prose
+    line; and a sentence carrying a numeric fact OR another substantive claim is
+    KEPT (returned in `held`) so the caller can report it for a prose rewrite
+    instead of deleting the fact. A reference that is a document INCLUDE rather
+    than prose
     (`\\includegraphics{...}`, a Markdown link target) is left alone entirely:
     it comes back in `structural` so the caller reports it
     (`is_structural_reference_line`). Everything else is the shared sentence
@@ -4144,9 +4198,9 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
                                     "the author")
                         for ref in held:
                             entry["skipped"].append(
-                                f"{ref!r} carries a numeric fact and a dangling reference: "
-                                f"the fact was KEPT and the pointer must be rewritten in "
-                                f"prose")
+                                f"{ref!r} carries a numeric fact or another substantive claim "
+                                f"and a dangling reference: the content was KEPT and the pointer "
+                                f"must be rewritten in prose")
                         for ref in structural:
                             entry["skipped"].append(
                                 f"{ref!r} is a document INCLUDE (a command argument or a "
@@ -7276,6 +7330,60 @@ def scores_per_version_label(agg: dict) -> str:
             if count is None else str(count))
 
 
+_REVISION_REPAIR_FIELDS = ("status", "rows", "rolled_back", "rollback_unsafe",
+                           "rollback_error", "error", "ledger")
+
+
+def revision_repair_summary(stored) -> dict:
+    """The bounded-repair outcome carried by a round record, or {}.
+
+    `p08` records `rec["revision_repair"]` on the run record; the decision used
+    to read it nowhere, so an arm whose own revision audit confirmed defects
+    that its repair did NOT apply reached a certified champion with no mention
+    in decision.json or DECISION_REPORT.md (F014). Only the reportable fields
+    are copied (the repair ledger can be large).
+    """
+    rec = stored if isinstance(stored, dict) else {}
+    rep = rec.get("revision_repair")
+    if not isinstance(rep, dict) or not rep:
+        return {}
+    return {k: rep.get(k) for k in _REVISION_REPAIR_FIELDS if k in rep}
+
+
+def revision_repair_record(ctx, rd) -> dict:
+    """The bounded-repair outcome of a decided round's CHAMPION-producing run.
+
+    `p08` records `revision_repair` on the RUN record, not on the round record;
+    the round record is what `rounds_data` carries. Resolve the producing run
+    from the round's own pin (`produced_by_run`), as
+    `champion_producing_run()` does for the hand-off list. A round record that
+    carries the outcome directly is also accepted (older fixtures/tests).
+    """
+    rd = rd if isinstance(rd, dict) else {}
+    direct = revision_repair_summary(rd.get("stored") or {})
+    if direct:
+        return direct
+    if ctx is None:
+        return {}
+    pin = rd.get("pin") or {}
+    if not isinstance(pin, dict) or not pin:
+        stored = rd.get("stored") or {}
+        pin = find_pin(ctx, stored.get("pin_id")) or {}
+    rid = pin.get("produced_by_run") if isinstance(pin, dict) else None
+    run = (ctx.state.get("runs") or {}).get(rid) if rid else None
+    return revision_repair_summary(run or {})
+
+
+def revision_repair_failures(rounds_data, ctx=None) -> list:
+    """[{round, status, ...}] for every decided round whose bounded repair failed."""
+    out = []
+    for rd in rounds_data or ():
+        summary = revision_repair_record(ctx, rd)
+        if summary.get("status") == "failed":
+            out.append({"round": rd.get("round"), **summary})
+    return out
+
+
 def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                           problems: list, final: dict, win_lengths=None,
                           final_clean=None, revision_token=None, win_format=None,
@@ -7496,6 +7604,21 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                      f"started from.")
         L.append(f"- winner directory: `{stored.get('winner_dir') or '(not published)'}/` "
                  f"(same content as the pin)")
+        _repair = revision_repair_record(ctx, rd)
+        if _repair.get("status") == "failed":
+            L.append(
+                "- bounded repair: **FAILED** — "
+                + str(_repair.get("error") or "the repair did not complete the plan")
+                + f" ({_repair.get('rows', '?')} planned row(s); "
+                + ("the audited pre-repair package was restored"
+                   if _repair.get("rolled_back") else
+                   "the rejected edits could NOT be rolled back")
+                + "). The confirmed repair-plan rows were NOT applied to this package; "
+                  "the unresolved defects remain visible in the arm's revision audit.")
+        elif _repair.get("status") == "done":
+            _ledger = _repair.get("ledger") or {}
+            L.append(f"- bounded repair: done ({_repair.get('rows', '?')} planned row(s)"
+                     + (f"; ledger {_ledger}" if _ledger else "") + ")")
         if stored.get("field_dropped"):
             L.append("- field deduplication (by content digest, first occurrence wins):")
             for d in stored["field_dropped"]:
@@ -8432,11 +8555,14 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         # Re-derive the round with the ranking key it was DECIDED with. These
         # two values are mutable configuration (`set-dedup-mode`,
         # `set-tiebreak-defect-floor`); reading today's config re-ranked a past
-        # decision after an operator change (F18/F19). Old roots that predate
-        # the record fall back to the current config.
+        # decision after an operator change (F18/F19). A legacy round that
+        # predates the record was decided with the historical default (`off`);
+        # passing None made `aggregate_round` read the LIVE config, so changing
+        # today's mode re-aggregated a past round under it (F035).
         _recorded_rule = rrec.get("anti_regression_rule") or next(
             (s.get("anti_regression_rule") for s in (rrec.get("stats") or {}).values()), None)
-        agg = aggregate_round(ctx, r, field, dedup=rrec.get("dedup_mode"), rule=_recorded_rule)
+        agg = aggregate_round(ctx, r, field, dedup=rrec.get("dedup_mode") or "off",
+                              rule=_recorded_rule)
         # Keep every decided round's own raw-score file present and current, even
         # for roots whose round predates it (the same file `run` writes at
         # aggregation time).
@@ -8603,6 +8729,19 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             print(f"[decide] WARNING: could not write the status readme: {e}")
         sys.exit(2)
     final = rounds_data[-1]
+    # A bounded repair that failed leaves its confirmed repair-plan rows
+    # unapplied (the audited pre-repair package is what was judged). Rule 10
+    # requires the unrepaired record to travel with the decision; before F014 it
+    # was visible only on the console.
+    _repair_failures = revision_repair_failures(rounds_data, ctx)
+    for _rf in _repair_failures:
+        problems.append(
+            f"round {_rf.get('round')}: the bounded repair FAILED "
+            f"({str(_rf.get('error') or 'no error recorded')[:240]}) -- "
+            + ("the audited pre-repair package was restored and judged"
+               if _rf.get("rolled_back") else
+               "the rejected edits could not be rolled back, so this arm is not publishable")
+            + f"; {_rf.get('rows', '?')} confirmed repair-plan row(s) were NOT applied")
     # A round that used a TOLERATED_FAIL trial is PROVISIONAL: its exhausted
     # stage never passed its postcheck, so the decision may not be certified
     # even when a panel is complete (rule 10: output is not certification).
@@ -8852,6 +8991,16 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             "are a named gap, not a clean result"]
     certification["submission_ready"] = readiness["submission_ready"]
     certification["package_findings"] = readiness["findings"]
+    if _repair_failures:
+        # An explicit note, not a blocker: the judged bytes are the audited
+        # pre-repair package, but the operator MUST see that the confirmed plan
+        # was not applied (F014, rule 10).
+        certification["revision_repair"] = _repair_failures
+        _repair_rounds = ", ".join(str(x.get("round")) for x in _repair_failures)
+        certification["notes"] = list(certification.get("notes") or []) + [
+            f"round(s) {_repair_rounds}: a bounded repair FAILED, so its confirmed "
+            f"repair-plan row(s) were not applied to the judged package; the audited "
+            f"pre-repair bytes were kept and the unrepaired defects stay on record"]
     record_anonymity_gaps(ctx, certification); cert_blockers = certification["blockers"]  # F-002
     cert_notes = certification["notes"]
     # The status document is a SIBLING of the directory and is written on every
@@ -8889,7 +9038,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         "score_model": score_model_doc(
             ctx,
             floor=(final["stored"] or {}).get("tiebreak_defect_floor"),
-            dedup=(final["stored"] or {}).get("dedup_mode")),
+            dedup=(final["stored"] or {}).get("dedup_mode") or "off"),
         "rounds": [{"round": rd["round"],
                     "field": rd["agg"]["field"],
                     "field_size": rd["agg"]["field_size"],
@@ -8905,6 +9054,10 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                     "selection": rd["sel"],
                     "champion_pin": rd["pin"],
                     "stored_champion": rd["stored"].get("champion"),
+                    # The arm's own bounded-repair outcome. A `failed` entry
+                    # means its confirmed repair-plan rows were not applied to
+                    # the judged bytes (F014).
+                    "revision_repair": revision_repair_record(ctx, rd) or None,
                     # The incumbent margin the human reads: median + sign counts of
                     # the (champion, base) directed scores. REPORTED ONLY -- the
                     # ranking key stays field-wide (a 2*judges pair is one outlier
@@ -8954,6 +9107,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                   "residuals": residuals,
                   "final_clean_version": final_clean_json,
                   "revision_token": win_token,
+                  "revision_repair": revision_repair_record(ctx, final) or None,
                   "final_round_complete": final["round"] == R},
     }
     write_json_atomic(ctx.reports_dir / "decision.json", decision)

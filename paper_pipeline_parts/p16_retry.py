@@ -12,12 +12,20 @@ import glob
 # =====================================================================
 
 def dir_size(path: Path) -> int:
-    """Bytes used by a directory tree (0 when it does not exist)."""
+    """Bytes used by a directory tree's own regular files (0 when absent).
+
+    A symlink is skipped: `Path.is_file()`/`Path.stat()` FOLLOW it, so a link to
+    a huge outside file was counted here while `rmtree_force` unlinks only the
+    link, and prune's dry-run/`reclaimed` total reported bytes it never frees
+    (F084).
+    """
     total = 0
     if not path.is_dir():
         return 0
     for p in path.rglob("*"):
         try:
+            if p.is_symlink():
+                continue
             if p.is_file():
                 total += p.stat().st_size
         except OSError:

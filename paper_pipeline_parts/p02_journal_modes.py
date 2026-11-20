@@ -1033,10 +1033,16 @@ TRACKING_AUX_NAME_RE = re.compile(
     r"\.(?:docx|tex|bib|pdf)$", re.IGNORECASE)
 # Trailing version token on a basename stem: the CURRENT content-hash token
 # ("-4f3a9c1"/"_4f3a9c1", 7 lowercase hex characters) or the LEGACY version
-# tokens ("-b", "_v2", "-v10", case-insensitive) that older packages carry.
+# tokens ("-b", "_v2", "-v10") that older packages carry. The legacy
+# single-letter alternative is LOWERCASE only: the legacy increments were
+# "-a"/"-b"-style arm letters, while an uppercase trailing letter is an
+# IDENTITY label (`Appendix_A.docx`, `Figure_B.pdf`) and must not be renamed to
+# `Appendix_<token>.docx` nor stripped from the hashed bytes (F171). The
+# shipped `paper-revise/scripts/revision_token.py` narrows the same alternative
+# to `[a-z]`, and the two readers must agree on one package.
 # A PLAIN trailing number ("-1", "-3") is NOT a version token: SI-Table-1.csv
 # and Figure-3.xlsx are distinct documents and must never be merged.
-DOC_TOKEN_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+|[-_][A-Za-z])$")
+DOC_TOKEN_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+|[-_][a-z])$")
 # Source/provenance suffixes that describe where a document came from, not a
 # different submission role. A content-token rename may legitimately change
 # these (`mainText-FrontiersTemplate-zotero-<old>` ->
@@ -2223,8 +2229,15 @@ def soft_deletions_allowed(ctx=None, rec=None) -> bool:
     invocation must not judge it under a different one.
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
-    if isinstance(policy, dict) and SOFT_DELETIONS in policy:
-        return content_edit_prefer_flag(policy[SOFT_DELETIONS])
+    if isinstance(policy, dict):
+        # `content_edit_policy_record` writes the soft key only when the stage
+        # was prompted with it ON (or when it differed from the live config at
+        # stage start). A dict WITHOUT the key therefore means the historical
+        # default OFF, which is what the prompt stated; falling back to today's
+        # config judged a resumed stage under a policy it never saw (F046).
+        if SOFT_DELETIONS in policy:
+            return content_edit_prefer_flag(policy[SOFT_DELETIONS])
+        return False
     return soft_deletions(ctx)
 
 
@@ -5935,7 +5948,7 @@ D10. AN OPAQUE IDENTIFIER OR EXTERNALLY-ASSIGNED FACT IS NOT AN EDITABLE SURFACE
 
 ADOPTED_SWEEPS_BLOCK = """
 
-=== THE ADOPTED CHECKS (the same checklist every session evaluates against) ===
+=== THE ADOPTED CHECKS (the judge panel's frozen M1-M24/J1-J4 map; see the scope note below) ===
   M1-M17  mechanical sweeps: acronyms, citations, display items, numbers/metrics, mandatory
           items, hygiene, cross-references, terminology, file hygiene, reference format, SI
           formatting, authors, reporting summary, cross-document metadata, numeric totals,
@@ -5969,6 +5982,12 @@ ADOPTED_SWEEPS_BLOCK = """
   J1-J4   scope fit and significance; scientific/statistical rigor; writing quality and claim
           calibration -- overclaiming AND underclaiming (the Q1-Q12 rubric); plagiarism,
           AI-content and policy compliance.
+  The JUDGE PANEL's frozen map is exactly this M1-M24/J1-J4 set: identical
+  scrutiny across versions is what keeps the panel calibrated, so it is never
+  extended. The GUIDED REVIEW, its audit and the path that applies its findings
+  additionally run M25-M36 and J5 in their own phase blocks (each with its own
+  artifact and coverage row); this shared block does not replace them, and a
+  session that carries those phase blocks must run them too.
   EVERY two-sided check runs in BOTH directions, and a check reported from one side only has not
   been run: claim strength (overclaim / underclaim), content (lost / invented), items (missing /
   unneeded), pointers (claim without its evidence / printed or promised content the text never

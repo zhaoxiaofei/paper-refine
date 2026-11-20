@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "node containment.test.mjs"
+    "test": "node containment.test.mjs && node run-child.test.mjs"
   },
   "keywords": [],
   "author": "",
