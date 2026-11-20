@@ -248,7 +248,8 @@ def test_context_overflow_gate():
     # p06's `why = ("... request as too large ...")` and p08's string
     # continuation `"(HTTP 413 / request too large)"` still matched after the
     # first filter, so the filter must cover every Python source line.
-    for _name in ("p06_postchecks.py", "p08_selection_driver.py"):
+    for _name in ("p06_postchecks.py", "p08_selection_driver.py",
+                  "p22_resume_continuation.py"):
         _source = (WS / "paper_pipeline_parts" / _name).read_text(encoding="utf-8")
         check(f"the full {_name} is not provider evidence",
               nb.agent_failure_kind("", _source) == "",

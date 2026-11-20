@@ -1,4 +1,4 @@
-# Part 00/22 of the pipeline -- the shared prelude, executed by the loader
+# Part 00/23 of the pipeline -- the shared prelude, executed by the loader
 # before every other part.
 from __future__ import annotations
 
@@ -461,6 +461,7 @@ PIPELINE_REQUIRED_PARTS = (
     "paper_pipeline_parts/p19_profiles.py",
     "paper_pipeline_parts/p20_judge_conflicts.py",
     "paper_pipeline_parts/p21_removal_accounting.py",
+    "paper_pipeline_parts/p22_resume_continuation.py",
 )
 PIPELINE_REQUIRED_ASSET_FILES = (
     "agent-common/agent_common/model_runtime.py",

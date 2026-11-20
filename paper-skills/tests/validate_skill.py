@@ -430,7 +430,8 @@ def main():
     _cw2 = " ".join(_cw.split()).lower()
     check("D21 M18 always enumerates legends and M19 carries the cover-letter preference",
           "always enumerated" in _sw2 and "no cover-letter word limit" in _sw2
-          and "300-500" in _sw2 and "persuading part" in _sw2
+          and "built-in 300-500" in _sw2 and "persuading part" in _sw2
+          and "should be **300-500 words**" not in _sw2
           and "cover-letter" in _cw2 and "persuading part" in _cw2)
     _rev2 = " ".join(rev_skill.split()).lower()
     _rt_path = os.path.join(root, "paper-revise", "scripts", "revision_token.py")
@@ -478,10 +479,10 @@ def main():
           and "snapshot first" in _rr and "citationid" in _rr)
     check("D20 both standalone prompts carry the length rule and the Zotero protocol",
           "165" in _ip and "3,750" in _ip and "m19" in _ip
-          and "no cover-letter word limit" in _ip and "always enumerated" in _ip
+          and "cover_letter" in _ip and "at most n" in _ip and "always enumerated" in _ip
           and "165" in _ap and "propose-then-verify" in _ap
           and "last-modified auto" in _ap
-          and "no cover-letter word limit" in _ap)
+          and "cover_letter" in _ap and "at most n words" in _ap)
 
     n_fail = sum(1 for _n, ok, _d in RESULTS if not ok)
     print("\n%d checks, %d failed" % (len(RESULTS), n_fail))

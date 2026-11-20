@@ -38,8 +38,9 @@ non-space characters with a newline treated as space; count with
 compression in the A7 diff log and in CHANGELOG.md under check id M19. A
 section that cannot be brought within the cap without losing content is left as
 it is and handed to MANUAL_STEPS.md. The cover letter's PERSUADING part follows
-the user's configured 300-500-word preference (the default profile's venue
-states no cover-letter word limit, checked 2026-09-19): bring an OVER-length part into the range by
+the venue profile's configured `cover_letter` bound (a range, or a one-sided
+`at most N words` / `at least N words`; the built-in 300-500-word preference
+applies only when the profile configures no cover-letter block): bring an OVER-length part into the range by
 removing redundancy only, label it as the user's preference rather than a
 journal requirement, and never delete content to reach it. An UNDER-length part
 is not padded or invented: leave it as it is and record the shortfall in

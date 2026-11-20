@@ -228,8 +228,14 @@ def test_audit_retry_completes_the_round():
     check("the audit run was retried and completed",
           rec.get("status") == "done" and int(rec.get("attempts") or 0) == 2,
           f"status={rec.get('status')} attempts={rec.get('attempts')}")
-    check("the failed first attempt is kept as an archive",
-          (root / "runs" / "r1_audit_try1_failed" / "record.json").is_file())
+    # With the documented sandbox continuation the failed first attempt is
+    # CONTINUED in place (no rebuild, so no `_tryN_failed` archive): the archive
+    # is made only when a retry actually rebuilds the sandbox.
+    check("the failed first attempt was continued in place, not rebuilt",
+          rec.get("status") == "done"
+          and int(rec.get("continuation_sessions") or 0) == 1
+          and not (root / "runs" / "r1_audit_try1_failed").exists(),
+          f"status={rec.get('status')} continuations={rec.get('continuation_sessions')}")
     check("the round completed, so the revise and integration runs were not blocked",
           ((state.get("rounds") or {}).get("1") or {}).get("status") == "done",
           str((state.get("rounds") or {}).get("1")))
@@ -753,8 +759,11 @@ def test_other_stages_recover_from_a_failed_attempt():
         out = proc.stdout + proc.stderr
         state = state_of(root)
         if kind == "judge":
+            # The retry budget counts FULL launches; a continuation is an
+            # auxiliary session and increments only the identity `attempts`.
             recs = [r for r in (state.get("runs") or {}).values()
-                    if r.get("kind") == "judge" and int(r.get("attempts") or 0) == 2]
+                    if r.get("kind") == "judge"
+                    and int(r.get("stage_attempts") or 0) == 2]
             check("judge: a failed panel session was rebuilt and its retry succeeded",
                   bool(recs) and all(r.get("status") == "done" for r in recs)
                   and "sandbox rebuild failed" not in out,
@@ -762,10 +771,13 @@ def test_other_stages_recover_from_a_failed_attempt():
                   + (f" tail={out[-120:]}" if not recs else ""))
         else:
             rec = (state.get("runs") or {}).get(run_id) or {}
-            check("revise: the failed first attempt was rebuilt and the retry succeeded",
-                  rec.get("status") == "done" and int(rec.get("attempts") or 0) == 2
+            check("revise: the failed first attempt was continued and the retry succeeded",
+                  rec.get("status") == "done"
+                  and int(rec.get("continuation_sessions") or 0) >= 1
                   and "unknown run kind" not in out and "sandbox rebuild failed" not in out,
-                  f"status={rec.get('status')} attempts={rec.get('attempts')} tail={out[-140:]}")
+                  f"status={rec.get('status')} attempts={rec.get('attempts')} "
+                  f"stage_attempts={rec.get('stage_attempts')} "
+                  f"continuations={rec.get('continuation_sessions')} tail={out[-140:]}")
     # ... and the rebuild covers EVERY kind, so nothing can be missing for the
     # stages this loop does not drive end to end (see test_kind_support_tables).
     check("the rebuild table covers the revise/integrate/judge/rewrite kinds explicitly",

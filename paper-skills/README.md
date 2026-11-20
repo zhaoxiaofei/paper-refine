@@ -310,11 +310,13 @@ paper-skills/
   the claim's own strength stays (removing it is an overclaim, not a
   shortening), a claim is never strengthened or weakened to reach a cap,
   under-length text is never flagged, and length never gates a version.
-  The cover letter's persuading part is measured against the master prompt's
-  own 300-500-word preference, and its TOTAL content is compared with the
-  profile's `cover_letter.total_max` when one is configured; the shipped
-  profiles set none, so that count is reported without a cap (also a Minor
-  formatting item, never a gate). The default profile's venue states no
+  The cover letter's persuading part is measured against the venue profile's
+  own `cover_letter` bound (a range, or a one-sided `at most N words` /
+  `at least N words`; the built-in 300-500-word preference applies only when
+  the profile configures no cover-letter block), and its TOTAL content is
+  compared with the profile's `cover_letter.total_max` when one is configured;
+  the shipped profiles set none, so that count is reported without a cap (also
+  a Minor formatting item, never a gate). The default profile's venue states no
   cover-letter word limit (checked 2026-09-19), so it is a Minor formatting
   item, never a journal requirement. **M18** always enumerates figure-legend
   word counts (the venue profile requires them to respect the article type's

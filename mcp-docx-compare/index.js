@@ -14,7 +14,7 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod/v4';
-import { allowedRoots, containsPath, realOrResolved } from './containment.mjs';
+import { allowedRoots, containedSpawnPath, containsPath, realOrResolved } from './containment.mjs';
 import { inFlightKey } from './derived-output.mjs';
 
 import { runFile } from './run-child.mjs';
@@ -139,7 +139,39 @@ serveStdio(() => {
           isError: true,
         };
       }
-      const argv = [absOriginal, absRevised, ...(absOutput ? [absOutput] : [])];
+      // RE-RESOLVE on the exact strings that are about to become argv: the
+      // containment checks above judged paths the child did not open yet, and a
+      // symlink swapped in between escaped the roots. `containedSpawnPath()`
+      // resolves again and returns the REAL path, so the child opens what was
+      // just validated; a swap is refused, not followed. When containment is
+      // unset the lexical paths are kept unchanged.
+      let spawnOriginal = absOriginal;
+      let spawnRevised = absRevised;
+      let spawnOutput = absOutput;
+      if (ALLOWED_ROOTS.length) {
+        try {
+          spawnOriginal = containedSpawnPath(absOriginal, ALLOWED_ROOTS);
+          spawnRevised = containedSpawnPath(absRevised, ALLOWED_ROOTS);
+          if (absOutput) spawnOutput = containedSpawnPath(absOutput, ALLOWED_ROOTS);
+        } catch (error) {
+          return {
+            content: [{ type: 'text', text: `refused: ${error.message}` }],
+            isError: true,
+          };
+        }
+        // A racing DELETE between the request check and the spawn must refuse
+        // too, not hand a missing path to Word.
+        for (const p of [spawnOriginal, spawnRevised]) {
+          if (!existsSync(p)) {
+            return {
+              content: [{ type: 'text', text: `refused: every input must be an existing `
+                                              + `absolute .docx file: ${p}` }],
+              isError: true,
+            };
+          }
+        }
+      }
+      const argv = [spawnOriginal, spawnRevised, ...(spawnOutput ? [spawnOutput] : [])];
       // 900_000 matches the orchestrator's redline budget
       // (paper_pipeline.render_docx_visual(timeout=900) and the redline chain's
       // own 900s); a smaller server-side cap would kill a slow-but-valid Word
@@ -150,7 +182,7 @@ serveStdio(() => {
       // Key on the path the comparer will actually write, not the input pair:
       // two revised files that share a basename derive the same redline path.
       // `inFlightKey` also case-folds it (a case-insensitive destination).
-      const key = inFlightKey(absOriginal, absRevised, absOutput);
+      const key = inFlightKey(spawnOriginal, spawnRevised, spawnOutput);
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(key, next);

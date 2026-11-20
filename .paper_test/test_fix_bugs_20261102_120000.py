@@ -270,7 +270,8 @@ def test_p4_contradiction_rule() -> None:
     wired = {
         "paper_pipeline_parts/p04_utils.py": ["apply_template_prompt",
                                               "apply_guideline_conform_prompt"],
-        "paper_pipeline_parts/p06_postchecks.py": ["resume_prompt", "repair_prompt"],
+        "paper_pipeline_parts/p06_postchecks.py": ["repair_prompt"],
+        "paper_pipeline_parts/p22_resume_continuation.py": ["resume_prompt"],
         "paper_pipeline_parts/p07_stage_quality_journal.py": ["feedback_prompt",
                                                               "concerns_prompt",
                                                               "response_prompt"],

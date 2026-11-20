@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 12/22 of the pipeline -- executed by the
+# Part 12/23 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1861,10 +1861,10 @@ def _form_text(path: Path) -> str:
         # scan reported "no software inventory" for a form it never read. The
         # caller's own empty-text branch records "could not be read as text".
         return ""
-    try:
-        return path.read_text("utf-8", "replace")
-    except OSError:
-        return ""
+    # Agent-writable package file: never read it whole. The bounded,
+    # no-follow reader applies the package byte budget and refuses a planted
+    # FIFO/symlink; an unreadable/oversized form is the caller's coverage gap.
+    return read_text_bounded(path, limit=PACKAGE_TEXT_BYTES_LIMIT) or ""
 
 
 def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
@@ -2316,11 +2316,10 @@ def scan_recovered_structure_claims(root: Path, texts=None, limit: int = 8) -> l
                         and meth.lower() in q.name.lower()), None)
             if hit is None:
                 continue
-            try:
-                lines = [ln for ln in hit.read_text("utf-8", "replace").splitlines()
-                         if ln.strip()]
-            except OSError:
+            text = read_text_bounded(hit, limit=PACKAGE_TEXT_BYTES_LIMIT)
+            if text is None:
                 continue
+            lines = [ln for ln in text.splitlines() if ln.strip()]
             counts = {}
             for line in lines[1:]:
                 cells = line.split("\t")
@@ -4106,16 +4105,14 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
             continue
         if p.name in PKG2_NEVER_EDITED_NAMES:
             # Reported (the re-scan lists it), never edited -- see the constant.
-            try:
-                if pkg2_reference_spans(p.read_text("utf-8", "replace"), patterns, index,
-                                        exempt=_exempt_ref):
-                    entry = {"file": rel, "removed": [],
-                             "skipped": ["the response-to-reviewers letter is the authors' "
-                                         "statement: reported, never edited"]}
-                    report["files"].append(entry)
-                    report["skipped"] += 1
-            except OSError:
-                pass
+            text = read_text_bounded(p, limit=PACKAGE_TEXT_BYTES_LIMIT)
+            if text is not None and pkg2_reference_spans(text, patterns, index,
+                                                         exempt=_exempt_ref):
+                entry = {"file": rel, "removed": [],
+                         "skipped": ["the response-to-reviewers letter is the authors' "
+                                     "statement: reported, never edited"]}
+                report["files"].append(entry)
+                report["skipped"] += 1
             continue
         ext = p.suffix.lower()
         entry = {"file": rel, "removed": [], "skipped": []}

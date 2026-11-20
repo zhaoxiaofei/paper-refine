@@ -913,12 +913,14 @@ for machine output); use it for the counts instead of estimating.
 Biotechnology profile's official "Preparing your material" page states what the
 cover letter must explain and disclose but states no cover-letter word limit
 (checked 2026-09-19); a venue profile may configure its own range instead.
-The master prompt's own preference is therefore carried as a USER
-PREFERENCE: the PERSUADING part (the body explaining importance and
-suitability; excluding the salutation, the signature block and required
-disclosures such as related manuscripts, prior editor discussions,
-double-anonymized author details and reviewer suggestions) should be
-**300-500 words**; outside that range is a MINOR formatting item, never a
+The venue profile's own `cover_letter` bound therefore governs, carried as a
+USER PREFERENCE: a range, or a one-sided `at most N words` / `at least N
+words` when the profile states only one side; the built-in 300-500-word
+preference applies only when the profile configures no cover-letter block. The
+PERSUADING part (the body explaining importance and suitability; excluding the
+salutation, the signature block and required disclosures such as related
+manuscripts, prior editor discussions, double-anonymized author details and
+reviewer suggestions) outside that bound is a MINOR formatting item, never a
 journal requirement and never gated. `count_words.py --section cover-letter` counts it.
 
 **Enumeration:** for every document that carries one, one row per section into
@@ -936,7 +938,8 @@ skip.
 **Finding rules (one per instance):**
 - abstract over the cap → CATEGORY-4 (technical formatting) finding
 - main text over the cap → CATEGORY-4 (technical formatting) finding
-- cover letter's persuading part outside the user's 300-500-word preference →
+- cover letter's persuading part outside the profile's configured cover-letter
+  preference (the built-in 300-500 default when the profile configures no block) →
   MINOR formatting finding (labelled as the user's preference, not a venue rule)
 - a section that cannot be brought within the cap without losing content →
   `unable — needs the author's judgement`, listed for manual action

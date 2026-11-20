@@ -204,7 +204,8 @@ def test_cover_letter_word_rule():
     print()
     print("== P3 a cover letter is a WORD, not a substring ==")
     for name, want in (("cover_letter.docx", True), ("coverLetter.docx", True),
-                       ("plainLetter.docx", True),
+                       ("plainLetter.docx", True), ("plainletter.docx", True),
+                       ("coverletter.docx", True),
                        ("letter_to_the_editor.docx", True), ("cover_letters.docx", True),
                        ("response_to_reviewers_letter.docx", False),
                        ("decision_letter.docx", False), ("discovery.docx", False),

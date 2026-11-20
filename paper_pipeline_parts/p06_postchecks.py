@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 06/22 of the pipeline -- executed by the
+# Part 06/23 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -7697,6 +7697,12 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
         # so is a table whose shape was replaced (no matching header at all),
         # because changing the columns cannot dispose the seeded rows.
         for _pin in (seeded_row_pins or {}).get(rel) or []:
+            _pin_error = str((_pin or {}).get("error") or "").strip()
+            if _pin_error:
+                # A pin that records WHY it could not be derived (a failed M2
+                # reference scan) is UNKNOWN evidence, never a clean table.
+                report.setdefault(rel, []).append(_pin_error)
+                continue
             try:
                 _want = int((_pin or {}).get("count") or 0)
             except (TypeError, ValueError):
@@ -7715,6 +7721,31 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
                 if all(c in _hdr for c in _cols):
                     _matching.append(_b)
             _present = sum(len(_b["rows"]) for _b in _matching)
+            _seed_ids = [list(x) for x in ((_pin or {}).get("rows") or []) if x]
+            if _seed_ids:
+                # Column names + row COUNT alone accepted wholesale fabrication:
+                # a session could delete the code-derived rows and emit the same
+                # number of invented rows with a real disposition. Every seeded
+                # row's identity cells must be PRESENT in the delivered table.
+                _want_ids = {tuple(_seed_cell(c) for c in row) for row in _seed_ids}
+                _have_ids = set()
+                for _b in _matching:
+                    for _r in _b["rows"]:
+                        _have_ids.add(tuple(_seed_cell(_r.get(c, "")) for c in _cols))
+                _missing = sorted(_want_ids - _have_ids)
+                if _missing:
+                    _label = str((_pin or {}).get("label") or "").strip()
+                    _named = f" for the `{_label}` table" if _label else ""
+                    _shown = "; ".join(" | ".join(row) for row in _missing[:3])
+                    report.setdefault(rel, []).append(
+                        f"is missing {len(_missing)} of the {len(_want_ids)} code-seeded "
+                        f"row identity(ies){_named} (columns: {', '.join(_cols)}): the "
+                        f"seeded rows were DELETED or REPLACED, not disposed -- re-emit "
+                        f"every seeded row with its own verdict in the `disposition` "
+                        f"cell (missing: {_shown}"
+                        + (f" (+{len(_missing) - 3} more)" if len(_missing) > 3 else "")
+                        + ")")
+                    continue
             if _present >= _want:
                 continue
             if _present == 0 and _empty_keyed:
@@ -7932,15 +7963,45 @@ def artifact_quality_notes(review_dir: Path) -> dict:
     return notes
 
 
+def _seed_cell(value) -> str:
+    """One identity cell, normalised so a re-typed cell still matches.
+
+    The artifact renderer (`_evidence_artifact_table`) caps every cell at 140
+    characters, so the identity must be capped there too or a long cell could
+    never match the table the session was given.
+    """
+    # `str(value or "")` turned a numeric 0 (a paragraph/line number) into the
+    # empty string, so the seed's first row never matched its rendered "0".
+    text = ("" if value is None else str(value))[:140]
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _seed_row_identity(row: dict, columns: list) -> list:
+    """A seeded row's identity: its own values in the pinned identity columns.
+
+    Keys are looked up case- and whitespace-insensitively, and the values are
+    whitespace-collapsed/case-folded, so a session that re-renders the table with
+    the same identity cells still matches. Content cells OUTSIDE the identity
+    columns (the disposition, a note) are free to change. A LIST of cells, not a
+    joined string: a cell may itself contain the join separator.
+    """
+    low = {re.sub(r"\s+", " ", str(k).strip().lower()): v for k, v in (row or {}).items()}
+    return [_seed_cell(low.get(re.sub(r"\s+", " ", str(c).strip().lower()), ""))
+            for c in columns]
+
+
 def review_seeded_row_pins(ctx: Ctx, base: Path) -> dict:
     """{artifact rel: [pin, ...]} re-derived from the read-only base.
 
-    Each pin is `{"columns": [...], "count": n, "label": ...}` and describes ONE
-    seeded table: the header shape the seed rendered and the number of rows it
-    rendered. They are derived HERE, from `base/`, never from the
-    session-writable artifact, so deleting a seeded table cannot lower its
-    expected count (F170) and deleting one ROW out of several cannot hide behind
-    the rows that remain (F012).
+    Each pin is `{"columns": [...], "count": n, "label": ..., "rows": [...]}` and
+    describes ONE seeded table: the header shape the seed rendered, the number of
+    rows it rendered, and each row's normalized IDENTITY cells. The identities
+    are what makes a wholesale replacement visible: a session that deletes the
+    code-derived rows and emits the same NUMBER of invented rows with a real
+    disposition used to pass (the count and columns matched). They are derived
+    HERE, from `base/`, never from the session-writable artifact, so deleting a
+    seeded table cannot lower its expected count (F170) and deleting one ROW out
+    of several cannot hide behind the rows that remain (F012).
 
     M30 is THREE seeded tables (A written values, B code/config literals, C
     negative claims) with three different header shapes. They are pinned
@@ -7949,10 +8010,19 @@ def review_seeded_row_pins(ctx: Ctx, base: Path) -> dict:
     """
     pins = {}
 
-    def add(rel: str, columns: list, rows, label: str) -> None:
+    def add(rel: str, columns: list, rows, label: str, identity=None) -> None:
+        rows = list(rows or [])
+        identities = []
+        for row in rows:
+            if not isinstance(row, dict):
+                identities = []
+                break
+            identities.append(list(identity(row) if identity
+                                   else _seed_row_identity(row, columns)))
         pins.setdefault(rel, []).append({"columns": list(columns),
-                                         "count": len(rows or []),
-                                         "label": label})
+                                         "count": len(rows),
+                                         "label": label,
+                                         "rows": identities})
 
     try:
         ev = code_side_evidence(ctx, base, "review")
@@ -7968,13 +8038,22 @@ def review_seeded_row_pins(ctx: Ctx, base: Path) -> dict:
     add("artifacts/OUTLINE.md", ["document", "heading", "paragraph"],
         (ev.get("outline") or {}).get("rows") or [], "OUTLINE")
     add("artifacts/PLACEHOLDERS.md", ["document", "paragraph", "class", "payload"],
-        (ev.get("placeholder_ledger") or {}).get("rows") or [], "PLACEHOLDERS")
+        (ev.get("placeholder_ledger") or {}).get("rows") or [], "PLACEHOLDERS",
+        # The renderer caps the payload at 100 characters (p04_utils
+        # `ph_rows`); the identity must use the SAME cell.
+        identity=lambda r: [_seed_cell(v) for v in (
+            r.get("document"), r.get("document_paragraph"),
+            r.get("class"), (r.get("payload") or "")[:100])])
     add("artifacts/CLAIM_STRENGTH.md", ["document", "paragraph", "kind", "direction"],
         (ev.get("claims") or {}).get("rows") or [], "CLAIM_STRENGTH")
     add("artifacts/M30_hierarchy_reconciliation.md",
         ["document", "kind", "number", "sentence"],
         (ev.get("hierarchy") or {}).get("rows") or [],
-        "A. written values with candidate producers")
+        "A. written values with candidate producers",
+        # The renderer caps the sentence at 110 characters.
+        identity=lambda r: [_seed_cell(v) for v in (
+            r.get("document"), r.get("kind"), r.get("number"),
+            (r.get("sentence") or "")[:110])])
     add("artifacts/M30_hierarchy_reconciliation.md",
         ["file", "line", "symbol", "value"],
         (ev.get("code_literals") or {}).get("rows") or [],
@@ -7982,16 +8061,38 @@ def review_seeded_row_pins(ctx: Ctx, base: Path) -> dict:
     add("artifacts/M30_hierarchy_reconciliation.md",
         ["written claim", "method token"],
         (ev.get("negative_claims") or {}).get("rows") or [],
-        "C. written negative claims")
+        "C. written negative claims",
+        # The seed rows carry `claim`/`token`; the artifact's own columns are
+        # "written claim"/"method token".
+        # The renderer caps the written claim at 110 characters.
+        identity=lambda r: [_seed_cell(v) for v in
+                            ((r.get("claim") or "")[:110], r.get("token"))])
     try:
         mod = _format_module()
-        if mod is not None and hasattr(mod, "reference_integrity_rows"):
-            refs = mod.reference_integrity_rows(
-                corpus_text_documents([(base, "", ())], raw_text=True, include_bib=True))
-            add("artifacts/M2_references.md",
-                ["document", "entry", "identifier"], refs or [], "M2")
-    except Exception:                                                 # noqa: BLE001
-        pass
+        if mod is None or not hasattr(mod, "reference_integrity_rows"):
+            raise RuntimeError("the format module's reference_integrity_rows is unavailable")
+        refs = mod.reference_integrity_rows(
+            corpus_text_documents([(base, "", ())], raw_text=True, include_bib=True))
+        add("artifacts/M2_references.md",
+            ["document", "entry", "identifier"], refs or [], "M2",
+            # The renderer substitutes these two display placeholders for an
+            # empty label / a malformed DOI; the identity must use the cell the
+            # session actually sees.
+            identity=lambda r: [_seed_cell(r.get("document")),
+                                _seed_cell(r.get("entry") or "—"),
+                                _seed_cell(r.get("identifier") or "(no DOI read)")])
+    except Exception as e:                                             # noqa: BLE001
+        # NEVER silently drop the M2 pin. With the other tables still pinned,
+        # the `_seed_unknown` guard (which only fires when NO pin exists) never
+        # noticed, so a failed scan disabled the M2 seed while the gate looked
+        # clean. Record the failure as its own pin: artifact_quality_report()
+        # reports it as UNKNOWN (a failure under every policy except `off`).
+        pins.setdefault("artifacts/M2_references.md", []).append({
+            "columns": ["document", "entry", "identifier"], "count": 0, "label": "M2",
+            "error": (f"the M2 reference seed could not be re-derived from base/ "
+                      f"({type(e).__name__}: {e}); the M2 table's seeded rows are UNKNOWN, "
+                      f"not clean"),
+        })
     return pins
 
 
@@ -8479,225 +8580,6 @@ REPAIR_PROFILES = {
 def repair_profile(rec: dict) -> dict:
     """The repair profile of a run's kind ({} when the stage has none)."""
     return REPAIR_PROFILES.get(str(rec.get("kind") or "")) or {}
-
-
-# =====================================================================
-# CONTINUATION OF A STOPPED SESSION (`codex exec resume <session-id>`)
-# =====================================================================
-def capture_agent_session_id(ctx: Ctx, rec: dict) -> str:
-    """The CLI session id of the attempt whose transcript is in this sandbox.
-
-    The agents print `session id: <uuid>` in their banner (codex does; a claude
-    build that prints one is picked up the same way), a claude
-    `--output-format json` run reports it in its result object, and `dsh --json`
-    opens its event stream with `"sessionId": "session-<uuid>"`;
-    `_execute_attempt_in` tees every one of them into `_agent.log`, so the id a
-    CONTINUATION needs is already on disk -- no extra channel and no guessing
-    from timestamps. The LAST id in the file wins (the transcript is appended
-    per attempt), whichever of the three forms it was written in.
-    """
-    try:
-        sb = ctx.sandbox_of(rec)
-    except Exception:                                            # noqa: BLE001
-        return ""
-    log = sb / "_agent.log"
-    # The transcript is agent-written: the shared reader refuses a symlink and
-    # applies the byte budget (F38).
-    text = read_text_bounded(log)
-    if not text:
-        return ""
-    hits = [(m.start(), m.group(1))
-            for pattern in (SESSION_ID_RE, DSH_SESSION_ID_RE)
-            for m in pattern.finditer(text)]
-    hits.sort()
-    return str(hits[-1][1]) if hits else ""
-
-
-def resume_argv_for(cmd: list, session_id: str) -> list:
-    """The argv that CONTINUES `session_id` with the same backend ([] if none).
-
-    codex:  `codex exec <overrides> -`  ->  `codex exec resume <id> <overrides> -`
-            (the prompt still arrives on stdin; note that `resume` accepts no
-            `-s/--sandbox` -- it reuses the policy recorded in the session)
-    claude: `claude --permission-mode ... --print` -> the same argv plus
-            `--resume <id>` (or `--continue`, which resumes the most recent
-            conversation of THIS directory -- every run has its own sandbox, so
-            that is this run's session -- when no id was captured)
-    dsh:    `dsh --profile headless --json -` -> the same argv plus
-            `--session-id <id>`, inserted BEFORE the `-` task positional (the
-            one-shot app reads its task from stdin and requires `-` to be its
-            only positional, and the id must be exact: an unknown one is an
-            error, so a continuation can never silently start a fresh session)
-    Anything else (a custom --agent-cmd/PAPER_AGENT_CMD) has no known resume form
-    and is left alone HERE: `resume_gate` then continues the stage in the SAME
-    sandbox with its own command as a fresh process (every artifact on disk
-    survives; only the chat transcript does not), instead of rebuilding the
-    sandbox and paying for the work again.
-    """
-    argv = [str(x) for x in (cmd or [])]
-    if not argv:
-        return []
-    name = Path(argv[0]).name.lower()
-    if name.startswith("codex") and len(argv) > 1 and argv[1] == "exec":
-        if not session_id:
-            return []                    # `resume --last` is GLOBAL: too risky in parallel
-        return [argv[0], "exec", "resume", session_id, *argv[2:]]
-    if name.startswith("claude"):
-        return [*argv, *(["--resume", session_id] if session_id else ["--continue"])]
-    if name.startswith("dsh"):
-        if not session_id:
-            # No `--continue` equivalent: the harness persists many sessions and
-            # adopts one only by exact id, which is precisely the continuation
-            # we want -- a fresh session would answer the continuation prompt
-            # with no memory of the work it is supposed to finish.
-            return []
-        if argv[-1] == "-":
-            return [*argv[:-1], "--session-id", session_id, "-"]
-        return [*argv, "--session-id", session_id]
-    return []
-
-
-def resume_unfinished_reason(ctx: Ctx, rec: dict) -> str:
-    """Why this failed attempt looks UNFINISHED ("" = it finished and was rejected).
-
-    Only an unfinished attempt is a continuation candidate: a stage that wrote
-    its deliverables and was rejected on their content is the retry/repair path's
-    business. The signature is (a) a process-level failure (timeout, killed CLI)
-    or (b) a postcheck error that names a deliverable which does NOT exist.
-    """
-    if rec.get("status") != "failed":
-        return ""
-    errors = [str(e) for e in ((rec.get("postcheck") or {}).get("errors") or [])]
-    if not errors:
-        if rec.get("last_error"):
-            return ("the agent process failed before the attempt could be judged: "
-                    + str(rec["last_error"])[:120])
-        return ""
-    missing = repair_missing_deliverable(ctx, rec, errors)
-    if missing:
-        return f"the stage stopped before writing {missing}"
-    return ""
-
-
-def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
-    """(argv, key, reason, mode): the continuation to run, or ([], key, "", "").
-
-    `mode` is `"cli"` when the backend's OWN session is continued (`codex exec
-    resume <id>`, `claude --resume`, `dsh --session-id`) and `"sandbox"` when it
-    cannot be: a custom `--agent-cmd`/`PAPER_AGENT_CMD` has no resume form, and
-    a resumed CLI session can only repeat an oversized context or a loop. A
-    sandbox continuation runs the stage's own command again, as a FRESH
-    process, in the SAME sandbox with the continuation prompt: every artifact
-    on disk survives, so the stage resumes from its own files instead of the
-    orchestrator throwing them away and paying for a rebuild.
-
-    A failed attempt that looks UNFINISHED but cannot be continued at all still
-    says so on the console, so the operator can tell "no continuation form",
-    "the continuation limit is spent" and "the attempt finished and was
-    rejected on its content" apart.
-    """
-    sid = str(rec.get("agent_session_id") or "")
-    key = sid or "__continue__"
-    reason = resume_unfinished_reason(ctx, rec)
-    if not reason:
-        return [], key, "", ""
-    if not cmd:
-        return [], key, "", ""
-    used = int((rec.get("resume_attempts") or {}).get(key) or 0)
-    if used >= RESUME_ATTEMPT_LIMIT:
-        why = (f"{used} continuation(s) already spent on this session "
-               f"(limit {RESUME_ATTEMPT_LIMIT})")
-        print(f"  [resume] {rec['id']}: no continuation -- {why}; a fresh attempt follows")
-        return [], key, "", ""
-    kind = str(rec.get("last_failure_kind") or "")
-    if kind in {"context_overflow", "runaway"}:
-        # `codex exec resume` resends the whole session, so a CLI continuation
-        # of an oversized context (or of a loop) can only fail the same way.
-        # A fresh process against the files on disk is a fresh context, which
-        # is exactly what the stage needs; the continuation budget still bounds
-        # how many times that can happen.
-        why = ("the provider already rejected this session's request as too large"
-               if kind == "context_overflow" else
-               "the session was stopped for looping instead of finishing the stage")
-        print(f"  [resume] {rec['id']}: the CLI session is not continued -- {why}; "
-              f"continuing in the SAME SANDBOX with a fresh context (artifacts kept)")
-        return list(cmd), key, reason, "sandbox"
-    argv = resume_argv_for(cmd, sid)
-    if not argv:
-        print(f"  [resume] {rec['id']}: this backend has no CLI resume form; continuing "
-              f"in the SAME SANDBOX with a fresh process (artifacts kept)")
-        return list(cmd), key, reason, "sandbox"
-    return argv, key, reason, "cli"
-
-
-def resume_prompt(rec: dict, problems: list, reason: str, used: int,
-                  author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
-                  resumed_cli: bool = True) -> str:
-    """The CONTINUATION prompt: finish the stage's own work, marker last.
-
-    `author_to_complete` is the run's hand-off policy: the escape item goes to
-    THAT mode's manual-list file. The prompt was policy-blind and always said
-    MANUAL_STEPS.md, the file the readme policy reserves for long-form detail
-    (F17).
-
-    `resumed_cli` says whether the CLI session itself was continued. When the
-    backend has no resume form the orchestrator still continues in the SAME
-    sandbox with a FRESH process (every artifact on disk survives); the chat
-    transcript does not, so the prompt must not promise that it does.
-    """
-    manual_target = handoff_target(author_to_complete)
-    listed = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(problems)) or "  (none recorded)"
-    is_judge = str(rec.get("kind") or "") == "judge"
-    # The judge is blind by design: its initial prompt carries no round, and its
-    # postcheck accepts `scores.json` alone. The generic continuation revealed
-    # the round and called the marker the ONLY signal -- two contradictions with
-    # the prompt it resumes.
-    where = (f"Run: {rec['id']}   stage: judge\n" if is_judge else
-             f"Run: {rec['id']}   stage: {rec.get('kind')}   round: {rec.get('round')}\n")
-    if resumed_cli:
-        context_line = (
-            "Your working directory is the same sandbox you were in, holding exactly the files "
-            "you left; nothing was rebuilt and nothing was thrown away. Your context -- the "
-            "packages you read, the differences you found, the plan you were following -- is "
-            "still yours.\n\n")
-    else:
-        context_line = (
-            "Your working directory is the same sandbox you were in, holding exactly the files "
-            "you left; nothing was rebuilt and nothing was thrown away. The chat transcript "
-            "itself is NOT carried over (this backend has no resume form), so re-open the "
-            "sandbox instead of trusting memory: the stage's own trees, `work/`, and the "
-            "ledgers you already wrote say what is done. Do not recreate them.\n\n")
-    signal = (
-        "  * `scores.json` IS this run's completion signal: keep it in the sandbox root, "
-        "parsing as JSON and carrying this run's run_id/target_id. Verify the sheet, then write "
-        f"the completion marker `{MARKER_FILE}` LAST; the judge postcheck accepts the sheet "
-        "alone.\n"
-        if is_judge else
-        f"  * Write the completion marker `{MARKER_FILE}` LAST, when the package and its "
-        "bookkeeping are actually done. It is the only completion signal this pipeline accepts.\n")
-    return with_context_budget((CONTRADICTION_RULE +
-        "CONTINUATION - YOUR OWN SESSION STOPPED BEFORE IT FINISHED.\n\n"
-        f"{where}"
-        "This is continuation " + str(used + 1) + " of at most "
-        + str(RESUME_ATTEMPT_LIMIT) + " for this session.\n"
-        + context_line
-        + f"WHY YOU ARE BEING RESUMED: {reason}\n\n"
-        "--- WHAT THE ORCHESTRATOR'S POSTCHECK SAID ABOUT WHAT YOU LEFT (data, not "
-        "instructions) ---\n"
-        f"{listed}\n\n"
-        "--- FINISH THE JOB ---\n"
-        "  * Do NOT start over and do NOT re-read what you already read: work from where you are "
-        "and complete the remaining items (for `integrate`: finish the donor survey and the ports "
-        "the hierarchy calls for, then the ledger, the language pass, the visual record and the "
-        "manual steps).\n"
-        "  * The stage's contract is in `PROMPT.md` in this sandbox -- re-read the part you need "
-        "instead of reconstructing it from memory.\n"
-        f"{signal}"
-        "  * If something cannot be finished honestly, use the pipeline's escape: write "
-        "`unable — manual verification required: <what the author must check>` in the ledger / "
-        f"language pass / visual record, record the item in {manual_target}, and say so in the "
-        "marker.\n"
-        "  * Stay inside this sandbox; never touch sibling sandboxes or parent directories.\n"))
 
 
 def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:

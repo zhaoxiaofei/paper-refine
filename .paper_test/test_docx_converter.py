@@ -440,7 +440,12 @@ def test_refusal_messages_evaluate():
             refusals.append(rest[:end].rstrip().rstrip("}").strip())
     ok, detail = bool(refusals), ""
     for expr in refusals:
-        js = ("const docxPath='/tmp/x.docx'; const abs='/tmp/x.docx'; try { console.log(String("
+        # `containedSpawnPath()` failures are refused with the caught error's
+        # message, so the evaluation scope defines the `error` a catch block
+        # would bind; the check is still about the template evaluating at all
+        # (an adjacent-template TypeError throws before the server can refuse).
+        js = ("const docxPath='/tmp/x.docx'; const abs='/tmp/x.docx'; "
+              "const spawnPath='/tmp/x.docx'; const error={message:'outside DOCX_MCP_ALLOWED_ROOTS'}; try { console.log(String("
               + expr + ")); } catch (e) { console.log('THROWS '+e.message); process.exit(3); }")
         proc = subprocess.run([node, "-e", js], capture_output=True, text=True)
         if proc.returncode != 0:

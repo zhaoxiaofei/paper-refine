@@ -304,15 +304,22 @@ def test_compaction_wiring():
 def test_adapter_request_and_budget():
     print("\n== F13/F15/F30: transport errors and minimal configs ==")
     for module, name in ((dots, "dots"), (qwen, "qwen")):
+        # The adapters now open through the module's no-redirect opener (F16),
+        # so the transport-error fixture must patch THAT callable as well as
+        # urllib.request.urlopen.
         saved = module.urllib.request.urlopen
-        module.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(
+        saved_open = module._NO_REDIRECT_OPENER.open
+        boom = lambda *a, **k: (_ for _ in ()).throw(  # noqa: E731
             http.client.BadStatusLine("bad"))
+        module.urllib.request.urlopen = boom
+        module._NO_REDIRECT_OPENER.open = boom
         try:
             result = module._request("GET", "http://x")
             check(f"F13 {name} turns BadStatusLine into a transport error",
                   result[0] == 0 and "BadStatusLine" in result[2], str(result))
         finally:
             module.urllib.request.urlopen = saved
+            module._NO_REDIRECT_OPENER.open = saved_open
     for module, name in ((dots, "dots"), (qwen, "qwen")):
         budget = module._chat_output_budget({"model": "m", "max_tokens": 100}, "x")
         check(f"F15 {name} a minimal cfg has a positive chat budget",

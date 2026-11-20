@@ -366,9 +366,14 @@ def test_permanent_failure_keeps_the_round_undecided():
           str(proc.returncode))
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
     rec = state["runs"]["r1_a2_revise"]
+    # `attempts` is the identity counter (it includes the bounded sandbox
+    # continuations, F04); the RETRY BUDGET is the full-launch counter.
     check("the failing session tried the whole retry budget",
-          rec["status"] == "failed" and rec["attempts"] == 2,
-          f"status={rec['status']} attempts={rec['attempts']}")
+          rec["status"] == "failed" and rec.get("stage_attempts") == 2
+          and 0 <= int(rec.get("continuation_sessions") or 0) <= 2,
+          f"status={rec['status']} attempts={rec.get('attempts')} "
+          f"stage_attempts={rec.get('stage_attempts')} "
+          f"continuations={rec.get('continuation_sessions')}")
     check("the round is NOT decided on a shrunk pool",
           state["rounds"]["1"]["status"] != "done"
           and not state["rounds"]["1"].get("champion"), str(state["rounds"]["1"].get("champion")))
@@ -397,8 +402,9 @@ def test_broken_marker_is_a_failed_attempt():
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
     rec = state["runs"]["r1_w1"]
     check("the broken marker was treated as a FAILED ATTEMPT (whole retry budget used)",
-          rec["status"] == "failed" and rec["attempts"] == 2,
-          f"status={rec['status']} attempts={rec['attempts']}")
+          rec["status"] == "failed" and rec.get("stage_attempts") == 2,
+          f"status={rec['status']} attempts={rec.get('attempts')} "
+          f"stage_attempts={rec.get('stage_attempts')}")
     checks = sum(1 for line in out.splitlines() if "stage mismatch" in line)
     check("the postcheck error is the stage mismatch the stub wrote",
           checks > 0 and "stage mismatch" in out, out[-200:])

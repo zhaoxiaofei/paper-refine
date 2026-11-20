@@ -153,18 +153,20 @@ def test_reset_drops_the_stale_session():
            "postcheck": {"ok": False, "warnings": [],
                          "errors": ["integrated/DIFF_LEDGER.md is missing: it is this "
                                     "stage's ledger"]}}
-    argv, key, _why = pp.resume_gate(ctx, rec, cmd)
+    argv, key, _why, mode = pp.resume_gate(ctx, rec, cmd)
     check("an unfinished attempt in a live sandbox IS continued (baseline)",
-          argv == ["codex", "exec", "resume", SID, "-"] and key == SID, str(argv))
+          argv == ["codex", "exec", "resume", SID, "-"] and key == SID
+          and mode == "cli", f"{argv} {mode}")
     shutil.rmtree(sb)                     # rebuild_sandbox() replaces the sandbox
     pp.reset_run_record(rec)              # what `retry` and the revalidation pass do
     check("the session id of the replaced sandbox is gone",
           not rec.get("agent_session_id"), str(rec.get("agent_session_id")))
     rec["status"] = "failed"
     rec["postcheck"] = dict(rec.get("postcheck") or {})
-    argv2, key2, _why2 = pp.resume_gate(ctx, rec, cmd)
+    argv2, key2, _why2, mode2 = pp.resume_gate(ctx, rec, cmd)
     check("the continuation is refused, and the next attempt is a fresh one",
-          argv2 == [] and key2 == "__continue__", f"{argv2} {key2}")
+          argv2 == [] and key2 == "__continue__" and mode2 == "",
+          f"{argv2} {key2} {mode2}")
 
 
 def test_harness_probe_names_the_missing_half():

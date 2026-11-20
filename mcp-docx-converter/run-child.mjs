@@ -21,21 +21,59 @@ export function killProcessTree(child, options = {}) {
   const pid = child && child.pid;
   try {
     if (platform === 'win32' && pid) {
-      run('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
-      return;
+      let taskkill = null;
+      try {
+        taskkill = run('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+      } catch (err) {
+        taskkill = { error: err };
+      }
+      if (taskkill && taskkill.status === 0) return { ok: true };
+      // taskkill is unavailable, was denied, or the pid was a wrapper that had
+      // already exited: the documented WHOLE-TREE kill did NOT run. Fall back
+      // to the wrapper handle and a PowerShell force-stop, and record the
+      // failure so the caller's timeout error can name it.
+      const notes = [];
+      if (child && typeof child.kill === 'function') {
+        try {
+          child.kill('SIGKILL');
+          notes.push('child.kill sent');
+        } catch {
+          notes.push('child.kill failed');
+        }
+      }
+      try {
+        const ps = run('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+          `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`],
+          { stdio: 'ignore' });
+        notes.push(ps && ps.status === 0
+          ? 'PowerShell Stop-Process sent'
+          : 'PowerShell Stop-Process failed');
+      } catch {
+        notes.push('PowerShell unavailable');
+      }
+      const why = taskkill && taskkill.error
+        ? (taskkill.error.message || String(taskkill.error))
+        : `status ${taskkill ? taskkill.status : 'none'}`;
+      const detail = `taskkill /T /F failed for pid ${pid} (${why}); ${notes.join('; ')}`;
+      if (child && typeof child === 'object') child.treeKillError = detail;
+      return { ok: false, error: detail };
     }
     if (detached && pid) {
       kill(-pid, 'SIGKILL');
-      return;
+      return { ok: true };
     }
     if (child && typeof child.kill === 'function') child.kill('SIGKILL');
-  } catch {
-    // already gone
+    return { ok: true };
+  } catch (err) {
+    const detail = String((err && err.message) || err);
+    if (child && typeof child === 'object') child.treeKillError = detail;
+    return { ok: false, error: detail };
   }
 }
 
 export function runFile(file, args, options = {}) {
-  const { timeout = 0, maxBuffer = 4 * 1024 * 1024, ...spawnOptions } = options;
+  const { timeout = 0, maxBuffer = 4 * 1024 * 1024,
+    killTree = killProcessTree, ...spawnOptions } = options;
   const detached = process.platform !== 'win32';
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, {
@@ -47,11 +85,13 @@ export function runFile(file, args, options = {}) {
     let stderr = '';
     let timedOut = false;
     let overflow = '';
+    let treeKillError = '';
     const killGroup = () => {
       try {
-        killProcessTree(child, { detached });
-      } catch {
-        // already gone
+        const result = killTree(child, { detached });
+        if (result && result.error) treeKillError = result.error;
+      } catch (err) {
+        treeKillError = String((err && err.message) || err);
       }
     };
     // `maxBuffer` is an ERROR budget, not a silent truncation point. The old
@@ -71,9 +111,12 @@ export function runFile(file, args, options = {}) {
       if (overflow) return;
       const bytes = chunk.length;
       if (budget[stream] + bytes > maxBuffer) {
-        overflow = `Command output exceeded the ${maxBuffer}-byte buffer and its process `
-                 + `group was killed: ${file}`;
+        // Kill first: `treeKillError` is assigned by killGroup(), so composing
+        // the error before the call can never name a failed overflow kill.
         killGroup();
+        overflow = `Command output exceeded the ${maxBuffer}-byte buffer and its process `
+                 + `group was killed: ${file}`
+                 + (treeKillError ? ` (tree kill incomplete: ${treeKillError})` : '');
         return;
       }
       budget[stream] += bytes;
@@ -108,6 +151,7 @@ export function runFile(file, args, options = {}) {
         ? overflow
         : timedOut
           ? `Command timed out after ${timeout}ms and its process group was killed: ${file}`
+          + (treeKillError ? ` (tree kill incomplete: ${treeKillError})` : '')
           : `Command failed (code ${code}, signal ${signal || 'none'}): ${file} ${args.join(' ')}`;
       const error = new Error(detail);
       error.code = code;

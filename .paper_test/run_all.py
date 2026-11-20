@@ -60,13 +60,16 @@ CHECK_LINE_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail|skip)\]|ok\b|fail\b|skip\
 # check guard and was reported PASS with its behaviour untested (F90).
 CHECK_REAL_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail )\]|ok\b|fail\b)")
 SKIP_LINE_RE = re.compile(r"(?im)^\s*\[skip\]")
-# A FAILure MARKER must start its check line: a passing check's detail can quote
-# `[FAIL]` (attempt-history does), and counting that as a failure hides a real
-# pass while the zero-exit guard is doing its job. The runner accepts the same
-# failure shapes CHECK_LINE_RE does -- `[FAIL]` and the bare `FAIL ...` form the
-# suites' own OK/FAIL convention allows -- so a suite that prints `FAIL ...` and
-# forgets `sys.exit(1)` is not reported PASS.
-FAIL_CHECK_RE = re.compile(r"(?im)^\s*(?:\[fail\]|fail\b)")
+# A FAILure MARKER must start its check line at COLUMN 0: a passing check's
+# detail can quote `[FAIL]` (attempt-history does), and a child process the
+# suite runs can print its own `[FAIL]` line as ordinary output
+# (test_document_recovery prints the pipeline's indented stage verdicts while
+# all its own checks pass). Both made a genuinely passing zero-exit suite look
+# failed. Every suite's own check line starts at column 0 (`[FAIL]` / `FAIL ...`,
+# the `[ok ]` / `OK` conventions of the tree), so the runner accepts only that
+# shape; a suite that prints `FAIL ...` and forgets `sys.exit(1)` is still not
+# reported PASS.
+FAIL_CHECK_RE = re.compile(r"(?im)^(?:\[fail\]|fail\b)")
 # The operator's standing request for this box: use 32 parallel sessions by
 # default (`-j 32`). The effective default is capped only by the number of
 # suites to run; `-j N` caps it on a smaller box, `-j 1` is the old sequential
@@ -157,9 +160,11 @@ def tail_failures(suite: str, rundir: Path, limit: int = 6) -> list:
     """The suite's own `[FAIL]`/`FAIL ...` CHECK lines (not one quoted in a detail).
 
     A passing check may print `[ok ] ... -- [FAIL] ...` as its evidence (the
-    attempt-history suite does). Matching the marker anywhere in the line made
-    that pass look like a failure to the zero-exit guard, so the marker must
-    start the check line.
+    attempt-history suite does), and a child process may print an indented
+    `[FAIL]` line of its own (test_document_recovery prints the pipeline's stage
+    verdicts). Matching the marker anywhere in the line made those look like
+    failures to the zero-exit guard, so the marker must start the check line at
+    column 0.
     """
     log = rundir / f"{suite}.log"
     if not log.is_file():

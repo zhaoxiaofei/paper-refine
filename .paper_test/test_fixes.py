@@ -150,16 +150,24 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
                     continue
                 header = "| # | " + " | ".join(cols) + " | disposition |"
                 sep = "|---|" + "---|" * (len(cols) + 1)
+                # The pin carries each seeded row's IDENTITY cells (F09): the
+                # fixture must reproduce them, not invent equal-length rows,
+                # or the report correctly calls it a fabricated table.
+                identities = [list(x) for x in (pin.get("rows") or [])]
                 rows = []
                 for i in range(1, count + 1):
+                    ident = identities[i - 1] if i - 1 < len(identities) else []
                     values = []
-                    for col in cols:
+                    for j, col in enumerate(cols):
                         key = col.strip().lower()
+                        if j < len(ident):
+                            values.append(str(ident[j]))
                         # Keep `summary` distinct from `first sentence`: an echo
                         # of the first sentence is a separately reported defect.
-                        values.append("" if key == "first sentence" else
-                                      ("fixture summary: the paragraph's claim"
-                                       if key == "summary" else "fixture"))
+                        else:
+                            values.append("" if key == "first sentence" else
+                                          ("fixture summary: the paragraph's claim"
+                                           if key == "summary" else "fixture"))
                     rows.append("| " + " | ".join(
                         [str(i)] + values + ["OK — fixture row is inside its bar"]) + " |")
                 blocks.append("\n".join([header, sep] + rows))

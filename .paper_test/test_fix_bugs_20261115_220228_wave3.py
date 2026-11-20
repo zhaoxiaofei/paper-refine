@@ -151,6 +151,34 @@ def test_f012_m30_pins_are_per_table_not_summed():
           str(report)[:200])
 
 
+def test_f009_fabricated_rows_are_reported():
+    print("\n== F09: same count, invented rows -- the identities must still match ==")
+    pins = {"artifacts/M18_caption_words.md": [
+        {"columns": ["document", "caption", "words"], "count": 2, "label": "M18",
+         "rows": [["real.docx", "fig1", "10"], ["real.docx", "fig2", "12"]]}]}
+    fabricated = M18_HEADER + (
+        "| 1 | fake.docx | invented one | 11 |  | x | OK — invented |\n"
+        "| 2 | fake.docx | invented two | 12 |  | y | OK — invented |\n")
+    rd = review_dir({"artifacts/M18_caption_words.md": fabricated})
+    report = pp.artifact_quality_report(rd, require_files=False,
+                                        seeded_row_pins=pins)
+    problems = report.get("artifacts/M18_caption_words.md") or []
+    check("F09 the same number of invented rows is reported",
+          any("missing 2 of the 2 code-seeded row identity" in p for p in problems),
+          str(problems)[:300])
+
+    # The seeded identities with a real disposition are CLEAN.
+    disposed = M18_HEADER + (
+        "| 1 | Real.docx | Fig1 | 10 |  | x | OK — figure legend inside its bar |\n"
+        "| 2 | real.docx | fig2 | 12 |  | y | OK — figure legend inside its bar |\n")
+    rd = review_dir({"artifacts/M18_caption_words.md": disposed})
+    report = pp.artifact_quality_report(rd, require_files=False,
+                                        seeded_row_pins=pins)
+    check("F09 the seeded identities with a real disposition are clean",
+          not (report.get("artifacts/M18_caption_words.md") or []),
+          str(report)[:200])
+
+
 def test_f012_pins_are_derived_per_seeded_table():
     print("\n== C012: the read-only base derives one pin per seeded table ==")
     corpus = Path(tempfile.mkdtemp()) / "corpus"
@@ -183,6 +211,7 @@ def test_f012_pins_are_derived_per_seeded_table():
 def main():
     test_f012_partial_deletion_is_reported()
     test_f012_replaced_seeded_table_is_reported()
+    test_f009_fabricated_rows_are_reported()
     test_f012_m30_pins_are_per_table_not_summed()
     test_f012_pins_are_derived_per_seeded_table()
     print(f"\n{'FAILED' if FAILS else 'PASSED'}: {len(FAILS)} failure(s)")

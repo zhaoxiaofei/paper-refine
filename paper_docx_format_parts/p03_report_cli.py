@@ -4426,7 +4426,7 @@ def _is_aux_name(name: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# PDF ARTIFACT SANITY (rules FMT-PDF1..FMT-PDF3).
+# PDF ARTIFACT SANITY (rules FMT-PDF1..FMT-PDF7).
 #
 # A submission package ships PDFs that must OPEN and SHOW their content outside
 # the author's own machine. Two shapes pass every existing check because they
@@ -4931,7 +4931,7 @@ def _pdf_image_pages(path: Path):
 
 
 def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
-    """FMT-PDF1..6 for one PDF (empty list = nothing proven wrong)."""
+    """FMT-PDF1..7 for one PDF (empty list = nothing proven wrong)."""
     rows = []
     name = Path(path).name
     if text is None:
@@ -5192,7 +5192,7 @@ def check_pdf(path: Path, policy: dict) -> dict:
             for i in blank if len(blank) > policy["blank_page_tolerance"]]
     if image_gap is not None:
         rows.append(image_gap)
-    # The artifact checks (FMT-PDF1..3) run on the SAME extraction: a form shell
+    # The artifact checks (FMT-PDF1..7) run on the SAME extraction: a form shell
     # has one non-blank page and would otherwise pass as clean.
     rows.extend(pdf_artifact_rows(path, text=txt, pages=res["pages"]))
     _fill_missing_row_tiers(rows)

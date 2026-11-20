@@ -5,7 +5,7 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod/v4';
-import { allowedRoots, containsPath } from './containment.mjs';
+import { allowedRoots, containedSpawnPath, containsPath } from './containment.mjs';
 import { pdfKey } from './in-flight.mjs';
 
 import { runFile } from './run-child.mjs';
@@ -85,15 +85,37 @@ serveStdio(() => {
           isError: true,
         };
       }
+      // RE-RESOLVE on the exact path the child is about to open: the containment
+      // check above judged a path the converter had not opened yet, and a
+      // symlink swapped in between escaped the roots. The child gets the REAL
+      // path that was just re-validated; a swap is refused, not followed.
+      let spawnPath = abs;
+      if (ALLOWED_ROOTS.length) {
+        try {
+          spawnPath = containedSpawnPath(abs, ALLOWED_ROOTS);
+        } catch (error) {
+          return {
+            content: [{ type: 'text', text: `refused: ${error.message}` }],
+            isError: true,
+          };
+        }
+        if (!existsSync(spawnPath)) {
+          return {
+            content: [{ type: 'text', text: `refused: docxPath must be an existing absolute `
+                                            + `.docx file: ${spawnPath}` }],
+            isError: true,
+          };
+        }
+      }
       // docx2pdf.sh writes beside the REAL input, and the destination may be
       // case-insensitive; `pdfKey` computes that destination once.
-      const key = pdfKey(abs);
+      const key = pdfKey(spawnPath);
       // 900_000 matches the orchestrator's render budget
       // (paper_pipeline.render_docx_visual(timeout=900)); a smaller server-side
       // cap would kill a slow-but-valid Word conversion before the caller's
       // own timeout and silently downgrade the render to a lower-fidelity
       // fallback.
-      const run = () => runFile(CONVERTER, [abs],
+      const run = () => runFile(CONVERTER, [spawnPath],
                                   { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);

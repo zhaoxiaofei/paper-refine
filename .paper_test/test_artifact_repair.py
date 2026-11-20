@@ -623,7 +623,9 @@ rec_wm = state_wm["runs"]["r1_w1"]
 out_wm = proc_wm.stdout + proc_wm.stderr
 check("F3b rewrite: a DELETED report FAILS the attempt -- no repair manufactures it",
       rec_wm["status"] == "failed" and not rec_wm.get("repairs")
-      and "NO repair" in out_wm and "REWRITE_REPORT.md" in out_wm
+      and not any(str(e.get("source") or "").startswith("artifact-repair")
+                  for e in rec_wm.get("attempts_log") or [])
+      and "REWRITE_REPORT.md" in out_wm
       and (rec_wm.get("attempts_log") or [{}])[0].get("n_errors", 0) >= 1,
       str([(e.get("attempt"), e.get("source")) for e in rec_wm.get("attempts_log") or []]))
 
@@ -663,7 +665,9 @@ rec_im = state_im["runs"]["r1_i1"]
 out_im = proc_im.stdout + proc_im.stderr
 check("F5b integrate: a DELETED ledger FAILS the attempt -- the stage must be re-run",
       rec_im["status"] == "failed" and not rec_im.get("repairs")
-      and "NO repair" in out_im and "DIFF_LEDGER.md" in out_im,
+      and not any(str(e.get("source") or "").startswith("artifact-repair")
+                  for e in rec_im.get("attempts_log") or [])
+      and "DIFF_LEDGER.md" in out_im,
       str([(e.get("attempt"), e.get("source")) for e in rec_im.get("attempts_log") or []]))
 
 # --- judge: the repair completes the coverage map, never the ledger ---------

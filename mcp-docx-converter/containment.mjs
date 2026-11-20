@@ -92,3 +92,26 @@ export function containsPath(target, roots) {
   return roots.some((r) => abs === r
     || abs.startsWith(r.endsWith(path.sep) ? r : r + path.sep));
 }
+
+
+/** Re-resolve an EXACT path immediately before it is handed to the child.
+ *
+ * The containment checks run on the request, then the comparer/converter opens
+ * the path in a separate process. A path swapped for a symlink in that window
+ * escaped the root. This helper re-runs the resolution on the string that is
+ * about to become argv, so the child receives the REAL path that was just
+ * re-validated (and a swap is refused instead of followed). `roots` empty means
+ * containment is off and the lexical path is returned.
+ */
+export function containedSpawnPath(target, roots) {
+  const abs = path.resolve(target);
+  if (!roots || !roots.length) return abs;
+  if (hasDanglingSymlink(abs)) {
+    throw new Error(`${abs} is a dangling symlink (it escapes DOCX_MCP_ALLOWED_ROOTS)`);
+  }
+  const real = realOrResolved(abs);
+  const ok = roots.some((r) => real === r
+    || real.startsWith(r.endsWith(path.sep) ? r : r + path.sep));
+  if (!ok) throw new Error(`${abs} is outside DOCX_MCP_ALLOWED_ROOTS`);
+  return real;
+}
