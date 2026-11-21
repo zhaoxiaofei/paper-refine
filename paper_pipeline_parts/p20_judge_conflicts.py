@@ -53,7 +53,11 @@ _JUDGE_CONFLICT_TOKEN_RE = re.compile(r"[a-z][a-z0-9_.\-/]{2,}")
 # is what keeps "M4"/"STAR2.7.5c" out). U+2212 (minus) and U+2013 (en dash, as
 # manuscripts type a range) are both accepted, then normalized to "-".
 _JUDGE_CONFLICT_NUMBER_RE = re.compile(
-    r"([-\u2212\u2013])(\d[\d,]*(?:\.\d+)?|\.\d+)"
+    # A sign GLUED to a preceding DIGIT is a range dash, not a negative number:
+    # `10-12` and `1,307–1,309` must parse as their two positive bounds, or a
+    # pure formatting difference manufactured a numeric contradiction (F006).
+    # A sign after anything else (`x−12`, `(-12)`) is still a real minus.
+    r"(?<!\d)([-\u2212\u2013])(\d[\d,]*(?:\.\d+)?|\.\d+)"
     r"|(?<![\w.])(\d[\d,]*(?:\.\d+)?|\.\d+)")
 # A small integer is a COUNT when the text marks it as one: "n = 5", "5
 # samples", "12 patients". The magnitude floor below still drops a BARE small
@@ -544,6 +548,12 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
             if not (SCORE_MIN <= score <= SCORE_MAX):
                 _drop("out_of_range_score")
                 continue
+            # An abstention (every check `unable`) is NOT a vote: aggregate_round
+            # drops it, and copying it here made a phantom direction_conflict
+            # against a real score and a false "complete" coverage claim (F002).
+            if judge_comparison_abstained(comp):
+                _drop("abstained")
+                continue
             opinions.append({
                 "judge_run": str(rec.get("id") or ""),
                 "judge_index": int(rec.get("judge_index")),
@@ -568,6 +578,7 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
             "comparisons_listed": listed,
             "comparisons_extracted": len(opinions),
             "comparisons_dropped": listed - len(opinions),
+            "abstained": int(dropped.get("abstained") or 0),
             "dropped": dict(sorted(dropped.items())),
             "complete": bool(unusable == 0 and unreadable_sheets == 0),
         })
@@ -1736,12 +1747,16 @@ def final_clean_reason(final: dict, rounds_data: list, rounds_total: int, final_
         return ("the champion was auto-promoted without a judge panel "
                 f"(round(s) {', '.join(str(r) for r in auto_promoted)}; "
                 f"--champion-select); it is PROVISIONAL, not a certified panel result")
-    if panel_gaps:
-        return "the judge panel is incomplete"
     # A NAMED gate blocker (the TOLERATED_FAIL note, an incomplete round, a
     # publication problem) is more informative than the generic provisional
     # sentence: a tolerated FINAL round was reported as "only round R of R is
-    # complete" and never named the tolerated stage (F102).
+    # complete" and never named the tolerated stage (F102). When BOTH a panel
+    # gap and named blockers exist, report both -- the early panel-gap return
+    # used to hide the actionable blockers (F011).
+    if gate_problems and panel_gaps:
+        return "; ".join(list(gate_problems) + ["the judge panel is incomplete"])
+    if panel_gaps:
+        return "the judge panel is incomplete"
     if gate_problems:
         return "; ".join(gate_problems)
     if provisional:

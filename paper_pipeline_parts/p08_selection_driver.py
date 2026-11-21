@@ -320,7 +320,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             "own_counts": {opp: len(v) for opp, v in sorted(st["own"].items())},
             "received_counts": {opp: len(v) for opp, v in sorted(st["received"].items())},
             "judges_seen": st["judges"],
-            "judges_expected": judges,
+            "judges_expected": per_judges.get(vid, judges),
             # Advisory information only (see caption_gate): the orchestrator
             # reports caption lengths and hand-off placeholders, it never gates
             # or ranks anything on them.
@@ -697,8 +697,23 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
             floor = max(0, int(floor))
         except (TypeError, ValueError):
             floor = tiebreak_defect_floor_of(ctx)
-    sel = derive_ranking(stats, candidates, base_rep,
-                         (agg or {}).get("issue_census") or {}, floor, r)
+    # Resolve a fresh arm that deduplicated into a field member so that member
+    # can compete in the arm's place (F005): `build_field`'s dropped map carries
+    # the representative. Only pay for the walk when a candidate has no stats
+    # row of its own; the ordinary full-panel round needs no resolution.
+    _representatives = {}
+    if any(c not in stats for c in candidates):
+        _field, _dropped = build_field(ctx, r)
+        _representatives = {str(d.get("id")): str(d.get("representative"))
+                            for d in (_dropped or [])
+                            if d.get("representative") and d.get("id") is not None}
+    if _representatives:
+        sel = derive_ranking(stats, candidates, base_rep,
+                             (agg or {}).get("issue_census") or {}, floor, r,
+                             representatives=_representatives)
+    else:
+        sel = derive_ranking(stats, candidates, base_rep,
+                             (agg or {}).get("issue_census") or {}, floor, r)
     for t in sel["ranking"]:
         crit, writing, manual = candidate_tiebreak_inputs(ctx, r, t["id"])
         t["critical_remaining"] = crit
@@ -766,13 +781,14 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
     """The run's per-member summary table (header row, then one row per member).
 
     Every member gets its three evidence columns filled from the round's own
-    records: `defects@K` and the severity totals come from the panel's issue
-    census -- the SAME numbers the ranking reads, over the SAME adaptive prefix
-    -- and `writing*` falls back to the round's frozen review for the rows that
-    have no producing session to self-report it (the pristine original, the
-    round's base), then to the producing run's own marker for an arm the ranking
-    did not admit. A '-' therefore means "this root genuinely has no record",
-    not "this member was not ranked".
+    records: `defects@K` is the adaptive-prefix count the ranking reads, while
+    the severity totals are the WHOLE issue census (all cells, not the prefix),
+    so a row can legitimately show defects@K=2 beside totals summing to 30 --
+    they answer different questions. `writing*` falls back to the round's frozen
+    review for the rows that have no producing session to self-report it (the
+    pristine original, the round's base), then to the producing run's own marker
+    for an arm the ranking did not admit. A '-' therefore means "this root
+    genuinely has no record", not "this member was not ranked".
     """
     st = agg["stats"]
     ranking_by_id = {row["id"]: row for row in (sel.get("ranking") or [])}

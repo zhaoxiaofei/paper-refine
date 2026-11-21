@@ -176,7 +176,7 @@ def champion_sort_key(row: dict) -> tuple:
 
 
 def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
-                   floor: int, round_no: int) -> dict:
+                   floor: int, round_no: int, representatives: dict = None) -> dict:
     """Rank the round's candidates from RECORDED inputs only (Rule 6's purity).
 
     Every input is plain data: the panel's per-version statistics (`stats`), the
@@ -198,8 +198,9 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     writing_remaining / manual_steps), which never rank.
     """
     trace = []
-    candidates = list(candidates or [])
-    missing = [c for c in candidates if c not in stats]
+    candidates = [str(c) for c in (candidates or [])]
+    representatives = {str(k): str(v) for k, v in (representatives or {}).items() if v}
+    missing = [c for c in candidates if c not in stats and c not in representatives]
     if missing:
         trace.append(f"candidate(s) {missing} are not field members this round (their content was "
                      f"deduplicated into another member, or the arm did not run) -> not eligible "
@@ -207,8 +208,35 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     # (id to crown, id of the row that carries its stats, is_base)
     contenders = [(c, c, False) for c in candidates if c in stats]
     # A candidate that deduplicated away is still represented in the field by
-    # the member it merged into; that member's row is already a contender of its
-    # own, so nothing is silently lost from the ranking.
+    # the member it merged into. That representative's row can be used as the
+    # candidate's row, so the content is not silently lost from the ranking
+    # (F005). The base representative is excluded here: the base already
+    # competes through `base_rep` below, and adding it twice would double its
+    # weight.
+    used_rows = {row_id for _cid, row_id, _is_base in contenders}
+    for cid in candidates:
+        if cid in stats:
+            continue
+        rep = representatives.get(cid)
+        if rep is None:
+            continue
+        if rep not in stats:
+            trace.append(f"candidate {cid!r} is content-identical to field member {rep!r}, but "
+                         f"that member has NO stats row in this field -> not eligible to win")
+            continue
+        if rep == base_rep:
+            trace.append(f"candidate {cid!r} is content-identical to the round's base "
+                         f"{base_rep!r}; the base row already competes")
+            continue
+        if rep in used_rows:
+            trace.append(f"candidate {cid!r} is content-identical to field member {rep!r}, "
+                         f"which already competes -> the content is represented once")
+            continue
+        contenders.append((cid, rep, False))
+        used_rows.add(rep)
+        trace.append(f"candidate {cid!r} is content-identical to field member {rep!r}; that "
+                     f"member's row is {cid}'s row and competes, so the content is not silently "
+                     f"lost")
     if base_rep and base_rep not in stats:
         # The round's base member has no panel row (a trimmed/legacy state): it
         # cannot compete, and subscripting it would abort the whole decision.
@@ -275,7 +303,7 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
                          f"{absent_stats} -> ineligible: a legacy/partial stats provider "
                          f"cannot be ranked")
             continue
-        eligible.append(cid)
+        eligible.append((cid, row_id))
     if not eligible:
         trace.append("no eligible rows: the champion falls back to A1_r (this round made no "
                      "demonstrable, non-regressing progress). If the cause was an incomplete "
@@ -290,8 +318,7 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
                 "tiebreak": {"floor": floor, "cells_used": 0, "cell_order": [],
                              "cells_total": len(tiebreak_cell_names())}}
     rows = []
-    for cid in eligible:
-        row_id = base_rep if cid == A1_ID and base_rep else cid
+    for cid, row_id in eligible:
         st = stats[row_id]
         rows.append({"id": cid, "rep": row_id, "is_base": bool(cid == A1_ID and base_rep),
                      "n": st["n"], "median": st["median"], "mean": st["mean"],
@@ -412,7 +439,8 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
                  "on the field-wide list. MANUAL_STEPS.md is reported but never ranked on; "
                  "missing counts sentinel = +inf")
     return {"champion": champ_row["id"], "champion_rep": champ_row["rep"],
-            "base_rep": base_rep, "eligible": eligible, "ranking": rows, "trace": trace,
+            "base_rep": base_rep, "eligible": [cid for cid, _row in eligible],
+            "ranking": rows, "trace": trace,
             "tiebreak": {"floor": floor, "cells_used": prefix_cells,
                          "cell_order": cell_names[:prefix_cells],
                          "cells_total": len(cell_names)}}

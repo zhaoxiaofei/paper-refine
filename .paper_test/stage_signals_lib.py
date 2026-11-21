@@ -1007,6 +1007,17 @@ def test_registry_reader_backup_and_compaction():
     rec["scores"] = {"run_id": "r1_judge_zz", "comparisons": [{"opponent_label": "v1",
                                                                "score": 0}]}
     big_before = len(json.dumps(rec))
+    # Compaction now requires the full artifact to exist (F063): a summary
+    # that points at a missing file would be the only copy lost. Write the
+    # three artifacts this fixture claims.
+    ctx.reports_dir.mkdir(parents=True, exist_ok=True)
+    (ctx.reports_dir / "judge_evidence_r1_judge_zz.json").write_text(
+        json.dumps({"label": "r1_judge_zz"}), encoding="utf-8")
+    _sb = ctx.root / "runs" / "r1_judge_zz"
+    _sb.mkdir(parents=True, exist_ok=True)
+    (_sb / "CODE_SCANS_after.json").write_text(json.dumps({"after": []}), encoding="utf-8")
+    (_sb / "FORMAT_FIX_r1_judge_zz.json").write_text(
+        json.dumps({"label": "r1_judge_zz"}), encoding="utf-8")
     ctx.save_state()
     st = json.loads(state_path.read_text(encoding="utf-8"))
     got = st["runs"]["r1_judge_zz"]

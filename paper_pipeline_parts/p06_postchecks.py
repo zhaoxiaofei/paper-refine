@@ -493,7 +493,10 @@ def _copy_session_tools(sb: Path, stamp: float = None,
                 missing = _missing_bundle_assets(driver_src.parent)
                 if missing:
                     raise OSError(f"incomplete driver bundle: {', '.join(missing)}")
-                copy_asset_dirs(driver_src.parent, tool_dir, names=PIPELINE_ASSET_DIRS)
+                # The required skill assets (F073) travel with the
+                # self-contained bundle, or its own pre-flight refuses it.
+                copy_asset_dirs(driver_src.parent, tool_dir,
+                                names=PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS)
                 for name in PIPELINE_MODULE_FILES:
                     _safe_restore_copy(driver_src.parent / name, tool_dir / name, sb)
                 # The full skill pack is optional in a manual sandbox. The
@@ -2083,6 +2086,13 @@ def _coverage_disposition_ok(value) -> bool:
     m = _COVERAGE_NAMED_BASIS_RE.search(text)
     if m is None:
         return True          # "N findings"
+    # A `clean -- basis:` tail that says the sweep never RAN is not a basis.
+    # The count-negation test used to run only for the "N findings" form, so
+    # "clean -- basis: the sweep did not run" certified a non-run (F014). It is
+    # NOT applied to `unable --`, where "could not run" is a legitimate reason.
+    if re.match(r"(?i)^\s*clean\b", text) \
+            and _COVERAGE_COUNT_NEGATED_RE.search(m.group(1) or ""):
+        return False
     return _coverage_reason_named(m.group(1))
 
 
@@ -2131,7 +2141,15 @@ def _coverage_row_disposition_ok(row) -> bool:
     if not detail:
         return False
     match = re.search(r"(?i)\b(?:basis|reason)\s*:\s*([^\n]+)", detail)
-    return bool(match and _coverage_reason_named(match.group(1)))
+    if not match:
+        return False
+    reason = match.group(1)
+    # The bare-`clean` route must refuse a basis that says the sweep never ran,
+    # exactly like the inline `clean -- basis:` form (F014). `unable` keeps
+    # "could not run" as a legitimate reason.
+    if bare == "clean" and _COVERAGE_COUNT_NEGATED_RE.search(reason):
+        return False
+    return bool(_coverage_reason_named(reason))
 
 
 def visual_tools_available() -> bool:
@@ -3246,6 +3264,29 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                     f"explicitly that the template was NOT visually verified and hand it to "
                     f"the author)")
             if docs:
+                # The manifest's `ok` is not proof the render still exists: a
+                # cache prune/deletion leaves the record claiming success while
+                # no page was ever copied, and the gate certified a visual
+                # comparison nobody could perform (F022).
+                render_missing = []
+                for d in docs:
+                    _role = str(d.get("role") or "").strip()
+                    _pdf = str(d.get("pdf") or "").strip()
+                    if not (_role and _pdf):
+                        # A legacy/synthetic manifest may record only a source
+                        # and page count; there is no render path to verify.
+                        continue
+                    if not _render_evidence_is_real(
+                            sandbox / VISUAL_TEMPLATE_DIR / _role / _pdf):
+                        render_missing.append(_pdf)
+                if render_missing:
+                    errs.append(
+                        f"{label}: {VISUAL_TEMPLATE_DIR}/manifest.json records a successful "
+                        f"template render, but its PDF is missing or not a real PDF: "
+                        f"{', '.join(render_missing[:4])} -- the required template "
+                        f"comparison did not happen. Re-render it, or state explicitly "
+                        f"that the template was NOT visually verified and hand it to the "
+                        f"author")
                 missing = []
                 for d in docs:
                     name = str(d.get("source") or "").lower()
@@ -7135,8 +7176,15 @@ COVER_LETTER_OVERRIDE_CITE_RE = re.compile(
 COVER_LETTER_OVERRIDE_REQUIRE_RE = re.compile(
     r"\b(?:requires?|required|mandates?|mandatory|specif(?:y|ies|ied)|instructs?|"
     r"states?|says|asks? for|calls for|directs?)\b", re.I)
+# An affirmative closure is not a fixed five-word vocabulary: a real run closed
+# the row with "As is -- the letter follows the manuscript template's styles"
+# and bypassed the journal-override requirement entirely (F018). The common
+# affirmative synonyms are all OK closures; a real remediation ("fixed",
+# "reformatted") and `unable` are deliberately NOT.
 COVER_LETTER_OK_CLOSE_RE = re.compile(
-    r"^\s*(?:ok\b|okay\b|ok\s*[—–\-:]|acceptable\b|no change\b|pass(?:es)?\b|clean\b)",
+    r"^\s*(?:ok\b|okay\b|ok\s*[—–\-:]|acceptable\b|no change\b|pass(?:es)?\b|"
+    r"clean\b|as[\s-]+is\b|accept(?:ed|able)?\b|keep\b|kept\b|fine\b|"
+    r"no\s+(?:defect|issue)\b|unchanged\b|retain(?:ed)?\b)",
     re.I)
 
 

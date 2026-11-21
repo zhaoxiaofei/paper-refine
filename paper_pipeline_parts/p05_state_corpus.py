@@ -532,7 +532,10 @@ def load_state_file(path: Path) -> tuple:
         # (inf became a string, a real string gained a NUL); read_json() is the
         # matching reader and every other pipeline-written JSON already uses it.
         return _json_revive(json.loads(text)), ""
-    except ValueError as e:                                       # noqa: BLE001
+    except (ValueError, RecursionError) as e:                     # noqa: BLE001
+        # A deeply nested but valid JSON document raises RecursionError, not
+        # ValueError; it must take the documented problem-string path instead of
+        # crashing every command with a bare traceback (F066).
         return None, f"is not valid JSON ({e})"
 
 
@@ -568,7 +571,7 @@ def _format_fix_summary(rep: dict, path_rel: str) -> dict:
     return out
 
 
-def compact_state(st: dict) -> int:
+def compact_state(st: dict, root: Path = None) -> int:
     """Replace the registry's redundant BULK with summaries; return bytes freed.
 
     Only write-only fields whose full payload is already on disk are touched, and
@@ -594,6 +597,18 @@ def compact_state(st: dict) -> int:
             payload = rec.get(field)
             if not isinstance(payload, dict) or payload.get("compacted"):
                 continue
+            if root is not None:
+                # The summary REPLACES the only in-registry copy with a pointer.
+                # A crash between assigning the payload and writing its artifact
+                # (or a restored state.json whose reports/ was lost) would
+                # otherwise destroy the evidence: compact only when the full
+                # artifact really exists and is non-empty (F063).
+                try:
+                    artifact = Path(root) / path_rel
+                    if not artifact.is_file() or artifact.stat().st_size <= 0:
+                        continue
+                except OSError:
+                    continue
             freed += len(json.dumps(payload, default=str))
             rec[field] = summarize(payload, path_rel)
     return freed
@@ -902,7 +917,7 @@ class Ctx:
         # COMPACT before writing: the fields `compact_state` drops are copies of
         # files that live on disk anyway, and keeping them here is what turned
         # the 2026-09-24 registry into 78 MiB (and then into a refused root).
-        freed = compact_state(self.state)
+        freed = compact_state(self.state, self.root)
         if freed:
             self.state.setdefault("log", []).append(
                 {"ts": utcnow(), "event": "state-compacted", "run_id": None,
@@ -3613,7 +3628,11 @@ def failed_sandbox_dir(ctx: Ctx, rec: dict, attempt: int = None) -> Path:
     if not _safe_state_segment(rid):
         die(f"refusing a failed-sandbox path for unsafe run id {rid!r} (it must be one "
             f"path component); repair state.json")
-    n = int(attempt or 0) or (len(list(ctx.runs_dir.glob(f"{rid}_try*_failed"))) + 1)
+    # The run id is a filename component from state.json: escape glob
+    # metacharacters or a tampered id (`*`) makes this count other runs'
+    # archives (F060).
+    n = int(attempt or 0) or (len(list(ctx.runs_dir.glob(
+        f"{glob.escape(rid)}_try*_failed"))) + 1)
     return ctx.runs_dir / (rid + FAILED_SUFFIX_FMT.format(n=n))
 
 
@@ -3765,7 +3784,10 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
         try:
             sb.rename(dest)
         except OSError:
-            shutil.copytree(sb, dest)
+            # Copy the TREE, not the files its links point at: the default
+            # symlinks=False materialized every link (legitimate evidence areas
+            # and agent-planted links alike) as its target (F065).
+            shutil.copytree(sb, dest, symlinks=True)
             rmtree_force(sb, ignore_errors=True)
         write_json_atomic(dest / "record.json", record)
     if entry is not None:
@@ -3923,7 +3945,8 @@ def best_failed_trial(ctx: Ctx, rec: dict):
         # A collision-suffixed archive (`..._try3_failed-2`, produced by
         # unique_path when the destination already exists) is still this run's
         # trial; the old suffix-free glob and ordinal regex missed it (F108).
-        kept = sorted(ctx.runs_dir.glob(f"{rid}_try*_failed*"))
+        # Same escape as prune: the id comes from state.json (F060).
+        kept = sorted(ctx.runs_dir.glob(f"{glob.escape(rid)}_try*_failed*"))
     except OSError:
         kept = []
     for p in kept:
@@ -4327,7 +4350,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
         if (fb / "feedback").is_dir():
             ensure_copy(fb / "feedback", sb / "feedback")
             extra_inputs["feedback"] = hash_manifest(sb / "feedback", follow_dir_links=True)
-    (sb / REWRITTEN_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / REWRITTEN_DIR)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
@@ -4511,7 +4534,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                       if a_rec is not None else None)
         if a_findings is not None and a_findings.is_file():
             review_a_findings = sha256_file(a_findings)
-    (sb / GUIDED_REVIEW_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / GUIDED_REVIEW_DIR)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     # Seed the M20 formatting sweep: the code-side OOXML scan IS the enumeration
@@ -4631,7 +4654,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
             ensure_copy(ctx.sandbox_of(rev_rec) / "concerns", sb / "concerns")
         if (ctx.sandbox_of(rev_rec) / "feedback").is_dir():
             ensure_copy(ctx.sandbox_of(rev_rec) / "feedback", sb / "feedback")
-    (sb / "audit").mkdir(exist_ok=True)
+    safe_mkdir(sb / "audit")
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "audit")
@@ -4940,7 +4963,7 @@ def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    (sb / COLD_START_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / COLD_START_DIR)
     # The cold-start prompt tells the session to check the structure the venue's
     # own recorded rule set requires, and the prompt appends `venue_norm_for(ctx)`
     # like every other role. Both are actionable only when the venue template is
@@ -5820,7 +5843,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                 "the reviser consumes the AUDITED finding list (--audit on)")
         ensure_copy(ctx.sandbox_of(aud_rec) / "audit", sb / "audit")
         aud_manifest = hash_manifest(sb / "audit")
-    (sb / REVISED_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / REVISED_DIR)
     # Seed the ledger and the language-pass coverage table EMPTY-BUT-SHAPED (a
     # head start, not a pass: the empty cells are still postcheck errors; the
     # completion marker is not seeded, so a stopped stage stays unfinished).
@@ -5935,11 +5958,22 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     # read as if it were a member of this round).
     others_dir = sb / "others"
     if others_dir.is_dir():
-        for stale in [p for p in others_dir.iterdir()
-                      if p.is_dir() and p.name not in other_ids]:
-            rmtree_force(stale, ignore_errors=True)
+        # EVERY entry that is not a current donor is removed, not only
+        # directories: a leftover regular file/symlink survived, entered the
+        # inputs manifest and was visible to the integrator (F071).
+        for stale in list(others_dir.iterdir()):
+            if stale.name in other_ids:
+                continue
+            try:
+                if stale.is_symlink() or not stale.is_dir():
+                    stale.unlink()
+                else:
+                    rmtree_force(stale, ignore_errors=True)
+            except OSError as e:
+                print(f"[run] WARNING: could not remove stale donor entry {stale}: {e}",
+                      file=sys.stderr)
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    (sb / INTEGRATED_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / INTEGRATED_DIR)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
@@ -6237,6 +6271,10 @@ def build_field(ctx: Ctx, r: int) -> tuple:
         e["fingerprint"] = fp
         if fp in seen:
             dropped.append({"id": e["id"],
+                            # The representative lets a caller resolve a
+                            # deduplicated CANDIDATE to the field member whose
+                            # panel row judges the same content (F005).
+                            "representative": seen[fp],
                             "reason": f"content-identical (same documents, ignoring file names "
                                       f"and bookkeeping text) to '{seen[fp]}' -- deduplicated"})
             continue
@@ -6666,7 +6704,10 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
     elif kind == "response":
         tgt_rel = str(rec.get("target_dir") or "").strip()
         if tgt_rel:
-            tgt = ctx.root / tgt_rel
+            # A recorded path is DATA: an absolute value would discard the root
+            # and `../` would escape it, so the revalidation hashed outside
+            # content (F064).
+            tgt = contained_under(ctx.root, tgt_rel)
             if tgt.is_dir() and (sb / "target").is_dir():
                 # The sandbox target/ is copied with exclude_top=("work",) and
                 # skip_aux=True; comparing it with the FULL source manifest made

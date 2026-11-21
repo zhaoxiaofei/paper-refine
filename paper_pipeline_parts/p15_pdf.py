@@ -608,7 +608,9 @@ def pdf_readme(manifest: dict) -> str:
 
 def pdf_summary(manifest: dict, rounds=None) -> None:
     """One-line summary of a PDF manifest (failures are warnings, never errors)."""
-    rounds = set(int(r) for r in rounds) if rounds else None
+    # An EXPLICIT empty list means NO rounds (the documented contract of
+    # run_pdf_conversion); collapsing it to None summarised every set (F024).
+    rounds = None if rounds is None else {int(r) for r in rounds}
     sets = [s for s in manifest["sets"]
             if rounds is None or int(s.get("round") or 0) in rounds]
     docs = [d for s in sets for d in s["documents"]]

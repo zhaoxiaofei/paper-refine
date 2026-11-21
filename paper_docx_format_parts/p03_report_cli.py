@@ -798,7 +798,7 @@ def _kill_tool_group(proc) -> None:
         pass
 
 
-def _run_text_tool(argv, timeout: int) -> tuple:
+def _run_text_tool(argv, timeout: int, cwd=None) -> tuple:
     """Run a child with output bounded in size AND lifetime.
 
     The old version pointed stdout/stderr at unbounded TemporaryFiles and
@@ -810,7 +810,7 @@ def _run_text_tool(argv, timeout: int) -> tuple:
     stream raises `ToolOutputOverBudget` as before.
     """
     cap = MAX_TOOL_OUTPUT_BYTES
-    proc = subprocess.Popen([str(a) for a in argv], stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen([str(a) for a in argv], cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             **_tool_popen_kwargs())
     over_budget = threading.Event()
@@ -2220,6 +2220,13 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     try:
         with zipfile.ZipFile(src) as pkg:
             problem = _docx_zip_problem(pkg)
+            if problem:
+                raise ValueError(problem)
+            # A repeated member name is an AMBIGUOUS package: the dict below
+            # would silently keep the LAST copy and the fixer would rewrite one
+            # of them while reporting success (F029). Refuse it, exactly as the
+            # strip/refresh helpers already do.
+            problem = _docx_duplicate_member_problem(pkg)
             if problem:
                 raise ValueError(problem)
             parts = {}
@@ -4334,18 +4341,23 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
                     n for n in names
                     if n == "work" or _is_aux_name(n)
                     or (Path(d) == path.parent and n == target_dir.name)])
-            proc = subprocess.run(argv + [path.name], cwd=str(target_dir),
-                                  capture_output=True, text=True, timeout=timeout)
+            # The shared bounded runner puts latexmk in its OWN session, caps
+            # both streams and kills the whole process GROUP on timeout.
+            # `subprocess.run(capture_output=True)` allocated every byte the
+            # engine printed and left pdflatex children holding the pipe open
+            # after the direct child was killed (F035).
+            returncode, _stdout, _stderr = _run_text_tool(
+                argv + [path.name], timeout, cwd=str(target_dir))
         except (OSError, subprocess.SubprocessError, shutil.Error) as e:
             return {"file": str(path), "kind": "tex", "ok": False, "engine": name,
                     "errors": [f"{type(e).__name__}: {e}"],
                     "detail": "the compile step itself failed"}
-        out = (proc.stdout or "") + (proc.stderr or "")
+        out = (_stdout or "") + (_stderr or "")
         errors = [ln.strip() for ln in out.splitlines() if ln.startswith("!")][:5]
-        return {"file": str(path), "kind": "tex", "ok": proc.returncode == 0, "engine": name,
+        return {"file": str(path), "kind": "tex", "ok": returncode == 0, "engine": name,
                 "errors": errors, "detail": (errors[0] if errors else
-                                             ("compiled" if proc.returncode == 0
-                                              else f"engine exited {proc.returncode}"))}
+                                             ("compiled" if returncode == 0
+                                              else f"engine exited {returncode}"))}
     finally:
         # A validation pass over N .tex files must not leak N full project
         # copies. Only the compile copy this call created is removed from an
@@ -5376,8 +5388,15 @@ def _table_cell_widths(row: str) -> list:
                         width = int(raw)
                     except ValueError:
                         width = None
-            gs = re.search(r'<w:gridSpan[^>]*w:val="(\d+)"', body)
-            span = int(gs.group(1)) if gs else 1
+            # XML allows single-quoted attributes: a legal `w:val='2'` was
+            # read as span 1, so a merged cell was not recognised and the
+            # geometry rules could rewrite a misaligned grid (F040).
+            gs = re.search(r"<w:gridSpan(?=[\s/>])[^>]*>", body)
+            gs_val = attr_of(gs.group(0), "w:val") if gs else None
+            try:
+                span = int(gs_val) if gs_val is not None else 1
+            except ValueError:
+                span = 1
         out.append((width, span))
     return out
 

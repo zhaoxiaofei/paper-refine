@@ -750,12 +750,36 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
                                dedup=rec.get("dedup_mode") or "off")
                if field else {"issue_rows": [], "field": []})
     rows = defect_list_rows(ctx, r, agg)
+    # An explicit disable (--no-defect-audit / agent_cmd None) wins over a stored
+    # audit: the operator asked for no audit in THIS invocation. It must also
+    # win over the empty-rows early return -- R02: otherwise a round with no
+    # defect rows leaves a previous SUCCESS's TP-only family on disk, which
+    # looks like this invocation's result while the record says audit off.
+    if not use_agent or agent_cmd is None:
+        # An OFF audit must not leave a previous SUCCESS's TP-only family on
+        # disk: the stale files look like this invocation's result while the
+        # record says the audit was disabled (F020). Remove them and record the
+        # disabled state, exactly as the failed path does. The diagnostic
+        # surface lives on `ctx.reports_dir`; a duck-typed context that carries
+        # no report area (aggregation-only callers/tests) has no stale family
+        # and nowhere to record one, so it still gets the disabled result.
+        removed = []
+        reports_dir = getattr(ctx, "reports_dir", None)
+        if reports_dir is not None:
+            removed = _remove_audited_defect_reports(ctx, r)
+            meta_path = reports_dir / f"round{int(r)}_defect_audit.json"
+            try:
+                write_json_atomic(meta_path, {
+                    "run": ctx.root.name, "round": r, "generated": utcnow(),
+                    "ok": False, "used": False, "audit": "off",
+                    "reason": "the LLM defect audit is off", "rows": len(rows)})
+            except OSError as e:                                 # noqa: BLE001
+                print(f"[defect-audit] WARNING: could not record the disabled audit at "
+                      f"{meta_path}: {e}")
+        return {"used": False, "reason": "the LLM defect audit is off",
+                "rows": len(rows), "removed": removed}
     if not rows:
         return {"used": False, "reason": "no defect rows to audit", "rows": 0}
-    # An explicit disable (--no-defect-audit / agent_cmd None) wins over a stored
-    # audit: the operator asked for no audit in THIS invocation.
-    if not use_agent or agent_cmd is None:
-        return {"used": False, "reason": "the LLM defect audit is off", "rows": len(rows)}
     judge_runs = {}
     for rec in ctx.runs(kind="judge", round_no=r):
         judge_runs[str(rec.get("id"))] = {

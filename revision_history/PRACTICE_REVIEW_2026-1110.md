@@ -68,7 +68,7 @@ left alone. It is repository bookkeeping, not submission content.
 * **Token/spend budgets.** The CLI backends do not expose a reliable per-session
   usage signal to this orchestrator. The wall-clock timeout and retry budget
   remain; a fabricated token cap would be worse than an honest wall-clock cap.
-* **Live-model evaluation / CI.** The 193 offline suites (now including
+* **Live-model evaluation / CI.** The 270 offline suites (now including
   `test_agent_security_trace.py`) prove the plumbing and the prompt contracts;
   they do not measure a model's task quality. A small real-model replay set is
   the next step if the operator wants that metric.

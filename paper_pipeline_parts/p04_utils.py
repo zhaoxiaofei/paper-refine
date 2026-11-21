@@ -1947,10 +1947,12 @@ def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
     try:
         with _open_reserved_tmp(tmp, "wb" if binary else "w",
                                 encoding=encoding, newline=newline) as f:
-            write(f)
-            f.flush()
+            # Apply the final mode BEFORE writing: the temp is created
+            # 0o666-minus-umask, so a secret-bearing registry was readable (F059).
             if mode is not None:
                 os.fchmod(f.fileno(), int(mode))
+            write(f)
+            f.flush()
             if fsync:
                 try:
                     os.fsync(f.fileno())
@@ -2124,10 +2126,11 @@ def write_csv_atomic(path, fields, rows) -> Path:
     def do(f) -> None:
         w = csv.DictWriter(f, fieldnames=list(fields))
         w.writeheader()
-        w.writerows(rows)
+        w.writerows({k: _csv_safe_cell(v) for k, v in row.items()} for row in rows)
 
     _atomic_write_bytes(tmp, path, do, newline="")
     return path
+
 
 
 JSON_MAX_NESTING = 1000
@@ -9506,18 +9509,6 @@ def contained_under(root, rel) -> Path:
 
 def _aux_ignore(_dir, names):
     return [n for n in names if _is_aux_doc(n)]
-
-
-def _corpus_ignore(skip_aux: bool, strip_bookkeeping: bool):
-    """shutil.copytree ignore-callback for a VERSION CORPUS copy."""
-    def _ignore(_dir, names):
-        out = []
-        if skip_aux:
-            out += [n for n in names if _is_aux_doc(n)]
-        if strip_bookkeeping:
-            out += [n for n in names if is_bookkeeping_name(n)]
-        return out
-    return _ignore
 
 
 # ---- permissions: the raw-data directory is READ-ONLY by contract -----------

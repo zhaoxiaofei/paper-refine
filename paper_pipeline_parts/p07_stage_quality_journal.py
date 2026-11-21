@@ -2254,13 +2254,14 @@ def build_issue_census(observations, field_ids, sessions_expected=None,
     accepted = {}                   # (version, source) -> [(class, (line, words), session)]
     for sess, target, opp, comp in observations:
         if target in census:
-            # OPPORTUNITIES are opponent comparisons, not judge sessions: one
-            # session comparing a version with seven opponents gave the version
-            # one opportunity and a 7x-inflated own_rate (the 2026-10-28 audit's
-            # F29). `own_sessions`/`peer_sessions` stay the session counts.
-            census[target]["own_opps"].add(str(opp))
+            # OPPORTUNITIES are one per (session, opponent) COMPARISON, not per
+            # distinct opponent: with two judges and two opponents a version can
+            # carry four mentions over two opponent ids, and dividing by the ids
+            # alone reported own_rate 2.0 (F004). `own_sessions`/`peer_sessions`
+            # stay the session counts.
+            census[target]["own_opps"].add((str(sess), str(opp)))
         if opp in census:
-            census[opp]["peer_opps"].add(str(target))
+            census[opp]["peer_opps"].add((str(sess), str(target)))
         items = ledger_items(comp)
         if not items:
             continue
@@ -3971,7 +3972,10 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
         rec0 = ctx.run(rid) or {}
         tgt_rel = str(rec0.get("target_dir") or "").strip()
         if tgt_rel:
-            target = ctx.root / tgt_rel
+            # A recorded path is DATA: an absolute value would discard the root
+            # and `../` would escape it, and this tree is COPIED into the stage
+            # (F064).
+            target = contained_under(ctx.root, tgt_rel)
         elif journal_is_scoped(ctx):
             rev_rec = ctx.run(rid_for_fresh(r, revise_vid(1)))
             if rev_rec is None:

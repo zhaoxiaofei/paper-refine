@@ -60,7 +60,8 @@ _CONTENT_UNIT_CONTAINED = 1.0
 # effective". A merge must preserve the polarity of the unit it covers.
 _CONTENT_NEGATION_RE = re.compile(
     r"(?i)\b(?:not|no|never|none|neither|nor|cannot|can't|won't|isn't|aren't|"
-    r"wasn't|weren't|doesn't|don't|didn't)\b")
+    r"wasn't|weren't|doesn't|don't|didn't|failed|fails|failing|without|unable|"
+    r"lacked|lacks|lacking|refused|refuses|prevented|prevents|absent)\b")
 
 
 def _content_unit_contained(unit: dict, candidates: list,
@@ -452,15 +453,27 @@ def _reason_denies_movement(reason: str) -> bool:
     (`was not lost and was moved to Methods`) and the additive
     `not only moved but also merged`, both of which are real reasons.
     """
-    verbs = (r"(?:moved?|merged?|folded?|relocated?|integrated?|reported|"
-             r"restated?|included?|placed?|put|found|survives?)")
-    negations = (r"(?:not|never|no|failed|didn't|did\s+not|cannot|can't|"
-                 r"without)")
+    verbs = (r"(?:moved?|moving|merged?|merging|folded?|folding|relocated?|relocating|"
+             r"integrated?|integrating|reported|reporting|restated?|restating|"
+             r"included?|including|placed?|placing|put|putting|found|finding|"
+             r"survives?|surviving)")
+    negations = (r"(?:not|never|no|failed|unable|didn't|did\s+not|could\s+not|"
+                 r"cannot|can't|without)")
+    # A denial can be POST-POSED after the movement word: "moving to Methods
+    # was not possible" / "merging into Results could not be done". The old
+    # clause test required the negation to precede the verb, so these fell
+    # through to the 4-word floor and closed a deleted paragraph as OK (F016).
+    postposed = re.compile(
+        r"(?i)\b(?:was|were|is|are|could|can|would|will|has|have|had)\s+"
+        r"(?:not|never|cannot)\b[^.;\n]{0,30}\b"
+        r"(?:possible|done|performed|carried\s+out|made|allowed|feasible|successful)\b")
     for clause in re.split(
             r"(?i)\b(?:and|but|because|while|although|whereas)\b|[.;,]", reason):
         # "not only moved but also merged" is additive, not a denial.
         if re.search(r"(?i)\bnot\s+(?:only|just)\b", clause):
             continue
+        if postposed.search(clause):
+            return True
         neg = re.search(r"(?i)\b" + negations + r"\b", clause)
         verb = re.search(r"(?i)\b" + verbs + r"\b", clause)
         if neg and verb and neg.start() < verb.start():

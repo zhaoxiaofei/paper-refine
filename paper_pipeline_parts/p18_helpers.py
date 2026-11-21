@@ -255,6 +255,49 @@ def run_bounded(argv, timeout, cwd=None, env=None):
     return proc.returncode, out, err
 
 
+def safe_mkdir(path) -> Path:
+    """Create a pipeline-owned OUTPUT directory without following a link.
+
+    A sandbox is reused across attempts, so a previous attempt can leave
+    `sb/revised` (or `sb/guided_review`) as a symlink to an outside directory.
+    `mkdir(exist_ok=True)` follows it and the stage's candidate is written
+    outside `--root`. Refuse any symlinked component, and a symlink at the
+    target itself, BEFORE creating or using the directory (F061).
+    """
+    path = Path(path)
+    try:
+        _refuse_symlinked_parent(path / "_")
+    except OSError as e:
+        die(f"refusing to create output directory {path}: {e}. An output "
+            f"directory must be a real directory inside the run sandbox, never a "
+            f"link to an outside path")
+    if path.is_symlink():
+        die(f"refusing to create output directory {path}: it is a symlink (an output "
+            f"directory must be a real directory inside the run sandbox)")
+    if path.exists() and not path.is_dir():
+        die(f"refusing to create output directory {path}: it exists and is not a directory")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+# A spreadsheet treats a cell beginning with one of these as a FORMULA. The
+# reports carry agent-written evidence/check text verbatim, so an untrusted row
+# could execute a formula when the operator opens the CSV (F087).
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_safe_cell(value):
+    """Neutralise a spreadsheet formula in one CSV cell.
+
+    Only STRINGS are touched: a numeric `-12` is a number, not a formula, and
+    prefixing it would turn a real value into text. A string that starts with a
+    formula character gets the conventional leading apostrophe.
+    """
+    if isinstance(value, str) and value[:1] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
 TEX_VERBATIM_ENVS = ("verbatim", "lstlisting", "minted", "Verbatim")
 
 
@@ -746,7 +789,15 @@ def _docx_xml_part(z: zipfile.ZipFile, name: str):
         return None
     if info.file_size > MAX_DOCX_PART_BYTES:
         return None
-    data = z.read(name)
+    # `file_size` is attacker-controlled central-directory metadata, and
+    # `ZipFile.read(name)` (no length) decompresses the WHOLE stream before the
+    # CRC check, so a forged small size still expanded without bound (F017).
+    # Read through a bounded length and reject the one byte that proves the
+    # real part is over budget.
+    with z.open(info) as fh:
+        data = fh.read(MAX_DOCX_PART_BYTES + 1)
+    if len(data) > MAX_DOCX_PART_BYTES:
+        return None
     text = data.decode("utf-16", "ignore") if data[:2] in (b"\xff\xfe", b"\xfe\xff") \
         else data.decode("utf-8", "ignore")
     if "<!DOCTYPE" in text or "<!ENTITY" in text:
@@ -2060,6 +2111,26 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
     return info
 
 
+def _corpus_ignore(skip_aux: bool, strip_bookkeeping: bool):
+    """shutil.copytree ignore-callback for a VERSION CORPUS copy."""
+    def _ignore(dirpath, names):
+        out = []
+        # Exclude only REGULAR FILES: the manifest functions filter `is_file()`,
+        # so a DIRECTORY whose name happens to look auxiliary/bookkeeping (e.g.
+        # `notes.tracking-a1.docx/`) stayed in the manifest while the copy
+        # dropped it, and the digest no longer described the copied corpus
+        # (F062).
+        def _file(name):
+            full = os.path.join(dirpath, name)
+            return os.path.isfile(full) and not os.path.islink(full)
+        if skip_aux:
+            out += [n for n in names if _is_aux_doc(n) and _file(n)]
+        if strip_bookkeeping:
+            out += [n for n in names if is_bookkeeping_name(n) and _file(n)]
+        return out
+    return _ignore
+
+
 def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
               strip_bookkeeping: bool = False, normalize_mtime: bool = False,
               root: Path = None, exclude_top_only=()) -> None:
@@ -2193,7 +2264,10 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
             # copying an arbitrary target into a corpus, sandbox or judge view.
             skipped.append(str(entry))
             continue
-        if skip_aux and _is_aux_doc(entry.name):
+        if skip_aux and entry.is_file() and _is_aux_doc(entry.name):
+            # Only a FILESYSTEM FILE is an auxiliary document: a DIRECTORY with
+            # an auxiliary-looking name must be copied, because the corpus
+            # manifest includes its files (F062).
             continue
         if strip_bookkeeping and entry.is_file() \
                 and is_bookkeeping_name(entry.name):

@@ -5,6 +5,8 @@
 # the single-file source.
 from __future__ import annotations
 
+import stat
+
 def _text_fragments(para: str) -> list:
     """[(start, end, unescaped_text, raw_fragment)] for every <w:t> in a paragraph."""
     out = []
@@ -1276,7 +1278,11 @@ def container_spans(xml: str) -> list:
     # closing token and the EOF fallback then made every later paragraph look
     # like it sat inside a table -- caption continuations were refused and the
     # report marked the rest of the document as table/text-box content.
-    tokens = re.compile(r"<w:(tbl|txbxContent)(?=[\s>])|</w:(tbl|txbxContent)>")
+    # XML permits whitespace before an end tag's `>`: `</w:tbl >` is legal, and
+    # without `\s*` the opening was pushed and never popped, so the EOF
+    # fallback made every later paragraph look like table/text-box content
+    # (F033).
+    tokens = re.compile(r"<w:(tbl|txbxContent)(?=[\s>])|</w:(tbl|txbxContent)\s*>")
     for m in tokens.finditer(_mask_noncontent(xml)):
         if m.group(1):
             stack.append(m.start())
@@ -2512,8 +2518,14 @@ def _table_spans(xml: str) -> list:
     if not xml:
         return []
     spans, depth, start = [], 0, 0
-    for m in re.finditer(r"<w:tbl(?=[\s>])|</w:tbl>", xml):
-        if m.group(0) == "</w:tbl>":
+    # Walk the MASKED copy: a commented-out `<w:tbl>` is not a live container,
+    # and XML permits whitespace before an end tag's `>`. A raw walk with the
+    # literal close left depth > 0 and returned [], so a table cell's only
+    # paragraph lost its protection and the fixer spliced it out, emitting
+    # `<w:tc></w:tc>` while reporting ok (F027).
+    text = _mask_noncontent(xml)
+    for m in re.finditer(r"<w:tbl(?=[\s>])|</w:tbl\s*>", text):
+        if m.group(0).startswith("</"):
             depth = max(0, depth - 1)
             if depth == 0:
                 spans.append((start, m.end()))
@@ -6086,13 +6098,56 @@ def _strip_bib_comments(text: str) -> str:
     return "".join(out)
 
 
+# A sibling .bib is package-adjacent input, not a trusted local file: a huge
+# one would be read whole and a symlink could point outside the package. 4 MiB
+# is far above any real bibliography and bounds both risks (F037).
+MAX_BIB_BYTES = 4 * 1024 * 1024
+
+
+def _read_bib_bounded(path) -> str | None:
+    """The .bib's text, or None for a symlink/non-regular/over-budget file.
+
+    Open ONCE with O_NOFOLLOW and fstat THAT descriptor, so a swap between a
+    name-based check and the read cannot follow a planted link (F037).
+    """
+    p = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(p, flags)
+    except OSError:
+        return None
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_BIB_BYTES:
+            return None
+        chunks, total = [], 0
+        while total <= MAX_BIB_BYTES:
+            block = os.read(fd, min(1 << 20, MAX_BIB_BYTES + 1 - total))
+            if not block:
+                break
+            chunks.append(block)
+            total += len(block)
+        if total > MAX_BIB_BYTES:
+            return None
+        return b"".join(chunks).decode("utf-8", "replace")
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def load_bib_facts(paths) -> list:
     """Parse .bib files into fact records for entry repair (stdlib only)."""
     records = []
     for p in paths or []:
-        try:
-            text = Path(p).read_text("utf-8", "replace")
-        except OSError:
+        text = _read_bib_bounded(p)
+        if text is None:
             continue
         text = _strip_bib_comments(text)
         pos = 0

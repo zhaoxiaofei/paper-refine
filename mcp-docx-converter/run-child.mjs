@@ -72,7 +72,7 @@ export function killProcessTree(child, options = {}) {
 }
 
 export function runFile(file, args, options = {}) {
-  const { timeout = 0, maxBuffer = 4 * 1024 * 1024,
+  const { timeout = 0, maxBuffer = 4 * 1024 * 1024, killGraceMs = 5000,
     killTree = killProcessTree, ...spawnOptions } = options;
   const detached = process.platform !== 'win32';
   return new Promise((resolve, reject) => {
@@ -127,14 +127,38 @@ export function runFile(file, args, options = {}) {
     child.stdout.on('data', (chunk) => append('stdout', chunk));
     child.stderr.on('data', (chunk) => append('stderr', chunk));
     let timer = null;
+    let graceTimer = null;
+    let settled = false;
     if (timeout > 0) {
       timer = setTimeout(() => {
         timedOut = true;
         killGroup();
+        // A failed tree kill leaves the child (and its pipes) alive, so no
+        // 'close' event may ever arrive and this promise would stay pending
+        // forever past its deadline. Arm a short grace period that settles the
+        // call with the recorded tree-kill failure (F038).
+        graceTimer = setTimeout(() => {
+          if (settled) return;
+          const detail = `Command timed out after ${timeout}ms and its process group could `
+            + `not be confirmed dead: ${file}`
+            + (treeKillError ? ` (tree kill incomplete: ${treeKillError})` : '');
+          const error = new Error(detail);
+          error.code = null;
+          error.signal = null;
+          error.stdout = stdout;
+          error.stderr = stderr;
+          error.killed = true;
+          error.overBudget = false;
+          finish(error);
+        }, killGraceMs);
+        if (typeof graceTimer.unref === 'function') graceTimer.unref();
       }, timeout);
     }
     const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
       if (error) reject(error);
       else resolve(result);
     };

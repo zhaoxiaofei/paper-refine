@@ -125,6 +125,34 @@ if (typeof runner.runFile === 'function') {
   }
 }
 
+// F038: a timeout whose tree kill FAILS must still settle. Without the grace
+// timer the promise waited for a 'close' event that a surviving child never
+// sends -- the MCP tool hung past its budget. The injected killer leaves the
+// child alive, and the child exits on its own well after the grace period.
+if (typeof runner.runFile === 'function') {
+  const started = Date.now();
+  try {
+    await runner.runFile(
+      process.execPath,
+      ['-e', "setTimeout(() => process.exit(0), 1200);"],
+      { timeout: 30, killGraceMs: 100,
+        killTree: () => ({ ok: false, error: 'simulated denial' }) },
+    );
+    fails.push('timeout with a failing kill: runFile resolved instead of rejecting');
+    console.log('FAIL timeout with a failing kill settles with an error');
+  } catch (err) {
+    try {
+      assert.match(err.message, /could not be confirmed dead/);
+      assert.match(err.message, /tree kill incomplete: simulated denial/);
+      assert.ok(Date.now() - started < 900, 'the grace timer must settle before the child exits');
+      console.log('OK timeout with a failing kill settles with an error');
+    } catch (assertErr) {
+      fails.push(`timeout with a failing kill: ${assertErr.message}`);
+      console.log(`FAIL timeout with a failing kill: ${assertErr.message}`);
+    }
+  }
+}
+
 if (fails.length) {
   console.log(`\n${fails.length} run-child check(s) FAILED`);
   process.exit(1);

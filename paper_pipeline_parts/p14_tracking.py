@@ -329,7 +329,9 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
     note = (f"[LOGGING FALLBACK -- not a tracked-changes document] difference tracking "
             f"against the {baseline} version failed: {reason}")
     try:
-        cand_raw = cand.read_bytes()
+        # The package is agent-written: read it through the regular-file guard
+        # and the payload budget instead of an unbounded `read_bytes()` (F021).
+        cand_raw = read_regular_file(cand, MAX_PAYLOAD_BYTES)
         _, cand_root = _docx_root(cand)
         body = cand_root.find(_w("body"))
         if body is None:
@@ -438,10 +440,13 @@ def write_text_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
     as parentheses so the comment cannot close early.
     """
     def read_lines(p: Path) -> list:
-        try:
-            return p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError as e:                                    # noqa: BLE001
-            return [f"[unreadable: {type(e).__name__}: {e}]"]
+        # The diff reads two AGENT-written files; bound each one exactly like
+        # every other package read (F021).
+        text = read_text_bounded(p, limit=PACKAGE_TEXT_BYTES_LIMIT)
+        if text is None:
+            return [f"[unreadable: non-regular, symlinked or over the "
+                    f"{PACKAGE_TEXT_BYTES_LIMIT}-byte budget: {Path(p).name}]"]
+        return text.splitlines()
 
     is_bib = out.suffix.lower() == ".bib"
     lines = [
@@ -1130,7 +1135,13 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
             c["pdf_ok"], c["pdf_error"] = False, "the tracking .tex is missing"
             continue
         try:
-            text = src.read_text(encoding="utf-8", errors="replace")
+            # An agent-written tracking .tex: bounded/regular-file read (F021).
+            text = read_text_bounded(src, limit=PACKAGE_TEXT_BYTES_LIMIT)
+            if text is None:
+                c["pdf_ok"] = False
+                c["pdf_error"] = ("the tracking .tex is non-regular, symlinked or over "
+                                  "the text budget")
+                continue
             if not re.search(r"\\documentclass\b", text):
                 # A fragment is compiled through its master; standalone it is
                 # not a document (`!\begin{document}`).

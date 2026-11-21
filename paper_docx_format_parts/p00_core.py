@@ -207,19 +207,19 @@ URL_RE = re.compile(
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
     r"|https?://[^\s<>\"]+|www\.[^\s<>\"]+|\bdoi:[^\s]+", re.I)
 
-PARA_TOKENS = re.compile(r"<w:p(?=[\s/>])|</w:p>")
-RUN_TOKENS = re.compile(r"<w:r(?=[\s/>])|</w:r>")
+PARA_TOKENS = re.compile(r"<w:p(?=[\s/>])|</w:p\s*>")
+RUN_TOKENS = re.compile(r"<w:r(?=[\s/>])|</w:r\s*>")
 # The BODY walker's tokens: the two block-level children of `<w:body>` a table
 # rule has to see in DOCUMENT ORDER (a `w:p` holds no `w:tbl`, and a nested
 # table inside a cell is part of its outer table).
 BODY_BLOCK_TOKENS = re.compile(r"<w:(p|tbl)(?=[\s/>])")
-ROW_TOKENS = re.compile(r"<w:tr(?=[\s/>])|</w:tr>")
-CELL_TOKENS = re.compile(r"<w:tc(?=[\s/>])|</w:tc>")
+ROW_TOKENS = re.compile(r"<w:tr(?=[\s/>])|</w:tr\s*>")
+CELL_TOKENS = re.compile(r"<w:tc(?=[\s/>])|</w:tc\s*>")
 # The opening arm must NOT match a self-closing `<w:t .../>`: without the
 # `(?<!/)` guard the tag was read as an opening one and the lazy body ran to the
 # NEXT run's `</w:t>`, so `text_of` returned literal markup and the writer
 # escaped it into the first run, deleting the following run wrapper.
-TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>", re.S)
+TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t\s*>", re.S)
 # A soft break/tab inside a paragraph (`<w:br/>`, `<w:cr/>`, `<w:tab/>`).
 # `text_of` renders each as a NEWLINE: it is a delimiter, not content, so every
 # text comparison still sees the same words AND the line-edge rules see the
@@ -234,7 +234,7 @@ NON_TEXT_TOKENS = re.compile(r"<w:(?:noBreakHyphen|sym)(?=[\s/>])[^>]*/?>")
 # The same walk, in DOCUMENT ORDER, for the callers that need both kinds of
 # piece at once (the text writer splices a fragment's new text at its own
 # offset, so a break counts as one character exactly like `text_of` says).
-_FRAG_OR_BREAK_PATTERN = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>"
+_FRAG_OR_BREAK_PATTERN = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t\s*>"
                                     r"|<w:(?:br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>",
                                     re.S)
 # The tab-STOP definitions a paragraph carries in `<w:pPr><w:tabs>`: `<w:tab>`
@@ -247,6 +247,43 @@ def _root_element_tag(frag: str) -> str:
     """The first element name in `frag` (`w:p`, `w:r`, `w:document`, ...)."""
     m = _ROOT_TAG_RE.search(frag or "")
     return m.group(1) if m else ""
+
+
+def _vanish_run_spans(text: str) -> list:
+    """(start, end) of runs whose rPr turns hidden text ON (`w:vanish`).
+
+    Hidden text is not rendered by Word, so it is not a character a reader
+    sees: counting it inflated word counts and made every FMT text rule judge
+    text the submission does not show (F032). `w:vanish w:val="0"` is the
+    explicit OFF spelling and is not hidden; `w:specVanish` is the same switch
+    for a style's own text.
+    """
+    spans, depth, start = [], 0, None
+    for m in re.finditer(r"<w:r(?=[\s/>])[^>]*>|</w:r\s*>", text or ""):
+        tok = m.group(0)
+        if tok.startswith("</"):
+            depth = max(0, depth - 1)
+            if depth == 0 and start is not None:
+                frag = text[start:m.end()]
+                if _run_rpr_hidden(frag):
+                    spans.append((start, m.end()))
+                start = None
+            continue
+        if tok.endswith("/>"):
+            continue                     # a self-closing empty run owns no text
+        if depth == 0:
+            start = m.start()
+        depth += 1
+    return spans
+
+
+def _run_rpr_hidden(run: str) -> bool:
+    """True when one run's properties mark its text hidden."""
+    for tag in re.findall(r"<w:(?:vanish|specVanish)(?=[\s/>])[^>]*/?>", run or ""):
+        value = attr(tag, "val")
+        if value is None or str(value).strip().lower() not in ("0", "false", "off"):
+            return True
+    return False
 
 
 class _FragOrBreakFinder:
@@ -267,6 +304,8 @@ class _FragOrBreakFinder:
         # deletions) are blanked to spaces first: the yielded tokens keep their
         # offsets into `frag`, and a hidden token is never a text character.
         text = _mask_noncontent(frag)
+        if "<w:vanish" in text or "<w:specVanish" in text:
+            text = _blank_spans(text, _vanish_run_spans(text))
         if _root_element_tag(text) == "w:r":
             # A RUN never owns a paragraph: any `<w:p>` inside a drawing it
             # carries is a text-box paragraph, not this run's text.
@@ -284,7 +323,7 @@ class _FragOrBreakFinder:
 
 
 _FRAG_OR_BREAK_RE = _FragOrBreakFinder()
-RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
+RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r\s*>|<w:r(?=[\s/>])[^>]*/>", re.S)
 FIELD_CHAR_RE = re.compile(
     # OOXML is XML: `w:fldCharType = "end"` (spaces around `=`) and
     # `w:fldCharType='end'` (single quotes) are legal spellings Word accepts.
@@ -293,7 +332,7 @@ FIELD_CHAR_RE = re.compile(
     # deleted the bibliography field's terminator; `field_ranges()` and the
     # Zotero inventory were blind to the same fields.
     r"<w:fldChar\b[^>]*?w:fldCharType\s*=\s*[\"'](\w+)[\"'][^>]*?/?>")
-INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?(?<!/)>.*?</w:instrText>", re.S)
+INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?(?<!/)>.*?</w:instrText\s*>", re.S)
 # A paragraph can carry no text and still hold an anchor a reader needs: a
 # footnote/endnote/comment reference, a bookmark, a simple field or a content
 # control. Deleting that "empty" paragraph loses the target/structure.
@@ -732,7 +771,10 @@ def text_of(frag: str) -> str:
 
 
 def has_drawing(frag: str) -> bool:
-    return bool(DRAWING_RE.search(frag))
+    # A commented-out/PI-hidden `<w:drawing>` is not live content; the other
+    # token predicates (`has_field`, `has_anchor`) already mask, and without it
+    # the fixer refused to repair a real page-break paragraph (F036).
+    return bool(DRAWING_RE.search(_mask_noncontent(str(frag or ""))))
 
 
 def has_field(frag: str) -> bool:
@@ -765,7 +807,7 @@ def has_math(frag: str) -> bool:
     deleted the WHOLE paragraph -- equation included -- while its text-based
     self-verification reported nothing lost.
     """
-    return bool(MATH_RE.search(frag))
+    return bool(MATH_RE.search(_mask_noncontent(str(frag or ""))))
 
 
 def _property_element_span(frag: str, tag: str) -> tuple[int, int] | None:
@@ -1182,11 +1224,16 @@ def is_on(frag: str | None, tag: str) -> bool:
 
 
 def _fld_simple_instruction(tag: str) -> str:
-    """The `w:instr` ATTRIBUTE of a `w:fldSimple` element, decoded once."""
-    m = re.search(r'w:instr="([^"]*)"', tag or "")
-    if not m:
+    """The `w:instr` ATTRIBUTE of a `w:fldSimple` element, decoded once.
+
+    XML allows either quote character and whitespace around `=`; the old
+    double-quote-only pattern read a legal `w:instr='...'` as an EMPTY
+    instruction, so the live-field fence could not see the citation (F028).
+    """
+    value = attr(tag, "instr")
+    if value is None:
         return ""
-    return (unesc(m.group(1)).replace("&quot;", '"').replace("&apos;", "'")).strip()
+    return (unesc(value).replace("&quot;", '"').replace("&apos;", "'")).strip()
 
 
 def field_ranges(xml: str) -> list:
@@ -1353,8 +1400,8 @@ ZOTERO_FIELD_TOKEN_RE = re.compile(
     # A self-closing `<w:t/>`/`<w:instrText/>` is an EMPTY element, never an
     # opening tag: without the `(?<!/)` guard the lazy body ran to the next
     # run's closing tag and fed markup into the field result.
-    r"|<w:instrText\b[^>]*?(?<!/)>(.*?)</w:instrText>"
-    r"|<w:t\b[^>]*?(?<!/)>(.*?)</w:t>"
+    r"|<w:instrText\b[^>]*?(?<!/)>(.*?)</w:instrText\s*>"
+    r"|<w:t\b[^>]*?(?<!/)>(.*?)</w:t\s*>"
     # The SELF-CLOSING simple field must come FIRST: the paired alternative's
     # `([^>]*)>` would otherwise swallow its closing `/>` as an attribute and
     # run its lazy body to the NEXT simple field's closing tag (one field read
@@ -1447,11 +1494,15 @@ def zotero_field_report(xml: str) -> dict:
             self_closing = m.group(4) is not None
             attrs = (m.group(4) if self_closing else m.group(5)) or ""
             body = "" if self_closing else (m.group(6) or "")
-            instr_m = re.search(r'w:instr="([^"]*)"', attrs)
             # An ATTRIBUTE also escapes the quote characters (`&quot;` around
-            # every JSON key); `unesc` decodes text-node entities only.
-            instr = (unesc(instr_m.group(1)).replace("&quot;", '"').replace("&apos;", "'")
-                     if instr_m else "")
+            # every JSON key); `unesc` decodes text-node entities only. The
+            # value is read through the shared attribute parser: XML permits
+            # BOTH quote characters and whitespace around `=`, and the old
+            # double-quote-only pattern made a legal single-quoted citation
+            # invisible to this inventory (F028).
+            _instr_raw = attr(attrs, "instr")
+            instr = (unesc(_instr_raw).replace("&quot;", '"').replace("&apos;", "'")
+                     if _instr_raw is not None else "")
             fields.append({"begin": m.start(), "end": m.end(), "instr": [instr],
                            "separate": m.start(),
                            "result": [text_of(body)]})
@@ -1907,7 +1958,12 @@ def docx_style_ids(path: Path) -> list:
             xml = ooxml_part_text(_docx_xml_part_guarded(pkg, "word/styles.xml"))
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return []
-    return sorted(set(re.findall(r'w:styleId="([^"]+)"', xml)))
+    # XML permits single-quoted attributes: use the shared parser instead of a
+    # double-quote-only pattern, which made a legal `w:styleId='Heading1'`
+    # invisible to style resolution (F097).
+    return sorted({sid for sid in (attr(tag, "styleId")
+                                   for tag in re.findall(r"<w:style\b[^>]*>", xml))
+                   if sid})
 
 
 def docx_style_name_map(path: Path) -> dict:
@@ -1969,8 +2025,11 @@ def _template_uses_even_odd(template: Path) -> bool:
     sects = SECT_READ_RE.findall(_strip_sect_changes(doc))
     # Every section, not only the last, and any attribute order: Word writes
     # `w:type` before or after `r:id` depending on the producer.
-    return any(re.search(r'<w:(?:header|footer)Reference\b[^>]*\bw:type="even"', sect)
-               for sect in sects)
+    for sect in sects:
+        for tag in re.findall(r"<w:(?:header|footer)Reference\b[^>]*>", sect):
+            if (attr(tag, "type") or "").strip().lower() == "even":
+                return True
+    return False
 
 
 def docx_front_matter_report(path: Path, template: Path = None, containers=()) -> dict:
@@ -2195,13 +2254,15 @@ def effective_emphasis(styles: dict, para_style: str | None, run_style: str | No
         i_node = re.search(r"<w:i(?=[\s/>])[^>]*/?>", direct_rpr)
         ics_node = re.search(r"<w:iCs(?=[\s/>])[^>]*/?>", direct_rpr)
         if i_node:
-            val = re.search(r'w:val="([^"]*)"', i_node.group(0))
+            # XML allows single-quoted attributes: a legal `w:val='0'` was read
+            # as ABSENT and turned the run italic ON (F096).
+            val = attr(i_node.group(0), "val")
             i_val = True if val is None else \
-                str(val.group(1)).strip().lower() not in ("0", "false", "off")
+                str(val).strip().lower() not in ("0", "false", "off")
         if ics_node:
-            val = re.search(r'w:val="([^"]*)"', ics_node.group(0))
+            val = attr(ics_node.group(0), "val")
             ics_val = True if val is None else \
-                str(val.group(1)).strip().lower() not in ("0", "false", "off")
+                str(val).strip().lower() not in ("0", "false", "off")
     return bool(i_val) or bool(ics_val)
 
 
@@ -2239,9 +2300,11 @@ def run_is_bold(styles: dict, para_style: str | None, run: str) -> bool:
                       (r"<w:bCs(?=[\s/>])[^>]*/?>", "bCs")):
         m = re.search(node, rpr)
         if m:
-            val = re.search(r'w:val="([^"]*)"', m.group(0))
+            # Both quote styles are legal XML; a single-quoted `w:val='0'` was
+            # read as absent and flipped an explicit OFF to ON (F096).
+            val = attr(m.group(0), "val")
             on = True if val is None else \
-                str(val.group(1)).strip().lower() not in ("0", "false", "off")
+                str(val).strip().lower() not in ("0", "false", "off")
             if key == "b":
                 b_val = on
             else:

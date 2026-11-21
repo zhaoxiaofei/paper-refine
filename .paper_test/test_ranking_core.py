@@ -87,7 +87,8 @@ def run_rank(stats, candidates=None, base_rep=BASE_REP, census=None, floor=10):
 def test_contract():
     params = list(inspect.signature(np.derive_ranking).parameters)
     check("A1 derive_ranking's inputs are exactly the recorded data",
-          params == ["stats", "candidates", "base_rep", "census", "floor", "round_no"],
+          params == ["stats", "candidates", "base_rep", "census", "floor", "round_no",
+                     "representatives"],
           str(params))
     check("A1 derive_ranking does not take a Ctx",
           "ctx" not in params, str(params))

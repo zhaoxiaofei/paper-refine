@@ -261,6 +261,36 @@ from pathlib import Path
 #     order that a Word/Zotero refresh rewrites -- FMT-Z1..Z5 -- with the
 #     `zotero-check` CLI and a version-to-version parity gate), each with its own
 #     coverage row and artifact; the judge's frozen map is unchanged.
+# 3.11.7 -- A STAGE THE BACKEND CANNOT RESUME CONTINUES IN ITS OWN SANDBOX, AND
+#   FAILURES ARE CLASSIFIED ON THE TRANSCRIPT TAIL. `resume_gate` returns a
+#   SANDBOX continuation -- the stage's own command as a fresh process in the
+#   SAME sandbox -- when the backend has no CLI resume form (a custom
+#   `--agent-cmd`) and for `context_overflow`/`runaway`, where resending the CLI
+#   session can only repeat the failure; the sandbox is neither rebuilt nor paid
+#   for again. `_read_stream_capped` keeps a bounded TAIL as well as the 16 MiB
+#   head, so the failure is classified from the end of the transcript. A repair
+#   plan row naming `revised/<document>` is normalised to the manifest key, a
+#   one-or-two-character correction of an e-mail DOMAIN (same local part) is a
+#   correction rather than a removed contact fact, and the run banner names the
+#   effective `--agent-cmd`. Later 3.11.7 fix waves add bounded reads for
+#   agent-written files (the shared byte budget plus regular-file/no-follow
+#   guards), UTF-16 DOCX part decoding, PKG-23 software-vs-numeric citation
+#   handling (bracket citations included), the README cover-letter bound aligned
+#   with the venue profile, resumed-session accounting, DOCX MCP containment and
+#   process-tree kill safety, seeded-row identity pins, and removal/redline/
+#   audit/ranking evidence repairs.
+# 3.11.6 -- `--almost-fail` BECOMES `--tolerate-fail`, AND A TOLERATED STAGE USES
+#   ITS BEST FAILED TRIAL. The policy now records the trial with the most
+#   required-output files (then the fewest FAIL messages) as the one the round
+#   proceeds on, names it on the round and in the decision, and keeps the
+#   result PROVISIONAL: a tolerated same-sandbox continuation is not retried as
+#   a fresh attempt, and a re-drive clears the stale record. Setup/retry/report
+#   wording and the switch itself were renamed with it.
+# 3.11.5 -- A NON-BLOCKING FAILURE POLICY FOR EXHAUSTED STAGES (`--almost-fail`,
+#   renamed `--tolerate-fail` in 3.11.6). A stage that exhausted its retry budget
+#   no longer leaves the whole round incomplete when a usable trial exists; the
+#   close is recorded as a tolerated failure and is never certified as a clean
+#   panel result.
 # 3.11.4 -- THE SESSION TURN CAP IS 3000 BY DEFAULT, AND THE ORCHESTRATOR
 #   ENFORCES IT. A long-horizon stage (a thesis revision) legitimately runs
 #   thousands of model turns, but the pipeline itself had NO turn bound: the
@@ -472,6 +502,21 @@ PIPELINE_REQUIRED_ASSET_FILES = (
     "paper_pipeline_parts/ranking.py",
     "paper_pipeline_parts/decision_report.py",
     MANUSCRIPT_WORDS_FILE,
+    # The stage prompts tell every session to READ these skill documents and to
+    # RUN the listed scripts. `copy_asset_dirs` silently skips a missing source
+    # directory, so without these entries a trimmed checkout passed the
+    # incomplete-bundle preflight and produced dangling prompt paths (F073,
+    # AGENTS Rule 11).
+    "paper-skills/paper-review/SKILL.md",
+    "paper-skills/paper-review/references/sweeps.md",
+    "paper-skills/paper-review/references/discovery.md",
+    "paper-skills/paper-review/scripts/convert_corpus.py",
+    "paper-skills/paper-review/scripts/enumerate_conventions.py",
+    "paper-skills/paper-review/scripts/count_words.py",
+    "paper-skills/paper-revise/SKILL.md",
+    "paper-skills/paper-revise/references/ledger.md",
+    "paper-skills/paper-revise/references/edit_rules.md",
+    "paper-skills/paper-revise/scripts/revision_token.py",
 )
 # venue_profiles/ is a RUNTIME asset too (load_precedence reads the root's copy
 # before the maintained one), but a trimmed checkout may legitimately omit it

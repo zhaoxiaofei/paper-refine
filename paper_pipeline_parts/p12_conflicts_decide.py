@@ -5006,7 +5006,11 @@ def affinity_definition_rows(root: Path, limit: int = 8) -> list:
             for cell in rowtext.split("|"):
                 for tm in AFFINITY_TOOL_RE.finditer(cell):
                     cand = tm.group(1).strip()
-                    if cand[:1].isupper() and re.search(re.escape(cand), prose):
+                    if cand[:1].isupper():
+                        # Record the claim even when the prose NEVER names the
+                        # tool: that is the strongest form of PKG-9, and the
+                        # old prose pre-filter skipped exactly it (F091). The
+                        # sentence-support loop below decides support.
                         claimed.setdefault(cand, rowtext)
         # SUPPORT means one SENTENCE that names the tool and the quantity
         # together -- the shipped control is "NetMHCpan-predicted half-maximal
@@ -7695,7 +7699,8 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                          f"{s['vs_base']:g}" if s.get("vs_base") is not None else "-",
                          _count_cell(ti.get("critical_remaining")),
                          _count_cell(writing),
-                         {True: "yes", False: "NO", None: "-"}[s.get("anti_regression_ok")],
+                         ("exempt (base)" if s.get("is_base") else
+                          {True: "yes", False: "NO", None: "-"}[s.get("anti_regression_ok")]),
                          f"{s['judges_seen']}/{s['judges_expected']}",
                          f"{s.get('author_placeholders') or 0}",
                          "CHAMPION" if vid == champ_rep else ""])
@@ -9085,10 +9090,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                     "scores_per_version": rd["agg"]["scores_per_version"],
                     "stats": rd["agg"]["stats"],
                     "diagnostics": rd["agg"]["diagnostics"],
-                    # The reported issue census (issues per version/tier/severity,
-                    # from the judges' own ledger rows). REPORTED ONLY -- it never
-                    # feeds the ranking; it is the number a chain of runs compares
-                    # across rounds. The same data is in
+                    # The issue census (issues per version/tier/severity, from
+                    # the judges' own ledger rows). It is the selection's
+                    # LEADING ranking input: champion_sort_key reads the adaptive
+                    # severity_tier_category prefix of this census first, before
+                    # the panel median/mean/IQR/digest. The same data is in
                     # reports/round<r>_issue_census.csv.
                     "issue_census": rd["agg"].get("issue_census") or {},
                     "selection": rd["sel"],
