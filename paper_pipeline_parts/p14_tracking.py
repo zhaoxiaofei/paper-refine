@@ -331,8 +331,12 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
     try:
         # The package is agent-written: read it through the regular-file guard
         # and the payload budget instead of an unbounded `read_bytes()` (F021).
-        cand_raw = read_regular_file(cand, MAX_PAYLOAD_BYTES)
-        _, cand_root = _docx_root(cand)
+        # `_docx_root` returns the DOCUMENT PART bytes and its parsed root;
+        # passing the whole ZIP (the old `read_regular_file`) made the
+        # serializer scan the archive for xmlns declarations it cannot see.
+        # Keep the no-follow/size guard before opening the archive.
+        read_regular_file(cand, MAX_PAYLOAD_BYTES)
+        cand_raw, cand_root = _docx_root(cand)
         body = cand_root.find(_w("body"))
         if body is None:
             raise RuntimeError("the revised document carries no w:body")

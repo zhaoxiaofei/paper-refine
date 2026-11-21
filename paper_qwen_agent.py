@@ -96,6 +96,7 @@ _NO_REDIRECT_OPENER = urllib.request.build_opener(rt._NoRedirectHandler)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import paper_dsh_runtime
+    import paper_agent_runtime_patch  # noqa: F401  (F024/F025, parent-tracked)
 finally:
     sys.path.pop(0)
 
@@ -136,22 +137,47 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _permanent_transport_error(err) -> bool:
+    """True for a transport error a retry cannot fix (redirect, auth, DNS/TLS)."""
+    text = str(err or "").lower()
+    return any(marker in text for marker in (
+        "redirect refused", "certificate verify failed", "ssl",
+        "name or service not known", "nodename nor servname",
+        "temporary failure in name resolution", "unknown url type",
+        "unauthorized", "forbidden"))
+
+
 def _normalize_harness(value: str) -> str:
     """Accept both the public harness names and the adapter spellings."""
     name = str(value).strip().lower().replace("_", "-").replace(" ", "-")
     return {"gpt-codex": "codex", "claude-code": "claude"}.get(name, name)
 
 
+def _qwen_api_key(args, url_secret: str) -> str:
+    """CLI/env key, then a key split out of the URL, then the local default."""
+    explicit = getattr(args, "api_key", None)
+    if explicit:
+        return explicit
+    env = _env("PAPER_QWEN_API_KEY", "")
+    if env:
+        return env
+    return url_secret or DEFAULT_API_KEY
+
+
 def config(args=None) -> dict:
     """Resolve the effective endpoint/harness configuration (args > env)."""
     args = args or argparse.Namespace()
-    base = (getattr(args, "base_url", None) or _env("PAPER_QWEN_BASE_URL",
-                                                   DEFAULT_BASE_URL)).rstrip("/")
+    # A URL may carry a credential in its userinfo/query. The base URL is
+    # written into codex's argv, the child environment and --probe output, so
+    # split the credential off and pass it through the API-key channel.
+    raw_base = (getattr(args, "base_url", None)
+                or _env("PAPER_QWEN_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+    base, url_secret = rt.split_endpoint_credentials(raw_base)
+    base = base.rstrip("/")
     return {
         "base_url": base,
         "model": getattr(args, "model", None) or _env("PAPER_QWEN_MODEL", DEFAULT_MODEL),
-        "api_key": getattr(args, "api_key", None) or _env("PAPER_QWEN_API_KEY",
-                                                          DEFAULT_API_KEY),
+        "api_key": _qwen_api_key(args, url_secret),
         "harness": _normalize_harness(getattr(args, "harness", None)
                                        or _env("PAPER_QWEN_HARNESS", DEFAULT_HARNESS)),
         # An explicit --reasoning-effort/flag wins, then the shared
@@ -225,7 +251,11 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
             return 0, None, (f"HTTP {e.code} redirect refused: the endpoint tried "
                              f"to forward the request (and its credentials) to "
                              f"another URL")
-        raw = e.read().decode("utf-8", "replace")
+        try:
+            raw = e.read().decode("utf-8", "replace")
+        except (http.client.HTTPException, OSError) as read_exc:
+            return 0, None, (f"could not read the HTTP {e.code} response body: "
+                             f"{type(read_exc).__name__}: {read_exc}")
         try:
             body = json.loads(raw)
         except ValueError:
@@ -253,7 +283,8 @@ def _request_with_retry(
         status, body, err = _request(
             method, url, payload=payload, api_key=api_key, timeout=timeout
         )
-        retryable = bool(err) or status in schedule.retryable_statuses
+        retryable = ((bool(err) and not _permanent_transport_error(err))
+                     or status in schedule.retryable_statuses)
         if not retryable or attempt >= schedule.max_retries:
             return status, body, err
         attempt += 1

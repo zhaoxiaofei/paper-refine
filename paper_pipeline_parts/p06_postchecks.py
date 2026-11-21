@@ -3128,7 +3128,7 @@ def seed_template_visuals(ctx: Ctx, sb: Path) -> dict:
     choices = visual_renderer_choices()
     choice = choices[0][0] if choices else "none"
     manifest = {"renderer": choice, "choice": choice, "documents": []}
-    out = sb / VISUAL_TEMPLATE_DIR
+    out = safe_mkdir(sb / VISUAL_TEMPLATE_DIR)
     for role, path in sorted(tpls.items()):
         try:
             digest = sha256_file(path)
@@ -3150,13 +3150,12 @@ def seed_template_visuals(ctx: Ctx, sb: Path) -> dict:
                    "fallbacks": r.get("fallbacks"),
                    "source": str(path), "sha256": digest, "attempts": attempts + 1}
             write_json_atomic(cache / "manifest.json", rec)
-        dest = out / role
-        dest.mkdir(parents=True, exist_ok=True)
+        dest = safe_mkdir(out / role)
         if rec.get("pdf") and (cache / rec["pdf"]).is_file():
-            shutil.copy2(cache / rec["pdf"], dest / rec["pdf"])
+            write_bytes_atomic(dest / rec["pdf"], read_regular_file(cache / rec["pdf"]))
         for png in rec.get("pngs") or []:
             if (cache / png).is_file():
-                shutil.copy2(cache / png, dest / Path(png).name)
+                write_bytes_atomic(dest / Path(png).name, read_regular_file(cache / png))
         manifest["documents"].append({
             "role": role, "source": Path(path).name, "sha256": digest,
             "renderer": rec.get("renderer"), "pages": rec.get("pages"),
@@ -4255,6 +4254,8 @@ def _validate_llm_conflicts(conflicts: list, opinions: list) -> tuple:
             why = "no judge run id"
         elif any(j not in pair_runs[(member, opponent)] for j in judges):
             why = "a named judge run did not score this pair"
+        elif not (c.get("evidence") or []):
+            why = "no evidence quote backs this conflict"
         else:
             for e in c.get("evidence") or []:
                 run = str(e.get("judge_run") or "").strip()
@@ -7324,8 +7325,15 @@ def _disposition_table_problems(path: Path) -> list:
         if empty:
             problems.append(f"{empty} of {len(block['rows'])} row(s) have an EMPTY "
                             f"`{key}` cell")
-        if key in DISPOSITION_COLUMNS:
-            problems += disposition_artifact_problems(block["rows"], block.get("widths"),
+        norm_key = "disposition" if "disposition" in key.lower() else key
+        if norm_key in DISPOSITION_COLUMNS:
+            # A renamed header (`disposition notes`) must still reach the
+            # shared filler/empty-cell checks; map the cell to the canonical
+            # key for that call.
+            rows = block["rows"]
+            if norm_key != key:
+                rows = [dict(r, disposition=r.get(key)) for r in rows]
+            problems += disposition_artifact_problems(rows, block.get("widths"),
                                                       len(block["header"]))
     return problems
 

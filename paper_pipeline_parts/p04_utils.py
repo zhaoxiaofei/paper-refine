@@ -3025,7 +3025,7 @@ LENGTH_COVER_CLOSING_RE = re.compile(
     # "Best regards are due to ...", cutting the persuading body at that line.
     # A comma/period after the phrase still closes ("Sincerely, The Authors").
     r"^\s*(?:sincerely|yours (?:sincerely|faithfully|truly)|best regards|kind regards|regards|"
-    r"with (?:best|kind) regards)\s*[,.;!]?\s*$|"
+    r"with (?:best|kind) regards)\s*[,.;!]?(?:\s+(?:the\s+)?authors?)?\s*$|"
     # A BARE courtesy line closes the letter; "Thank you for considering our
     # manuscript ..." is a body OPENER. The old bare `|thank you)\b` alternative
     # matched that opener and reported 0 persuading words (see count_words.py,
@@ -3226,7 +3226,7 @@ def _tex_length_scan(text: str):
         m = re.match(r"\\(?:sub)*section\*?(?:\[[^\]]*\])?\{([^{}]*)\}", line)
         if m:
             out.append(m.group(1).strip())
-            continue
+            if not (line := line[m.end():].strip()): continue
         if TEX_CAPTION_TOKEN_RE.search(line):
             # Parse EVERY caption group on the line: `\caption{...}\caption{...}`
             # is legal, and consuming only the first left the second legend's
@@ -5756,7 +5756,7 @@ def _style_usage(docx: Path) -> set:
         xml = raw.decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
-    return {sid for sid in re.findall(r'<w:pStyle w:val="([^"]+)"', xml) if sid}
+    return {m.group(2) for m in re.finditer(r"""<w:pStyle\b[^>]*\bw:val\s*=\s*(["'])(.*?)\1""", xml) if m.group(2)}
 
 
 def _manuscript_front_matter_styles(template: Path) -> set:
@@ -5785,7 +5785,7 @@ def _defined_styles(docx: Path) -> set:
         styles = raw.decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
-    return set(re.findall(r'w:styleId="([^"]+)"', styles))
+    return {m.group(2) for m in re.finditer(r"""\bw:styleId\s*=\s*(["'])(.*?)\1""", styles) if m.group(2)}
 
 
 def _zip_part_too_big(z, name: str) -> bool:
@@ -5825,7 +5825,7 @@ def _protected_template_parts(tpl: Path) -> dict:
                     continue
                 if re.match(r"word/(header|footer)\w*\.xml$", low):
                     body = z.read(name).decode("utf-8", "replace")
-                    text = " ".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body))
+                    text = " ".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", body))
                     # A part that carries the template's own PROSE (its typesetting
                     # note) or a VML/DrawingML TEXT BOX may be intentionally replaced
                     # by a plain page-number footer; the logo header, the empty

@@ -3318,11 +3318,12 @@ def part_rels(pkg: zipfile.ZipFile, part: str) -> dict:
     if relname not in pkg.namelist():
         return {}
     out = {}
-    xml = ooxml_part_text(pkg.read(relname))
+    xml = _mask_noncontent(ooxml_part_text(pkg.read(relname)))
     for m in _REL_ENTRY_RE.finditer(xml):
-        attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
-        if attrs.get("Id") and attrs.get("Type", "").endswith("/image"):
-            out[attrs["Id"]] = attrs.get("Target", "").lstrip("/").replace("\\", "/")
+        el = m.group(0)
+        rid, typ, target = attr_of(el, "Id"), attr_of(el, "Type"), attr_of(el, "Target")
+        if rid and (typ or "").endswith("/image"):
+            out[rid] = (target or "").lstrip("/").replace("\\", "/")
     return out
 
 
@@ -3594,9 +3595,14 @@ def _ocr_word_heights(data: bytes) -> list:
 
 def figure_text_size_rows(docx_path: Path, policy: dict = None) -> list:
     """FMT-IM6: embedded raster figures whose own text is below the floor."""
+    # Read the scalar BEFORE merging POLICY_DEFAULTS (which seeds it with 0):
+    # an explicit `min_figure_text_pt: 0` means "not gated" and must not fall
+    # back to the profile's `figure_text.min_pt`.
+    _raw = (policy or {}).get("min_figure_text_pt")
+    if _raw is None:
+        _raw = ((policy or {}).get("figure_text") or {}).get("min_pt")
     policy = dict(POLICY_DEFAULTS, **(policy or {}))
-    floor = float(policy.get("min_figure_text_pt")
-                  or ((policy.get("figure_text") or {}).get("min_pt")) or 0)
+    floor = float(_raw or 0)
     if floor <= 0:
         return []
     rows = []
@@ -3772,9 +3778,11 @@ def image_resolution_rows(path: Path, printed_in: float = 6.5,
 def figure_text_size_for_image(path: Path, printed_in: float = 6.5,
                                policy: dict = None) -> list:
     """FMT-IM6 for a standalone submitted figure (no DOCX extent to read)."""
+    _raw = (policy or {}).get("min_figure_text_pt")
+    if _raw is None:
+        _raw = ((policy or {}).get("figure_text") or {}).get("min_pt")
     policy = dict(POLICY_DEFAULTS, **(policy or {}))
-    floor = float(policy.get("min_figure_text_pt")
-                  or ((policy.get("figure_text") or {}).get("min_pt")) or 0)
+    floor = float(_raw or 0)
     if floor <= 0:
         return []
     if not shutil.which("tesseract"):

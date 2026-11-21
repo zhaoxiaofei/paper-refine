@@ -23,6 +23,31 @@ import zipfile
 
 W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
 
+def _fresh_run_dir(run_dir, skill_root):
+    """Create a FRESH run dir without deleting an arbitrary user directory.
+
+    `--run-dir .` / `$HOME` used to be recursively deleted immediately. Refuse a
+    protected or non-temporary non-empty path; a temp dir (the documented usage)
+    is still cleaned so a re-run starts fresh.
+    """
+    import tempfile
+    run_dir = os.path.abspath(run_dir)
+    root = os.path.abspath(skill_root)
+    home = os.path.abspath(os.path.expanduser("~"))
+    if run_dir in (os.path.abspath(os.sep), home, root) or run_dir.startswith(root + os.sep):
+        raise SystemExit(f"refusing --run-dir {run_dir!r}: it is the skill tree, "
+                         f"the home directory or the filesystem root")
+    if os.path.exists(run_dir) and not os.path.isdir(run_dir):
+        raise SystemExit(f"refusing --run-dir {run_dir!r}: it is not a directory")
+    if os.path.isdir(run_dir) and os.listdir(run_dir):
+        tmp = os.path.abspath(tempfile.gettempdir())
+        if not (run_dir == tmp or run_dir.startswith(tmp + os.sep)):
+            raise SystemExit(f"refusing --run-dir {run_dir!r}: it is non-empty and "
+                             f"outside the temp directory; not deleting it")
+    shutil.rmtree(run_dir, ignore_errors=True)
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir
+
 
 # ---------------------------------------------------------------- fixtures
 def docx(path, paras, header=None, footer=None):
@@ -205,9 +230,8 @@ def main():
     ap.add_argument("--skill-root", required=True)
     ap.add_argument("--run-dir", required=True)
     args = ap.parse_args()
-    root, run_dir = os.path.abspath(args.skill_root), os.path.abspath(args.run_dir)
-    shutil.rmtree(run_dir, ignore_errors=True)
-    os.makedirs(run_dir)
+    root = os.path.abspath(args.skill_root)
+    run_dir = _fresh_run_dir(args.run_dir, root)
     sub = build_fixtures(run_dir)
     work, out = os.path.join(run_dir, "review", "work"), os.path.join(run_dir, "review")
     pipeline(root, work, sub)
@@ -350,19 +374,19 @@ def main():
     check("C21 slash-separated acronyms split into two tokens",
           "acro_probe.md.txt" in (split_row.get("files") or []),
           "files=%s" % (split_row.get("files") or []))
-    check("C23 CI listed as an EXEMPT row in M1",
+    check("C27 CI listed as an EXEMPT row in M1",
           re.search(r"\|\s*CI\s*\|\s*EXEMPT", m1_md) is not None)
     interval_line = next((i for i, ln in enumerate(corpus_text.get("supp_notes.md.txt", "").splitlines(), 1)
                           if "interval [2, 5]" in ln), -1)
     interval_calls = [c for c in m2.get("callouts", [])
                       if c.get("file", "").startswith("supp_notes") and c.get("line") == interval_line]
-    check("C24 interval [2, 5] not treated as a citation",
+    check("C28 interval [2, 5] not treated as a citation",
           not interval_calls and 2 not in m2.get("orphan_callouts", []),
           "calls=%s suspects=%d" % (interval_calls, len(m2.get("suspect_brackets", []))))
     cn_row = m1_rows.get("CN") or {}
     m1b_rows = [ln for ln in m1_md.split("## M1b", 1)[-1].splitlines()
                 if ln.startswith("| CN |")]
-    check("C25 M1b instance table lists long-form residue rows",
+    check("C29 M1b instance table lists long-form residue rows",
           "## M1b — LONG FORMS RE-USED AFTER THEIR FIRST USE" in m1_md
           and len(m1b_rows) == 1 and "m1b_probe.md.txt:7" in m1b_rows[0]
           and "copy-number" in m1b_rows[0],

@@ -50,8 +50,8 @@ VS_ORIGINAL_TOLERANCE = 0.0
 #     CLI/config parameter), or when every cell is included;
 #   * the version's ordered per-cell census at that prefix is the leading key
 #     (fewer defects, and a worse severity earlier, is worse). The median is
-#     consulted ONLY when the whole census is equal, then the mean, IQR, digest
-#     and id.
+#     consulted ONLY when the whole census is equal, then the mean, IQR and
+#     digest.
 # Rationale: a per-cell count is tiny and fluctuates; accumulating cells in the
 # order the scoring semantics prioritises grows the evidence until the cleanest
 # candidate has enough counts (or there is nothing left to add), and the single
@@ -362,15 +362,16 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
         t["tiebreak_prefix_cells"] = prefix_cells
     # Ranking key, in order (2026-10-01, fourth calibration), with each
     # component's provenance:
-    #   defect_prefix_total   the cumulative defect count (per source, collapsed
-    #                         only per session+version) over the adaptive
-    #                         severity_tier_category
-    #                         prefix, ASCENDING: fewer defects is better. THE
-    #                         PREFIX LEADS the key: it is the most direct
-    #                         improvement signal, and the panel median is coarse.
-    #                         The prefix stops when the cleanest ranked version
-    #                         has `tiebreak_defect_floor` counts (default 10) or
-    #                         every cell is included.
+    #   defect_prefix_census  the ORDERED per-cell census at the adaptive
+    #                         severity_tier_category prefix, ASCENDING: fewer
+    #                         defects, and a worse severity earlier, is worse.
+    #                         THE CENSUS LEADS the key (the cumulative
+    #                         `defect_prefix_total` is retained for reports and
+    #                         is NOT read here): it preserves the tier and
+    #                         severity of every defect, and the panel median is
+    #                         coarse. The prefix stops when the cleanest ranked
+    #                         version has `tiebreak_defect_floor` counts
+    #                         (default 10) or every cell is included.
     #   -median               the field-wide panel statistic: the first
     #                         TIE-BREAK when two versions carry the same prefix.
     #   -mean                 consulted after the median (a total count is more

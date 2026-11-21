@@ -1858,7 +1858,11 @@ def stage_venue_template(ctx: "Ctx", sb: Path) -> dict:
                                   manuscript_names=article_type_manuscript_names(ctx))
     if not res or not venue_templates_enabled():
         return {}
-    dst = sb / "venue_template"
+    # The sandbox is agent-writable: a previous attempt can leave
+    # `venue_template` (or a role directory) as a symlink to an outside
+    # directory, so create every level through the no-follow guard and write
+    # each template atomically instead of `copy2`-ing through a planted link.
+    dst = safe_mkdir(sb / "venue_template")
     staged = {}
     for role, value in (("word", res.get("word") or {}), ("latex", res.get("latex") or {})):
         for key, p in value.items():
@@ -1867,12 +1871,12 @@ def stage_venue_template(ctx: "Ctx", sb: Path) -> dict:
                     continue
                 target = dst / role / q.name
                 if not target.is_file() or sha256_file(target) != sha256_file(q):
-                    target.parent.mkdir(parents=True, exist_ok=True)
+                    safe_mkdir(target.parent)
                     if target.is_file():
                         # the previously staged copy is 0444: an UPDATED venue
-                        # template must still be re-stageable (copy2 would raise)
+                        # template must still be re-stageable
                         make_writable(target)
-                    shutil.copy2(q, target)
+                    write_bytes_atomic(target, read_regular_file(q))
                 with contextlib.suppress(OSError):
                     os.chmod(target, 0o444)
                 staged[f"{role}/{q.name}"] = sha256_file(target)
@@ -1907,6 +1911,10 @@ def extract_official_template(path: Path) -> dict:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return {"skipped": "unreadable"}
+        # A commented-out declaration or a fenced example is not authoritative
+        # structure: run every discovery on the SAME comment/fence-stripped
+        # text the section reader uses.
+        text = _strip_source_markup(text, suffix)
         m = TEX_DOCCLASS_RE.search(text)
         out["documentclass"] = m.group(1).strip() if m else ""
         out["sections"] = [{"level": lvl, "title": title}
@@ -2158,7 +2166,7 @@ _TEMPLATE_HEADING_KEY_RE = re.compile(r"[^a-z0-9]+")
 # body sentence, not a caption); the earlier template pattern accepted that prose
 # as a caption and fed it to the numbering check (F72).
 _TEMPLATE_CAPTION_RE = re.compile(
-    r"^\s*(Figure|Fig\.?|Table)\s*(\d{1,3})[A-Za-z]?\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)",
+    r"^\s*(Figure|Fig\.?|Table)\s*S?(\d{1,3})[A-Za-z]?\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)",
     re.I)
 
 
@@ -2279,7 +2287,12 @@ def scan_template_conformance(sources: list, requirements: dict,
         def _separated(rest: str) -> bool:
             rest = re.sub(r"^(?:\*{1,3}|_{1,3})", "", rest)
             rest = re.sub(r"^\}", "", rest)
-            return bool(re.match(r"\s*[.:]", rest))
+            # The label may be continued by its own qualifier ("Ethics
+            # approval.", "Funding statement."); an unrelated continuing word
+            # still fails because the separator must follow the qualifier.
+            return bool(re.match(
+                r"\s*(?:(?:approval|statement|section|policy|declaration|"
+                r"disclosure|details|information)\s*)*[.:]", rest, re.I))
 
         # The requested label itself. Its own pattern may match only a prefix
         # ("ethic" / "acknowledg"), so a separator test after the pattern end
@@ -2661,7 +2674,14 @@ def _docx_exemplar_text(path: Path):
         return None
     try:
         with zipfile.ZipFile(path) as pkg:
-            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+            # The formatter's bounded, entity-guarded reader and shared
+            # UTF-16-aware decoder: a large compressed part must not be
+            # decompressed whole, and a UTF-16 template must still parse.
+            problem = mod._docx_zip_problem(pkg)
+            if problem:
+                return None
+            xml = mod.ooxml_part_text(
+                mod._docx_xml_part_guarded(pkg, "word/document.xml"))
     # RuntimeError is what `zipfile` raises for an ENCRYPTED entry and
     # NotImplementedError for an unsupported compression method: neither is an
     # OSError/BadZipFile/KeyError, so a reader that answers "unreadable" must

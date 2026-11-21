@@ -494,7 +494,9 @@ AUDIT_COVERAGE_CHECKS = tuple([f"M{i}" for i in range(1, 37)]
 # `No findings ...` is the same verdict as `0 findings` and `unable to check X`
 # the same verdict as `unable -- <reason>`; both spellings are accepted, and the
 # reason-bearing ones still pass the shared filler gate in `_audit_disposition_ok`.
-_AUDIT_REDERIVATION_VERB = r"(?:re-?derived|confirmed|checked|verified)"
+_AUDIT_REDERIVATION_VERB = (
+    r"(?:re-?derived|confirmed|checked|verified|re-?derive|confirm|check|verify|"
+    r"review(?:ed)?)")
 _AUDIT_NEGATED_VERB_RE = (
     r"\b(?:not|never|cannot|can\s+not|could\s+not|unable\s+to|no\s+longer)\b"
     r"(?:\s+\w+){0,2}\s+" + _AUDIT_REDERIVATION_VERB + r"\b")
@@ -580,7 +582,9 @@ def _audit_disposition_ok(value) -> bool:
     if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
         return False
     if _AUDIT_COUNT_RE.search(text):
-        return True          # "3 findings" / "no findings": a complete verdict
+        # A count is a complete verdict only when it is not negated:
+        # `0 findings -- not checked` used to take this shortcut and pass.
+        return not _audit_negated_verb(text)
     m = _AUDIT_CANONICAL_TAIL_RE.search(text)
     if m is not None:
         return _coverage_reason_named(m.group(1))
@@ -2124,7 +2128,28 @@ def dedup_location_of(evidence) -> tuple:
     line = int(m.group(1)) if m else None
     d = DEDUP_DOC_RE.search(text)
     doc = d.group(1).replace("\\", "/").lower() if d else None
-    return line, tuple(w.lower() for w in DEDUP_WORD_RE.findall(text)), doc
+    # Tokenize the EXCERPT, not the whole cell: the location prefix alone
+    # (a long path + line) met the minimum-word bar and merged distinct short
+    # excerpts at the same line. Strip through the line locator and any quote
+    # delimiters, then use the quoted text when the cell carries one.
+    excerpt = text[m.end():] if m else text
+    excerpt = re.sub(r"^\s*[:#\-\u2013\u2014|,.]+\s*", "", excerpt)
+    q = None
+    # Match each opening delimiter with ITS OWN closer. The old mixed class
+    # closed a double-quoted excerpt at an internal apostrophe ("the patient's
+    # dose"), leaving two words that could never meet DEDUP_MIN_WORDS (R03).
+    # The straight/curly single quote is also the possessive apostrophe, so it
+    # only delimits when it is not between word characters.
+    for opener, closer, guard in (('"', '"', False), ("\u201c", "\u201d", False),
+                                  ("\u2018", "\u2019", True), ("'", "'", True)):
+        pat = ((r"(?<![\w])" if guard else "") + re.escape(opener)
+               + r"(.+?)" + re.escape(closer) + (r"(?![\w])" if guard else ""))
+        q = re.search(pat, excerpt)
+        if q:
+            break
+    if q:
+        excerpt = q.group(1)
+    return line, tuple(w.lower() for w in DEDUP_WORD_RE.findall(excerpt)), doc
 
 
 def dedup_fuzzy_similarity(a_words, b_words) -> float:
@@ -3839,6 +3864,21 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
                 continue
             f = str(c.get("file") or "").strip()
             if not f:
+                continue
+            # Enforce package containment BEFORE the file is opened: the
+            # postcheck that reports an absolute/`..` path runs later, so an
+            # agent-chosen value used to be read from anywhere on the machine.
+            if Path(f).is_absolute() or ".." in Path(f).parts:
+                problems.append(
+                    f"response row {cid!r}: change file {f!r} is not a "
+                    f"package-relative path (absolute and parent-relative paths "
+                    f"can leave the package)")
+                continue
+            if not is_within(target / f, target) \
+                    or (prev_available and not is_within(prev / f, prev)):
+                problems.append(
+                    f"response row {cid!r}: change file {f!r} resolves outside "
+                    f"the package (a symlink or parent-relative path)")
                 continue
             before, after = norm(c.get("before")), norm(c.get("after"))
             if not before and not after:
@@ -5700,7 +5740,12 @@ def _short_text_carries_fact(text) -> bool:
     2+-digit number or an identifier) keeps the text in scope whatever its
     length.
     """
-    return bool(_fact_survival_tokens(text))
+    text = str(text or "")
+    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
+        if len(re.sub(r"\D", "", match.group(0))) >= _FACT_SURVIVAL_MIN_DIGITS \
+                or _fact_single_digit_is_fact(text, match):
+            return True
+    return bool(_FACT_SURVIVAL_IDENT_RE.search(text))
 _CONTENT_UNIT_MATCH = 0.55
 _CONTENT_MATCH_STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "were", "was", "are",
@@ -7152,7 +7197,8 @@ def _fact_number_units(units) -> dict:
         text = str(unit.get("text") or "")
         for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
             raw = match.group(0)
-            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
+                    and not _fact_single_digit_is_fact(text, match):
                 continue
             out.setdefault(_fact_survival_key(raw), set()).add(
                 _fact_survival_unit_after(text, match.end()))
@@ -7261,9 +7307,20 @@ def _fact_unit_change_examples(base_units, cand_units, pairs=None,
         # `55 mg` -> `55 ml` change in this one (F129).
         surviving = _fact_number_units([paired]) if paired is not None else {}
         seen = set()
+        # The base's own unit set for this number: a candidate that ADDS a
+        # second unit ("55 mg or 55 ml") is a new fact even when the base unit
+        # also survives.
+        base_units_by_num = {}
+        for _bm in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
+            if len(re.sub(r"\D", "", _bm.group(0))) < _FACT_SURVIVAL_MIN_DIGITS \
+                    and not _fact_single_digit_is_fact(text, _bm):
+                continue
+            base_units_by_num.setdefault(_fact_survival_key(_bm.group(0)), set()).add(
+                _fact_survival_unit_after(text, _bm.end()))
         for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
             raw = match.group(0)
-            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
+                    and not _fact_single_digit_is_fact(text, match):
                 continue
             printed_unit = _fact_survival_unit_after(text, match.end())
             num_key = _fact_survival_key(raw)
@@ -7275,6 +7332,11 @@ def _fact_unit_change_examples(base_units, cand_units, pairs=None,
                 continue
             if printed_unit:
                 if printed_unit in others:
+                    added_units = (others - (base_units_by_num.get(num_key) or set())) - {""}
+                    if not added_units:
+                        continue
+                    changed.append((unit, f"{raw} {printed_unit}",
+                                    sorted(u or "(unitless)" for u in others)))
                     continue
                 if _unit_change_is_correction(
                         text, paired.get("text") or "", raw, printed_unit,
@@ -8720,8 +8782,11 @@ def journal_final_target(ctx: Ctx) -> tuple:
         # `run` that re-assembles the submission package must read the winner.
         rrec = ctx.round_get(1) or {}
         win_rel = str(rrec.get("winner_dir") or "")
-        if win_rel and (ctx.root / win_rel).is_dir():
-            return ctx.root / win_rel, f"the {mode} revision"
+        # State data is untrusted path input: an absolute value discarded
+        # ctx.root and `../` escaped it. Resolve and require containment.
+        winner = contained_under_or_none(ctx.root, win_rel) if win_rel else None
+        if winner is not None and winner.is_dir():
+            return winner, f"the {mode} revision"
         sb = ctx.sandbox_of(rec)
         return sb / REVISED_DIR, f"the {mode} revision"
     pins = ctx.state.get("pinned") or []

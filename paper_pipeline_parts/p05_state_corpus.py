@@ -2537,7 +2537,9 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
 
 def _blank_xml_elements(data: bytes, tags, value: bytes = b"") -> bytes:
     for tag in tags:
-        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb">)", re.S | re.I)
+        # XML permits whitespace before `>` in a closing tag (`</dc:creator >`);
+        # an exact close left the author value in a blinded judge view.
+        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb"\s*>)", re.S | re.I)
         data = pat.sub(lambda m: m.group(1) + value + m.group(3), data)
     return data
 
@@ -2674,8 +2676,9 @@ def _prune_dropped_part_references(payload: bytes, name: str, dropped: set,
         return payload
     if low == "[content_types].xml":
         def _override(m):
-            pm = re.search(rb'PartName="([^"]*)"', m.group(0))
-            part = pm.group(1).decode("utf-8", "replace").lstrip("/") if pm else ""
+            pm = re.search(rb'PartName\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', m.group(0))
+            raw = (pm.group(1) if pm.group(1) is not None else pm.group(2)) if pm else b""
+            part = raw.decode("utf-8", "replace").lstrip("/")
             if part and part.lower() in dropped:
                 notes.append(f"dropped the [Content_Types].xml Override for {part}")
                 return b""
@@ -2964,7 +2967,7 @@ def _blank_pdf_value(value: bytes) -> bytes:
 def _blank_xmp_fields(stream: bytes) -> bytes:
     for tag in (b"rdf:li", b"xmp:CreateDate", b"xmp:ModifyDate", b"xmp:MetadataDate",
                 b"xmp:CreatorTool", b"pdf:Producer", b"dc:title", b"dc:description"):
-        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb">)", re.S)
+        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb"\s*>)", re.S)
         stream = pat.sub(lambda m: m.group(1) + b" " * len(m.group(2)) + m.group(3), stream)
     return stream
 
@@ -3082,7 +3085,7 @@ def _sanitize_rtf_bytes(data: bytes) -> tuple:
     return data, []
 
 
-_SVG_METADATA_RE = re.compile(rb"(?is)<metadata\b[^>]*>.*?</metadata>")
+_SVG_METADATA_RE = re.compile(rb"(?is)<metadata\b[^>]*>.*?</metadata\s*>")
 _SVG_COMMENT_RE = re.compile(rb"(?s)<!--.*?-->")
 _SVG_TOOL_ATTR_RE = re.compile(
     rb"(?i)\s+(?:inkscape|sodipodi|adobe|dc|cc|rdf|i):[\w:-]+\s*=\s*"
@@ -3100,7 +3103,11 @@ def _sanitize_svg_bytes(raw: bytes) -> tuple:
     out = _SVG_METADATA_RE.sub(b"", raw)
     out = _SVG_COMMENT_RE.sub(b"", out)
     out = _SVG_TOOL_ATTR_RE.sub(b"", out)
-    return out, []
+    notes = []
+    if re.search(rb"(?is)<metadata\b", out):
+        notes.append("an SVG metadata element could not be stripped; inspect the "
+                     "judge view for author metadata")
+    return out, notes
 
 
 def _transform_view_file(old_rel: str, src: Path, file_map: dict):
@@ -3847,8 +3854,9 @@ def _trial_marker_names_this_run(data, rec: dict) -> bool:
             return False
         return data.get("run_id") in (None, rec.get("id"))
     # A legacy/older-schema marker that names no stage is still a completion
-    # signal when it is non-empty; the prompted shape always carries `stage`.
-    return True
+    # signal when it is non-empty, but a run_id it DOES name must be this run's:
+    # a copied marker from another run is not this trial's signal.
+    return data.get("run_id") in (None, rec.get("id"))
 
 
 def _trial_signal_paths(sandbox: Path, kind: str, rec: dict = None) -> set:

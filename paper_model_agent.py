@@ -66,6 +66,7 @@ from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import paper_dsh_runtime
+    import paper_agent_runtime_patch  # noqa: F401  (F024/F025, parent-tracked)
 finally:
     sys.path.pop(0)
 
@@ -405,7 +406,19 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
                 with contextlib.suppress(OSError):
                     self.wfile.write(raw)
                 return
-            raw = e.read()
+            try:
+                raw = e.read()
+            except (http.client.HTTPException, OSError) as read_exc:
+                raw = json.dumps({"error": {"message":
+                                           "custom endpoint proxy could not read the "
+                                           f"upstream HTTP {e.code} body: {read_exc}"}}).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                with contextlib.suppress(OSError):
+                    self.wfile.write(raw)
+                return
             self.send_response(e.code)
             ctype = e.headers.get("Content-Type") if e.headers else None
             self.send_header("Content-Type", ctype or "application/json")

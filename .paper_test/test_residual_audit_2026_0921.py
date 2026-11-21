@@ -9,7 +9,8 @@ had already ENUMERATED the problems and the pipeline threw them away. This suite
 pins the countermeasures, each one a class rather than an instance:
 
   * the tiered sentence-length bar (an abstract sentence of exactly 45 words is a
-    finding; a 50-word Methods sentence is not; a 61-word one is advisory),
+    finding; a 50-word Methods sentence is not; a 61-word one is finding-tier
+    because the venue profile declares the Methods bar),
   * `FMT-T8c` promoted from "report only" to a finding-tier redundancy rule,
   * `FMT-T9f` (a term the manuscript has to gloss), `FMT-T9i` (mega-paragraph)
     and `FMT-T9j` (two term families competing for one concept: CN vs CNV),
@@ -132,8 +133,8 @@ def test_sentence_bar_tiers():
     mrows = [r for r in fmt.long_text_rows([long_methods], [False], ["methods"],
                                            style_limits=STYLE_LIMITS)
              if "long sentence" in r["evidence"]]
-    check("a 61-word Methods sentence is recorded as ADVISORY",
-          bool(mrows) and mrows[0]["tier"] == "advisory", str(mrows[:1])[:160])
+    check("a 61-word Methods sentence is FMT-T9c finding-tier at the declared bar",
+          bool(mrows) and mrows[0]["tier"] == "finding", str(mrows[:1])[:160])
     mega = fmt.long_text_rows(["word " * 260], [False], ["body"],
                               style_limits=STYLE_LIMITS)
     check("a 260-word paragraph is a FMT-T9i structural row",

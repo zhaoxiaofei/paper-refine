@@ -177,7 +177,11 @@ def run_bounded(argv, timeout, cwd=None, env=None):
             total = 0
             try:
                 while True:
-                    chunk = pipe.read(65536)
+                    # Read the raw descriptor: `BufferedReader.read` holds the
+                    # buffer lock, and a grandchild that keeps the pipe open
+                    # then made the main thread's `pipe.close()` wait on it
+                    # forever after the timeout.
+                    chunk = os.read(pipe.fileno(), 65536)
                     if not chunk:
                         break
                     before = total
@@ -233,11 +237,15 @@ def run_bounded(argv, timeout, cwd=None, env=None):
         # end forces the reader to EOF instead of leaving it blocked forever.
         for t, pipe in zip(readers, (proc.stdout, proc.stderr)):
             if t.is_alive():
-                try:
-                    pipe.close()
-                except OSError:
-                    pass
+                # Never close a pipe a live reader still owns: its close waits
+                # on the reader's lock (the hang). The pipe is left to the
+                # daemon reader, which exits at EOF or with the process.
                 t.join(timeout=2)
+                continue
+            try:
+                pipe.close()
+            except OSError:
+                pass
         out_f.seek(0, os.SEEK_END)
         out_size = out_f.tell()
         err_f.seek(0, os.SEEK_END)

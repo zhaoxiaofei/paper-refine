@@ -939,7 +939,7 @@ def elem(frag: str | None, tag: str) -> str | None:
     """
     if not frag:
         return None
-    frag = re.sub(r"<w:(pPrChange|rPrChange)\b[^>]*>.*?</w:\1>", "", frag, flags=re.S)
+    frag = re.sub(r"<w:(pPrChange|rPrChange)\b[^>]*>.*?</w:\1\s*>", "", frag, flags=re.S)
     # A comment/processing instruction inside the properties is not live
     # formatting either: `<!-- <w:ind w:firstLine="720"/> -->` before the live
     # `<w:ind w:firstLine="0"/>` was returned as the paragraph's indentation.
@@ -2222,7 +2222,7 @@ def live_rpr(rpr: str | None) -> str:
     a roman run as italic and made the mechanical fixer unable to clear its own
     row (it must not edit the change record).
     """
-    return re.sub(r"<w:rPrChange\b.*?</w:rPrChange>", "", rpr or "", flags=re.S)
+    return re.sub(r"<w:rPrChange\b.*?</w:rPrChange\s*>", "", rpr or "", flags=re.S)
 
 
 def effective_emphasis(styles: dict, para_style: str | None, run_style: str | None,
@@ -2472,7 +2472,7 @@ def _rpr_set_emphasis(rpr: str | None, on: bool) -> tuple:
     # not the live run formatting: deleting/inserting `w:i` there corrupts the
     # revision record while the run itself keeps its emphasis. Edit only the
     # live segments and leave every revision subtree byte-identical.
-    _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange>)", rpr, flags=re.S)
+    _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange\s*>)", rpr, flags=re.S)
     for _i in range(0, len(_segs), 2):
         _seg = _segs[_i]
         _seg = re.sub(r"<w:i(?=[\s/>])[^>]*/>", "", _seg)

@@ -427,6 +427,12 @@ FINDING_TIER_RULES = {
     "FMT-S1",    # break-only paragraph / blank page
     "FMT-S3",    # running head on the title page
     "FMT-S4",    # tracked changes in a final package
+    # M20 lists these as findings: a heading without keepNext/keepLines
+    # (T3a/T3b), italics on the title/correspondence block, "et al." or a
+    # journal title (T6a/T6b/T6f/T6g), a mixed URL/email treatment (T7a/T7b),
+    # and proofing markers in the final package (S5).
+    "FMT-T3a", "FMT-T3b", "FMT-T6a", "FMT-T6b", "FMT-T6f", "FMT-T6g",
+    "FMT-T7a", "FMT-T7b", "FMT-S5",
     "FMT-T1",    # mixed quotation marks
     # The M20 sweep's dash/quote family: sweeps.md lists "mixed straight/curly
     # quotation marks, a spaced hyphen used as a dash, or em-dash density above
@@ -1091,7 +1097,13 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
             strict = kind in STRICT_KINDS
             rows.append({"rule": "FMT-T9c",
                          "severity": "medium" if strict else "low",
-                         "tier": "finding" if kind != "methods" else "advisory",
+                         # The profile DECLARED this section's bar, so it is a
+                         # venue rule here whatever the section kind: the
+                         # docstring's contract is that only a declared bar can
+                         # make a row finding-tier, not that Methods bars are
+                         # advisory (R07/F080; README "FMT-T9c ... finding-tier
+                         # when the profile states the bar").
+                         "tier": "finding",
                          "evidence": f"long sentence ({n} words; {kind} profile bar {bar}) in "
                                      f"para {i}: {s.strip()[:80]!r}...",
                          "detail": "split it (one idea per sentence) or move the "

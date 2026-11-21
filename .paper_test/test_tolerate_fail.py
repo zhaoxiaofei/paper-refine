@@ -128,13 +128,16 @@ class FakeCtx:
         self.logs.append((args, kwargs))
 
 
-def _trial(root: Path, name: str, files: list, errors: list) -> Path:
+def _trial(root: Path, name: str, files: list, errors: list,
+           run_id: str = "r1_a2_revise") -> Path:
     sb = root / "runs" / name
     (sb / "guided_review").mkdir(parents=True, exist_ok=True)
     for f in files:
         (sb / "guided_review" / f).write_text("# synthetic review file\n", encoding="utf-8")
+    # The marker must name the run whose trial this is: a legacy marker with a
+    # FOREIGN run_id is another run's completion signal, not this trial's.
     (sb / "_pipeline_done.json").write_text(
-        json.dumps({"run_id": "r1_a2_revise", "kind": "revise"}), encoding="utf-8")
+        json.dumps({"run_id": run_id, "kind": "revise"}), encoding="utf-8")
     (sb / "record.json").write_text(
         json.dumps({"attempt": 1, "kind": "revise", "errors": errors}), encoding="utf-8")
     return sb
@@ -177,8 +180,8 @@ def test_trial_selection_tie_break_and_none() -> None:
     rid = "r1_guided_review"
     rec = {"id": rid, "kind": "guided_review", "status": "failed", "attempt": 2,
            "attempts_log": [{"attempt": 2, "ok": False, "errors": ["x"]}]}
-    _trial(tmp, f"{rid}_try1_failed", ["a.md", "b.md"], ["e1", "e2"])
-    _trial(tmp, f"{rid}_try2_failed", ["a.md", "b.md"], ["e1"])
+    _trial(tmp, f"{rid}_try1_failed", ["a.md", "b.md"], ["e1", "e2"], run_id=rid)
+    _trial(tmp, f"{rid}_try2_failed", ["a.md", "b.md"], ["e1"], run_id=rid)
     active = ctx.sandbox_of(rec)
     (active / "guided_review").mkdir(parents=True)
     (active / "guided_review" / "c.md").write_text("# current\n", encoding="utf-8")
@@ -274,7 +277,9 @@ def test_tolerated_trial_is_used_end_to_end() -> None:
         "printf '# Audit\\n\\nNo findings.\\n' > audit/AUDIT_REPORT.md\n"
         "if [ -d base ]; then cp -a base/. revised/ 2>/dev/null || true; fi\n"
         "printf '# Change\\n' > revised/CHANGELOG.md\n"
-        "printf '{\"run_id\":\"x\",\"kind\":\"x\"}\\n' > _pipeline_done.json\n"
+        # A legacy marker carries no run_id: a placeholder would be another
+        # run's completion signal, not this trial's.
+        "printf '{\"kind\":\"x\"}\\n' > _pipeline_done.json\n"
         "exit 1\n", encoding="utf-8")
     stub.chmod(0o755)
     root = setup_root(tmp, "--tolerate-fail")

@@ -223,8 +223,8 @@ Everything lives under the root you passed to `setup`:
 The selection rule is one incumbent guard plus one ordered default key. Retention
 is applied first: if the key's leader is not the incumbent and ties it exactly on
 (median, mean, IQR), the incumbent is kept. Otherwise the default key decides:
-**defect prefix** (fewer defects wins) → **median** → **mean** → **IQR** → content
-**digest**. The prefix comes from the
+**ordered defect census** (fewer defects, and a worse severity earlier, wins) →
+**median** → **mean** → **IQR** → content **digest**. The prefix comes from the
 blind panel's own issue ledger; the panel statistics sit below it. See *How a
 round is decided* below for the rationale and the gates.
 
@@ -3114,7 +3114,7 @@ The artifact *process* is shared as well; the differences are deliberate:
 | `scores.json` (signed comparison items with class + severity) | judge | only the panel scores |
 
 **How a round is decided (one ranking key, every arm on the same terms):**
-the **cumulative defect count over the adaptive
+the **ordered per-cell defect census over the adaptive
 severity_tier_category prefix** (the canonical cell order is
 `fatal_correctness_peer, fatal_correctness_own, …,
 minor_formatting_own`: fatal, critical, major and minor -- the SAME four severity
@@ -3123,10 +3123,10 @@ the cells accumulating
 every ranked version's reported defect counts, and STOP
 at the first prefix where the version with the FEWEST defects reaches the
 configured floor -- default 10, `setup --tiebreak-defect-floor N` /
-`set-tiebreak-defect-floor N` -- or when every cell is used; the cumulative
-count at that prefix LEADS the ranking -- the number of defects the panel
-attributed to a version is the most direct improvement signal, while the flat
-median is coarse on a -4..+4 integer scale), then `-median`, then `-mean`, `IQR`,
+`set-tiebreak-defect-floor N` -- or when every cell is used; the ORDERED CENSUS
+at that prefix LEADS the ranking, compared cell by cell in canonical order, so a
+fatal defect does not tie with several minor ones -- the cumulative total chooses
+the prefix but is not the comparator), then `-median`, then `-mean`, `IQR`,
 the provenance-free content digest; the run id is only a deterministic sort
 fallback, never a champion input. Retention is applied first: if the key's leader
 is not the incumbent and that leader ties the incumbent exactly on (median, mean,
@@ -3728,7 +3728,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 271 suites (a few
+any failure. They are independent, so run them in parallel — 272 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

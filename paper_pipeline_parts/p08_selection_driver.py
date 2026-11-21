@@ -1938,11 +1938,13 @@ def _serve_selfcheck(sb: Path, rec: dict, stop: threading.Event) -> None:
     seen = ""
     while not stop.wait(0.4):
         try:
-            if not request.is_file() or request.is_symlink():
-                continue
-            if request.stat().st_size > 8192:
-                continue
-            raw = request.read_text(encoding="utf-8", errors="replace")
+            # Open ONCE with O_NOFOLLOW and fstat/read that same descriptor: the
+            # old is_file/is_symlink/stat then read_text() let an agent swap the
+            # path for a symlink or a huge file between the check and the read.
+            with _open_regular_no_follow(request) as fh:
+                if os.fstat(fh.fileno()).st_size > 8192:
+                    continue
+                raw = fh.read(8193).decode("utf-8", "replace")
         except OSError:
             continue
         try:
@@ -2203,6 +2205,11 @@ def apply_results(ctx: Ctx, results: dict) -> None:
             rec["status"] = "failed"
             rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
             rec["last_failure_kind"] = str(res.get("failure_kind") or "")
+            # A process-level failure never reached a postcheck: the previous
+            # attempt's postcheck errors are stale and made
+            # resume_unfinished_reason misclassify this as a content rejection
+            # (no continuation offered).
+            rec.pop("postcheck", None)
             # The process died mid-session: its CLI session id is still in the
             # transcript, and a continuation may finish the work it started.
             sid = capture_agent_session_id(ctx, rec)
@@ -3820,9 +3827,11 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
     started = rec.get("last_attempt_started")
     marker = sb / MARKER_FILE
     saved_marker = None
-    if marker.is_file():
+    if marker.is_file() and not marker.is_symlink():
         try:
-            saved_marker = marker.read_bytes()
+            # No-follow, bounded read: a planted symlink must not republish an
+            # outside file as this sandbox's completion marker.
+            saved_marker = read_regular_file(marker, MAX_PAYLOAD_BYTES)
         except OSError:
             saved_marker = None
     result = None

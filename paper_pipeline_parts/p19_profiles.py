@@ -569,9 +569,8 @@ def synthesize_frozen_review(ctx, r: int, sb) -> dict:
     rows = list(cold_start_findings_rows(ctx, r) or [])
     if journal_is_scoped(ctx):  # defensive: a scoped round never reaches here
         rows = []
-    target = sb / GUIDED_REVIEW_DIR
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "round2").mkdir(parents=True, exist_ok=True)
+    target = safe_mkdir(sb / GUIDED_REVIEW_DIR)
+    safe_mkdir(target / "round2")
     write_json_atomic(sb / FINDINGS_REL, _frozen_review_doc(r))
     rows_md = _cold_start_findings_md(rows, level=3)
     write_text_atomic(sb / GUIDED_REVIEW_DIR / "findings.md",

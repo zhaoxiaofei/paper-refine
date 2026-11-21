@@ -18,6 +18,31 @@ import sys
 import zipfile
 
 W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+def _fresh_run_dir(run_dir, skill_root):
+    """Create a FRESH run dir without deleting an arbitrary user directory.
+
+    `--run-dir .` / `$HOME` used to be recursively deleted immediately. Refuse a
+    protected or non-temporary non-empty path; a temp dir (the documented usage)
+    is still cleaned so a re-run starts fresh.
+    """
+    import tempfile
+    run_dir = os.path.abspath(run_dir)
+    root = os.path.abspath(skill_root)
+    home = os.path.abspath(os.path.expanduser("~"))
+    if run_dir in (os.path.abspath(os.sep), home, root) or run_dir.startswith(root + os.sep):
+        raise SystemExit(f"refusing --run-dir {run_dir!r}: it is the skill tree, "
+                         f"the home directory or the filesystem root")
+    if os.path.exists(run_dir) and not os.path.isdir(run_dir):
+        raise SystemExit(f"refusing --run-dir {run_dir!r}: it is not a directory")
+    if os.path.isdir(run_dir) and os.listdir(run_dir):
+        tmp = os.path.abspath(tempfile.gettempdir())
+        if not (run_dir == tmp or run_dir.startswith(tmp + os.sep)):
+            raise SystemExit(f"refusing --run-dir {run_dir!r}: it is non-empty and "
+                             f"outside the temp directory; not deleting it")
+    shutil.rmtree(run_dir, ignore_errors=True)
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir
 FAILS = []
 
 
@@ -111,9 +136,7 @@ def main():
     ap.add_argument("--run-dir", required=True)
     args = ap.parse_args()
     root = os.path.abspath(args.skill_root)
-    base = os.path.abspath(args.run_dir)
-    shutil.rmtree(base, ignore_errors=True)
-    os.makedirs(base, exist_ok=True)
+    base = _fresh_run_dir(args.run_dir, root)
 
     # R1 — all-lowercase gene/protein symbols
     d = os.path.join(base, "r1")

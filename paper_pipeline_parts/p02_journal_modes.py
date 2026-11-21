@@ -436,6 +436,13 @@ def journal_feedback_files(ctx: Ctx) -> list:
         rel = p.relative_to(ctx.pristine).as_posix()
         if is_original_submission_rel(rel):
             continue
+        # The fallback may still read a legacy `raw_data/` name (the dedicated
+        # area is preferred), but an INERT disabled evidence area and an
+        # author's own README are never the journal's letter. (A full
+        # is_non_manuscript_rel() filter would also drop the documented
+        # raw_data fallback.)
+        if is_disabled_evidence_rel(rel) or is_non_submitted_readme_name(p.name):
+            continue
         if evidence_area_of(rel) == LLM_FEEDBACK_DIR:
             # The LLM review is its own stream (`journal_llm_feedback_files`),
             # never swept up by the decision-letter name heuristic: a

@@ -138,6 +138,8 @@ def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
     if not reason:
         return [], key, "", ""
     if not cmd:
+        print(f"  [resume] {rec.get('id', '?')}: no continuation -- the stage "
+              f"recorded no resumable command")
         return [], key, "", ""
     used = int((rec.get("resume_attempts") or {}).get(key) or 0)
     if used >= RESUME_ATTEMPT_LIMIT:

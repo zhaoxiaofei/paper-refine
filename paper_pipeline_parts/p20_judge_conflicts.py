@@ -613,7 +613,10 @@ def _normalize_llm_conflicts(data) -> list:
             elif isinstance(q, str):
                 evidence.append({"judge_run": "", "side": "evidence",
                                  "text": " ".join(q.split())[:300]})
-        if not summary and not evidence:
+        # A conflict with no judge words is a fabricated blocker: the manual
+        # TODO must require at least one quote that the validator can bind to
+        # the cited opinions.
+        if not evidence:
             continue
         if not manual:
             manual = _JUDGE_CONFLICT_MANUAL.get(kind, _JUDGE_CONFLICT_MANUAL["other"])
@@ -693,8 +696,7 @@ def run_judge_conflict_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
     # NB: NOT "judge_conflict_*" -- instrumentation/tests classify sandboxes by
     # name and a "judge_" prefix would read as a judge session.  The audit is a
     # separate, lightweight session.
-    sb = ctx.reports_dir / F"conflict_check_round{int(r)}"
-    sb.mkdir(parents=True, exist_ok=True)
+    sb = safe_mkdir(ctx.reports_dir / F"conflict_check_round{int(r)}")
     write_json_atomic(sb / "judge_opinions.json", payload)
     write_json_atomic(sb / "candidate_conflicts.json",
                       {"conflicts": payload.get("candidate_conflicts") or []})

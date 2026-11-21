@@ -896,6 +896,11 @@ def analyse_package(path: Path, policy: dict) -> dict:
             problem = _docx_zip_problem(pkg)
             if problem:
                 raise ValueError(problem)
+            # A repeated member name is an ambiguous package: the fixer refuses
+            # it as unreadable, so the scanner must not report it clean.
+            problem = _docx_duplicate_member_problem(pkg)
+            if problem:
+                raise ValueError(problem)
             raw = pkg.read("word/document.xml")
             problem = _docx_entity_problem(raw, "word/document.xml")
             if problem:
@@ -1100,7 +1105,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
         _max = _pb.get("cover_letter_max_pages") if isinstance(_pb, dict) else None
         if pages and isinstance(_max, int) and pages > _max:
             res["rows"].append(cover_letter_page_row(path, pages, src, _max))
-        elif pages is None and _max is not None and pdf.is_file():
+        elif pages is None and _max is not None:
             # Neither the rendered PDF nor the cached page count could state the
             # length: record the unexamined class rather than let the budget look
             # enforced (a skipped check is reported as skipped).
@@ -1381,7 +1386,7 @@ def _unlink_fields(xml: str) -> tuple:
         # `w:fldSimple` carries no fldChar/instrText runs: remove only its
         # tags, so the result runs stay as plain text.
         for m in re.finditer(r"<w:fldSimple\b[^>]*/>|<w:fldSimple\b[^>]*>|"
-                             r"</w:fldSimple>", chunk):
+                             r"</w:fldSimple\s*>", chunk):
             field_edits.append((s + m.start(), s + m.end(), ""))
         if field_edits:
             edits.extend(field_edits)
@@ -1712,7 +1717,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 head = body.rstrip()[:-2].rstrip() + ">"
                 xml = apply_edits(xml, [(s.start(), s.end(), head + "<w:titlePg/></w:sectPr>")])
             else:
-                at = s.start() + body.find("</w:sectPr>")
+                close = re.search(r"</w:sectPr\s*>", body)
+                if close is None:
+                    # No live close to splice before: refuse the edit rather
+                    # than insert at -1 (which corrupts the preceding element).
+                    return doc_xml
+                at = s.start() + close.start()
                 # CT_SectPr's ordered tail after titlePg: textDirection,
                 # bidi, rtlGutter, docGrid, printerSettings. Looking only for
                 # the last two put titlePg after textDirection/bidi/rtlGutter,
@@ -2616,7 +2626,7 @@ _REVISION_RECORD_RE = re.compile(
 # ended at the NESTED close of a `w:sectPrChange`, returning an unbalanced
 # prefix whose obsolete geometry was then adopted.
 _SECT_RE = SECT_READ_RE
-_RELS_TAG_RE = re.compile(r"<Relationship\b[^>]*>")
+_RELS_TAG_RE = re.compile(r"<(?:[A-Za-z_][\w.\-]*:)?Relationship\b[^>]*>")
 
 
 def _rels_entries(xml: str) -> list:
@@ -2626,7 +2636,9 @@ def _rels_entries(xml: str) -> list:
     yield the same header/footer role map as the canonical order.
     """
     out = []
-    for m in _RELS_TAG_RE.finditer(xml or ""):
+    # A commented-out relationship is not live, and a namespace-prefixed
+    # `<pkg:Relationship>` is a legal OPC entry.
+    for m in _RELS_TAG_RE.finditer(_mask_noncontent(xml or "")):
         tag = m.group(0)
         rid, typ, target = attr_of(tag, "Id"), attr_of(tag, "Type"), attr_of(tag, "Target")
         if rid is None or target is None:
@@ -2815,7 +2827,15 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
                     body = body[:at] + new_el + body[at + len(el):]
                     masked = masked[:at] + new_el + masked[at + len(el):]
             elif new_el:
-                pos = masked.rfind("</w:sectPr>")
+                # The close may carry whitespace (`</w:sectPr >`, legal XML);
+                # an exact-tag rfind returned -1 and spliced the new child at
+                # the end of the section's bytes, corrupting the XML.
+                close = None
+                for close in re.finditer(r"</w:sectPr\s*>", masked):
+                    pass
+                if close is None:
+                    return body
+                pos = close.start()
                 # `w:sectPrChange` is the LAST child in schema order, so a
                 # missing geometry element must land BEFORE it, never after
                 # (the masked scan cannot see the record's own tag).
@@ -2937,7 +2957,14 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     def target_of(kind: str, role: str) -> str:
         rid = refs[kind].get(role)
         k, target = rel_map.get(rid, ("", "")) if rid else ("", "")
-        return target if k == kind and target and f"word/{target}" in tnames else ""
+        if k != kind or not target:
+            return ""
+        # A Target may be package-absolute (`/word/header1.xml`). It is
+        # relative to `word/` here, so strip the leading slash (and a leading
+        # `word/`) before checking the template's parts.
+        norm = target.lstrip("/").replace("\\", "/")
+        rel = norm[len("word/"):] if norm.startswith("word/") else norm
+        return rel if f"word/{rel}" in tnames else ""
 
     by_target = {}
 
@@ -3773,8 +3800,17 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
             typ = attr_of(rm.group(0), "w:type") or "default"
             return "" if (tag, typ) in replaced else rm.group(0)
 
+        # `w:sectPrChange` is revision history: its nested old section must stay
+        # byte-identical. Apply the substitutions/splices only to the LIVE part
+        # and re-attach the record unchanged.
+        body = m.group(0)
+        change = _SECT_CHANGE_RE.search(body)
+        history = ""
+        if change is not None:
+            history = body[change.start():]
+            body = body[:change.start()]
         body = re.sub(r"<w:(header|footer)Reference(?=[\s/>])[^>]*/>",
-                      keep_source_ref, m.group(0))
+                      keep_source_ref, body)
         body = re.sub(r"<w:titlePg[^>]*/>", "", body)
         # The OPENING tag only: `[^>]*` greedily consumed the `/` of a legal
         # `<w:sectPr att="x"/>`, so the references were inserted AFTER the
@@ -3793,15 +3829,25 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
             # rtlGutter, docGrid, printerSettings. Anchoring only on docGrid or
             # the closing tag put titlePg AFTER textDirection/bidi/rtlGutter,
             # where Word reads the section as schema-invalid.
-            at = body.find("</w:sectPr>")
+            at = None
+            close = re.search(r"</w:sectPr\s*>", body)
+            if close is not None:
+                at = close.start()
+            elif change is not None:
+                # The live close sits in the split-off `w:sectPrChange`
+                # history, so the live section has no close to anchor on. Its
+                # end is `change.start()` in the original section: insert
+                # before the record, exactly where the live close used to be
+                # (R02).
+                at = len(body)
             for tag in ("textDirection", "bidi", "rtlGutter", "docGrid",
                         "printerSettings"):
                 t = body.find(f"<w:{tag}")
-                if t != -1 and (at == -1 or t < at):
+                if t != -1 and (at is None or t < at):
                     at = t
-            if at == -1:
-                at = body.rfind("/>")
-            body = body[:at] + "<w:titlePg/>" + body[at:]
+            if at is not None:
+                body = body[:at] + "<w:titlePg/>" + body[at:]
+        body += history
         out = out[:m.start()] + body + out[m.end():]
     if refs_all:
         root = re.search(r"<w:document\b[^>]*>", out)
@@ -4140,7 +4186,7 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             # used only by a comment was dropped and the comment then pointed at
             # an undefined style while the report claimed success.
             doc_part_re = re.compile(
-                r"word/(?:document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml")
+                r"word/(?:document|header[^/]*|footer[^/]*|footnotes|endnotes|comments)\.xml")
             ref_ids = set()
             for name in sorted(parts):
                 if doc_part_re.fullmatch(name):
@@ -4725,6 +4771,11 @@ def _pdf_object_bodies(data: bytes) -> dict:
     # hit inside a stream is harmless as long as it is not the LAST definition
     # of the number we resolve -- the dictionary guard below drops those.
     for m in re.finditer(rb"(\d+)\s+0\s+obj", data):
+        # A crafted number longer than CPython's int() digit limit raised
+        # ValueError out of `check_pdf`; an unusable object number is just a
+        # non-object, so skip it.
+        if len(m.group(1)) > 18:
+            continue
         num = int(m.group(1))
         start = m.end()
         end = data.find(b"endobj", start)
@@ -5652,10 +5703,15 @@ def referenced_header_footer_parts(parts: dict, document_xml: str) -> set:
             target = str(rel["target"]).lstrip("/").replace("\\", "/")
             targets[rel["id"]] = (target if target.startswith("word/")
                                   else "word/" + target)
-    ref_ids = {attr_of(m.group(0), "r:id")
-               for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>",
-                                    document_xml or "")}
-    ref_ids.discard(None)
+    # The relationship namespace may be bound to any prefix (`rel:id`), not
+    # only the usual `r:`; resolve the prefix from the document itself.
+    prefixes = _rel_prefixes(document_xml or "") or {"r"}
+    ref_ids = set()
+    for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>",
+                         document_xml or ""):
+        rid = _attached_template_rid(m.group(0), prefixes)
+        if rid:
+            ref_ids.add(rid)
     return {targets[rid] for rid in ref_ids if rid in targets}
 
 
@@ -6655,14 +6711,22 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
             targets = {}
             if rels_name in z.namelist():
                 rels_xml = ooxml_part_text(z.read(rels_name))
-                for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
-                    attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
-                    typ = attrs.get("Type", "")
-                    if attrs.get("Id") and (typ.endswith("/header") or typ.endswith("/footer")):
-                        tgt = attrs.get("Target", "").lstrip("/").replace("\\", "/")
-                        targets[attrs["Id"]] = (tgt if tgt.startswith("word/")
-                                                else "word/" + tgt)
-            ref_ids = re.findall(r'<w:(?:header|footer)Reference[^>]*r:id="([^"]+)"', out_doc)
+                for rel in _rels_entries(rels_xml):
+                    # `_rels_entries` already reduces `Type` to its last path
+                    # segment ("header"/"footer"), so test that short form: a
+                    # `Type.endswith("/header")` test is always false here and
+                    # silently skipped the post-repair FMT-S10 re-scan (R01).
+                    typ = str(rel.get("type") or "")
+                    if rel.get("id") and typ in ("header", "footer"):
+                        tgt = str(rel.get("target") or "").lstrip("/").replace("\\", "/")
+                        targets[rel["id"]] = (tgt if tgt.startswith("word/")
+                                              else "word/" + tgt)
+            prefixes = _rel_prefixes(out_doc) or {"r"}
+            ref_ids = []
+            for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>", out_doc):
+                rid = _attached_template_rid(m.group(0), prefixes)
+                if rid:
+                    ref_ids.append(rid)
             aux = [(targets[rid], ooxml_part_text(z.read(targets[rid])))
                    for rid in ref_ids if rid in targets and targets[rid] in z.namelist()]
     except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as exc:

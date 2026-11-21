@@ -85,11 +85,22 @@ def _content_unit_contained(unit: dict, candidates: list,
         return False
     polarity = bool(_CONTENT_NEGATION_RE.search(str(unit.get("text") or "")))
     for cand in candidates or ():
-        if len(tokens & _content_tokens(cand)) / len(tokens) < floor:
-            continue
-        if bool(_CONTENT_NEGATION_RE.search(str(cand.get("text") or ""))) != polarity:
-            continue
-        return True
+        cand_text = str(cand.get("text") or "")
+        # Polarity belongs to the CLAUSE that carries the content, not to a
+        # merged sentence: another sentence's negation used to flip the
+        # candidate and defeat containment.
+        clauses = [c for c in re.split(r"(?<=[.!?])\s+|\s*;\s*", cand_text) if c]
+        matched = False
+        for clause in clauses:
+            clause_unit = {"tokens": re.findall(r"[0-9A-Za-z]+", clause.lower())}
+            if len(tokens & _content_tokens(clause_unit)) / len(tokens) < floor:
+                continue
+            matched = True
+            if bool(_CONTENT_NEGATION_RE.search(clause)) == polarity:
+                return True
+        if not matched and len(tokens & _content_tokens(cand)) / len(tokens) >= floor \
+                and bool(_CONTENT_NEGATION_RE.search(cand_text)) == polarity:
+            return True
     return False
 
 
@@ -541,7 +552,21 @@ def _deletion_disposition_ok(value, allow_nothing_removed: bool = True) -> bool:
                 r"table\s*\d+|figure\s*\d+|paragraph\s*\d+|supplementary)\b",
                 reason):
             return True
-        return len(words) >= 4
+        # Four arbitrary words are not a reason. The closure must name a
+        # checkable basis: a location/artifact (section, table, figure, line,
+        # paragraph, a named document) with a retention claim, or an
+        # identity/duplication claim ("duplicate", "identical", "the same
+        # fact", "no fact", "already stated").
+        named = re.search(
+            r"(?i)(?:\b(?:sec(?:tion)?|table|figure|paragraph|line|row|appendix|"
+            r"supplement)\b\.?\s*\d|\u00a7\s*\d|"
+            r"\b[\w./-]+\.(?:md|txt|tex|docx|doc|rtf|pdf|csv)\b)", reason)
+        claim = re.search(
+            r"(?i)\b(?:duplicate|redundant|identical|surviv\w*|"
+            r"same\s+(?:fact|statement|sentence|value|content)|"
+            r"no\s+(?:fact|value|information)|nothing\s+(?:new|additional)|"
+            r"already\s+(?:stated|present|reported|covered))\b", reason)
+        return bool(claim) or bool(named)
     if re.match(r"(?i)^manual-required\b", text):
         return True
     if re.match(r"(?i)^fact\s+removed\s*[\u2014\u2013:-]\s*RP-\d+\b", text):
