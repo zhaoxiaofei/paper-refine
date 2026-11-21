@@ -2767,7 +2767,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
     def _accept_changes(payload: bytes) -> bytes:
         """Drop revision marks / edit ids; return the accepted document XML."""
         nonlocal accepted
-        new = re.sub(rb"<w:rsids\b[^>]*>.*?</w:rsids>", b"", payload, flags=re.S)
+        new = re.sub(rb"<w:rsids\b[^>]*>.*?</w:rsids\s*>", b"", payload, flags=re.S)
         new = re.sub(rb"<w:rsids\b[^>]*/>", b"", new)
         new = re.sub(rb"\s(?:[\w]+:)?(?:rsid\w*|paraId|textId|durableId)=([\"'])[^\"']*\1",
                      b"", new)
@@ -2775,7 +2775,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         new = re.sub(rb"<w:lastRenderedPageBreak\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:proofState\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:attachedTemplate\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:docVars\b[^>]*>.*?</w:docVars>", b"", new, flags=re.S)
+        new = re.sub(rb"<w:docVars\b[^>]*>.*?</w:docVars\s*>", b"", new, flags=re.S)
         new = re.sub(rb"<w:trackChanges\b[^>]*/>", b"", new)
         def _drop_nested(tag: bytes) -> None:
             """Remove a nested revision wrapper innermost-first.
@@ -2792,7 +2792,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
             pat = re.compile(
                 rb"<w:" + tag + rb"\b[^>]*/>"
                 rb"|<w:" + tag + rb"\b[^>]*>(?:(?!<w:" + tag
-                + rb"\b(?![^>]*/>)).)*?</w:" + tag + rb">", re.S)
+                + rb"\b(?![^>]*/>)).)*?</w:" + tag + rb"\s*>", re.S)
             for _ in range(64):
                 stripped = pat.sub(b"", new)
                 if stripped == new:
@@ -2803,21 +2803,22 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         # `<w:del>` wrapper around its cells. Stripping only the marker kept
         # every cell's text, resurrecting the row as accepted content (F19).
         new = re.sub(
-            rb"<w:tr\b[^>]*>(?:(?!</w:tr>).)*?<w:trPr\b[^>]*>"
-            rb"(?:(?!</w:trPr>).)*?<w:del\b[^>]*/>"
-            rb"(?:(?!</w:trPr>).)*?</w:trPr>(?:(?!</w:tr>).)*?</w:tr>",
+            rb"<w:tr\b[^>]*>(?:(?!</w:tr\s*>).)*?<w:trPr\b[^>]*>"
+            rb"(?:(?!</w:trPr\s*>).)*?<w:del\b[^>]*/>"
+            rb"(?:(?!</w:trPr\s*>).)*?</w:trPr\s*>(?:(?!</w:tr\s*>).)*?</w:tr\s*>",
             b"", new, flags=re.S)
         _drop_nested(b"del")
         _drop_nested(b"cellDel")
         _drop_nested(b"moveFrom")
         new = re.sub(rb"<w:del\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:delText\b[^>]*>.*?</w:delText>", b"", new, flags=re.S)
+        new = re.sub(rb"<w:delText\b[^>]*>.*?</w:delText\s*>", b"", new, flags=re.S)
         new = re.sub(rb"<w:(rPrChange|pPrChange|tblPrChange|trPrChange|tcPrChange|"
-                     rb"sectPrChange|numberingChange)\b[^>]*>.*?</w:\1>", b"", new, flags=re.S)
-        new = re.sub(rb"<w:(cellIns|cellDel|cellMerge|moveFrom)\b[^>]*>.*?</w:\1>", b"",
-                     new, flags=re.S)
+                     rb"sectPrChange|numberingChange)\b[^>]*>.*?</w:\1\s*>", b"", new,
+                     flags=re.S)
+        new = re.sub(rb"<w:(cellIns|cellDel|cellMerge|moveFrom)\b[^>]*>.*?</w:\1\s*>",
+                     b"", new, flags=re.S)
         new = re.sub(rb"<w:(?:cellIns|cellDel|cellMerge|moveFrom)\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:moveTo\b[^>]*>(.*?)</w:moveTo>", rb"\1", new, flags=re.S)
+        new = re.sub(rb"<w:moveTo\b[^>]*>(.*?)</w:moveTo\s*>", rb"\1", new, flags=re.S)
         # Word nests `w:ins` inside `w:ins` (a later insertion inside an
         # earlier one). One non-greedy pass pairs the OUTER open tag with the
         # INNER close tag, so it unwraps the outer mark and leaves the inner
@@ -2825,7 +2826,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         # (and the judge's read) promises. Re-apply until no `w:ins` survives;
         # each pass removes at least one mark, so this terminates.
         for _ in range(64):
-            unwrapped = re.sub(rb"<w:ins\b[^>]*>(.*?)</w:ins>", rb"\1", new, flags=re.S)
+            unwrapped = re.sub(rb"<w:ins\b[^>]*>(.*?)</w:ins\s*>", rb"\1", new, flags=re.S)
             if unwrapped == new:
                 break
             new = unwrapped

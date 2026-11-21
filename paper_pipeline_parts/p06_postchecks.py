@@ -6106,14 +6106,20 @@ def _safe_restore_copy(src: Path, dest: Path, root: Path) -> None:
     if dest.is_symlink():
         dest.unlink()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.restore-{os.getpid()}-{time.time_ns()}")
     try:
-        shutil.copy2(src, tmp)
-        os.replace(tmp, dest)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
+        src_mode = stat.S_IMODE(os.stat(src).st_mode)
+    except OSError:
+        src_mode = None
+
+    def _copy(f) -> None:
+        with open(src, "rb") as sf:
+            shutil.copyfileobj(sf, f)
+
+    # A random O_EXCL|O_NOFOLLOW sibling: the old fixed
+    # `.{name}.restore-{pid}-{time_ns}` name could be predicted and a symlink
+    # planted there, which copy2 then followed outside the sandbox.
+    _atomic_write_bytes(tmp_path_for(dest), dest, _copy, binary=True,
+                        mode=src_mode)
 
 
 def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:

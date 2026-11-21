@@ -1250,11 +1250,13 @@ DISPLAY_KINDS = {
 #   * a LABEL opens a block: a paragraph whose text starts with a figure or
 #     table caption label ("Fig. 2 | ...", "Figure S1. ...", "Table 3 ...");
 #   * a CONTINUATION is the paragraph right after the label (or after another
-#     continuation): non-empty text, no embedded drawing, not a heading, not
-#     another label, not a reference entry, no section break, not inside a
-#     table/text box;
-#   * an empty paragraph, a heading, another label, an image or a table closes
-#     the block.
+#     continuation): non-empty text, not a heading, not another label, not a
+#     reference entry, no section break, not inside a table/text box. A
+#     drawing does NOT close the block: the scan reports the split caption as
+#     FMT-T2c with fix=editorial, and the merge predicate refuses a block that
+#     carries a drawing (see `_caption_continuation`);
+#   * an empty paragraph, a heading, another label, a table or a section break
+#     closes the block. An image does not (see the continuation rule above).
 #
 # The BLOCK rules (a multi-paragraph caption -> merge it; a caption carrying a
 # foreign paragraph style -> align it with its sibling captions; a continuation
@@ -3691,6 +3693,40 @@ def figure_text_size_rows(docx_path: Path, policy: dict = None) -> list:
     return rows
 
 
+MAX_STANDALONE_IMAGE_BYTES = 256 * 1024 * 1024
+
+
+def _read_standalone_image(path: Path):
+    """(data, over_budget) for a standalone raster, under a hard byte budget.
+
+    The DOCX media path already bounds a part, but a submitted `figures/*.png`
+    was read whole: one oversized raster could exhaust memory. The read is
+    bounded, follows no symlink and accepts only a regular file. The caller
+    records the over-budget case as a gap rather than reporting the image
+    clean.
+    """
+    try:
+        fd = os.open(Path(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None, False
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, False
+        if st.st_size > MAX_STANDALONE_IMAGE_BYTES:
+            return None, True
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(MAX_STANDALONE_IMAGE_BYTES + 1)
+        if len(data) > MAX_STANDALONE_IMAGE_BYTES:
+            return None, True
+        return data, False
+    except OSError:
+        return None, False
+    finally:
+        os.close(fd)
+
+
 def image_resolution_rows(path: Path, printed_in: float = 6.5,
                           policy: dict = None) -> list:
     """FMT-IM4 for a standalone submitted raster (no DOCX extent to read).
@@ -3703,9 +3739,17 @@ def image_resolution_rows(path: Path, printed_in: float = 6.5,
     floor = float(policy.get("min_image_dpi") or 0)
     if floor <= 0 or printed_in <= 0:
         return []
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
+    data, over_budget = _read_standalone_image(path)
+    if over_budget:
+        return [{
+            "rule": "FMT-IM4", "severity": "low", "document": Path(path).name,
+            "location": "artwork",
+            "evidence": (f"image over the {MAX_STANDALONE_IMAGE_BYTES} byte read "
+                         f"budget; its resolution was NOT measured"),
+            "detail": ("re-export the figure at the submission width, or inspect "
+                       "its resolution by hand"),
+            "fix": "manual", "protected": False, "tier": "advisory"}]
+    if data is None:
         return []
     size = image_pixel_size(data)
     if not size:
@@ -3741,9 +3785,17 @@ def figure_text_size_for_image(path: Path, printed_in: float = 6.5,
             "detail": ("the standalone figure's text size was NOT examined; install "
                        "tesseract or measure the artwork manually"),
             "fix": "manual", "protected": False, "tier": "advisory"}]
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
+    data, over_budget = _read_standalone_image(path)
+    if over_budget:
+        return [{
+            "rule": "FMT-IM6", "severity": "low", "document": Path(path).name,
+            "location": "artwork text",
+            "evidence": (f"image over the {MAX_STANDALONE_IMAGE_BYTES} byte read "
+                         f"budget; its text size was NOT measured"),
+            "detail": ("re-export the figure at the submission width, or measure "
+                       "its type by hand"),
+            "fix": "manual", "protected": False, "tier": "advisory"}]
+    if data is None:
         return []
     size = image_pixel_size(data)
     if not size:

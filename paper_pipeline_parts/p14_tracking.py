@@ -769,14 +769,23 @@ def _tracking_write_copy(src, dest) -> None:
     if dest.is_symlink():
         dest.unlink()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.track-{os.getpid()}-{time.time_ns()}")
+    src = Path(src)
     try:
-        shutil.copy2(src, tmp)
-        os.replace(tmp, dest)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
+        src_mode = stat.S_IMODE(os.stat(src).st_mode)
+    except OSError:
+        src_mode = None
+
+    def _copy(f) -> None:
+        with open(src, "rb") as sf:
+            shutil.copyfileobj(sf, f)
+
+    # tmp_path_for reserves a random O_EXCL|O_NOFOLLOW sibling and
+    # _atomic_write_bytes reopens it without following a path swap. A fixed
+    # `.{name}.track-{pid}-{time_ns}` name was predictable: an agent that can
+    # write the tracking directory pre-created a symlink there and copy2 then
+    # overwrote the link's target outside the root.
+    _atomic_write_bytes(tmp_path_for(dest), dest, _copy, binary=True,
+                        mode=src_mode)
 
 
 def tracking_summary_line(entry: dict, where: str = "") -> str:

@@ -1139,11 +1139,12 @@ def _open_regular_no_follow(p: Path):
 
 
 def read_regular_file(p: Path, max_bytes: int = None) -> bytes:
-    """Read one regular file under the `_open_regular_no_follow` guard."""
+    """Read one regular file under the no-follow guard; `max_bytes` is a hard cap."""
     with _open_regular_no_follow(p) as f:
-        if max_bytes is not None and os.fstat(f.fileno()).st_size > max_bytes:
+        data = f.read() if max_bytes is None else f.read(max_bytes + 1)
+        if max_bytes is not None and len(data) > max_bytes:
             raise OSError(f"file over the read budget: {p}")
-        return f.read()
+        return data
 
 
 def sha256_file(p: Path) -> str:
@@ -4177,8 +4178,13 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                                      "evidence": r["evidence"], "detail": r["detail"],
                                      "fix": "editorial", "protected": False,
                                      "tier": r.get("tier") or mod.tier_of(r["rule"])})
-                except Exception:                                     # noqa: BLE001
-                    pass
+                except Exception as e:                                # noqa: BLE001
+                    rows.append({
+                        "rule": "FMT-PDF0", "severity": "low",
+                        "document": prefix + rel, "location": "PDF text scan",
+                        "evidence": f"{_fn} failed on {prefix + rel}: {type(e).__name__}: {str(e)[:200]}",
+                        "detail": f"the {_fn} class was NOT examined for this PDF",
+                        "fix": "manual", "protected": False, "tier": "advisory"})
             if hasattr(mod, "availability_claim_rows"):
                 for r in mod.availability_claim_rows(pdf_paras, prefix + rel):
                     r["document"] = prefix + rel
@@ -4336,8 +4342,13 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                         for r in mod.image_resolution_rows(q, width, policy):
                             r["document"] = prefix + r["document"]
                             rows.append(r)
-                    except Exception:                             # noqa: BLE001
-                        continue
+                    except Exception as e:                        # noqa: BLE001
+                        rows.append({
+                            "rule": "FMT-IM4", "severity": "low",
+                            "document": prefix + q.name, "location": "artwork",
+                            "evidence": f"image resolution was NOT measured for {q.name}: {type(e).__name__}: {str(e)[:200]}",
+                            "detail": "re-read the image or inspect its resolution by hand",
+                            "fix": "manual", "protected": False, "tier": "advisory"})
     # CROSS-SURFACE CLAIMS (J6/FMT-AV4): compare the submitted surfaces once,
     # after every DOCX/text/PDF paragraph has been collected. A per-file scan
     # cannot see the supplement saying "shipped" while the main text says "not
@@ -5688,7 +5699,7 @@ def _docx_hf_signature(path: Path) -> dict:
     # the first section was read as a later one and the page-1 furniture check
     # compared against the wrong section. `_SECT_RE` was never defined in this
     # module, so the fallback was the only path.
-    sects = re.findall(r"<w:sectPr(?=[\s/>])[^>]*/>|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>", doc)
+    sects = re.findall(r"<w:sectPr(?=[\s/>])[^>]*/>|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr\s*>", doc)
     roles, seen = [], set()
     # OOXML attribute ORDER is not significant: Word writes `r:id` before
     # `w:type` in some files, and the old positional regex then read no roles at
@@ -5697,10 +5708,11 @@ def _docx_hf_signature(path: Path) -> dict:
     for m in re.finditer(r"<w:(header|footer)Reference(?=[\s/>])[^>]*/?>",
                          sects[0] if sects else ""):
         tag = m.group(0)
-        typ = re.search(r'\bw:type="([^"]*)"', tag)
+        typ = re.search(r"\bw:type\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag)
         if not typ:
             continue
-        key = (m.group(1), typ.group(1))
+        typ_val = typ.group(1) if typ.group(1) is not None else typ.group(2)
+        key = (m.group(1), typ_val)
         if key not in seen:
             seen.add(key)
             roles.append(key)
@@ -5850,9 +5862,9 @@ def _out_part_hashes(docx: Path) -> set:
     return hashes
 
 
-_SUP_RUN_RE = re.compile(r"<w:r\b[^>]*>([\s\S]*?)</w:r>")
-_SUP_ALIGN_RE = re.compile(r'<w:vertAlign\b[^>]*w:val="superscript"')
-_SUP_TEXT_RE = re.compile(r"<w:t\b[^>]*>([\s\S]*?)</w:t>")
+_SUP_RUN_RE = re.compile(r"<w:r\b[^>]*>([\s\S]*?)</w:r\s*>")
+_SUP_ALIGN_RE = re.compile(r'<w:vertAlign\b[^>]*w:val\s*=\s*["\']superscript["\']')
+_SUP_TEXT_RE = re.compile(r"<w:t\b[^>]*>([\s\S]*?)</w:t\s*>")
 
 
 def _superscript_run_count(frag: str) -> int:

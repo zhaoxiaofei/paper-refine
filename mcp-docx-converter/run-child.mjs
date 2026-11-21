@@ -117,6 +117,21 @@ export function runFile(file, args, options = {}) {
         overflow = `Command output exceeded the ${maxBuffer}-byte buffer and its process `
                  + `group was killed: ${file}`
                  + (treeKillError ? ` (tree kill incomplete: ${treeKillError})` : '');
+        // The SAME failed-kill hazard as the timeout path: if the tree kill did
+        // not take, the child can hold its pipes open and no 'close' event ever
+        // arrives. Arm the bounded grace timer here too, so an overflow settles.
+        graceTimer = setTimeout(() => {
+          if (settled) return;
+          const error = new Error(overflow);
+          error.code = null;
+          error.signal = null;
+          error.stdout = stdout;
+          error.stderr = stderr;
+          error.killed = true;
+          error.overBudget = true;
+          finish(error);
+        }, killGraceMs);
+        if (typeof graceTimer.unref === 'function') graceTimer.unref();
         return;
       }
       budget[stream] += bytes;

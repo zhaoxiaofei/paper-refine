@@ -239,7 +239,7 @@ _FRAG_OR_BREAK_PATTERN = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t\s*>"
                                     re.S)
 # The tab-STOP definitions a paragraph carries in `<w:pPr><w:tabs>`: `<w:tab>`
 # there is formatting (where the next tab lands), never a character of the text.
-_TAB_STOP_SPANS_RE = re.compile(r"<w:tabs(?=[\s/>])[^>]*>.*?</w:tabs>", re.S)
+_TAB_STOP_SPANS_RE = re.compile(r"<w:tabs(?=[\s/>])[^>]*>.*?</w:tabs\s*>", re.S)
 _ROOT_TAG_RE = re.compile(r"<\s*([A-Za-z_][\w:.-]*)(?=[\s/>])")
 
 
@@ -278,8 +278,16 @@ def _vanish_run_spans(text: str) -> list:
 
 
 def _run_rpr_hidden(run: str) -> bool:
-    """True when one run's properties mark its text hidden."""
-    for tag in re.findall(r"<w:(?:vanish|specVanish)(?=[\s/>])[^>]*/?>", run or ""):
+    """True when one run's LIVE properties mark its text hidden.
+
+    `w:rPrChange` records the formatting the run had BEFORE a tracked change:
+    `w:vanish` inside it says the text USED to be hidden, not that it is hidden
+    now. Scanning the whole run blanked a currently visible sentence whose
+    previous formatting was hidden, so only the live rPr is read here.
+    """
+    run = re.sub(r"<w:rPrChange(?=[\s/>])[\s\S]*?</w:rPrChange\s*>", "",
+                 run or "")
+    for tag in re.findall(r"<w:(?:vanish|specVanish)(?=[\s/>])[^>]*/?>", run):
         value = attr(tag, "val")
         if value is None or str(value).strip().lower() not in ("0", "false", "off"):
             return True
@@ -353,10 +361,10 @@ MATH_RE = re.compile(r"<m:(?:oMath|oMathPara)(?=[\s/>])")
 # LIVE section's own `</w:sectPr>`.
 SECT_READ_RE = re.compile(
     r"<w:sectPr(?=[\s/>])[^>]*/>"
-    r"|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>(?!\s*</w:sectPrChange>)")
+    r"|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr\s*>(?!\s*</w:sectPrChange\s*>)")
 # The tracked-change record itself: its `<w:sectPr>` is the section properties
 # BEFORE the edit and is not attached to the document any more.
-_SECT_CHANGE_RE = re.compile(r"<w:sectPrChange(?=[\s/>])[\s\S]*?</w:sectPrChange>")
+_SECT_CHANGE_RE = re.compile(r"<w:sectPrChange(?=[\s/>])[\s\S]*?</w:sectPrChange\s*>")
 PROOFERR_RE = re.compile(r"<w:proofErr[^>]*/>")
 # Revision marks beyond the run-level w:ins/w:del pair: Word records tracked
 # table/cell edits and property changes with their own elements, and a final
@@ -1258,7 +1266,7 @@ def field_ranges(xml: str) -> list:
             out.append((start, m.end(),
                         unesc(raw[raw.find(">") + 1:raw.rfind("<")]).strip() if raw else ""))
     simple_stack = []
-    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple>", scan):
+    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple\s*>", scan):
         tag = m.group(0)
         if tag.startswith("</"):
             if simple_stack:
@@ -1319,7 +1327,7 @@ def _field_result_spans(xml: str) -> list:
     # element's own content, not a fldChar separate region. The spelling fixer
     # rewrote those results because this walk only knew complex fields.
     simple_stack = []
-    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple>", scan):
+    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple\s*>", scan):
         tag = m.group(0)
         if tag.startswith("</"):
             if simple_stack:
@@ -1407,7 +1415,7 @@ ZOTERO_FIELD_TOKEN_RE = re.compile(
     # run its lazy body to the NEXT simple field's closing tag (one field read
     # as two, with the wrong instruction).
     r"|<w:fldSimple\b([^>]*?)/>"
-    r"|<w:fldSimple\b([^>]*)>(.*?)</w:fldSimple>"
+    r"|<w:fldSimple\b([^>]*)>(.*?)</w:fldSimple\s*>"
     # A soft break/tab is a text delimiter in a field result too: `text_of()`
     # renders it as a newline, so the inventory must not join the words it
     # separates ("Smith\n2020" is not "Smith2020").
@@ -2535,7 +2543,7 @@ def split_run_text_span(run: str, start: int, end: int):
     the caller then reports the row without a mechanical edit, rather than
     restyling bytes it cannot address.
     """
-    tm = re.search(r"(<w:t(?=[\s>])[^>]*>)([\s\S]*?)(</w:t>)", run)
+    tm = re.search(r"(<w:t(?=[\s>])[^>]*>)([\s\S]*?)(</w:t\s*>)", run)
     if tm is None or len(re.findall(r"<w:t(?=[\s>])", run)) != 1:
         return None
     # A run may also carry a footnote/comment reference, a drawing or another

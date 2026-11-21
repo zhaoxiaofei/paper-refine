@@ -351,8 +351,9 @@ from pathlib import Path
 #   gate; it is shared text, so `--execution-profile high` and `medium` stay
 #   normatively identical (rule 12).
 # 3.11.0 -- MODEL / HARNESS SPLIT (`--agent-model` + `--agent-harness`, and the
-#   same pair for judges). The old `--agent` / `--judge-agent` names remain as
-#   legacy shortcuts with their exact old commands. The new axes are:
+#   same pair for judges). The old `--agent` / `--judge-agent` names were
+#   REPLACED by these axes and are no longer accepted as shortcuts; see
+#   `docs/agent-harnesses.md` for the current spellings. The new axes are:
 #     * harness: dsh (default), gpt-codex, claude-code;
 #     * model: deepseek-flash (default), gpt-sol, gpt-terra, claude-opus,
 #       claude-sonnet, qwen38-27b, dots3-note-preview, OR an arbitrary

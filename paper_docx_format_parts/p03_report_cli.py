@@ -3123,6 +3123,34 @@ _HEADING_SKIP_PREFIXES = ("figure ", "fig. ", "fig ", "table ", "supplementary f
                           "supplementary table", "extended data ", "box ")
 
 
+def _run_sizes(run: str) -> list:
+    """Every live `w:sz` value in a run, quote-style independent.
+
+    XML attribute quoting is not significant, so `w:val='20'` is the same size
+    as `w:val="20"`; reading only the double-quoted spelling made a legal body
+    run invisible to the dominant-size calculation.
+    """
+    out = []
+    for tag in re.findall(r"<w:sz(?=[\s/>])[^>]*/?>", run or ""):
+        val = attr_of(tag, "w:val")
+        if val is not None and str(val).strip().isdigit():
+            out.append(int(str(val).strip()))
+    return out
+
+
+def _run_is_bold(run: str) -> bool:
+    """True when the run carries a live direct `w:b` that is ON.
+
+    Accepts both legal quote styles and the boolean spellings; a single-quoted
+    `<w:b w:val='1'/>` is bold exactly like `<w:b/>`.
+    """
+    for tag in re.findall(r"<w:b(?=[\s/>])[^>]*/?>", run or ""):
+        val = attr_of(tag, "w:val")
+        if val is None or str(val).strip().lower() in ("1", "true", "on"):
+            return True
+    return False
+
+
 def _body_run_size(doc_xml: str):
     """The document's dominant run size (its body-text size), or None.
 
@@ -3136,12 +3164,12 @@ def _body_run_size(doc_xml: str):
         if len(text_of(frag).split()) < 25:
             continue
         for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", frag):
-            t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run))
-            for s in re.findall(r'<w:sz w:val="(\d+)"', run):
-                weights[int(s)] += len(t)
+            t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run))
+            for s in _run_sizes(run):
+                weights[s] += len(t)
     if weights:
         return weights.most_common(1)[0][0]
-    sizes = Counter(re.findall(r'<w:sz w:val="(\d+)"', doc_xml))
+    sizes = Counter(_run_sizes(doc_xml))
     if not sizes:
         return None
     return int(sizes.most_common(1)[0][0])
@@ -3205,13 +3233,13 @@ def heading_like_paragraphs(doc_xml: str, containers=()) -> list:
             continue
         sizes, all_bold, has_text = [], True, False
         for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", frag):
-            if not "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run)).strip():
+            if not "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run)).strip():
                 continue
             has_text = True
-            if not re.search(r"<w:b/>|<w:b w:val=\"(?:1|true|on)\"", run):
+            if not _run_is_bold(run):
                 all_bold = False
                 break
-            sizes += [int(s) for s in re.findall(r'<w:sz w:val="(\d+)"', run)]
+            sizes += _run_sizes(run)
         if not (has_text and all_bold and sizes) or max(sizes) < body + 2:
             continue
         out.append((i, text, max(sizes)))
@@ -3329,7 +3357,7 @@ def _correspondence_lead(para_xml: str) -> int:
     would shift the bold span into the name.
     """
     for rm in re.finditer(r"<w:r\b[\s\S]*?</w:r>", para_xml):
-        tm = re.search(r"<w:t[^>]*>([\s\S]*?)</w:t>", rm.group(0))
+        tm = re.search(r"<w:t[^>]*>([\s\S]*?)</w:t\s*>", rm.group(0))
         if not tm:
             continue
         text = unesc(tm.group(1))
@@ -3355,7 +3383,7 @@ def _bold_label_runs(para_xml: str) -> str:
     out = para_xml
     for rm in list(re.finditer(r"<w:r\b[\s\S]*?</w:r>", out)):
         run = rm.group(0)
-        tm = re.search(r"(<w:t[^>]*>)([\s\S]*?)(</w:t>)", run)
+        tm = re.search(r"(<w:t[^>]*>)([\s\S]*?)(</w:t\s*>)", run)
         if not tm:
             continue
         # `unesc`, not `xml.sax.saxutils.unescape`: the sax decoder only knows
@@ -3420,11 +3448,11 @@ def _label_is_bold(para_xml: str) -> bool:
         return False
     left = len(m.group(0)) + _correspondence_lead(para_xml)
     for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", para_xml):
-        text = "".join(unesc(t) for t in re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run))
+        text = "".join(unesc(t) for t in re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run))
         if not text.strip():
             continue
         take = min(left, len(text))
-        if take > 0 and not re.search(r"<w:b/>|<w:b w:val=\"(?:1|true|on)\"", run):
+        if take > 0 and not _run_is_bold(run):
             return False
         left -= take
         if left <= 0:
@@ -4033,6 +4061,16 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             # whole-package read below, and every XML part is refused when it
             # carries a DTD/entity declaration.
             problem = _docx_zip_problem(spkg) or _docx_zip_problem(tpkg)
+            if problem:
+                return {"file": str(src), "ok": False,
+                        "error": f"unreadable DOCX package: {problem}"}
+            # A repeated member name is an AMBIGUOUS package: the dict below
+            # would silently keep the LAST copy and the rewrite would publish
+            # it with ok=True, so readers that pick the earlier copy disagree
+            # about what the document is. Refuse it, exactly as the strip/
+            # refresh helpers already do.
+            problem = (_docx_duplicate_member_problem(spkg)
+                       or _docx_duplicate_member_problem(tpkg))
             if problem:
                 return {"file": str(src), "ok": False,
                         "error": f"unreadable DOCX package: {problem}"}
@@ -5331,7 +5369,11 @@ def _token_width_twips(token: str, font_pt: float) -> int:
 
 def _cell_font_pt(styles: dict, cell: str) -> float:
     """The largest run size in a cell, else its paragraph style's, else 10 pt."""
-    sizes = [int(x) / 2.0 for x in re.findall(r'<w:sz(?=[\s/>])[^>]*w:val="(\d+)"', cell)]
+    sizes = []
+    for tag in re.findall(r'<w:sz(?=[\s/>])[^>]*>', cell):
+        val = attr_of(tag, "w:val")
+        if val is not None and val.isdigit():
+            sizes.append(int(val) / 2.0)
     if sizes:
         return max(sizes)
     st = re.search(r'<w:pStyle[^>]*w:val="([^"]+)"', cell)
@@ -5346,7 +5388,7 @@ def _cell_font_pt(styles: dict, cell: str) -> float:
 
 
 def _table_grid_widths(tbl: str) -> list:
-    grid = re.search(r"<w:tblGrid(?=[\s/>]).*?</w:tblGrid>", tbl, re.S)
+    grid = re.search(r"<w:tblGrid(?=[\s/>])[\s\S]*?</w:tblGrid\s*>", tbl, re.S)
     if not grid:
         return []
     # Bounded parse: a well-formed document may carry a 5000-digit width and
@@ -5354,13 +5396,13 @@ def _table_grid_widths(tbl: str) -> list:
     # ended, so the whole package scan crashed). An unparseable grid means the
     # table cannot be laid out: return [] so the caller skips it.
     widths = []
-    for x in re.findall(r'<w:gridCol[^>]*w:w="(\d+)"', grid.group(0)):
+    for tag in re.findall(r'<w:gridCol(?=[\s/>])[^>]*>', grid.group(0)):
+        x = attr_of(tag, "w:w")
+        if x is None or not x.isdigit():
+            continue
         if len(x) > 6:
             return []
-        try:
-            widths.append(int(x))
-        except ValueError:
-            return []
+        widths.append(int(x))
     return widths
 
 
@@ -5375,7 +5417,7 @@ def _table_cell_widths(row: str) -> list:
     """
     out = []
     for _s, _e, cell in _spans(row, CELL_TOKENS):
-        tcpr = re.search(r"<w:tcPr(?=[\s/>]).*?</w:tcPr>", cell, re.S)
+        tcpr = re.search(r"<w:tcPr(?=[\s/>])[\s\S]*?</w:tcPr\s*>", cell, re.S)
         width, span = None, 1
         if tcpr:
             body = tcpr.group(0)
@@ -5402,13 +5444,19 @@ def _table_cell_widths(row: str) -> list:
 
 
 def _table_cell_margins(tbl: str) -> tuple:
-    m = re.search(r"<w:tblCellMar(?=[\s/>]).*?</w:tblCellMar>", tbl, re.S)
+    m = re.search(r"<w:tblCellMar(?=[\s/>])[\s\S]*?</w:tblCellMar\s*>", tbl)
     if not m:
         return (108, 108)
-    left = re.search(r'<w:left[^>]*w:w="(\d+)"', m.group(0))
-    right = re.search(r'<w:right[^>]*w:w="(\d+)"', m.group(0))
-    return (int(left.group(1)) if left else 108,
-            int(right.group(1)) if right else 108)
+
+    def _side(name: str) -> int:
+        tag = re.search(rf"<w:{name}(?=[\s/>])[^>]*>", m.group(0))
+        val = attr_of(tag.group(0), "w:w") if tag else None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return 108
+
+    return (_side("left"), _side("right"))
 
 
 def table_layout_rows(xml: str, styles: dict, doc: str, policy: dict = None) -> list:
@@ -5553,7 +5601,7 @@ def table_layout_fixes(xml: str, rows: list) -> list:
             # identical grid would only log a repair that changed nothing.
             continue
         edits_in_tbl = []
-        gm = re.search(r"<w:tblGrid(?=[\s/>]).*?</w:tblGrid>", tbl, re.S)
+        gm = re.search(r"<w:tblGrid(?=[\s/>])[\s\S]*?</w:tblGrid\s*>", tbl, re.S)
         if gm:
             edits_in_tbl.append((gm.start(), gm.end(),
                                  "<w:tblGrid>" + "".join(
@@ -5574,11 +5622,11 @@ def table_layout_fixes(xml: str, rows: list) -> list:
                 if ci >= len(cells):
                     break
                 cell = cells[ci][2]
-                m = re.search(r'<w:tcW[^>]*w:w="(\d+)"', cell)
+                m = re.search(r"<w:tcW(?=[\s/>])[^>]*\bw:w\s*=\s*([\"'])(\d+)\1", cell)
                 if not m:
                     continue
-                abs_start = r0 + cells[ci][0] + m.start(1)
-                abs_end = r0 + cells[ci][0] + m.end(1)
+                abs_start = r0 + cells[ci][0] + m.start(2)
+                abs_end = r0 + cells[ci][0] + m.end(2)
                 edits_in_tbl.append((abs_start, abs_end, str(widths[ci])))
         if edits_in_tbl:
             edits.append((s, e, apply_edits(tbl, edits_in_tbl)))

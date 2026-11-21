@@ -363,6 +363,83 @@ def _w(tag: str) -> str:
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 
 
+def _root_start_tag(text: str, limit: int = 6000) -> str:
+    """The document element's own start tag (or a bounded prefix).
+
+    Namespace declarations live on the ROOT element, which a long prolog --
+    comments, processing instructions, a DOCTYPE -- can push past a fixed byte
+    prefix. Reading the root tag itself finds them wherever it starts, and it
+    accepts both legal attribute quote styles (`xmlns:w14='...'`).
+
+    Prolog comments, processing instructions, CDATA sections and the DOCTYPE are
+    skipped (a `<name>` inside them is not the document element), and the start
+    tag ends at the first `>` OUTSIDE a quoted attribute value.
+    """
+    text = text or ""
+    i, n = 0, len(text)
+    while i < n:
+        lt = text.find("<", i)
+        if lt == -1:
+            break
+        if text.startswith("<!--", lt):
+            end, close_len = text.find("-->", lt + 4), 3
+        elif text.startswith("<![CDATA[", lt):
+            end, close_len = text.find("]]>", lt + 9), 3
+        elif text.startswith("<?", lt):
+            end, close_len = text.find("?>", lt + 2), 2
+        elif text.startswith("<!", lt):
+            # DOCTYPE / markup declaration: skip it, respecting a quoted value
+            # and the internal subset's `[ ... ]` so its `>` ends the scan.
+            j, depth, quote = lt + 2, 0, ""
+            while j < n:
+                ch = text[j]
+                if quote:
+                    if ch == quote:
+                        quote = ""
+                elif ch in "\"'":
+                    quote = ch
+                elif ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth = max(0, depth - 1)
+                elif ch == ">" and depth == 0:
+                    j += 1
+                    break
+                j += 1
+            i = j
+            continue
+        else:
+            m = re.match(r"<([A-Za-z_][\w:.-]*)(?=[\s/>])", text[lt:])
+            if not m:
+                i = lt + 1
+                continue
+            j, quote = lt + 1 + len(m.group(1)), ""
+            while j < n:
+                ch = text[j]
+                if quote:
+                    if ch == quote:
+                        quote = ""
+                elif ch in "\"'":
+                    quote = ch
+                elif ch == ">":
+                    return text[lt:j + 1]
+                j += 1
+            return text[lt:]
+        if end == -1:
+            break
+        i = end + close_len
+    return text[:limit]
+
+
+def _namespace_declarations(text: str) -> dict:
+    """{prefix: uri} for every `xmlns:prefix` declaration in `text`."""
+    out = {}
+    for m in re.finditer(r"xmlns:([A-Za-z0-9_]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')",
+                         text or ""):
+        out[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
+    return out
+
+
 def _serialize_document(root, raw: bytes) -> bytes:
     """Serialise `root`, restoring the xmlns declarations ElementTree dropped.
 
@@ -377,12 +454,12 @@ def _serialize_document(root, raw: bytes) -> bytes:
     wanted = (root.get("{%s}Ignorable" % MC_NS) or "").split()
     if not wanted:
         return out
-    head = out[:4000].decode("utf-8", "replace")
+    head = _root_start_tag(out.decode("utf-8", "replace"))
     missing = [p for p in dict.fromkeys(wanted) if ("xmlns:%s=" % p) not in head]
     if not missing:
         return out
-    declared = dict(re.findall(r'xmlns:([A-Za-z0-9_]+)="([^"]+)"',
-                               raw[:6000].decode("utf-8", "replace")))
+    declared = _namespace_declarations(
+        _root_start_tag(raw.decode("utf-8", "replace")))
     for prefix in missing:
         uri = declared.get(prefix)
         if uri:
@@ -395,10 +472,10 @@ def _docx_root(path: Path):
         raw = _docx_xml_part(z, "word/document.xml")
     if raw is None:
         raise OSError("word/document.xml is over the size/entity budget")
-    head = raw[:6000].decode("utf-8", "replace")
-    for m in re.finditer(r'xmlns:([A-Za-z0-9_]+)="([^"]+)"', head):
+    for prefix, uri in _namespace_declarations(
+            _root_start_tag(raw.decode("utf-8", "replace"))).items():
         try:
-            ET.register_namespace(m.group(1), m.group(2))
+            ET.register_namespace(prefix, uri)
         except ValueError:
             pass
     return raw, ET.fromstring(raw)
