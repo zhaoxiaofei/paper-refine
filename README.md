@@ -576,7 +576,10 @@ submission:
   decision report follow it.
 
 The **cover letter** has two separate reported budgets (neither gates): its
-*persuading part* against the operator's 300–500-word preference, and its
+*persuading part* against the venue profile's own `cover_letter` bound — a
+range, or a one-sided `at most N words` / `at least N words` when the profile
+states only one side; the built-in 300–500-word preference applies only when the
+profile configures no cover-letter block — and its
 **TOTAL content** — salutation, body, disclosures and signature — against a
 profile's `cover_letter.total_max` when one is configured. The shipped profiles
 record no total cap (Nature Biotechnology's own guidance states none), so the
@@ -3725,7 +3728,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 268 suites (a few
+any failure. They are independent, so run them in parallel — 269 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

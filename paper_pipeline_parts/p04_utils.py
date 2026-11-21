@@ -5231,7 +5231,9 @@ def _docx_paragraph_texts(path: Path) -> list:
             data = _docx_xml_part(z, "word/document.xml")
         if data is None:
             return []
-        xml = data.decode("utf-8", "replace")
+        # A legal OOXML part may be UTF-16; decoding it as UTF-8 left
+        # NUL-interleaved text and every paragraph scan saw nothing (F66).
+        xml = _decode_text_source(data, "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return []
     out = []
@@ -5326,7 +5328,9 @@ def _email_texts_in_file(path: Path) -> tuple:
                     data = _docx_xml_part(z, n)
                     if data is None:
                         return [], f"unreadable DOCX ({n} is over the size/entity budget)"
-                    parts.append((n, data.decode("utf-8", "replace")))
+                    # Honour a UTF-16 part's BOM/pattern instead of decoding it
+                    # as UTF-8 and losing every address/identifier in it (F66).
+                    parts.append((n, _decode_text_source(data, "replace")))
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError,
                 NotImplementedError) as e:
             return [], f"unreadable DOCX ({type(e).__name__}: {e})"

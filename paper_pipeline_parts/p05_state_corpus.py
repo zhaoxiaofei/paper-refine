@@ -3093,6 +3093,18 @@ def _transform_view_file(old_rel: str, src: Path, file_map: dict):
 
     def _read() -> tuple:
         try:
+            st = src.stat()
+        except OSError as e:
+            return None, [f"unreadable source ({e}); the file is omitted from the view"]
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_PAYLOAD_BYTES:
+            # A multi-gigabyte agent-written payload must fail cheaply: stat the
+            # source and omit an over-budget/irregular one instead of calling
+            # read_bytes() on it (F46). The "unreadable source" wording routes
+            # the omission through the caller's named-gap path.
+            return None, [f"unreadable source (not a regular file within the "
+                          f"{MAX_PAYLOAD_BYTES // (1024 * 1024)} MiB payload budget); "
+                          f"the file is omitted from the view"]
+        try:
             return src.read_bytes(), []
         except OSError as e:
             # One unreadable payload must not abort judge materialization

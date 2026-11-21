@@ -2960,7 +2960,12 @@ def _repair_file_text(path: Path):
         if path.suffix.lower() not in _REPAIR_TEXT_EXTS \
                 and path.suffix.lower() != ".docx":
             return None
-        return path.read_bytes().decode("utf-8")
+        # Agent-written package content: read it through the bounded reader so
+        # an oversized file, a planted FIFO or a symlink swap cannot exhaust
+        # memory or read outside the sandbox (F44). `errors="strict"` keeps the
+        # old contract that a binary package is opaque (None), not mojibake.
+        return read_text_bounded(path, errors="strict",
+                                 limit=PACKAGE_TEXT_BYTES_LIMIT)
     except (OSError, UnicodeDecodeError, RuntimeError, NotImplementedError):
         return None
 

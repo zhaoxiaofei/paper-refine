@@ -4260,6 +4260,33 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             "front_parts": {k: v for k, v in (front_parts or {}).items() if k != "copied"}}
 
 
+_LATEX_DOCUMENTCLASS = b"\\documentclass"
+
+
+def _latex_has_documentclass(path: Path) -> bool:
+    """True when the file contains `\\documentclass`, in bounded memory.
+
+    `validate_latex` used to read the WHOLE .tex twice with `read_text()` just
+    to decide whether it is a fragment, so an agent-written 10 GiB .tex
+    allocated the whole file twice before any budget applied (F48). Scan a
+    bounded head, then one chunk at a time, carrying only the overlap a marker
+    split across two reads needs.
+    """
+    overlap = len(_LATEX_DOCUMENTCLASS) - 1
+    with path.open("rb") as fh:
+        head = fh.read(8000)
+        if _LATEX_DOCUMENTCLASS in head:
+            return True
+        tail = head[-overlap:] if len(head) >= overlap else head
+        while True:
+            chunk = fh.read(1 << 20)
+            if not chunk:
+                return False
+            if _LATEX_DOCUMENTCLASS in tail + chunk:
+                return True
+            tail = chunk[-overlap:]
+
+
 def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict:
     """Compile one STANDALONE .tex in a scratch copy of its directory.
 
@@ -4269,12 +4296,11 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
     file's compile is what proves it.
     """
     try:
-        head = path.read_text(encoding="utf-8", errors="replace")[:8000]
+        has_documentclass = _latex_has_documentclass(path)
     except OSError as e:
         return {"file": str(path), "kind": "tex", "ok": False,
                 "errors": [f"unreadable: {e}"], "detail": str(e)}
-    if "\\documentclass" not in head and "\\documentclass" not in \
-            path.read_text(encoding="utf-8", errors="replace"):
+    if not has_documentclass:
         return {"file": str(path), "kind": "tex", "ok": None,
                 "detail": "fragment (no \\documentclass): validated through the document "
                           "that inputs it"}

@@ -1387,11 +1387,33 @@ def _cached_sha256(p: Path) -> str:
         st = p.stat()
     except OSError:
         raise
+    # A referenced figure is agent-writable package content: hash it in bounded
+    # chunks, and refuse one over the per-part media budget (the same 32 MiB cap
+    # `embedded_media_digests` applies) instead of loading a multi-gigabyte
+    # payload into memory (F47). The caller treats ValueError as "cannot prove
+    # the file is embedded" and keeps the reference.
+    if st.st_size > MEDIA_PART_MAX_BYTES:
+        raise ValueError(f"{p} is over the {MEDIA_PART_MAX_BYTES // (1024 * 1024)} "
+                         f"MiB per-file digest budget")
     key = (str(p), st.st_mtime_ns, st.st_size)
     hit = _FILE_DIGEST_CACHE.get(key)
     if hit is not None:
         return hit
-    digest = hashlib.sha256(p.read_bytes()).hexdigest()
+    h = hashlib.sha256()
+    remaining = MEDIA_PART_MAX_BYTES + 1
+    with p.open("rb") as fh:
+        while remaining > 0:
+            chunk = fh.read(min(1 << 20, remaining))
+            if not chunk:
+                break
+            h.update(chunk)
+            remaining -= len(chunk)
+    if remaining <= 0:
+        # The file GREW past the budget between stat() and the read: never hash
+        # an over-budget payload.
+        raise ValueError(f"{p} is over the {MEDIA_PART_MAX_BYTES // (1024 * 1024)} "
+                         f"MiB per-file digest budget")
+    digest = h.hexdigest()
     if len(_FILE_DIGEST_CACHE) > 512:
         _FILE_DIGEST_CACHE.clear()
     _FILE_DIGEST_CACHE[key] = digest
@@ -2539,16 +2561,32 @@ def scan_cited_note_negations(root: Path, texts=None, limit: int = 8) -> list:
 
 
 REF_ENTRY_NUM_RE = re.compile(r"^\s*(\d{1,3})\.\s*$")
+# A software/version token is not a numeric citation: MACS2, Seurat4 and
+# ggplot2 were parsed as citations of references 2, 4 and 2 (F97). The
+# lookahead is case-insensitive, so the stems are lower-case;
+# `(?<![A-Za-z])` stops the engine from retrying at the second letter of the
+# same token.
+CITATION_SOFTWARE_STEMS = (
+    "grch", "chm", "python", "hg", "mm", "macs", "seurat", "ggplot", "deseq",
+    "imagej", "fiji", "cellranger", "scanpy", "anndata", "samtools",
+    "bedtools", "star", "bowtie", "hisat", "spades", "canu", "flye", "kraken",
+    "salmon", "kallisto", "htseq", "featurecounts", "limma", "edger",
+)
 INLINE_CITATION_RE = re.compile(
     # The word must END in a letter: a hyphen is a word separator here, not part
     # of the citation stem, so "COVID-19" is not a citation of reference 19
     # (`[A-Za-z\-]{2,}` used to absorb the trailing hyphen and bind the 19).
-    r"(?<![A-Za-z])((?!(?:grch|chm|python|hg|mm)\d)[A-Za-z][A-Za-z\-]{1,}[A-Za-z])"
+    r"(?<![A-Za-z])((?!(?:" + "|".join(CITATION_SOFTWARE_STEMS) + r")\d)"
+    r"[A-Za-z][A-Za-z\-]{1,}[A-Za-z])"
     # A citation glued to the sentence period ("omics43.") is the usual form;
     # reject only a digit or a decimal continuation, not the full stop.
     r"(\d{1,4})(?!\d|\.\d)",
     re.I,
 )
+# A bracket citation is the normal in-text form in a manuscript whose
+# superscripts were flattened: "single-cell omics [43]". The glued-word regex
+# above cannot see it, so PKG-23 silently inspected no citation at all (F97).
+BRACKET_CITATION_RE = re.compile(r"\[(\d{1,4})\]")
 SINGLE_CELL_RE = re.compile(r"(?i)\bsingle[- ]cell\b")
 ASSEMBLY_TITLE_RE = re.compile(
     r"(?i)\b(?:complete sequence|genome assembly|reference genome|"
@@ -2694,10 +2732,15 @@ def scan_single_cell_citation_mismatch(root: Path, texts=None, limit: int = 8) -
         for s in _sentences("\n".join(paras)):
             if not SINGLE_CELL_RE.search(s):
                 continue
+            cited = []
             for m in INLINE_CITATION_RE.finditer(s):
                 if m.group(1).lower() in CITATION_LABEL_WORDS:
                     continue
-                num = int(m.group(2))
+                cited.append(int(m.group(2)))
+            # A bracket citation is a real one whether or not the document also
+            # glues numbers to words; keep both forms, each number once (F97).
+            cited.extend(int(m.group(1)) for m in BRACKET_CITATION_RE.finditer(s))
+            for num in dict.fromkeys(cited):
                 title = refs.get(num, "")
                 if not title or SINGLE_CELL_RE.search(title):
                     continue
