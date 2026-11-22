@@ -3,7 +3,8 @@
 # functions, in the loader's own module globals. These are pure helpers
 # (no module-level side effects): the lower-numbered parts call them at
 # runtime, so they may live after the CLI definitions. Split out of
-# p04_utils.py to keep every maintained source file under 10,000 lines.
+# p04_utils.py (and, later, p06_postchecks.py / p07_stage_quality_journal.py)
+# to keep every maintained source file under 10,000 lines.
 from __future__ import annotations
 
 import html as _html
@@ -2073,9 +2074,11 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
     if ok:
         # The non-evidence part must match the pristine corpus exactly, and every
         # evidence area must be a link to the canonical copy.
-        if (hash_manifest(ctx.pristine, exclude_top_only=excluded).get("files")
-                != hash_manifest(dst, follow_dir_links=True,
-                                 exclude_top_only=excluded).get("files")):
+        if not manifests_equal(
+                hash_manifest(ctx.pristine, exclude_top_only=excluded),
+                hash_manifest(dst, follow_dir_links=True,
+                              exclude_top_only=excluded)):
+            # `files` alone hid a difference inside an unreadable subtree (F112).
             ok = False
         for name in areas:
             link = dst / name
@@ -2960,3 +2963,348 @@ def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
                 f"not a recorded comparison. Use `OK -- ...`, `contradiction -- ...` or "
                 f"`unable -- ...`.")
     return errs, warns
+
+
+# ===========================================================================
+# Helpers split out of `p04_utils.py`, `p06_postchecks.py` and
+# `p07_stage_quality_journal.py` when those parts crossed the repository's
+# 10,000-line limit. The parts are executed in filename order into the same
+# globals, so these functions see every earlier constant/helper, and every
+# caller sees them once all parts have loaded.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Split out of `p04_utils.py`: the Zotero field-continuity gate.
+# ---------------------------------------------------------------------------
+
+
+def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
+                                  errs: list, warns: list) -> dict:
+    """Every Zotero field of `base_dir` must survive into the version in `out_dir`.
+
+    The stage gate for every agent that produces a DOCX. A version may ADD a
+    field, EDIT a field (same citationID, changed item data/result) and DELETE
+    a field together with its visible citation text; it may never delete every
+    live field at once, leave a field malformed (an unterminated begin, a
+    stray field char, unparseable citation JSON, a missing/duplicate
+    citationID), or replace a field by its plain-text result. A failure is an
+    attempt error, so the retry policy hands the session another go with the
+    exact fields it has to restore.
+
+    Documents are paired by their version-token-free basename, so
+    `...-mainText-181c700.docx` matches `...-mainText-<newtoken>.docx`. A
+    document the agent did not deliver at all is left to the document-set /
+    backfill layer, which restores the base bytes itself.
+    """
+    mod = _format_module()
+    rep = {"label": label, "checked": 0, "documents": [], "errors": 0, "warnings": 0,
+           "fields_before": 0, "fields_after": 0, "deleted": [], "plain_text": []}
+    if mod is None or not hasattr(mod, "zotero_report_for_docx"):
+        rep["skipped"] = f"{DOCX_FORMAT_MODULE} carries no field inventory"
+        return rep
+    if not (base_dir.is_dir() and out_dir.is_dir()):
+        rep["skipped"] = "the base or the output directory is missing"
+        return rep
+    if errs is None:
+        errs = []
+    def doc_map(root: Path, gaps: list) -> tuple:
+        """({pairing key: path}, collisions) for one side of the comparison.
+
+        The version-token-free key pairs `manuscript-4f3a9c1.docx` with
+        `manuscript.docx`, but two DIFFERENT documents can strip to one key
+        (`appendix-a.docx` / `appendix-b.docx`): the dict comprehension kept
+        only the last, so one document was never field-checked at all. The
+        collision is reported instead of being silent.
+        """
+        out, seen = {}, {}
+        for p in _fmt_corpus_files(root, gaps):
+            key = _docx_field_key(p.relative_to(root).as_posix())
+            seen.setdefault(key, []).append(p)
+            out[key] = p
+        clashes = {k: v for k, v in seen.items() if len(v) > 1}
+        return out, clashes
+
+    base_gaps, out_gaps = [], []
+    base_docs, base_clash = doc_map(base_dir, base_gaps)
+    out_docs, out_clash = doc_map(out_dir, out_gaps)
+    rep["unreadable_dirs"] = {"base": sorted(set(base_gaps)),
+                              "output": sorted(set(out_gaps))}
+    if base_gaps or out_gaps:
+        # A DOCX under an unreadable directory is invisible to the walk. The
+        # continuity report must name it: otherwise it claims every document was
+        # field-checked while one was never opened (F107).
+        for _side, _gaps in (("base", base_gaps), ("output", out_gaps)):
+            for _gap in sorted(set(_gaps)):
+                _msg = (f"ZOTERO FIELD CONTINUITY: the {_side} directory {_gap!r} "
+                        f"could not be read; its DOCX documents were NOT "
+                        f"field-checked")
+                warns.append(_msg)
+                rep["warnings"] += 1
+                # A skipped subsection is NOT a clean check: this gate fails only
+                # on rep["errors"], so a warning alone let an unreadable base
+                # directory pass the hard field gate with 0 errors (F063).
+                errs.append(_msg)
+                rep["errors"] += 1
+    for side, clashes in (("base", base_clash), ("output", out_clash)):
+        for key, paths in sorted(clashes.items()):
+            warns.append(f"ZOTERO FIELD CONTINUITY: two {side} documents pair to one key "
+                         f"({key!r}): {', '.join(p.name for p in paths)}; only "
+                         f"{max(paths).name} is compared -- "
+                         f"rename them so their names differ by more than a version token")
+            rep["warnings"] += 1
+    if not base_docs:
+        if base_gaps:
+            # Do not report "carries no DOCX" for a tree whose DOCX documents
+            # were merely unreadable: that misstates the cause (F063).
+            rep["skipped"] = ("the base's DOCX documents could not be read: "
+                              + ", ".join(sorted(set(base_gaps))))
+        else:
+            rep["skipped"] = "the base carries no DOCX"
+        return rep
+    pairs = [(base_docs[k], out_docs[k]) for k in sorted(set(base_docs) & set(out_docs))]
+    # A pairing-key collision (`appendix-a.docx` / `appendix-b.docx`) leaves one
+    # of the documents out of the comparison entirely (the key maps to a single
+    # path). Pair every colliding document whose counterpart carries the same
+    # name, so a field deleted or garbled in the shadowed file is still caught;
+    # the collision warning above still names the group.
+    paired = {(b.resolve(), o.resolve()) for b, o in pairs}
+    for key in sorted(set(base_clash) & set(out_clash)):
+        for base in sorted(base_clash[key]):
+            cand = [o for o in out_clash[key]
+                    if o.name.lower() == base.name.lower()
+                    and not any(p[0] == base.resolve() for p in paired)
+                    and not any(p[1] == o.resolve() for p in paired)]
+            if len(cand) == 1:
+                pairs.append((base, cand[0]))
+                paired.add((base.resolve(), cand[0].resolve()))
+    rest_base = [base_docs[k] for k in sorted(base_docs) if k not in out_docs]
+    rest_out = [out_docs[k] for k in sorted(out_docs) if k not in base_docs]
+    # A stage may rename a document (a template stage hands back the template's
+    # own file name). Exact name wins, then a unique document role, then the
+    # sole remainder; a document the stage did not deliver at all is left to
+    # the document-set/backfill layer, which restores the base bytes itself.
+    for base in list(rest_base):
+        exact = [o for o in rest_out if o.name.lower() == base.name.lower()]
+        role = docx_document_role(base.name)
+        # `docx_document_role` returns "main" for EVERY unrecognized name, so a
+        # role of "main" cannot tell an explicit main manuscript from a deleted
+        # `appendix.docx`. Pairing on it made a deletion look like a rename and
+        # compared the wrong documents (F115); "main" renames are handled by
+        # the sole-remainder fallback below.
+        cands = exact or ([o for o in rest_out
+                           if role and role != "main"
+                           and docx_document_role(o.name) == role] if role else [])
+        if len(cands) == 1:
+            pairs.append((base, cands[0]))
+            rest_out.remove(cands[0])
+            rest_base.remove(base)
+    if len(rest_base) == 1 and len(rest_out) == 1:
+        pairs.append((rest_base[0], rest_out[0]))
+    for base, out in pairs:
+        before = mod.zotero_report_for_docx(base)
+        after = mod.zotero_report_for_docx(out)
+        cont = mod.zotero_field_continuity_problems(before, after)
+        rel = out.relative_to(out_dir).as_posix()
+        entry = {"file": rel, "baseline": base.relative_to(base_dir).as_posix(),
+                 "fields_before": cont["baseline_fields"], "fields_after": cont["output_fields"],
+                 "errors": cont["errors"], "warnings": cont["warnings"],
+                 "deleted": cont["deleted"], "added": cont["added"], "edited": cont["edited"],
+                 "plain_text": cont["plain_text"]}
+        rep["checked"] += 1
+        rep["fields_before"] += cont["baseline_fields"]
+        rep["fields_after"] += cont["output_fields"]
+        for msg in cont["errors"]:
+            if not cont["plain_text"]:
+                msg += (" -- restore the whole complex field (begin -> instrText -> separate -> "
+                        "result -> end) from the base version, or delete the citation text with "
+                        "it; see the $zotero-use DOCX reference")
+            errs.append(f"ZOTERO FIELD CONTINUITY: {rel}: {msg}")
+            rep["errors"] += 1
+        rep["plain_text"].extend(cont["plain_text"])
+        for msg in cont["warnings"]:
+            warns.append(f"ZOTERO FIELD CONTINUITY: {rel}: {msg}")
+            rep["warnings"] += 1
+        rep["deleted"].extend(cont["deleted"])
+        rep["documents"].append(entry)
+    return rep
+
+
+# ---------------------------------------------------------------------------
+# Split out of `p06_postchecks.py`: the prior-audit observation readers.
+# `PRIOR_AUDIT_ID_RE` stays in p06; the globals are shared at call time.
+# ---------------------------------------------------------------------------
+
+
+def _prior_audit_is_divider(cells) -> bool:
+    """True for a markdown table's `|---|:--:|` divider row."""
+    cells = [str(c or "").strip() for c in (cells or [])]
+    # `_split_table_cells` keeps the empty cells outside the outer pipes.
+    while cells and not cells[0]:
+        cells.pop(0)
+    while cells and not cells[-1]:
+        cells.pop()
+    return bool(cells) and all(re.fullmatch(r":?-{1,}:?", c) for c in cells)
+
+
+def prior_audit_observation_lines(text: str) -> list:
+    """The observation lines of `prior_audit/UNRESOLVED.md`, in file order.
+
+    The recorded format is ONE line per observation (location + re-runnable
+    evidence). Headings, blank lines, table separators and fenced blocks are
+    structure, not observations; a leading list marker or number is stripped so
+    the same observation yields the same text across rounds.
+
+    A record written as a markdown TABLE is still a record: every data row of
+    every `|` block is one observation. Skipping every line that starts with
+    `|` (the old rule) returned [] for a table-form handoff, so the whole
+    prior-audit record vanished from the convergence gate (F120).
+    """
+    rows, fence, table = [], None, []
+
+    def flush_table() -> None:
+        block, table[:] = list(table), []
+        if not block:
+            return
+        cells_list = [_split_table_cells(line) for line in block]
+        if len(cells_list) >= 2 and _prior_audit_is_divider(cells_list[1]):
+            for cells in cells_list[2:]:
+                row = " ".join(" ".join(str(c or "").split()) for c in cells).strip()
+                if row and set(row) - set("| -:"):
+                    rows.append(row)
+            return
+        # No divider: not a GFM table, but every `|` line still carries content.
+        # Treat the lines as prose rather than dropping them silently.
+        for line in block:
+            s = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", line).strip()
+            if s and set(s) - set("| -:"):
+                rows.append(s)
+
+    for line in str(text or "").splitlines():
+        s = line.strip()
+        m = re.match(r"^(`{3,}|~{3,})", s)
+        if fence is not None:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+            continue
+        if m:
+            flush_table()
+            fence = m.group(1)
+            continue
+        if s.startswith("|"):
+            table.append(s)
+            continue
+        flush_table()
+        if not s or s.startswith("#") or set(s) <= set("-:| "):
+            continue
+        s = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", s).strip()
+        if s:
+            rows.append(s)
+    flush_table()
+    return rows
+
+
+def _prior_audit_index_rows(path: Path) -> list:
+    """[(id, observation)] of the staged indexed view (`OBSERVATIONS.md`)."""
+    out = []
+    for block in parse_markdown_blocks(path):
+        header = [str(h or "").strip().lower() for h in block["header"]]
+        if "id" not in header:
+            continue
+        text_col = next((h for h in header if h in ("observation", "text", "line", "detail")), None)
+        if text_col is None:
+            continue
+        for row in block["rows"]:
+            oid = str(row.get("id") or "").strip().upper()
+            if not PRIOR_AUDIT_ID_RE.fullmatch(oid):
+                continue
+            text = " ".join(str(row.get(text_col) or "").split())
+            out.append((oid, text))
+    return out
+
+
+def prior_audit_observation_ids(sb: Path) -> list:
+    """[(id, observation)] for the staged prior-audit record.
+
+    `[]` when no record was staged. `None` when a staged record EXISTS but
+    cannot be read (permissions, a link/FIFO, an over-budget file): that is
+    UNKNOWN, not "the audit observed nothing", exactly as `prior_proposal_ids()`
+    treats an unreadable prior-round file. An unreadable `UNRESOLVED.md` used to
+    return [] and the disposition gate passed vacuously (F120).
+    """
+    dirp = Path(sb) / "prior_audit"
+    # The indexed read-only view p05 stages is the authoritative id list (it is
+    # what the review is told to cite), so prefer it when it is readable.
+    idx = dirp / "OBSERVATIONS.md"
+    p = dirp / "UNRESOLVED.md"
+
+    def _staged_irregular(path: Path) -> bool:
+        """True for a lexically present entry that is not a regular file.
+
+        A directory, FIFO or symlink (including a BROKEN one, where exists() is
+        false) is staged content that cannot be read -- UNKNOWN, never "no
+        record staged" (F011).
+        """
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return not stat.S_ISREG(st.st_mode)
+
+    if _staged_irregular(idx) or _staged_irregular(p):
+        return None
+    if idx.is_file():
+        rows = _prior_audit_index_rows(idx)
+        if rows:
+            return rows
+    if p.is_file():
+        text = read_text_bounded(p)
+        if text is None:
+            return None
+        return [(f"AU-OBS-{i:03d}", line)
+                for i, line in enumerate(prior_audit_observation_lines(text), 1)]
+    if idx.is_file():
+        return None
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Split out of `p07_stage_quality_journal.py`: the self-check helpers.
+# ---------------------------------------------------------------------------
+
+
+def _usable_deliverable(p: Path) -> bool:
+    """Is this file worth ADOPTING into its canonical path?
+
+    Non-empty, and (for JSON) parseable: a truncated file moved into place would
+    only turn a "missing" failure into a "malformed" one, and the rescue exists
+    to preserve work, not to shuffle garbage.
+    """
+    try:
+        if not p.is_file() or p.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    if p.suffix.lower() == ".json":
+        return read_json(p, revive=False, lenient=True) is not None
+    return True
+
+
+def _selfcheck_artifact_policy(sb: Path) -> str:
+    """The artifact policy the sandbox's enclosing run root recorded.
+
+    The pre-flight has no `Ctx`; it must read the same recorded policy the
+    postcheck's `strict_dispositions(ctx)` reads, or the two disagree (F113).
+    A sandbox outside a run root keeps the documented default (`on`).
+    """
+    root = _enclosing_run_root(sb)
+    if root is not None:
+        cfg = read_json(root / "pipeline_config.json", revive=False, lenient=True)
+        if isinstance(cfg, dict):
+            raw = str(cfg.get("artifact_policy") or "").strip().lower()
+            if raw in ARTIFACT_POLICIES:
+                return raw
+    return DEFAULT_ARTIFACT_POLICY
+
+

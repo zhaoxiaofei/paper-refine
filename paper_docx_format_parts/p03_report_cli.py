@@ -1008,7 +1008,8 @@ def analyse_package(path: Path, policy: dict) -> dict:
     # carry orphan numbered parts (footer2.xml) that Word never uses, and a row
     # against one of those is a false positive.
     # `attr_of` accepts single- or double-quoted attributes; OOXML permits both.
-    ref_ids = {attr_of(m.group(0), "r:id")
+    prefixes = _rel_prefixes(xml) or {"r"}
+    ref_ids = {_attached_template_rid(m.group(0), prefixes)
                for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>", xml)}
     ref_ids.discard(None)
     referenced = {part_targets[rid] for rid in ref_ids if rid in part_targets}
@@ -2602,7 +2603,8 @@ def validate_docx_parts(path: Path) -> dict:
 # Official venue templates: restyle a package into the journal's own DOCX
 # --------------------------------------------------------------------------
 
-_STYLE_REF_RE = re.compile(r'<w:(pStyle|rStyle)\b[^>]*?w:val="([^"]+)"')
+_STYLE_REF_RE = re.compile(
+    r'<w:(?P<tag>pStyle|rStyle)\b[^>]*?w:val\s*=\s*(?P<q>["\'])(?P<val>[^"\']+)(?P=q)')
 # Direct properties the template's styles are supposed to own. Semantic run
 # formatting (b/i/u/color/vertAlign/...) is deliberately NOT stripped.
 _DIRECT_FORMAT_PATTERNS = (
@@ -2756,12 +2758,14 @@ def _remap_style_refs(xml: str, mapping: dict) -> tuple:
     count = [0]
 
     def sub(m):
-        new = mapping.get(m.group(2))
-        if not new or new == m.group(2):
+        old = m.group("val")
+        new = mapping.get(old)
+        if not new or new == old:
             return m.group(0)
         count[0] += 1
-        return m.group(0).replace(f'w:val="{m.group(2)}"',
-                                  f'w:val="{_xml_attr_value(new)}"')
+        return (m.group(0)[:m.start("val") - m.start(0)]
+                + _xml_attr_value(new)
+                + m.group(0)[m.end("val") - m.start(0):])
 
     return _STYLE_REF_RE.sub(sub, xml), count[0]
 
@@ -2817,7 +2821,7 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
             body = body[:body.rfind("/>")].rstrip() + ">" + "</w:sectPr>"
         # Every lookup/splice below is against the LIVE section only: the
         # nested `w:sectPr` of a `w:sectPrChange` is revision history (F195).
-        masked = _live_sect_pr(body)
+        masked = _mask_noncontent(_live_sect_pr(body))
         for tag in ("pgSz", "pgMar", "cols", "docGrid"):
             el = elem(masked, tag)
             new_el = geo.get(tag)
@@ -3062,7 +3066,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     # document relationships (fresh ids)
     rels, rels_encode = _ooxml_part_codec(
         parts.get("word/_rels/document.xml.rels", b""))
-    used = set(re.findall(r'Id="([^"]+)"', rels))
+    used = set(re.findall(r"\bId\s*=\s*[\"']([^\"']+)[\"']", rels))
     n = 2001
     for key, dest in (("header_default", out.get("header_default")),
                       ("header_first", out.get("header_first")),
@@ -3078,10 +3082,18 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         used.add(rid)
         n += 1
         kind = "header" if key.startswith("header") else "footer"
-        rels = rels.replace("</Relationships>",
-                            f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
-                            f'officeDocument/2006/relationships/{kind}" Target="{dest}"/>'
-                            f'</Relationships>')
+        # A legal `</Relationships >` must still be a splice point; the exact
+        # spelling produced no relationship while the r:id was still written
+        # (F012). Only record the id when the entry actually landed.
+        mclose = re.search(r"</Relationships\s*>", rels)
+        if mclose is None:
+            continue
+        rels = (rels[:mclose.start()]
+                + f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
+                  f'officeDocument/2006/relationships/{kind}" Target="{dest}"/>'
+                + rels[mclose.start():])
+        if not re.search(r"\bId\s*=\s*[\"']" + re.escape(rid) + r"[\"']", rels):
+            continue
         out[key + "_rid"] = rid
     parts["word/_rels/document.xml.rels"] = rels_encode(rels)
     return out
@@ -3517,7 +3529,7 @@ def _insert_ppr_extra(ppr_xml: str, extra: str) -> str:
         # as unreadable content (the shipped NeoHeteroclitic main text carries
         # exactly that on its affiliation and correspondence lines, and its
         # `docx validate` fails on it).
-        head = re.sub(r"<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s>])[^>]*>[\s\S]*?</w:rPr>",
+        head = re.sub(r"<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s>])[^>]*>[\s\S]*?</w:rPr\s*>",
                       "", head, count=1)
     rm = re.search(r"<w:rPr(?=[\s>])", head)
     if rm:
@@ -3883,16 +3895,17 @@ def _with_even_odd_headers(parts: dict) -> bool:
         rels, rels_encode = _ooxml_part_codec(
             parts.get("word/_rels/document.xml.rels", b""))
         if "relationships/settings" not in rels:
-            used = set(re.findall(r'Id="([^"]+)"', rels))
+            used = set(re.findall(r"\bId\s*=\s*[\"']([^\"']+)[\"']", rels))
             n = 3001
             while f"rId{n}" in used:
                 n += 1
-            rels = rels.replace(
-                "</Relationships>",
-                f'<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/'
-                f'officeDocument/2006/relationships/settings" Target="settings.xml"/>'
-                f"</Relationships>")
-            parts["word/_rels/document.xml.rels"] = rels_encode(rels)
+            mclose = re.search(r"</Relationships\s*>", rels)
+            if mclose is not None:
+                rels = (rels[:mclose.start()]
+                        + f'<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/'
+                          f'officeDocument/2006/relationships/settings" Target="settings.xml"/>'
+                        + rels[mclose.start():])
+                parts["word/_rels/document.xml.rels"] = rels_encode(rels)
         return True
     text, settings_encode = _ooxml_part_codec(settings)
     if is_on(text, "evenAndOddHeaders"):
@@ -3954,8 +3967,9 @@ def _reorder_numbering_groups(xml: str, pics: str, abstracts: str, nums: str) ->
         if inner[open_end - 2:open_end] == "/>":
             end = open_end
         else:
-            close = inner.find(f"</w:{m.group(1)}>", open_end)
-            end = close + len(f"</w:{m.group(1)}>") if close != -1 else open_end
+            close_m = re.search(rf"</w:{m.group(1)}\s*>", inner[open_end:])
+            close = open_end + close_m.start() if close_m else -1
+            end = close + len(close_m.group(0)) if close_m else open_end
         entries.append((m.group(1), inner[m.start():end]))
         pos = end
     if pos < len(inner):
@@ -4191,7 +4205,7 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             for name in sorted(parts):
                 if doc_part_re.fullmatch(name):
                     xml = ooxml_part_text(parts[name])
-                    ref_ids |= {m.group(2) for m in _STYLE_REF_RE.finditer(xml)}
+                    ref_ids |= {m.group("val") for m in _STYLE_REF_RE.finditer(xml)}
             kept_styles = []
             for sid in sorted((ref_ids - set(t_by_id) - set(mapping)) | set(collided)):
                 m = re.search(rf'<w:style\b[^>]*w:styleId="{re.escape(sid)}"[\s\S]*?</w:style>',
@@ -6595,7 +6609,7 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         return report
     try:
         with zipfile.ZipFile(src) as z:
-            problem = _docx_zip_problem(z)
+            problem = _docx_zip_problem(z) or _docx_duplicate_member_problem(z)
             if problem:
                 raise ValueError(problem)
             names = z.namelist()
@@ -6621,13 +6635,9 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
     def visible(xml_text: str) -> str:
         return "\n".join(text_of(p[2]) for p in paragraphs(xml_text))
 
-    try:
-        doc_xml = data["word/document.xml"].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        # A non-UTF-8 main part is an unreadable package, not a traceback out
-        # of a documented `repair-layout` command.
-        report["error"] = f"unreadable DOCX package: {exc}"
-        return report
+    # A legal UTF-16 main part is accepted by scan/fix; decoding it as UTF-8
+    # here reported the same package as unreadable (F078).
+    doc_xml, doc_encode = _ooxml_part_codec(data["word/document.xml"])
     # A malformed main part is an unreadable package (the scanner/validator
     # likewise report FMT-X1): the regex rules below tolerate broken XML and
     # would otherwise "repair" a document Word cannot open.
@@ -6642,7 +6652,7 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
     if edits:
         new_doc = apply_edits(doc_xml, edits)
         if visible(new_doc) == before_text:
-            data["word/document.xml"] = new_doc.encode("utf-8")
+            data["word/document.xml"] = doc_encode(new_doc)
             report["changes"].append(f"rewrote the column grid of {len(edits)} table(s) "
                                      f"from their cell widths")
         else:
@@ -6878,7 +6888,10 @@ def cmd_scan(args) -> int:
         problem = _write_report(
             args.json, out,
             protected=[Path(f) for f in out.get("files") or []]
-            + ([Path(args.pdf)] if args.pdf else []))
+            + ([Path(args.pdf)] if args.pdf else [])
+            # The policy file is a READ input of the same command; letting the
+            # report overwrite it destroyed the scan's own configuration (F028).
+            + ([Path(args.policy)] if getattr(args, "policy", None) else []))
         if problem:
             log(f"error: refusing to write --json: {problem}")
             return 2

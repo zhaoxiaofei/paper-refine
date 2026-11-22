@@ -1140,6 +1140,10 @@ def _open_regular_no_follow(p: Path):
 
 def read_regular_file(p: Path, max_bytes: int = None) -> bytes:
     """Read one regular file under the no-follow guard; `max_bytes` is a hard cap."""
+    # O_NOFOLLOW on the final component is not enough: a symlinked PARENT
+    # directory is followed. Every sibling reader already applies this guard,
+    # and callers pass agent-writable paths (F006).
+    _refuse_symlinked_read_parent(Path(p))
     with _open_regular_no_follow(p) as f:
         data = f.read() if max_bytes is None else f.read(max_bytes + 1)
         if max_bytes is not None and len(data) > max_bytes:
@@ -2518,13 +2522,24 @@ def count_manual_steps(path: Path):
     # table loop below tell a bullet that happens to contain pipes from a table
     # row (the old code counted such a bullet twice).
     bullet = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+\S")
-    n = sum(1 for line in lines if bullet.match(line))
     # One header row PER TABLE, not one for the whole file: subtracting a single
     # header from every table row at once over-counts by one per extra table.
     separator = re.compile(r"^\s*\|?[\s:\-|]+\|?\s*$")
+    fence = re.compile(r"^\s*(?:```|~~~)")
+    n = 0
     in_table = False
+    in_fence = False
     for line in lines:
+        if fence.match(line):
+            # A fenced example/diff block is not a list of manual items; its
+            # bullets and table rows used to be counted (F102).
+            in_fence = not in_fence
+            in_table = False
+            continue
+        if in_fence:
+            continue
         if bullet.match(line):
+            n += 1
             in_table = False
             continue
         if separator.match(line):
@@ -3083,8 +3098,8 @@ def _tex_brace_delta(text: str) -> int:
 # `\begin`/`\end` tokens were stripped but the BODY was counted as the authors'
 # prose, drifting a .tex count upward against the venue cap.
 TEX_MATH_ENV_RE = re.compile(
-    r"\\begin\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
-    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\{\1\}", re.M)
+    r"\\begin\s*\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
+    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\s*\{\1\}", re.M)
 
 
 def blank_math_environments(text: str) -> str:
@@ -3187,8 +3202,8 @@ def _tex_length_scan(text: str):
         line = strip_tex_comment(raw).strip()
         env_at_start = env_kind
         env_kind = _tex_float_env_after(line, env_kind)
-        begins = re.search(r"\\begin\{abstract\}", line)
-        ends = re.search(r"\\end\{abstract\}", line)
+        begins = re.search(r"\\begin\s*\{abstract\}", line)
+        ends = re.search(r"\\end\s*\{abstract\}", line)
         if begins or ends:
             # Both environment tokens may sit ANYWHERE on the line: a one-line
             # abstract is `\begin{abstract} ... \end{abstract}`, and the usual
@@ -4060,6 +4075,8 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue        # `code/` is revision content, not submission prose
             if is_non_manuscript_rel(rel):
                 continue        # evidence area, not submission prose (see above)
+            if is_code_rel(prefix + rel):
+                continue        # code/ is revision content, not prose (F066)
             if "work" in rel.split("/")[:-1]:
                 continue
             raw = read_text_bounded(p)
@@ -4224,6 +4241,12 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                     continue
                 rel = q.relative_to(src).as_posix()
                 if not is_submitted(rel) or is_evidence_rel(rel):
+                    continue
+                if is_code_rel(prefix + rel):
+                    # `code/` is revision content, never a submitted figure:
+                    # the DOCX/text/PDF loops of this same sweep skip it, and
+                    # FMT-IM4/FMT-IM6 rows against an analysis-code raster are
+                    # not submission defects (F074).
                     continue
                 if (prefix + rel) in overrides[i]:
                     continue                  # a later source provides this path
@@ -4703,157 +4726,6 @@ def _docx_field_key(rel: str) -> str:
     name = (DOC_TOKEN_RE.sub("", stem) + dot + ext) if dot else DOC_TOKEN_RE.sub("", p.name)
     parent = "" if p.parent.as_posix() == "." else p.parent.as_posix() + "/"
     return (parent + name).lower()
-
-
-def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
-                                  errs: list, warns: list) -> dict:
-    """Every Zotero field of `base_dir` must survive into the version in `out_dir`.
-
-    The stage gate for every agent that produces a DOCX. A version may ADD a
-    field, EDIT a field (same citationID, changed item data/result) and DELETE
-    a field together with its visible citation text; it may never delete every
-    live field at once, leave a field malformed (an unterminated begin, a
-    stray field char, unparseable citation JSON, a missing/duplicate
-    citationID), or replace a field by its plain-text result. A failure is an
-    attempt error, so the retry policy hands the session another go with the
-    exact fields it has to restore.
-
-    Documents are paired by their version-token-free basename, so
-    `...-mainText-181c700.docx` matches `...-mainText-<newtoken>.docx`. A
-    document the agent did not deliver at all is left to the document-set /
-    backfill layer, which restores the base bytes itself.
-    """
-    mod = _format_module()
-    rep = {"label": label, "checked": 0, "documents": [], "errors": 0, "warnings": 0,
-           "fields_before": 0, "fields_after": 0, "deleted": [], "plain_text": []}
-    if mod is None or not hasattr(mod, "zotero_report_for_docx"):
-        rep["skipped"] = f"{DOCX_FORMAT_MODULE} carries no field inventory"
-        return rep
-    if not (base_dir.is_dir() and out_dir.is_dir()):
-        rep["skipped"] = "the base or the output directory is missing"
-        return rep
-    if errs is None:
-        errs = []
-    def doc_map(root: Path, gaps: list) -> tuple:
-        """({pairing key: path}, collisions) for one side of the comparison.
-
-        The version-token-free key pairs `manuscript-4f3a9c1.docx` with
-        `manuscript.docx`, but two DIFFERENT documents can strip to one key
-        (`appendix-a.docx` / `appendix-b.docx`): the dict comprehension kept
-        only the last, so one document was never field-checked at all. The
-        collision is reported instead of being silent.
-        """
-        out, seen = {}, {}
-        for p in _fmt_corpus_files(root, gaps):
-            key = _docx_field_key(p.relative_to(root).as_posix())
-            seen.setdefault(key, []).append(p)
-            out[key] = p
-        clashes = {k: v for k, v in seen.items() if len(v) > 1}
-        return out, clashes
-
-    base_gaps, out_gaps = [], []
-    base_docs, base_clash = doc_map(base_dir, base_gaps)
-    out_docs, out_clash = doc_map(out_dir, out_gaps)
-    rep["unreadable_dirs"] = {"base": sorted(set(base_gaps)),
-                              "output": sorted(set(out_gaps))}
-    if base_gaps or out_gaps:
-        # A DOCX under an unreadable directory is invisible to the walk. The
-        # continuity report must name it: otherwise it claims every document was
-        # field-checked while one was never opened (F107).
-        for _side, _gaps in (("base", base_gaps), ("output", out_gaps)):
-            for _gap in sorted(set(_gaps)):
-                _msg = (f"ZOTERO FIELD CONTINUITY: the {_side} directory {_gap!r} "
-                        f"could not be read; its DOCX documents were NOT "
-                        f"field-checked")
-                warns.append(_msg)
-                rep["warnings"] += 1
-                # A skipped subsection is NOT a clean check: this gate fails only
-                # on rep["errors"], so a warning alone let an unreadable base
-                # directory pass the hard field gate with 0 errors (F063).
-                errs.append(_msg)
-                rep["errors"] += 1
-    for side, clashes in (("base", base_clash), ("output", out_clash)):
-        for key, paths in sorted(clashes.items()):
-            warns.append(f"ZOTERO FIELD CONTINUITY: two {side} documents pair to one key "
-                         f"({key!r}): {', '.join(p.name for p in paths)}; only "
-                         f"{max(paths).name} is compared -- "
-                         f"rename them so their names differ by more than a version token")
-            rep["warnings"] += 1
-    if not base_docs:
-        if base_gaps:
-            # Do not report "carries no DOCX" for a tree whose DOCX documents
-            # were merely unreadable: that misstates the cause (F063).
-            rep["skipped"] = ("the base's DOCX documents could not be read: "
-                              + ", ".join(sorted(set(base_gaps))))
-        else:
-            rep["skipped"] = "the base carries no DOCX"
-        return rep
-    pairs = [(base_docs[k], out_docs[k]) for k in sorted(set(base_docs) & set(out_docs))]
-    # A pairing-key collision (`appendix-a.docx` / `appendix-b.docx`) leaves one
-    # of the documents out of the comparison entirely (the key maps to a single
-    # path). Pair every colliding document whose counterpart carries the same
-    # name, so a field deleted or garbled in the shadowed file is still caught;
-    # the collision warning above still names the group.
-    paired = {(b.resolve(), o.resolve()) for b, o in pairs}
-    for key in sorted(set(base_clash) & set(out_clash)):
-        for base in sorted(base_clash[key]):
-            cand = [o for o in out_clash[key]
-                    if o.name.lower() == base.name.lower()
-                    and not any(p[0] == base.resolve() for p in paired)
-                    and not any(p[1] == o.resolve() for p in paired)]
-            if len(cand) == 1:
-                pairs.append((base, cand[0]))
-                paired.add((base.resolve(), cand[0].resolve()))
-    rest_base = [base_docs[k] for k in sorted(base_docs) if k not in out_docs]
-    rest_out = [out_docs[k] for k in sorted(out_docs) if k not in base_docs]
-    # A stage may rename a document (a template stage hands back the template's
-    # own file name). Exact name wins, then a unique document role, then the
-    # sole remainder; a document the stage did not deliver at all is left to
-    # the document-set/backfill layer, which restores the base bytes itself.
-    for base in list(rest_base):
-        exact = [o for o in rest_out if o.name.lower() == base.name.lower()]
-        role = docx_document_role(base.name)
-        # `docx_document_role` returns "main" for EVERY unrecognized name, so a
-        # role of "main" cannot tell an explicit main manuscript from a deleted
-        # `appendix.docx`. Pairing on it made a deletion look like a rename and
-        # compared the wrong documents (F115); "main" renames are handled by
-        # the sole-remainder fallback below.
-        cands = exact or ([o for o in rest_out
-                           if role and role != "main"
-                           and docx_document_role(o.name) == role] if role else [])
-        if len(cands) == 1:
-            pairs.append((base, cands[0]))
-            rest_out.remove(cands[0])
-            rest_base.remove(base)
-    if len(rest_base) == 1 and len(rest_out) == 1:
-        pairs.append((rest_base[0], rest_out[0]))
-    for base, out in pairs:
-        before = mod.zotero_report_for_docx(base)
-        after = mod.zotero_report_for_docx(out)
-        cont = mod.zotero_field_continuity_problems(before, after)
-        rel = out.relative_to(out_dir).as_posix()
-        entry = {"file": rel, "baseline": base.relative_to(base_dir).as_posix(),
-                 "fields_before": cont["baseline_fields"], "fields_after": cont["output_fields"],
-                 "errors": cont["errors"], "warnings": cont["warnings"],
-                 "deleted": cont["deleted"], "added": cont["added"], "edited": cont["edited"],
-                 "plain_text": cont["plain_text"]}
-        rep["checked"] += 1
-        rep["fields_before"] += cont["baseline_fields"]
-        rep["fields_after"] += cont["output_fields"]
-        for msg in cont["errors"]:
-            if not cont["plain_text"]:
-                msg += (" -- restore the whole complex field (begin -> instrText -> separate -> "
-                        "result -> end) from the base version, or delete the citation text with "
-                        "it; see the $zotero-use DOCX reference")
-            errs.append(f"ZOTERO FIELD CONTINUITY: {rel}: {msg}")
-            rep["errors"] += 1
-        rep["plain_text"].extend(cont["plain_text"])
-        for msg in cont["warnings"]:
-            warns.append(f"ZOTERO FIELD CONTINUITY: {rel}: {msg}")
-            rep["warnings"] += 1
-        rep["deleted"].extend(cont["deleted"])
-        rep["documents"].append(entry)
-    return rep
 
 
 VALIDATE_TEX_TIMEOUT = 600
@@ -5856,7 +5728,14 @@ def _out_part_hashes(docx: Path) -> set:
                         # An agent-delivered part declaring more than the budget
                         # is unverifiable, never decompressed (F062).
                         continue
-                    hashes.add(hashlib.sha256(z.read(name)).hexdigest())
+                    # The declared size is attacker-controlled: inflate through
+                    # a bounded stream and treat an overrun as unverifiable
+                    # instead of trusting the central directory (F032).
+                    with z.open(name) as fh:
+                        payload = fh.read(MAX_DOCX_PART_BYTES + 1)
+                    if len(payload) > MAX_DOCX_PART_BYTES:
+                        continue
+                    hashes.add(hashlib.sha256(payload).hexdigest())
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
     return hashes
@@ -6732,7 +6611,10 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
                         "error": f"{dest} is not empty and carries no .docx package document; "
                                  f"refusing to delete it (--force only replaces a built "
                                  f"submission package)"}
-            rmtree_force(dest)
+            if not rmtree_force(dest):
+                return {"ok": False,
+                        "error": f"{dest} survives deletion; refusing to rebuild the "
+                                 f"package into the stale tree"}
         else:
             return {"ok": False, "error": f"{dest} exists and is not empty (use --force)"}
     dest.mkdir(parents=True, exist_ok=True)
@@ -7606,6 +7488,9 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
                 # submission prose: placeholder and number-provenance scans read
                 # the submission documents only.
                 continue
+            if is_code_rel(prefix + rel):
+                # `code/` is revision content, never manuscript prose (F066).
+                continue
             if "work" in rel.split("/")[:-1]:
                 continue
             try:
@@ -7864,8 +7749,8 @@ def _lookup_cache_fresh(entry: dict) -> bool:
         return False
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
-    age = (datetime.now(timezone.utc) - when).days
-    return 0 <= age <= LOOKUP_CACHE_TTL_DAYS
+    return timedelta(0) <= datetime.now(timezone.utc) - when \
+        <= timedelta(days=LOOKUP_CACHE_TTL_DAYS)
 
 
 # The order matters twice: each class first takes its reserved share, then the
@@ -9823,10 +9708,14 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
         except OSError:
             continue
     if out["failed"]:
-        raise OSError(
+        err = OSError(
             "the non-shippable-file sweep could not remove "
             + ", ".join(f"{f['path']} ({f['error']})" for f in out["failed"])
             + "; the package still carries file(s) no submission may ship")
+        # Carry the removals that DID happen: the caller's failure record must
+        # not report an empty `removed` list (F100).
+        err.partial = out
+        raise err
     return out
 
 
@@ -9855,7 +9744,10 @@ def strip_stage_non_shippable(sb: Path, pkg_dir: Path) -> dict:
             return strip_non_shippable_files_in_dir(path)
         except OSError as e:
             out["failed"].append({"path": prefix.rstrip("/") or ".", "error": str(e)})
-            return {"error": str(e), "removed": [], "kept_in_evidence": []}
+            partial = getattr(e, "partial", None) or {}
+            return {"error": str(e),
+                    "removed": list(partial.get("removed") or []),
+                    "kept_in_evidence": list(partial.get("kept_in_evidence") or [])}
 
     if pkg_dir.is_dir():
         out["package"] = _sweep_half(pkg_dir, "")

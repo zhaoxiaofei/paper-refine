@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -548,8 +549,20 @@ def test_harness_and_docs() -> None:
     print("\n== F092/F093/F102/F103: test harness and ranking docs ==")
     sys.path.insert(0, str(ROOT / "paper-skills" / "tests"))
     import validate_skill as v
-    keep = ROOT / "debug_runs" / "20261122-000954" / "03_fix_bugs" / "scratch" / "s092_keep"
-    keep.mkdir(parents=True, exist_ok=True)
+    # A unique HERMETIC directory outside the SYSTEM temp tree and outside the
+    # skill tree: the old hard-coded debug_runs path mutated an unrelated run
+    # and its cleanup could delete operator data (F080). A fresh checkout does
+    # not carry the ignored `tmp/` directory, so create its parent first, and
+    # fall back to a non-temp cache dir outside the checkout when the checkout
+    # itself is read-only: the refusal needs a non-empty path that is NOT under
+    # `tempfile.gettempdir()`, or the gate deletes it instead of refusing.
+    base = ROOT / "tmp"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        base = Path.home() / ".cache" / "paper-refine-tests"
+        base.mkdir(parents=True, exist_ok=True)
+    keep = Path(tempfile.mkdtemp(prefix="s092-", dir=base))
     (keep / "precious.txt").write_text("keep", encoding="utf-8")
     try:
         refused = False
@@ -560,8 +573,7 @@ def test_harness_and_docs() -> None:
         check("F092 a non-empty run dir outside the temp tree is refused",
               refused and (keep / "precious.txt").exists())
     finally:
-        (keep / "precious.txt").unlink(missing_ok=True)
-        keep.rmdir()
+        shutil.rmtree(keep, ignore_errors=True)
 
     ids = re.findall(r'check\("([A-Za-z]+\d+)\b',
                      src("paper-skills/tests/validate_skill.py"))

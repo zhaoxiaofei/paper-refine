@@ -457,7 +457,9 @@ def _judge_conflict_counts(conflicts: list) -> dict:
     for c in conflicts or []:
         sev = str(c.get("severity") or "major")
         counts[sev] = counts.get(sev, 0) + 1
-    counts["total"] = sum(counts.get(s, 0) for s in JUDGE_CONFLICT_SEVERITIES)
+    # Count EVERY row: a legacy severity outside the current three was listed
+    # but excluded from the total (F089).
+    counts["total"] = sum(v for k, v in counts.items() if k != "total")
     return counts
 
 
@@ -513,6 +515,7 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
     def _drop(reason):
         dropped[reason] = dropped.get(reason, 0) + 1
 
+    _seen_opinions = set()
     for _slot, rec in sorted(newest.items(),
                              key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
         target = str(rec.get("target_id"))
@@ -542,6 +545,14 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
             if opp == target:
                 _drop("self_comparison")
                 continue
+            _dup_key = (target, rec.get("judge_index"), str(opp))
+            if _dup_key in _seen_opinions:
+                # aggregate_round keeps one opinion per
+                # (target, judge_index, opponent); a sheet that lists the same
+                # opponent twice must not shift the median (F045).
+                _drop("duplicate_opponent")
+                continue
+            _seen_opinions.add(_dup_key)
             if not is_int(score):
                 _drop("missing_score")
                 continue
@@ -1410,7 +1421,7 @@ def _score_model_floor(ctx, floor) -> int:
         return tiebreak_defect_floor_of(ctx)
 
 
-def score_model_doc(ctx=None, floor=None, dedup=None) -> dict:
+def score_model_doc(ctx=None, floor=None, dedup=None, rule=None) -> dict:
     """The machine-readable description of how a round is scored and ranked.
 
     Factored out of build_decision_report so the score model is one object with
@@ -1467,7 +1478,7 @@ def score_model_doc(ctx=None, floor=None, dedup=None) -> dict:
                                      "the vs_base margin of the final round is the only paired "
                                      "statement the decision supports",
         "anti_regression_tolerance": VS_ORIGINAL_TOLERANCE,
-        "anti_regression_rule": f"{vs_original_rule_of(ctx)} (setup --vs-original-rule "
+        "anti_regression_rule": f"{rule or vs_original_rule_of(ctx)} (setup --vs-original-rule "
                                 f"median|sign; the rule this root actually applies); "
                                 f"the sign rule fails only when the exact one-sided sign test "
                                 f"over the pair's 2*judges directed scores is significant at "

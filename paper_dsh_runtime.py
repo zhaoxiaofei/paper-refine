@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import select
 import shutil
 import subprocess
 import sys
@@ -15,10 +16,14 @@ MAX_DSH_LINE_BYTES = 1 << 20
 
 
 def _writable(path: Path, adapter: str) -> bool:
+    # A fixed probe name is followed when an attacker plants a symlink there,
+    # and two adapters sharing a home race on the same path. mkstemp creates an
+    # unpredictable name with O_CREAT|O_EXCL and never follows a link.
     try:
-        probe = path / f".paper_{adapter}_write_test"
-        probe.write_text("x", encoding="utf-8")
-        probe.unlink()
+        fd, probe = tempfile.mkstemp(prefix=f".paper_{adapter}_write_test_",
+                                     dir=str(path))
+        os.close(fd)
+        os.unlink(probe)
         return True
     except OSError:
         return False
@@ -110,32 +115,72 @@ def run_dsh_streaming(cmd: list, env: dict, adapter: str) -> tuple:
     turn_failed = None
     saw_turn_end = False
     carry = b""
+    terminal = False
+    forced_rc = None
+    # Read the raw descriptor with a bounded wait instead of blocking in
+    # `read1()` until the pipe reaches EOF. `turn_end` is terminal: the old
+    # loop kept the adapter blocked for a child that closed stdout but kept
+    # running, or for a grandchild that inherited stdout.
+    fd = proc.stdout.fileno()
     try:
-        # `read1`, not `read`: a buffered `read(n)` waits for n bytes (or EOF),
-        # so a slow harness's first event would not be echoed until the stream
-        # filled or the process exited -- the opposite of streaming.
-        read_chunk = getattr(proc.stdout, "read1", proc.stdout.read)
         while True:
-            chunk = read_chunk(1 << 20)
-            if not chunk:
+            try:
+                ready = select.select([fd], [], [], 0.25)[0]
+            except (OSError, ValueError):
+                # select() cannot watch this descriptor (e.g. a Windows pipe):
+                # keep the old streaming shape for that platform.
+                ready = [fd]
+            if ready:
+                try:
+                    chunk = os.read(fd, 1 << 20)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    break
+                _echo_stdout(chunk)
+                carry += chunk
+                *lines, carry = carry.split(b"\n")
+                for line in lines:
+                    failed = line_turn_end_failed(line)
+                    if failed is not None:
+                        turn_failed = failed
+                        saw_turn_end = True
+                        terminal = True
+                if len(carry) > MAX_DSH_LINE_BYTES:
+                    carry = b""       # a single event line over budget: unusable
+                if terminal:
+                    break
+                continue
+            # No data is ready. Once the child is gone, a pipe that only a
+            # grandchild still holds open will not deliver this turn's events.
+            if proc.poll() is not None:
                 break
-            _echo_stdout(chunk)
-            carry += chunk
-            *lines, carry = carry.split(b"\n")
-            for line in lines:
-                failed = line_turn_end_failed(line)
-                if failed is not None:
-                    turn_failed = failed
-                    saw_turn_end = True
-            if len(carry) > MAX_DSH_LINE_BYTES:
-                carry = b""           # a single event line over budget: unusable
-        if carry:
+        if not terminal and carry:
             failed = line_turn_end_failed(carry)
             if failed is not None:
                 turn_failed = failed
                 saw_turn_end = True
-        proc.wait()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            if saw_turn_end:
+                # The turn completed; lingering is cleanup, not the turn.
+                # Report the completed turn instead of blocking on the exit.
+                forced_rc = 0
+            with contextlib.suppress(OSError):
+                proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                proc.wait()
     finally:
+        if proc.stdout is not None:
+            with contextlib.suppress(OSError):
+                proc.stdout.close()
         if proc.poll() is None:
             with contextlib.suppress(OSError):
                 proc.kill()
@@ -145,4 +190,4 @@ def run_dsh_streaming(cmd: list, env: dict, adapter: str) -> tuple:
         # harness may have died before answering.
         print(f"{adapter}: the harness emitted no turn_end completion event", file=sys.stderr)
         turn_failed = True
-    return int(proc.returncode or 0), turn_failed
+    return (forced_rc if forced_rc is not None else int(proc.returncode or 0)), turn_failed

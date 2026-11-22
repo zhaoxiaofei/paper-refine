@@ -2501,11 +2501,15 @@ def _rpr_set_emphasis(rpr: str | None, on: bool) -> tuple:
     # carry a schema-successor tag such as w:color even when the live rPr has
     # none; scanning the whole string would then splice the explicit override
     # INTO the revision record. Never insert past the start of the record.
-    _change_at = rpr.find("<w:rPrChange")
+    # Scan the LIVE children only: a commented-out `<w:color/>` used to be the
+    # insertion anchor, so the override landed inside the comment and the live
+    # rPr was unchanged (F067). The mask is length-preserving.
+    probe = _mask_noncontent(rpr)
+    _change_at = probe.find("<w:rPrChange")
     if _change_at != -1:
         at = min(at, _change_at)
     for tag in after_tags:
-        m = re.search(rf"<w:{tag}(?=[\s/>])", rpr)
+        m = re.search(rf"<w:{tag}(?=[\s/>])", probe)
         if m:
             # The EARLIEST schema-successor wins, not the first tag in this
             # list that happens to be present: with <w:sz/> before <w:color/>

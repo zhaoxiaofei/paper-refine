@@ -386,6 +386,11 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
     rebuild_failures = []
     for rec in targets:
         reset_run_record(rec)
+        # Persist the reset BEFORE the sandbox is rebuilt/moved: a
+        # KeyboardInterrupt or SIGKILL during materialization used to leave
+        # state.json with the old status while the live sandbox was already
+        # moved to the failed archive (F107).
+        ctx.save_state()
         blocked = unmet_deps(ctx, rec)
         if blocked:
             rec["status"] = "stale"

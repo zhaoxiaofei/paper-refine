@@ -133,14 +133,15 @@ if [[ -z "${ENV_PREFIX}" ]] && [[ ! -w "$("${CONDA}" info --base)/envs" ]]; then
   echo "      and leaving any named environment untouched." >&2
 fi
 
-if [[ -z "${ENV_PREFIX}" ]]; then
-  case "${ENV_NAME}" in
-    base|root)
-      echo "error: refusing to manage the conda environment '${ENV_NAME}'; set" >&2
-      echo "       PAPER_REFINE_TEST_ENV to a dedicated name." >&2
-      exit 2 ;;
-  esac
-fi
+# The policy applies to the RESOLVED target, not only to the no-prefix case:
+# an explicit PAPER_REFINE_TEST_PREFIX naming base/root (or a path whose last
+# component is base/root) used to reach `conda env remove -y -p` unchecked.
+case "$(basename -- "${ENV_PREFIX:-${ENV_NAME}}")" in
+  base|root)
+    echo "error: refusing to manage the conda environment '${ENV_PREFIX:-${ENV_NAME}}'; set" >&2
+    echo "       PAPER_REFINE_TEST_ENV to a dedicated name." >&2
+    exit 2 ;;
+esac
 
 # --- 1. delete the previous environment (only with --recreate) -------------
 if [[ "${RECREATE}" -eq 1 ]]; then

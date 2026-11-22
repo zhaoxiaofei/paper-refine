@@ -246,8 +246,13 @@ def fill_seeded_tables(dirp: Path) -> None:
                         cells = cells[:-1]
                 row_no = j - start
                 rule = cell(cells, "rule")
-                reason = (f"OK — {rule or 'row ' + str(row_no)}: reviewed against its own bar "
-                          f"({p.stem} row {row_no})")
+                # The reason must satisfy the pipeline's own deletion-audit
+                # vocabulary: `OK — <why no fact is lost>` needs BOTH a claim
+                # that nothing was lost and a named location (F041), so a bare
+                # "reviewed against its own bar" is not a closure the product
+                # accepts. Name the row as the location and state the claim.
+                reason = (f"OK — {rule or 'row ' + str(row_no)}: the content survives in "
+                          f"the merged text ({p.stem} row {row_no})")
                 changed = False
                 for k, key in enumerate(header):
                     if k >= len(cells):

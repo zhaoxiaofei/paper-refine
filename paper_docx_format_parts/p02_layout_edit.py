@@ -1520,9 +1520,10 @@ def _rpr_splice(rpr: str, element: str, tag: str) -> str:
     head, inner = rpr[:head_end], rpr[head_end:]
     close = inner.rfind("</w:rPr>")
     body, tail = (inner[:close], inner[close:]) if close >= 0 else (inner, "")
-    # place it after the LAST child that must precede it
+    # place it after the LAST live child that must precede it: a commented-out
+    # child is not formatting and must not become the anchor (F067).
     last_before = 0
-    for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", body):
+    for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", _mask_noncontent(body)):
         child = m.group(1)
         idx = RPR_CHILD_ORDER.index(child) if child in RPR_CHILD_ORDER else want
         if idx <= want:
@@ -3338,8 +3339,25 @@ def _pixel_size_for(sizes: dict, target: str):
 
 
 def _attr_any(frag: str, name: str):
-    m = re.search(rf'\b{name}="([^"]*)"', frag)
-    return m.group(1) if m else None
+    return attr_of(frag, name)
+
+
+def _relationships_prefixes(text: str) -> set:
+    """Every prefix bound to the OOXML relationships namespace in `text`."""
+    return set(re.findall(
+        r"xmlns:([A-Za-z_][\w.-]*)\s*=\s*[\"']"
+        r"http://schemas\.openxmlformats\.org/officeDocument/2006/relationships[\"']",
+        text or "")) or {"r"}
+
+
+def _relationship_id(frag: str, prefixes) -> str:
+    """The r:id/r:embed/r:link-style value on `frag`, whatever prefix it uses."""
+    for prefix in sorted(prefixes or {"r"}):
+        for name in ("embed", "id", "link"):
+            value = attr_of(frag, f"{prefix}:{name}")
+            if value:
+                return value
+    return ""
 
 
 def _nearest_image_height(width: float, ratio: float, unit: str) -> float:
@@ -3369,7 +3387,9 @@ def _ratio_fixes(block: str, expected: float) -> list:
         if new_cy == cyi:
             continue
         fixes.append((m.start(), m.end(),
-                      re.sub(r'\bcy="[^"]*"', f'cy="{new_cy}"', tag, count=1)))
+                      re.sub(r'''(\bcy\s*=\s*)(["'])[^"']*\2''',
+                             lambda mm: f'{mm.group(1)}{mm.group(2)}{new_cy}{mm.group(2)}',
+                             tag, count=1)))
     for m in re.finditer(r"<v:shape(?=[\s/>])[^>]*>", block):
         tag = m.group(0)
         style = re.search(r'style="([^"]*)"', tag)
@@ -3402,6 +3422,7 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
     # extent is an integer), and a height already at that value cannot be
     # repaired further. Only a missing or invalid tolerance falls back to the
     # permissive default.
+    _rprefixes = _relationships_prefixes(part_xml)
     _tol = policy.get("image_aspect_tolerance")
     try:
         tol = 0.02 if _tol is None else float(_tol)
@@ -3432,10 +3453,10 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
                         continue
                 except ValueError:
                     continue
-            emb = re.search(r'r:(?:embed|id|link)="([^"]+)"', block)
-            if not emb:
+            rid = _relationship_id(block, _rprefixes)
+            if not rid:
                 continue
-            target = rels.get(emb.group(1))
+            target = rels.get(rid)
             size = _pixel_size_for(sizes, target) if target else None
             if not size:
                 continue
@@ -3618,6 +3639,7 @@ def figure_text_size_rows(docx_path: Path, policy: dict = None) -> list:
     try:
         with zipfile.ZipFile(docx_path) as pkg:
             xml = ooxml_part_text(pkg.read("word/document.xml"))
+            _rprefixes = _relationships_prefixes(xml)
             sizes = media_pixel_sizes(pkg)
             rels = part_rels(pkg, "word/document.xml")
             seen = set()
@@ -3626,10 +3648,10 @@ def figure_text_size_rows(docx_path: Path, policy: dict = None) -> list:
                         r"<w:(?:drawing|pict)(?=[\s/>]).*?</w:(?:drawing|pict)>",
                         para, re.S):
                     block = m.group(0)
-                    emb = re.search(r'r:(?:embed|id|link)="([^"]+)"', block)
-                    if not emb:
+                    rid = _relationship_id(block, _rprefixes)
+                    if not rid:
                         continue
-                    target = rels.get(emb.group(1))
+                    target = rels.get(rid)
                     if not target or not RASTER_IMAGE_EXT_RE.search(str(target)):
                         continue                       # vector art has no pixel grid
                     size = _pixel_size_for(sizes, target)
@@ -5478,7 +5500,8 @@ def zotero_bibliography_state(xml: str, frame: dict):
         if end_here:
             content = para[content_start:end[0] - p0]
         else:
-            close_at = para.rfind("</w:p>")
+            close_m = list(re.finditer(r"</w:p\s*>", para))
+            close_at = close_m[-1].start() if close_m else -1
             content = para[content_start:close_at if close_at >= 0 else len(para)]
         span = _zotero_entry_span_of_run(content)
         if span is None:
@@ -5911,7 +5934,7 @@ def _part_has_zotero_item_field(raw) -> bool:
     # refresh reported success while `zotero-check` (UTF-16-aware) still saw
     # the stale field.
     text = ooxml_part_text(raw) if isinstance(raw, bytes) else str(raw or "")
-    instr = "".join(re.findall(r"<w:instrText\b[^>]*(?<!/)>(.*?)</w:instrText>",
+    instr = "".join(re.findall(r"<w:instrText\b[^>]*(?<!/)>(.*?)</w:instrText\s*>",
                                text, re.S | re.I))
     return "ADDIN ZOTERO_ITEM" in re.sub(r"\s+", " ", instr).upper()
 
@@ -6312,7 +6335,7 @@ def _iter_wt_elements(para: str):
     # `(?<!/)` guard `<w:t />` was read as an opening element and the lazy body
     # ran to the NEXT `</w:t>`, so live markup became "text" and was escaped
     # into the replacement. `TEXT_RE`/`_text_fragments` already carry the guard.
-    for m in re.finditer(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>", para, re.S):
+    for m in re.finditer(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t\s*>", para, re.S):
         inner = m.group(0)
         text = unesc(inner[inner.find(">") + 1:inner.rfind("<")])
         yield m.start(), m.end(), text

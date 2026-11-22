@@ -1,16 +1,17 @@
-"""Parent-tracked F024/F025 fixes for the shared agent runtime.
+"""Parent-tracked F003/F024/F025 fixes for the shared agent runtime.
 
-The shared runtime lives in the ``agent-common`` git submodule. The two
-verified fixes for F024 (an ``AgentSelection`` repr that printed ``prep_json``
+The shared runtime lives in the ``agent-common`` git submodule. The three
+verified fixes for F003 (signature/OAuth query keys were not treated as
+credentials), F024 (an ``AgentSelection`` repr that printed ``prep_json``
 credentials) and F025 (an unguarded ``exc.read()`` in the shared prep proxy)
 were first written as uncommitted edits inside that submodule's work tree.
-Review finding R06 showed that such an edit cannot be represented in the parent
+Review finding R07 showed that such an edit cannot be represented in the parent
 commit: ``git add`` records the submodule's old HEAD, so the parent commit would
-silently omit both fixes.
+silently omit the fixes.
 
-R06's documented alternative is to move the two changes to a parent-tracked
-module and leave the submodule at its recorded gitlink commit. This module is
-that parent-tracked home. Importing it installs the same behaviour on the
+R07's documented alternative is to move the changes to a parent-tracked module
+and leave the submodule at its recorded gitlink commit. This module is that
+parent-tracked home. Importing it installs the same behaviour on the
 already-imported ``agent_common.model_runtime`` module and is idempotent.
 """
 from __future__ import annotations
@@ -99,11 +100,59 @@ def _install_prep_proxy_short_read_guard() -> None:
                 with contextlib.suppress(OSError):
                     self.wfile.write(raw)
 
+        def do_GET(self) -> None:
+            # The same forward path serves GET: an IncompleteRead in the error
+            # body escaped do_POST-only guarding (F059).
+            responded = False
+            original_send_response = self.send_response
+
+            def send_response(code: int, *args: Any, **kwargs: Any) -> None:
+                nonlocal responded
+                responded = True
+                return original_send_response(code, *args, **kwargs)
+
+            self.send_response = send_response  # type: ignore[method-assign]
+            try:
+                return super().do_GET()
+            except http.client.HTTPException as exc:
+                if responded:
+                    raise
+                raw = json.dumps(
+                    {"error": {"message": (
+                        "custom endpoint proxy could not read the upstream "
+                        "response body: %s" % exc)}}
+                ).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                with contextlib.suppress(OSError):
+                    self.wfile.write(raw)
+
     rt._PrepProxyHandler = _ShortReadGuardedPrepProxyHandler
 
 
+def _install_credential_key_vocabulary() -> None:
+    """F003: treat signature/OAuth query-key spellings as credentials.
+
+    ``_credential_key`` reads the module-level ``_CREDENTIAL_KEY_NAMES`` set by
+    name at call time, so extending the module attribute here covers every
+    caller (``endpoint_credentials``, ``split_endpoint_credentials`` and the
+    probe/pair paths) without touching the submodule.
+    """
+    extra = frozenset({
+        "sig", "signature", "xamzsignature", "xamzcredential", "xamzsecuritytoken",
+        "sessiontoken", "jwt", "ticket", "code", "sas", "sastoken", "idtoken",
+    })
+    current = getattr(rt, "_CREDENTIAL_KEY_NAMES", None)
+    if not isinstance(current, frozenset) or extra <= current:
+        return
+    rt._CREDENTIAL_KEY_NAMES = current | extra
+
+
 def install() -> None:
-    """Install both patches; safe to call on every import."""
+    """Install the parent-tracked patches; safe to call on every import."""
+    _install_credential_key_vocabulary()
     _install_agent_selection_repr()
     _install_prep_proxy_short_read_guard()
 

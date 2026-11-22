@@ -1404,12 +1404,16 @@ def available_venue_profiles(root=None) -> dict:
                     f"the file declares id {declared!r}; the file name {path.name!r} is "
                     f"the id `set-venue` resolves -- rename the file to {declared}.json "
                     f"or fix its id")
+            if declared:
                 owner = declared_owner.get(declared)
                 if owner is not None and owner[1].parent == path.parent and owner[0] != key:
                     # Two files in the SAME directory declaring one id: name the
                     # duplicate instead of hiding it. The file whose NAME is the
                     # declared id is the rightful owner; the other one is the
-                    # duplicate.
+                    # duplicate. This must run even when THIS file's name is
+                    # the declared id: the duplicate may have been read first,
+                    # and the outer `declared != key` guard made the rightful
+                    # owner's correcting branch unreachable (F042).
                     if key == declared:
                         prior = found.get(owner[0])
                         if prior is not None and not prior.get("error"):

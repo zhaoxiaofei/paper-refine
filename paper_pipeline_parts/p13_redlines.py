@@ -110,10 +110,11 @@ def match_track_pairs(base_sources: list, cand_sources: list, ext: str,
     Only documents of the SAME extension are ever paired: a `.docx` revision of
     a `.tex` source is a different document, not a tracked change.
     """
-    base = [f for f in list_track_files(base_sources, problems=base_problems)
-            if f["ext"] == ext]
-    cand = [f for f in list_track_files(cand_sources, problems=cand_problems)
-            if f["ext"] == ext]
+    # Pass the extension filter INTO the reader: the old call read/digested every
+    # trackable file once per extension and appended the same unreadable error
+    # each time, producing duplicate skip rows and repeated warnings (F052).
+    base = list_track_files(base_sources, exts=(ext,), problems=base_problems)
+    cand = list_track_files(cand_sources, exts=(ext,), problems=cand_problems)
     pool, used = list(enumerate(cand)), set()
 
     def take(match):
@@ -434,7 +435,7 @@ def _root_start_tag(text: str, limit: int = 6000) -> str:
 def _namespace_declarations(text: str) -> dict:
     """{prefix: uri} for every `xmlns:prefix` declaration in `text`."""
     out = {}
-    for m in re.finditer(r"xmlns:([A-Za-z0-9_]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')",
+    for m in re.finditer(r"xmlns:([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')",
                          text or ""):
         out[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
     return out

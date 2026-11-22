@@ -859,6 +859,19 @@ def _placeholder_globs_from_ctx(ctx=None) -> list:
     return [str(x).strip() for x in raw if str(x).strip()]
 
 
+def _strip_declared_token(tok: str) -> str:
+    """One declared placeholder path without a balanced quote pair.
+
+    The README may write the declaration as ``"data/x.tsv"`` or ``'x.tsv'`` as
+    well as with backticks; the old fallback kept the quote characters, so
+    fnmatch never matched the real path (F092).
+    """
+    tok = str(tok or "").strip()
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+        tok = tok[1:-1].strip()
+    return tok
+
+
 def declared_placeholder_paths(root: Path, extra=()) -> dict:
     """The placeholders a package DECLARES: {patterns, files, readme, reasons}.
 
@@ -893,8 +906,9 @@ def declared_placeholder_paths(root: Path, extra=()) -> dict:
             toks = BACKTICK_TOKEN_RE.findall(m.group(1)) or [
                 t.strip() for t in re.split(r"[,;]", m.group(1))]
             for tok in toks:
-                if tok.strip():
-                    patterns.append(tok.strip())
+                tok = _strip_declared_token(tok)
+                if tok:
+                    patterns.append(tok)
                     found = True
         for m in PLACEHOLDER_BULLET_RE.finditer(text):
             line = m.group(1)
@@ -1530,6 +1544,32 @@ def _norm_header(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
 
 
+def _one_edit_apart(a: str, b: str) -> bool:
+    """True when two normalized names differ by at most one character.
+
+    The documented PKG-11 rule is "case or ONE character"; SequenceMatcher's
+    ratio put a one-substitution typo in a 6-9 character name below 0.90, so the
+    rule could not see the very defect it documents (F091). Insert/delete and
+    substitution are both one edit.
+    """
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) <= 1
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    i = j = diff = 0
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1
+            j += 1
+            continue
+        diff += 1
+        if diff > 1:
+            return False
+        j += 1
+    return True
+
+
 def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
     """PKG-11: sibling tables whose header names differ only by case/one char."""
     root = Path(root)
@@ -1572,9 +1612,9 @@ def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
             for b in names[i + 1:]:
                 if a == b:
                     continue
-                norm_ratio = difflib.SequenceMatcher(
-                    None, _norm_header(a), _norm_header(b)).ratio()
-                if norm_ratio < NEAR_MISS_RATIO:
+                na, nb = _norm_header(a), _norm_header(b)
+                norm_ratio = difflib.SequenceMatcher(None, na, nb).ratio()
+                if norm_ratio < NEAR_MISS_RATIO and not _one_edit_apart(na, nb):
                     continue
                 if by_name[a] == by_name[b]:
                     continue
@@ -1618,9 +1658,16 @@ def _p_reports_significant(cell: str, parsed=None) -> bool:
     text = re.sub(r"\\textbf\{|\\emph\{|\}", "", str(cell or "")).strip()
     if re.search(r"\*+\s*\$?\s*$", text):
         return True
-    if re.search(r"(?:<|≤|<=)\s*\$?\s*\d", text):
-        return True
-    if re.search(r"(?:>|≥|>=)\s*\$?\s*\d", text):
+    # Compare the STATED bound to the rule's alpha. The old test returned True
+    # for any inequality before a digit, so `p < 0.10` was classified as
+    # significant under the caption's 0.05 rule (F096).
+    m = re.search(r"(?:<=|≤|<)\s*\$?\s*(\d*\.\d+|\d+)", text)
+    if m:
+        try:
+            return float(m.group(1)) <= 0.05
+        except ValueError:
+            return False
+    if re.search(r"(?:>=|≥|>)\s*\$?\s*\d", text):
         return False
     value = _parse_p(text) if parsed is None else parsed
     return value is not None and value <= 0.05
@@ -1704,8 +1751,10 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
         if text is None:
             gaps.append(rel)
             continue
-        if "mcb" not in p.name.lower() and "MCB" not in text[:4000]:
-            continue
+        # Do not pre-filter on a literal `mcb` filename/token: the scan is a
+        # general p-vs-interval consistency check, and the caption rule below is
+        # the real selector (F053).
+
         caption = " ".join(_latex_command_bodies(text, "captionof")
                            + _latex_command_bodies(text, "caption"))
         if not caption or not (MCB_P_SMALL_RULE_RE.search(caption)
@@ -2184,7 +2233,9 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
     grids = []
     gaps = []
     for p in sorted(_iter_tree_files(root)):
-        if not p.is_file() or p.suffix.lower() != ".tsv" or "grid" not in p.name.lower():
+        if not p.is_file() or p.suffix.lower() != ".tsv":
+            # Select grids by their HEADER, not by the literal word "grid" in
+            # the filename (F054).
             continue
         header, body = _read_delimited_table(p, gaps=gaps)
         if not header:
@@ -3564,9 +3615,9 @@ def _pkg2_area_patterns(names: list) -> list:
         joined = "|".join(re.escape(n) for n in names)
         patterns.append(re.compile(
             r"(?<![\w./\\&?#-])(?:" + joined
-            + r")[/\\](?![^\s.,;:)\]}\u201d\u2019\"'])", re.I))
+            + r")[/\\](?![^\s.,;:)\]}\u201d\u2019\"`'])", re.I))
         patterns.append(re.compile(
-            r"(?<![\w./\\&?#-])(?:" + joined + r")[/\\]?\s+(?:director(?:y|ies)|"
+            r"(?<![\w./\\&?#-])(?:" + joined + r")(?:[/\\]|`)?\s+(?:director(?:y|ies)|"
             r"folder|dir)\b", re.I))
     return patterns
 
@@ -5165,7 +5216,7 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
             # out: for a reader of the submission it is as unreachable as an area
             # file, so the row names it too.
             absent_labels.setdefault(label, []).append(rel)
-    if not carried_labels:
+    if not carried_labels and not absent_labels:
         # No figure FILE carries a label: this package embeds its artwork in the
         # documents themselves (the CopyNumBench main text carries five images
         # and no `Figure*.png`), so a name-based check has nothing to compare
@@ -7984,7 +8035,7 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              "minor, tier priority order, peer before own -- until the cleanest version reaches "
              "the configured floor or every cell is used; fewer defects first), then `-median`, "
              "`-mean`, `IQR`, the CONTENT DIGEST (provenance-free: a "
-             "perfect tie must never be decided by the arm's name) and only after that the id. "
+             "perfect tie must never be decided by the arm's name). "
              "An exact (median, mean, IQR) tie is applied as retention BEFORE the prefix "
              "and digest. `critical_remaining`/`writing_remaining` are reported and "
              "cross-checked (self-reported marker values, +inf when absent) but are NOT ranking "
@@ -8817,7 +8868,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # that is the inherited champion re-judged by a stricter panel. The selection
     # rule is left alone; decide simply must not sign that winner as certified,
     # exactly like an incomplete panel.
-    final_champ_row = stats_row_for(final["agg"], final["stored"].get("champion"))
+    final_champ_row = stats_row_for(final["agg"], final["stored"].get("champion_rep")
+                                      or final["stored"].get("champion"))
     final_regression = None
     if final_champ_row and final_champ_row.get("anti_regression_ok") is False:
         final_regression = (f"the final champion {final['stored'].get('champion')!r} is judged "
@@ -9051,6 +9103,16 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # The status document is a SIBLING of the directory and is written on every
     # `decide` (certified, provisional or refused), so the package is never
     # mistaken for a signed answer.
+    def _champ_row(agg, stored) -> dict:
+        """The statistics row of the round's JUDGED candidate.
+
+        `stats_row_for` is keyed on the candidate id, but a deduplicated fresh
+        champion is stored as the representative id (`champion_rep`); looking up
+        only `champion` lost the panel statistics (F086).
+        """
+        return stats_row_for(
+            agg, stored.get("champion_rep") or stored.get("champion")) or {}
+
     readme_path = write_final_clean_readme(ctx, certification, final, final_clean)
     decision = {
         "generated": utcnow(),
@@ -9083,7 +9145,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         "score_model": score_model_doc(
             ctx,
             floor=(final["stored"] or {}).get("tiebreak_defect_floor"),
-            dedup=(final["stored"] or {}).get("dedup_mode") or "off"),
+            dedup=(final["stored"] or {}).get("dedup_mode") or "off",
+            rule=(final["stored"] or {}).get("anti_regression_rule")),
         "rounds": [{"round": rd["round"],
                     "field": rd["agg"]["field"],
                     "field_size": rd["agg"]["field_size"],
@@ -9109,17 +9172,15 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                     # ranking key stays field-wide (a 2*judges pair is one outlier
                     # session away from flipping).
                     "champion_vs_base": {
-                        "median": (stats_row_for(rd["agg"],
-                                                 rd["stored"].get("champion")) or {}
-                                   ).get("vs_base"),
-                        "n": len(((stats_row_for(rd["agg"], rd["stored"].get("champion")) or {}
-                                  ).get("vs_base_vals") or [])),
-                        "wins": sum(1 for x in ((stats_row_for(
-                            rd["agg"], rd["stored"].get("champion")) or {}
-                        ).get("vs_base_vals") or []) if x > 0),
-                        "losses": sum(1 for x in ((stats_row_for(
-                            rd["agg"], rd["stored"].get("champion")) or {}
-                        ).get("vs_base_vals") or []) if x < 0),
+                        "median": _champ_row(rd["agg"], rd["stored"]).get("vs_base"),
+                        "n": len(_champ_row(rd["agg"], rd["stored"]).get("vs_base_vals")
+                                 or []),
+                        "wins": sum(1 for x in (
+                            _champ_row(rd["agg"], rd["stored"]).get("vs_base_vals")
+                            or []) if x > 0),
+                        "losses": sum(1 for x in (
+                            _champ_row(rd["agg"], rd["stored"]).get("vs_base_vals")
+                            or []) if x < 0),
                         "reported_only": True,
                     },
                     "captions": {vid: {"gate_ok": s.get("caption_gate_ok"),
@@ -9248,7 +9309,9 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     for rd in rounds_data:
         st = rd["agg"]["stats"]
         champ = rd["stored"].get("champion")
-        crow = stats_row_for(rd["agg"], champ)
+        # The console statistic is the representative row (F086); the printed
+        # id stays the champion the decision records.
+        crow = _champ_row(rd["agg"], rd["stored"])
         med = crow.get("median")
         mean = crow.get("mean")
         print(f"[decide] round {rd['round']}: field={rd['agg']['field_size']} "

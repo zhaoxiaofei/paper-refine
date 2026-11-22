@@ -467,6 +467,12 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
                         if res.get("ok") and _made.is_file():
                             out_dir.mkdir(parents=True, exist_ok=True)
                             shutil.move(str(_made), str(out_pdf))
+                        elif res.get("ok"):
+                            # The renderer claimed success but wrote nothing:
+                            # the manifest must not record a PDF that does not
+                            # exist (F088).
+                            res = dict(res, ok=False,
+                                       error="the renderer reported success but wrote no PDF")
                     finally:
                         shutil.rmtree(_tmp, ignore_errors=True)
             except OSError as e:

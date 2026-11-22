@@ -183,6 +183,12 @@ def main(argv):
         import python_redlines as real          # the published package's name
     except ImportError:
         real = None
+    except Exception as exc:                                        # noqa: BLE001
+        # An installed-but-broken module used to escape as a traceback and exit
+        # 1, contradicting the adapter's documented "prints a message and exits
+        # with a documented code, never a traceback" contract (F105).
+        fail("python_redlines is not importable: %s: %s"
+             % (type(exc).__name__, str(exc).splitlines()[-1] if str(exc) else ""), 4)
     if real is not None and try_engine_api(real, base, revised, stage):
         commit_stage()
         return 0
@@ -194,6 +200,9 @@ def main(argv):
         import redlines as _legacy
     except ImportError:
         _legacy = None
+    except Exception as exc:                                        # noqa: BLE001
+        fail("python-redlines is not importable: %s: %s"
+             % (type(exc).__name__, str(exc).splitlines()[-1] if str(exc) else ""), 4)
     if _legacy is not None:
         redlines = _legacy
     if redlines is None:

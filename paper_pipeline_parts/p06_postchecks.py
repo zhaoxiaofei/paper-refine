@@ -1049,12 +1049,14 @@ def _copy_bytes_if_different(src: Path, dst: Path) -> bool:
         data = src.read_bytes()
     except OSError:
         return False
-    if dst.is_file():
-        try:
-            if dst.read_bytes() == data:
-                return False
-        except OSError:
-            pass
+    try:
+        # The destination lives under the agent-writable sandbox: an unbounded
+        # whole-file read let a previous attempt leave an arbitrarily large
+        # file there (F030).
+        if read_regular_file(dst, max_bytes=MAX_JSON_BYTES) == data:
+            return False
+    except OSError:
+        pass
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     def do(f) -> None:
@@ -1539,8 +1541,11 @@ def ledger_named_ids(ledger, wanted=()) -> set:
     question it is about: does the payload name every frozen finding id?
 
     An id counts when it appears as a scalar that EQUALS a frozen id -- a row
-    field's value, a list element, or a mapping key -- at any nesting level. A
-    JSON number is coerced to its canonical string exactly like every other
+    field's value, a mapping key, or an element of a documented plain id list
+    (`_ID_LIST_KEYS`) or of the top-level list itself -- at any nesting level.
+    A string element of any OTHER list does not count: an id quoted inside
+    another row's `evidence` is evidence, not a disposition of that row (F005).
+    A JSON number is coerced to its canonical string exactly like every other
     ledger reader (`ledger_row_id`), so `{"id": 1, ...}` names frozen id "1"
     (F096). Prose that merely mentions an id does not count, so a report object
     that names no finding still fails the gate.
@@ -1571,9 +1576,15 @@ def ledger_named_ids(ledger, wanted=()) -> set:
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    visit(item, depth + 1)
+                    visit(item, depth + 1, allow_strings)
                 elif allow_strings:
-                    note(item)                  # a DOCUMENTED plain id list
+                    # A plain id list counts only where the contract says it is
+                    # one: the top-level list itself, or a documented id-list
+                    # key. An id quoted inside another row's `evidence` list is
+                    # evidence, not a disposal of that row (F005): counting
+                    # every string element at every depth let a row dispose a
+                    # finding it merely quoted.
+                    note(item)
 
     visit(ledger, 0, isinstance(ledger, (list, tuple)))
     return named
@@ -1993,20 +2004,23 @@ COVERAGE_DISPOSITION_RE = re.compile(
 # A reason that NEGATES the check is not a disposition: `clean -- basis:
 # x.md not checked` says the opposite of what the cell's verdict claims.
 _COVERAGE_NEGATED_CHECK_RE = re.compile(
-    r"(?i)\b(?:not|never|could\s+not|cannot|can['\u2019]t|wasn['\u2019]t|"
-    r"weren['\u2019]t|isn['\u2019]t|didn['\u2019]t|did\s+not)\s+"
-    r"(?:be\s+)?(?:checked|verified|re-?derived|examin(?:e|ed)|reviewed|inspected)\b"
+    r"(?i)\b(?:not|never|could\s+not|couldn['\u2019]t|would\s+not|wouldn['\u2019]t|"
+    r"cannot|can['\u2019]t|wasn['\u2019]t|weren['\u2019]t|isn['\u2019]t|"
+    r"didn['\u2019]t|doesn['\u2019]t|don['\u2019]t|did\s+not|does\s+not|do\s+not)\s+"
+    r"(?:be\s+|been\s+)?(?:check(?:ed|s|ing)?|verif(?:y|ied|ies)|re-?deriv(?:e|ed)|"
+    r"examin(?:e|ed)|review(?:ed)?|inspect(?:ed)?|ran|run|perform(?:ed)?)\b"
     # `clean -- basis: no rows were checked` / `no row was examined`: the
     # negated subject precedes the verb instead of following "not".
     r"|\bno\s+[^.;\n]{0,40}?\b(?:was|were)\s+"
-    r"(?:checked|verified|re-?derived|examin(?:e|ed)|reviewed|inspected)\b")
+    r"(?:check(?:ed|s)?|verif(?:ied|ies)|re-?deriv(?:ed)?|examin(?:e|ed)|"
+    r"review(?:ed)?|inspect(?:ed)?|ran|run)\b")
 # A finding COUNT is not a reason-bearing form, so a count row whose tail says the
 # sweep never RAN contradicts its own "0 findings". This wider verb set is used
 # ONLY for the count form: `unable -- the pass was not performed` is a legitimate
 # inability reason, so the shared `_coverage_reason_named` test must not carry it.
 _COVERAGE_COUNT_NEGATED_RE = re.compile(
     r"(?i)\b(?:not|never|without|could\s+not|cannot|did\s+not|didn['\u2019]t)\b"
-    r"[^.;\n]{0,25}\b(?:run|executed?|performed?)\b")
+    r"[^.;\n]{0,25}\b(?:run|executed?|performed?|check(?:ed|s)?|verif(?:ied|ies))\b")
 # A tail that says no work happened ("checked nothing", "nothing was checked",
 # "no sweep was performed") is a negated check even though it uses none of the
 # "not checked" spellings above (F160).
@@ -2021,8 +2035,13 @@ _COVERAGE_NAMED_BASIS_RE = re.compile(
     r"|out\s+of\s+scope\s*(?:--|—|–))\s*(.*)$")
 
 
-def _coverage_reason_named(reason) -> bool:
+def _coverage_reason_named(reason, allow_negated: bool = False) -> bool:
     """True when a `<dash> <reason>` tail NAMES an artifact or a reason.
+
+    ``allow_negated`` is true ONLY for an ``unable -- <reason>`` row: there,
+    "the renderer could not run" IS the inability the disposition records, so
+    the negated-check test (which refuses ``clean -- basis: <x> not checked``)
+    must not be applied to it (F014).
 
     Shared by the review gate and the audit gate (the audit's prose forms carry
     the same tail), so both refuse the same filler.
@@ -2037,8 +2056,17 @@ def _coverage_reason_named(reason) -> bool:
             # refusal, not a named reason: refuse it like every other filler.
             r"not\s+applicable|not-applicable|inapplicable", reason):
         return False
-    # A reason that negates the check's own verdict contradicts it.
-    if _COVERAGE_NEGATED_CHECK_RE.search(reason) or _COVERAGE_NOWORK_RE.search(reason):
+    # An anonymous pointer ("see above", "as discussed") names no artifact,
+    # location or reason; it is the same filler as `x` (F040).
+    if re.fullmatch(
+            r"(?i)(?:see\s+(?:above|below|here|there|prior|previous|report|details?)|"
+            r"as\s+(?:discussed|above|before|noted|stated)|ditto|ibid(?:\.|em)?)"
+            r"[.!]?", reason):
+        return False
+    # A reason that negates the check's own verdict contradicts it -- except in
+    # an `unable -- <reason>` row, where the negation is the disposition.
+    if not allow_negated and (_COVERAGE_NEGATED_CHECK_RE.search(reason)
+                              or _COVERAGE_NOWORK_RE.search(reason)):
         return False
     # At least three alphanumeric characters: a one- or two-character token
     # (`x`, `ok`, `ab`, `12`) and punctuation alone cannot name an artifact or
@@ -2093,7 +2121,9 @@ def _coverage_disposition_ok(value) -> bool:
     if re.match(r"(?i)^\s*clean\b", text) \
             and _COVERAGE_COUNT_NEGATED_RE.search(m.group(1) or ""):
         return False
-    return _coverage_reason_named(m.group(1))
+    # The same exemption for `unable --`: "could not run" is its disposition.
+    return _coverage_reason_named(
+        m.group(1), allow_negated=bool(re.match(r"(?i)^\s*unable\b", text)))
 
 
 _BARE_COVERAGE_DISPOSITIONS = {"clean", "unable", "out of scope", "out-of-scope"}
@@ -2149,7 +2179,7 @@ def _coverage_row_disposition_ok(row) -> bool:
     # "could not run" as a legitimate reason.
     if bare == "clean" and _COVERAGE_COUNT_NEGATED_RE.search(reason):
         return False
-    return bool(_coverage_reason_named(reason))
+    return bool(_coverage_reason_named(reason, allow_negated=bare == "unable"))
 
 
 def visual_tools_available() -> bool:
@@ -3476,8 +3506,14 @@ def prior_proposal_ids(sb: Path) -> list:
     (F73).
     """
     path = sb / "prior_round" / "new_sweeps.md"
-    if not path.exists():
+    try:
+        # lstat, not exists(): a BROKEN symlink is staged content, not absence
+        # (F011).
+        path.lstat()
+    except FileNotFoundError:
         return []
+    except OSError:
+        return None
     text = read_text_bounded(path)
     if text is None:
         return None
@@ -4022,122 +4058,6 @@ def resync_sweeps_appendix(sweeps_path: Path, sweeps_text: str) -> str:
 
 
 PRIOR_AUDIT_ID_RE = re.compile(r"\bAU-OBS-\d{3,}\b")
-
-
-def _prior_audit_is_divider(cells) -> bool:
-    """True for a markdown table's `|---|:--:|` divider row."""
-    cells = [str(c or "").strip() for c in (cells or [])]
-    # `_split_table_cells` keeps the empty cells outside the outer pipes.
-    while cells and not cells[0]:
-        cells.pop(0)
-    while cells and not cells[-1]:
-        cells.pop()
-    return bool(cells) and all(re.fullmatch(r":?-{1,}:?", c) for c in cells)
-
-
-def prior_audit_observation_lines(text: str) -> list:
-    """The observation lines of `prior_audit/UNRESOLVED.md`, in file order.
-
-    The recorded format is ONE line per observation (location + re-runnable
-    evidence). Headings, blank lines, table separators and fenced blocks are
-    structure, not observations; a leading list marker or number is stripped so
-    the same observation yields the same text across rounds.
-
-    A record written as a markdown TABLE is still a record: every data row of
-    every `|` block is one observation. Skipping every line that starts with
-    `|` (the old rule) returned [] for a table-form handoff, so the whole
-    prior-audit record vanished from the convergence gate (F120).
-    """
-    rows, fence, table = [], None, []
-
-    def flush_table() -> None:
-        block, table[:] = list(table), []
-        if not block:
-            return
-        cells_list = [_split_table_cells(line) for line in block]
-        if len(cells_list) >= 2 and _prior_audit_is_divider(cells_list[1]):
-            for cells in cells_list[2:]:
-                row = " ".join(" ".join(str(c or "").split()) for c in cells).strip()
-                if row and set(row) - set("| -:"):
-                    rows.append(row)
-            return
-        # No divider: not a GFM table, but every `|` line still carries content.
-        # Treat the lines as prose rather than dropping them silently.
-        for line in block:
-            s = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", line).strip()
-            if s and set(s) - set("| -:"):
-                rows.append(s)
-
-    for line in str(text or "").splitlines():
-        s = line.strip()
-        m = re.match(r"^(`{3,}|~{3,})", s)
-        if fence is not None:
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
-                fence = None
-            continue
-        if m:
-            flush_table()
-            fence = m.group(1)
-            continue
-        if s.startswith("|"):
-            table.append(s)
-            continue
-        flush_table()
-        if not s or s.startswith("#") or set(s) <= set("-:| "):
-            continue
-        s = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", s).strip()
-        if s:
-            rows.append(s)
-    flush_table()
-    return rows
-
-
-def _prior_audit_index_rows(path: Path) -> list:
-    """[(id, observation)] of the staged indexed view (`OBSERVATIONS.md`)."""
-    out = []
-    for block in parse_markdown_blocks(path):
-        header = [str(h or "").strip().lower() for h in block["header"]]
-        if "id" not in header:
-            continue
-        text_col = next((h for h in header if h in ("observation", "text", "line", "detail")), None)
-        if text_col is None:
-            continue
-        for row in block["rows"]:
-            oid = str(row.get("id") or "").strip().upper()
-            if not PRIOR_AUDIT_ID_RE.fullmatch(oid):
-                continue
-            text = " ".join(str(row.get(text_col) or "").split())
-            out.append((oid, text))
-    return out
-
-
-def prior_audit_observation_ids(sb: Path) -> list:
-    """[(id, observation)] for the staged prior-audit record.
-
-    `[]` when no record was staged. `None` when a staged record EXISTS but
-    cannot be read (permissions, a link/FIFO, an over-budget file): that is
-    UNKNOWN, not "the audit observed nothing", exactly as `prior_proposal_ids()`
-    treats an unreadable prior-round file. An unreadable `UNRESOLVED.md` used to
-    return [] and the disposition gate passed vacuously (F120).
-    """
-    dirp = Path(sb) / "prior_audit"
-    # The indexed read-only view p05 stages is the authoritative id list (it is
-    # what the review is told to cite), so prefer it when it is readable.
-    idx = dirp / "OBSERVATIONS.md"
-    if idx.is_file() and not idx.is_symlink():
-        rows = _prior_audit_index_rows(idx)
-        if rows:
-            return rows
-    p = dirp / "UNRESOLVED.md"
-    if p.is_file() and not p.is_symlink():
-        text = read_text_bounded(p)
-        if text is None:
-            return None
-        return [(f"AU-OBS-{i:03d}", line)
-                for i, line in enumerate(prior_audit_observation_lines(text), 1)]
-    if idx.is_file() and not idx.is_symlink():
-        return None
-    return []
 
 
 def prior_audit_disposition_problems(sb: Path, fj) -> list:
@@ -4903,8 +4823,12 @@ def m1b_audit_section_missing(m1_md: str) -> bool:
     if "ACRONYM INVENTORY" not in text.upper():
         return False
     # A level-3 `### M1b` IS the section; a prose sentence quoting "## M1b" is
-    # not. Parse headings exactly as `_m1b_table` does.
-    return not any(_M1B_HEADING_RE.match(ln.strip()) for ln in text.splitlines())
+    # not. Parse headings exactly as `_m1b_table` does, and require the table
+    # too: the extractor emits the table unconditionally (a placeholder row when
+    # clean), so a bare heading proves no audit either (F035).
+    if not any(_M1B_HEADING_RE.match(ln.strip()) for ln in text.splitlines()):
+        return True
+    return not _m1b_table(text)[0]
 
 
 def m1b_row_count(m1_md: str) -> int:
@@ -4913,9 +4837,17 @@ def m1b_row_count(m1_md: str) -> int:
 
 
 def _is_recorded_reason(cell: str) -> bool:
-    """Is this disposition cell a reason rather than a bare verdict word?"""
+    """Is this disposition cell a reason rather than a bare verdict word?
+
+    Length alone is not a reason: `OK — see above` is 13 characters and names
+    nothing, so the shared verdict/filler closure is applied too (F049).
+    """
     text = re.sub(r"\s+", " ", str(cell or "")).strip()
-    return len(text) >= 12 and re.search(r"[A-Za-z]{3}", text) is not None
+    if len(text) < 12 or re.search(r"[A-Za-z]{3}", text) is None:
+        return False
+    if _disposition_filler_closure(text):
+        return False
+    return True
 
 
 def m1b_rows_disposed(m1_md: str) -> bool:
@@ -7470,6 +7402,7 @@ _DISPOSITION_FILLER_TAIL_RE = re.compile(
     r"(?i)^(?:x+|n/?a|none|nil|null|tbd|todo|yes|no|ok|okay|checked|done|"
     r"pass|passed|tested|fine|good|clean|"
     r"see(?:\s+(?:above|below|here|there|report|details?))?|"
+    r"as\s+(?:discussed|above|before|noted|stated)|"
     r"[-—–_.:;,\s]+)$")
 
 
@@ -9687,6 +9620,10 @@ def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     _safe_remove_prompt(sb / RESUME_PROMPT_FILE)
     if res.get("error") or res.get("rc") not in (0,):
         rec["status"] = "failed"
+        # A process-level failure was never judged: the PREVIOUS attempt's
+        # postcheck errors must not classify this one as a content rejection
+        # and suppress the continuation (F007).
+        rec.pop("postcheck", None)
         rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
         rec["last_failure_kind"] = str(res.get("failure_kind") or "")
         record_attempt(ctx, rec, False, [rec["last_error"]], [],
@@ -9734,6 +9671,9 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     _safe_remove_prompt(sb / REPAIR_PROMPT_FILE)
     if res.get("error") or res.get("rc") not in (0,):
         record["ok"] = False
+        # Same rule as the continuation branch: a process failure leaves no
+        # current postcheck, so the previous attempt's errors are stale (F007).
+        rec.pop("postcheck", None)
         record["error"] = res.get("error") or f"repair session exited rc={res.get('rc')}"
         record_attempt(ctx, rec, False, [record["error"]], [],
                        source="artifact-repair (process failed)")

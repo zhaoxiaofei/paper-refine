@@ -1982,7 +1982,7 @@ def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
     return with_context_budget(CONTRADICTION_RULE + text)
 
 
-def _merge_tree(src: Path, dst: Path) -> int:
+def _merge_tree(src: Path, dst: Path, notes: list = None) -> int:
     """Copy every file under `src` into `dst` (creating paths); count writes.
 
     Every symlink -- a source entry the staged agent planted, a symlinked source
@@ -1992,15 +1992,27 @@ def _merge_tree(src: Path, dst: Path) -> int:
     the link's target, and `copy2` followed a destination link (overwriting its
     external target).
     """
-    src = Path(src)
+    src, dst = Path(src), Path(dst)
     if src.is_symlink():
         # The loop below refuses links INSIDE src, but `Path.rglob` on a
         # symlinked src enumerates the TARGET's files as ordinary regular
         # files, so every one of them was published.
         raise OSError(f"refusing to publish from symlinked directory {src}")
+    # A symlinked DESTINATION was never checked: `target.parent.mkdir` and
+    # `os.replace` both follow it and write outside the venue store (F005).
+    if dst.is_symlink():
+        raise OSError(f"refusing to publish through symlinked directory {dst}")
+    _refuse_symlinked_parent(dst)
     written = 0
     for p in sorted(src.rglob("*")):
-        if p.is_symlink() or not p.is_file():
+        if p.is_symlink():
+            # Do not drop a staged link silently: its disappearance is a named
+            # gap, not a successful publication (F031).
+            if notes is not None:
+                notes.append(f"{p.relative_to(src).as_posix()}: skipped a symlinked "
+                             f"staged entry (not published)")
+            continue
+        if not p.is_file():
             continue
         rel = p.relative_to(src)
         target = dst / rel
@@ -2146,14 +2158,15 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
         # operator gets a note and the rest of the staging still publishes.
         out["notes"].append(f"{official.name}: refused a symlinked staged directory")
     elif official is not None:
-        out["official_files"] = _merge_tree(official, dest / f"{vid}{VENUE_OFFICIAL_SUFFIX}")
+        out["official_files"] = _merge_tree(
+            official, dest / f"{vid}{VENUE_OFFICIAL_SUFFIX}", out["notes"])
     manuscripts = next((r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}" for r in roots
                         if (r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}").is_dir()), None)
     if manuscripts is not None and manuscripts.is_symlink():
         out["notes"].append(f"{manuscripts.name}: refused a symlinked staged directory")
     elif manuscripts is not None:
-        out["manuscript_files"] = _merge_tree(manuscripts,
-                                              dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}")
+        out["manuscript_files"] = _merge_tree(
+            manuscripts, dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}", out["notes"])
     for rel, why in (("PUBLISH.md", "the agent explained a publish blocker"),
                      ("_pipeline_done.json", "the agent's completion marker")):
         if (sb / rel).is_file():
@@ -2164,7 +2177,7 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
 def latest_add_venue_sandbox(dest: Path, vid: str):
     """The newest `<dest>/.add-venue/<vid>-*` sandbox, or None."""
     base = Path(dest) / ".add-venue"
-    if not base.is_dir():
+    if not base.is_dir() or base.is_symlink():
         return None
     # Match the EXACT `<vid>-<stamp>` segment, not a name prefix: for
     # vid="nature", `nature-biotechnology-2026...` also startswith "nature-"
@@ -2179,7 +2192,8 @@ def latest_add_venue_sandbox(dest: Path, vid: str):
         m = pat.match(p.name)
         return (m.group(1), m.group(2) or "", p.name)
 
-    cands = sorted((p for p in base.iterdir() if p.is_dir() and pat.match(p.name)),
+    cands = sorted((p for p in base.iterdir()
+                    if p.is_dir() and not p.is_symlink() and pat.match(p.name)),
                    key=_stamp_key)
     return cands[-1] if cands else None
 
@@ -2740,7 +2754,8 @@ def cmd_add_venue(args) -> None:
     # the store's copy (the shipped default is read at import, so publishing an
     # invalid one could brick every later command, including the repair tools).
     staged_profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in (sb / "store", sb)
-                           if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()), None)
+                           if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()
+                           and not (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_symlink()), None)
     if staged_profile is not None:
         try:
             VenueProfile(json.loads(staged_profile.read_text(encoding="utf-8")),

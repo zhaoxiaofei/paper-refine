@@ -583,11 +583,16 @@ def _audit_disposition_ok(value) -> bool:
         return False
     if _AUDIT_COUNT_RE.search(text):
         # A count is a complete verdict only when it is not negated:
-        # `0 findings -- not checked` used to take this shortcut and pass.
-        return not _audit_negated_verb(text)
+        # `0 findings -- not checked` used to take this shortcut and pass, and a
+        # "nothing/nobody checked" tail names no negation verb at all (F008).
+        return (not _audit_negated_verb(text)
+                and not _COVERAGE_NOWORK_RE.search(text))
     m = _AUDIT_CANONICAL_TAIL_RE.search(text)
     if m is not None:
-        return _coverage_reason_named(m.group(1))
+        # `unable -- <why it could not run>` is the documented inability form;
+        # its reason legitimately negates the check (F014), unlike `clean`.
+        return _coverage_reason_named(
+            m.group(1), allow_negated=bool(re.match(r"(?i)^\s*unable\b", text)))
     if _AUDIT_VERB_RE.search(text) and not _audit_negated_verb(text):
         # a re-derivation sentence, e.g. "the sweep was re-derived". A BARE
         # verb ("checked", "confirmed", "verified the") records no object and
@@ -1291,7 +1296,11 @@ def postcheck_revise(ctx: Ctx, rec: dict):
         # status map by the run record would leave a sandbox-only id with no
         # status and read an honest `manual-required` row as a missing one.
         final_status=revision_ledger_final_status(rev),
-        exempt_removed=pipeline_removed_sentences(rec, with_document=True))
+        exempt_removed=pipeline_removed_sentences(rec, with_document=True),
+        # Under `author_to_complete: document` a required hand-off marker must
+        # survive, so the finding-side helper must not exempt its deletion
+        # either (F118).
+        allow_marker_delete=author_to_complete_mode_of(ctx) in ("readme", "off"))
     _removal_errs, _removal_warns = finding_removal_messages(_removals, f"{REVISED_DIR}/")
     errs.extend(_removal_errs)
     warns.extend(_removal_warns)
@@ -9386,23 +9395,6 @@ def _zero_item_handoff_package(mode, marker) -> bool:
     return is_int(count) and count == 0
 
 
-def _usable_deliverable(p: Path) -> bool:
-    """Is this file worth ADOPTING into its canonical path?
-
-    Non-empty, and (for JSON) parseable: a truncated file moved into place would
-    only turn a "missing" failure into a "malformed" one, and the rescue exists
-    to preserve work, not to shuffle garbage.
-    """
-    try:
-        if not p.is_file() or p.stat().st_size == 0:
-            return False
-    except OSError:
-        return False
-    if p.suffix.lower() == ".json":
-        return read_json(p, revive=False, lenient=True) is not None
-    return True
-
-
 def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
     """Move a REQUIRED bookkeeping deliverable the session wrote one level up.
 
@@ -9516,6 +9508,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     """
     kind = str(kind or "")
     errs, warns = [], []
+    strict = _selfcheck_artifact_policy(sb) != "off"
     if kind not in SELFCHECK_STAGES:
         return False, [f"unknown stage {kind!r} (known: {', '.join(SELFCHECK_STAGES)})"], []
     # `round` stays None when the caller did not supply one: the marker's own
@@ -9767,8 +9760,15 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             # revise sessions (their rows lived under a key the reader did not
             # know); it now runs BEFORE the marker too.
             frozen = findings_from_sandbox(sb, sandbox_audit_record(sb))
-            ids = [str(f.get("id")).strip() for f in frozen
-                   if isinstance(f.get("id"), str) and str(f.get("id")).strip()]
+            # Coerce every id exactly like frozen_finding_ids(): a numeric
+            # `{"id": 1}` used to be dropped here while the postcheck required
+            # "1", so the pre-flight certified a ledger the postcheck rejected
+            # (F075).
+            ids = []
+            for f in frozen:
+                fid = str(f.get("id") or "").strip()
+                if fid and fid not in ids:
+                    ids.append(fid)
             total = len(ids) if (sb / FINDINGS_REL).exists() else None
             lerrs, lwarns = revision_ledger_problems(d, ids, total,
                                                      "revised/revision_report.json")
@@ -9888,16 +9888,21 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                                 f"round stages one structural and one sentence-level arm so the "
                                 f"pool has both kinds of difference")
         # W-12's language pass: one row per change plus one coverage row per step.
+        # The postcheck routes both families through `strict_dispositions(ctx)`
+        # (`check_language_pass`); the pre-flight has no Ctx, so it reads the
+        # same recorded policy from the enclosing run root (F113).
         lp = language_pass_report(d)
         if not lp["present"]:
-            errs.append(f"{kind}: no work/R6_language.md -- the L1-L11 language pass is a "
-                        f"required artifact of every package-producing stage: one row per change "
-                        f"plus one coverage row per step (including the steps that changed "
-                        f"nothing)")
+            (errs if strict else warns).append(
+                f"{kind}: no work/R6_language.md -- the L1-L11 language pass is a "
+                f"required artifact of every package-producing stage: one row per change "
+                f"plus one coverage row per step (including the steps that changed "
+                f"nothing)")
         elif lp["missing"]:
-            errs.append(f"{kind}: the language pass covers {11 - len(lp['missing'])}/11 steps; no "
-                        f"coverage row for {', '.join(lp['missing'])} (a step with no row is an "
-                        f"unaudited step)")
+            (errs if strict else warns).append(
+                f"{kind}: the language pass covers {11 - len(lp['missing'])}/11 steps; no "
+                f"coverage row for {', '.join(lp['missing'])} (a step with no row is an "
+                f"unaudited step)")
         visual = {REWRITTEN_DIR: VISUAL_ARTIFACT_REWRITTEN,
                   REVISED_DIR: VISUAL_ARTIFACT_REVISED,
                   INTEGRATED_DIR: VISUAL_ARTIFACT_INTEGRATED}.get(pkg)

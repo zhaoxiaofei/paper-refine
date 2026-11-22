@@ -2851,7 +2851,19 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 stripped += 1
                 continue                              # a stale rendered page + Word setting
             payload = _prune_dropped_part_references(payload, name, dropped, notes)
+            if "/embeddings/" in low and payload[:2] == b"PK":
+                # An embedded workbook/document is a nested OOXML package; the
+                # outer loop only rewrites top-level XML, so it was copied
+                # byte-for-byte with its own docProps author (F001).
+                nested, nested_notes = _sanitize_ooxml_bytes(payload)
+                if nested != payload:
+                    stripped += 1
+                notes.extend(f"embedded object {name}: {n}" for n in nested_notes)
+                payload = nested
             if low == "docprops/core.xml":
+                # A legal UTF-16 core part is invisible to the byte regexes; the
+                # word/xl/ppt branch normalized it, this branch did not (F004).
+                payload = _ooxml_xml_utf8(payload)
                 payload = _blank_xml_elements(payload, (b"dc:creator", b"cp:lastModifiedBy"),
                                               b"author")
                 payload = _blank_xml_elements(payload, (b"dc:title", b"dc:subject",
@@ -2863,6 +2875,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 payload = _blank_xml_elements(payload, (b"cp:revision",), b"1")
                 stripped += 1
             elif low == "docprops/app.xml":
+                payload = _ooxml_xml_utf8(payload)
                 payload = _blank_xml_elements(payload, (b"Company", b"Manager", b"Application",
                                                         b"AppVersion", b"Template",
                                                         b"HyperlinkBase", b"TitlesOfParts"))
@@ -2913,6 +2926,15 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                     payload = _blank_xml_elements(
                         payload, (b"author", b"personDisplayName"), b"author")
                     stripped += 1
+                if low.startswith("word/comments") and low.endswith(".xml"):
+                    # `w:author` was neutralized, but the comment BODY (its
+                    # w:t text) can name a person or lab; a comment is not part
+                    # of the accepted document (F024).
+                    new_c = re.sub(rb"(<w:t\b[^>]*>)(.*?)(</w:t\s*>)", rb"\1\3",
+                                   payload, flags=re.S)
+                    if new_c != payload:
+                        stripped += 1
+                    payload = new_c
                 # the pipeline's own hand-off marker prefix must not identify a
                 # package as "revised by the pipeline"; the payload stays.
                 payload = payload.replace(PLACEHOLDER_TOKEN.encode(), b"[TO BE COMPLETED")
@@ -2966,9 +2988,20 @@ def _blank_pdf_value(value: bytes) -> bytes:
 
 def _blank_xmp_fields(stream: bytes) -> bytes:
     for tag in (b"rdf:li", b"xmp:CreateDate", b"xmp:ModifyDate", b"xmp:MetadataDate",
-                b"xmp:CreatorTool", b"pdf:Producer", b"dc:title", b"dc:description"):
+                b"xmp:CreatorTool", b"pdf:Producer", b"dc:title", b"dc:description",
+                b"xmpMM:DocumentID", b"xmpMM:InstanceID", b"xmpMM:OriginalDocumentID",
+                b"xmpMM:DerivedFrom", b"pdf:Keywords", b"dc:subject"):
         pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb"\s*>)", re.S)
         stream = pat.sub(lambda m: m.group(1) + b" " * len(m.group(2)) + m.group(3), stream)
+    # The same properties are also written as rdf:Description ATTRIBUTES; the
+    # element loop cannot see those, so the document id/derived-from filename
+    # survived a blinded PDF (F029).
+    for attr in (b"xmpMM:DocumentID", b"xmpMM:InstanceID", b"xmpMM:OriginalDocumentID",
+                 b"pdf:Keywords"):
+        apat = re.compile(rb"(\b" + attr + rb"\s*=\s*)([\"'])(.*?)\2", re.S)
+        stream = apat.sub(
+            lambda m: m.group(1) + m.group(2) + b" " * len(m.group(3)) + m.group(2),
+            stream)
     return stream
 
 
@@ -3042,7 +3075,7 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
 
 
 _RTF_IDENTITY_RE = re.compile(
-    rb"\{\\(?:author|company|title|operator|manager|subject|keywords|doccomm|"
+    rb"\{\\(?:\*\\)?(?:author|company|title|operator|manager|subject|keywords|doccomm|"
     rb"category|hlinkbase)(?=[^A-Za-z])")
 
 
@@ -3103,8 +3136,15 @@ def _sanitize_svg_bytes(raw: bytes) -> tuple:
     out = _SVG_METADATA_RE.sub(b"", raw)
     out = _SVG_COMMENT_RE.sub(b"", out)
     out = _SVG_TOOL_ATTR_RE.sub(b"", out)
+    # RDF is not the only carrier: a direct `<dc:creator>` child, an
+    # `<rdf:RDF>` block outside `<metadata>`, and `<title>`/`<desc>` text all
+    # reach the judge view byte-for-byte (F027).
+    out = re.sub(rb"(?is)<dc:[A-Za-z_][\w.-]*\b[^>]*>.*?</dc:[A-Za-z_][\w.-]*\s*>",
+                 b"", out)
+    out = re.sub(rb"(?is)<rdf:RDF\b[^>]*>.*?</rdf:RDF\s*>", b"", out)
+    out = re.sub(rb"(?is)<(title|desc)\b[^>]*>.*?</\1\s*>", b"", out)
     notes = []
-    if re.search(rb"(?is)<metadata\b", out):
+    if re.search(rb"(?is)<metadata\b|<dc:[A-Za-z_]", out):
         notes.append("an SVG metadata element could not be stripped; inspect the "
                      "judge view for author metadata")
     return out, notes

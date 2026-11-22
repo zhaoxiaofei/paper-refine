@@ -331,9 +331,15 @@ fi
 # machine image.
 install_repo() {
     local name=$1 url=$2 dest=$3 ref=$4
-    local commit=""
+    local commit="" _status="" _status_rc=0
     if [ -d "$dest/.git" ]; then
-        if [ "$OFFLINE" = 0 ] && [ -z "$(git -C "$dest" status --porcelain 2>/dev/null || true)" ]; then
+        _status=$(git -C "$dest" status --porcelain 2>/dev/null); _status_rc=$?
+        if [ "$OFFLINE" = 0 ] && [ "$_status_rc" -ne 0 ]; then
+            # `|| true` used to turn an unreadable index / dubious ownership /
+            # broken worktree into "clean" and refreshed it anyway (F087).
+            warn "cannot read the git status of $name ($dest): git exit $_status_rc; " \
+                 "not refreshing it"
+        elif [ "$OFFLINE" = 0 ] && [ -z "$_status" ]; then
             note "refreshing $name"
             if run git -C "$dest" fetch --depth 1 origin "$ref" >/dev/null 2>&1; then
                 if ! run git -C "$dest" checkout --detach FETCH_HEAD >/dev/null 2>&1; then

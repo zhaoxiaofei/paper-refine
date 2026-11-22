@@ -178,11 +178,11 @@ def _csv_quotes_open(line: str, in_quotes: bool) -> bool:
 def iter_head_dump(path: Path):
     """Yield (virtual csv path, text) blocks from a ``head`` listing.
 
-    Every physical line between markers is preserved (blank lines and embedded
-    newlines included), and a marker is recognized only BETWEEN CSV records: a
-    marker-shaped line inside an open quoted field stays field text. The
-    reconstructed block is therefore the original CSV text, not a
-    newline-free approximation of it.
+    Every non-blank physical line between markers is preserved (embedded
+    newlines included); a blank line between records is record separation and is
+    dropped, so the reconstructed block is the CSV records, not a
+    newline-free approximation of them. A marker is recognized only BETWEEN CSV
+    records: a marker-shaped line inside an open quoted field stays field text.
     """
     current: str | None = None
     buffer: list[str] = []

@@ -635,9 +635,14 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
             # A version whose sources are temporarily absent must not REPLACE
             # its accumulated rows with a placeholder: keep the real rows and
             # record the missing source as a skip.
-            old.setdefault("skipped", []).append({
+            row = {
                 "source": "this invocation",
-                "reason": "the version's sources were not found; the earlier rows were kept"})
+                "reason": "the version's sources were not found; the earlier rows were kept"}
+            skipped = old.setdefault("skipped", [])
+            # Re-running after a prune must not append the IDENTICAL skip row
+            # again: the manifest grew without bound (F085).
+            if row not in skipped:
+                skipped.append(row)
             return
         if key not in prev_versions:
             version_order.append(key)
@@ -1300,7 +1305,7 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
     key = (pair["base_digest"], pair["cand_digest"], ext, memo_dir)
     if memo is not None and memo.get(key):
         earlier = ctx.root / str(memo[key])
-        if earlier.is_file():
+        if earlier.is_file() and earlier.resolve() != persist_out.resolve():
             persist_out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(earlier, persist_out)
             rec["ok"] = True
@@ -1499,7 +1504,8 @@ def _cmd_track_locked(ctx: Ctx, args) -> None:
             f"with {ctx.rounds_count()} round(s) (rounds are 1-based)", code=2)
     rounds = [int(args.round)] if args.round else None
     versions = (None if args.version == "all"
-                else [v.strip() for v in str(args.version).split(",") if v.strip()])
+                else list(dict.fromkeys(
+                    v.strip() for v in str(args.version).split(",") if v.strip())))
     if versions is not None and not all(is_fresh_vid(v) for v in versions):
         bad = [v for v in versions if not is_fresh_vid(v)]
         die(f"--version takes a round-local candidate version id or a comma-separated list "

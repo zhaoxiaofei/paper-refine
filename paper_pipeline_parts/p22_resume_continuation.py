@@ -37,9 +37,17 @@ def capture_agent_session_id(ctx: Ctx, rec: dict) -> str:
     except Exception:                                            # noqa: BLE001
         return ""
     log = sb / "_agent.log"
-    # The transcript is agent-written: the shared reader refuses a symlink and
-    # applies the byte budget (F38).
-    text = read_text_bounded(log)
+    # The transcript is append-only and can exceed the shared read budget after
+    # two long attempts; the LAST id is at the END, so read a bounded TAIL
+    # instead of treating an over-budget file as empty (F065).
+    try:
+        with _open_regular_no_follow(log) as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 16 * 1024 * 1024))
+            text = fh.read(16 * 1024 * 1024).decode("utf-8", "replace")
+    except OSError:
+        return ""
     if not text:
         return ""
     hits = [(m.start(), m.group(1))

@@ -1271,13 +1271,43 @@ def _check_rounds_bound(rounds: int) -> int:
     return rounds
 
 
+def _split_round_list(text: str) -> list:
+    """Split a CLI/config round list, keeping underscores that belong to a number.
+
+    `_` between digits is the historical list separator (`1_2` -> 1, 2; F69), but
+    Python integer literals use `_` as a digit-group separator, and a documented
+    literal must stay ONE value (`1_000` is 1000, `0xFFFF_FFFF` is one mask;
+    F119). A base-prefixed token is always one literal; a decimal token keeps an
+    underscore only when it groups exactly three digits (the conventional
+    spelling). Any other underscore keeps the historical separator meaning.
+    """
+    out = []
+    for part in re.split(r"[,;\s]+", text.strip()):
+        if not part:
+            continue
+        if re.fullmatch(r"0[xXoObB][0-9A-Fa-f_]+", part):
+            out.append(part)
+            continue
+        pieces = part.split("_")
+        merged = [pieces[0]]
+        for nxt in pieces[1:]:
+            if len(nxt) == 3 and nxt.isdigit():
+                merged[-1] += "_" + nxt
+            else:
+                merged.append(nxt)
+        out.extend(merged)
+    return out
+
+
 def parse_round_counts(values, rounds: int, flag: str) -> list:
     """Normalize a per-round count list to exactly `rounds` entries.
 
     The CLI accepts either a single integer ("--rewrites 3") or a comma/space
     separated list of length n = --rounds ("--rewrites 2,1"). A list shorter
     than n is EXTENDED BY REPEATING ITS LAST ELEMENT; a longer one is truncated
-    to the first n entries (the extra entries would never be reached).
+    to the first n entries (the extra entries would never be reached). An
+    underscore is part of the number when it groups three digits ("1_000");
+    otherwise it separates entries ("1_2"), the historical spelling.
     """
     vals = []
     for v in (values if isinstance(values, (list, tuple)) else [values]):
@@ -1285,9 +1315,7 @@ def parse_round_counts(values, rounds: int, flag: str) -> list:
             continue
         # A command-line value arrives as ONE string ("3", "2,1", "2, 1"); a
         # config value may already be a list of ints. Both shapes are accepted.
-        # `_` is a separator too: `int("1_2")` is 12, so without this a list
-        # written as `1_2` silently became ONE round count of twelve.
-        parts = re.split(r"[,;_\s]+", str(v).strip()) if isinstance(v, str) else [v]
+        parts = _split_round_list(str(v)) if isinstance(v, str) else [v]
         vals.extend(p for p in parts if str(p).strip() != "")
     counts = []
     for v in vals:
@@ -1347,9 +1375,13 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
 
     Same shape rules as parse_round_counts (one value or a comma-separated list;
     a shorter list is extended by repeating its last element, a longer one is
-    truncated), but each entry is an unsigned 32-bit mask written in any Python
-    integer literal form: decimal ("5"), hexadecimal ("0xFFFFFFFF", the default),
-    octal or binary. The mask addresses the round's pool in canonical order
+    truncated), but each entry is an unsigned 32-bit mask written as a Python
+    integer literal: decimal ("5"), hexadecimal ("0xFFFFFFFF", the default),
+    octal or binary. A base-prefixed literal may carry `_` digit groups
+    ("0xFFFF_FFFF"), and a decimal literal may use the conventional
+    three-digit grouping ("1_000"); a bare `_` between short decimal groups
+    keeps the historical list-separator spelling ("1_2" = masks 1 and 2).
+    The mask addresses the round's pool in canonical order
     [a1, w1..wM, a2..a{1+N}]: bit (k-1) selects the integration arm i<k> of the
     k-th member (see INTEGRATOR_ALL).
     """
@@ -1358,10 +1390,8 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
         if v is None:
             continue
         # A command-line value arrives as ONE string ("5", "0xFF,3"); a config
-        # value may already be a list of ints. Both shapes are accepted. `_` is
-        # a list separator here exactly as in parse_round_counts: without it
-        # `1_2` was one mask of int("1_2", 0) == 12.
-        parts = re.split(r"[,;_\s]+", str(v).strip()) if isinstance(v, str) else [v]
+        # value may already be a list of ints. Both shapes are accepted.
+        parts = _split_round_list(str(v)) if isinstance(v, str) else [v]
         vals.extend(p for p in parts if str(p).strip() != "")
     masks = []
     for v in vals:

@@ -317,7 +317,17 @@ def _pair_problem(cfg: dict) -> str:
         if not cfg.get("endpoint"):
             return "empty custom endpoint URL"
         if not cfg.get("base_url"):
-            return (f"cannot parse endpoint URL {cfg.get('endpoint')!r}: it must be "
+            # The raw value can carry userinfo/query credentials; the message is
+            # written to stderr and must not echo them (F002). `redact_endpoint_url`
+            # uses `urlsplit`, which raises on an unparsable value (a bad IPv6
+            # literal), so a malformed endpoint fell through as a traceback
+            # instead of the documented usage error; strip it textually then.
+            _endpoint_text = str(cfg.get("endpoint"))
+            try:
+                _shown = rt.redact_endpoint_url(str(cfg.get('endpoint')))
+            except ValueError:
+                _shown = rt._safe_endpoint_text(_endpoint_text)
+            return (f"cannot parse endpoint URL {_shown!r}: it must be "
                     f"an http(s) URL with a host")
         credential = rt.endpoint_credentials(str(cfg.get("endpoint")))
         if credential:
@@ -453,7 +463,10 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
+            # A truncated chunked/Content-Length body raises IncompleteRead (an
+            # HTTPException), which escaped and killed the client connection
+            # with a traceback (F051).
             pass
         finally:
             with contextlib.suppress(OSError):
@@ -634,7 +647,7 @@ def _print_probe(cfg: dict) -> int:
               "claude-code": "claude"}.get(cfg["harness"], "")
     print(f"harness: {cfg['harness']}")
     if cfg["family"] == "endpoint":
-        print(f"endpoint: {cfg['endpoint']}")
+        print(f"endpoint: {rt.redact_endpoint_url(str(cfg['endpoint']))}")
         print(f"base:    {cfg['base_url']}")
         print(f"model:   {cfg.get('model_name') or '(unresolved)'}")
         print(f"key:     {cfg['api_key_env']} "
@@ -648,6 +661,10 @@ def _print_probe(cfg: dict) -> int:
         print(f"key:     DEEPSEEK_API_KEY "
               f"{'set' if cfg['deepseek_key'] else 'NOT set'}")
     problem = _pair_problem(cfg) or _key_problem(cfg)
+    if binary and not shutil.which(binary):
+        # The probe prints the absence but used to report `problem: none` and
+        # exit 0, so an unusable harness passed `--probe` (F090).
+        problem = problem or f"{binary} is not on PATH"
     if problem:
         print(f"problem: {problem}")
         return 1

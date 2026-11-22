@@ -1943,6 +1943,10 @@ def _serve_selfcheck(sb: Path, rec: dict, stop: threading.Event) -> None:
             # path for a symlink or a huge file between the check and the read.
             with _open_regular_no_follow(request) as fh:
                 if os.fstat(fh.fileno()).st_size > 8192:
+                    # Rename the oversized request aside: `continue` re-opened
+                    # the same file forever and never answered (F099).
+                    with contextlib.suppress(OSError):
+                        os.replace(request, box / f"request.oversized-{time.time_ns()}")
                     continue
                 raw = fh.read(8193).decode("utf-8", "replace")
         except OSError:

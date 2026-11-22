@@ -560,7 +560,10 @@ for i in "${!tool_names[@]}"; do
     # Keep exactly ONE versioned snapshot (the documented rollback copy) and
     # prune every older one: an unpruned copy per install grew the disk without
     # bound (F066).
-    for _stale in "${tool_path}"-*; do
+    # Only the installer's own snapshot names are pruned: `-<YYYY-MMDD>-<commit>`
+    # (see new_version below). A bare `<tool>-backup`/operator directory is not
+    # a snapshot and must survive (F060).
+    for _stale in "${tool_path}"-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]-*; do
         [ -e "$_stale" ] || continue
         rm -rf -- "$_stale"
     done
@@ -582,9 +585,11 @@ done
 # on it (approval policy, timeouts).
 codex_mcp_state() {
     CODEX_HOME="$codex_home" codex mcp list --json | "$node_bin" -e '
-        let text = "";
-        process.stdin.on("data", (chunk) => (text += chunk));
+        const chunks = [];
+        process.stdin.on("data", (chunk) => chunks.push(
+            Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
         process.stdin.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
             const [name, command, script] = process.argv.slice(1);
             let list;
             try {
@@ -1038,11 +1043,28 @@ repair_dsh_managed_block() {
         function writeBackup() {
             try {
                 const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").replace("Z", "");
-                let target = `${patchFile}.bak-install-agent-tooling-${stamp}`;
-                let suffix = 2;
-                while (fs.existsSync(target)) target = `${patchFile}.bak-install-agent-tooling-${stamp}-${suffix++}`;
-                fs.writeFileSync(target, backupSource, { mode: 0o600 });
-                return target;
+                // "wx" is O_CREAT|O_EXCL: a symlink planted at the predictable
+                // backup name (existsSync is false for a dangling one) can never
+                // receive the backup bytes.
+                for (let suffix = 1; suffix <= 100; suffix += 1) {
+                    const target = suffix === 1
+                        ? `${patchFile}.bak-install-agent-tooling-${stamp}`
+                        : `${patchFile}.bak-install-agent-tooling-${stamp}-${suffix}`;
+                    let fd;
+                    try {
+                        fd = fs.openSync(target, "wx", 0o600);
+                    } catch (error) {
+                        if (error.code === "EEXIST") continue;
+                        throw error;
+                    }
+                    try {
+                        fs.writeFileSync(fd, backupSource);
+                    } finally {
+                        fs.closeSync(fd);
+                    }
+                    return target;
+                }
+                throw new Error("no free backup name beside the patch file");
             } catch (error) {
                 fail(`could not back it up before the repair (${error.message || error.code}); the file is untouched`);
             }
@@ -1283,10 +1305,27 @@ if [ "$dsh_enabled" = 1 ]; then
             fs.writeFileSync(out, `${JSON.stringify(servers, null, 2)}\n`);
         ' "$servers_json" "${row_args[@]}"
 
+        profiles_root_real="$(realpath -e -- "$dsh_home/profiles" 2>/dev/null || true)"
+        if [ -z "$profiles_root_real" ]; then
+            echo "error: cannot resolve $dsh_home/profiles; refusing the dsh MCP install" >&2
+            exit 1
+        fi
         profile_dirs=()
         for profile_dir in "$dsh_home"/profiles/*/; do
+            profile_dir="${profile_dir%/}"
             [ -f "$profile_dir/cordis.patch.yml" ] || continue
-            profile_dirs+=("${profile_dir%/}")
+            # A symlinked `profiles/<name>` passes the lexical glob just as it
+            # passes install-codex-mcp's prefix check; the repair and the row
+            # writer would then edit a file outside <dsh-home>/profiles.
+            profile_dir_real="$(realpath -e -- "$profile_dir" 2>/dev/null || true)"
+            case "$profile_dir_real/" in
+                "$profiles_root_real"/*) ;;
+                *)
+                    echo "error: refusing dsh profile $(basename -- "$profile_dir"): it resolves outside $dsh_home/profiles" >&2
+                    exit 1
+                    ;;
+            esac
+            profile_dirs+=("$profile_dir")
         done
         # What the verification reads back: the same name/script pairs the
         # writer was just given.
@@ -1339,7 +1378,7 @@ fi
 # installed under that directory (a bridge, for example) are left untouched.
 legacy_tool_path_referenced() {
     local needle=$1 file
-    for file in "$codex_home/config.toml" "$PWD/.codex/config.toml"; do
+    for file in "$codex_home/config.toml" "$repo_dir/.codex/config.toml"; do
         if [ -f "$file" ] && grep -Fq -- "$needle" "$file" 2>/dev/null; then
             return 0
         fi

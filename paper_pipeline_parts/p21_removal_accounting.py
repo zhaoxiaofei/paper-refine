@@ -46,7 +46,10 @@ def ledger_final_status_map(ledger, wanted=()) -> dict:
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    visit(item, depth + 1)
+                    # An id-keyed mapping whose value is a LIST
+                    # (`{"F-1": [{"final_status": ...}]}`) must carry the key
+                    # down, or the status is stored under "" (F047).
+                    visit(item, depth + 1, keyed_id)
 
     visit(ledger, 0)
     return out
@@ -98,9 +101,22 @@ def _content_unit_contained(unit: dict, candidates: list,
             matched = True
             if bool(_CONTENT_NEGATION_RE.search(clause)) == polarity:
                 return True
-        if not matched and len(tokens & _content_tokens(cand)) / len(tokens) >= floor \
-                and bool(_CONTENT_NEGATION_RE.search(cand_text)) == polarity:
-            return True
+        if not matched:
+            # The unit's tokens may be spread across clauses. Then EVERY clause
+            # that carries one of them must agree with the unit's polarity: the
+            # old whole-candidate fallback let an unrelated negation elsewhere
+            # supply the polarity and rescue a reversed claim (F009).
+            contributing = [c for c in clauses
+                            if tokens & _content_tokens({"tokens": re.findall(
+                                r"[0-9A-Za-z]+", c.lower())})]
+            covered = set()
+            for clause in contributing:
+                covered |= tokens & _content_tokens({"tokens": re.findall(
+                    r"[0-9A-Za-z]+", clause.lower())})
+            if len(covered) / len(tokens) >= floor and contributing \
+                    and all(bool(_CONTENT_NEGATION_RE.search(c)) == polarity
+                            for c in contributing):
+                return True
     return False
 
 
@@ -292,7 +308,8 @@ def _removal_exemption_counters(exempt_removed) -> tuple:
 
 def finding_removal_problems(base: Path, package: Path, findings,
                              final_status=None, exempt_removed=(),
-                             skipped: list = None) -> list:
+                             skipped: list = None,
+                             allow_marker_delete: bool = True) -> list:
     """[{id, final, lost}] for findings whose quoted sentence is gone.
 
     Insertions and deletions are ON by default and are the reviser's call, so
@@ -386,7 +403,8 @@ def finding_removal_problems(base: Path, package: Path, findings,
         exempt_document, exempt_text = _removal_exemption_counters(exempt_removed)
         lost = []
         for u in gone:
-            if _removal_is_artifact(u["text"]):
+            if _removal_is_artifact(u["text"],
+                                    allow_marker_delete=allow_marker_delete):
                 continue
             if _content_unit_contained(u, rev_units):
                 continue
@@ -561,12 +579,32 @@ def _deletion_disposition_ok(value, allow_nothing_removed: bool = True) -> bool:
             r"(?i)(?:\b(?:sec(?:tion)?|table|figure|paragraph|line|row|appendix|"
             r"supplement)\b\.?\s*\d|\u00a7\s*\d|"
             r"\b[\w./-]+\.(?:md|txt|tex|docx|doc|rtf|pdf|csv)\b)", reason)
+        # A section NAME with no number is a checkable location too: the seeded
+        # instruction asks for `OK — <why no fact is lost>`, and the documented
+        # closure of that shape names where the content went ("OK — content
+        # survives in Results"). Requiring a NUMBER after the word rejected
+        # that shape while accepting `OK — survives, line 3`, so the shipped
+        # e2e seeds failed the audit.
+        section = re.search(
+            r"(?i)\b(?:abstract|introduction|background|related\s+work|"
+            r"materials?\s+and\s+methods|methods?|results?|discussion|"
+            r"conclusions?|limitations|acknowledg(?:e)?ments?|"
+            r"supplementary(?:\s+(?:information|material|text|table|figure))?|"
+            r"appendix|main\s+text)\b", reason)
         claim = re.search(
             r"(?i)\b(?:duplicate|redundant|identical|surviv\w*|"
             r"same\s+(?:fact|statement|sentence|value|content)|"
             r"no\s+(?:fact|value|information)|nothing\s+(?:new|additional)|"
             r"already\s+(?:stated|present|reported|covered))\b", reason)
-        return bool(claim) or bool(named)
+        # An identity/duplication claim is self-sufficient (the original is
+        # the surviving copy even when the row does not name it); every other
+        # claim must name a checkable location (a numbered one or a section
+        # name). `OK — survives` and `OK — line 3` each carry only one half and
+        # close nothing (F041).
+        identity = re.search(
+            r"(?i)\b(?:duplicate|redundant|identical|"
+            r"same\s+(?:fact|statement|sentence|value|content))\b", reason)
+        return bool(identity) or (bool(claim) and (bool(named) or bool(section)))
     if re.match(r"(?i)^manual-required\b", text):
         return True
     if re.match(r"(?i)^fact\s+removed\s*[\u2014\u2013:-]\s*RP-\d+\b", text):

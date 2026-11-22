@@ -146,9 +146,9 @@ def _permanent_transport_error(err) -> bool:
     """True for a transport error a retry cannot fix (redirect, auth, DNS/TLS)."""
     text = str(err or "").lower()
     return any(marker in text for marker in (
-        "redirect refused", "certificate verify failed", "ssl",
+        "redirect refused", "certificate verify failed",
         "name or service not known", "nodename nor servname",
-        "temporary failure in name resolution", "unknown url type",
+        "unknown url type",
         "unauthorized", "forbidden"))
 
 
@@ -227,6 +227,18 @@ def _selection(cfg: dict):
     return selection
 
 
+def _request_url(base: str, suffix: str) -> str:
+    """`base` with `suffix` added to its PATH, keeping any query/fragment.
+
+    String-concatenating `base + '/chat/completions'` put the new path inside a
+    `?model=...` query value, so the request URL was malformed (F039).
+    """
+    parsed = urllib.parse.urlsplit(str(base))
+    path = parsed.path.rstrip("/") + suffix
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+
+
 def _request(method: str, url: str, payload: dict = None, api_key: str = "",
              timeout: float = 10.0) -> tuple:
     """(status, parsed-body-or-text, error) for one JSON request."""
@@ -239,7 +251,12 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
         headers["Authorization"] = f"Bearer {api_key}"
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    except ValueError as e:
+        # A malformed base URL must be a clean adapter error, not a raw
+        # urllib ValueError traceback (F050).
+        return 0, None, f"invalid endpoint URL: {e}"
     try:
         with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -316,7 +333,7 @@ def _request_with_retry(
 
 def probe_endpoint(cfg: dict, timeout: float = 10.0) -> tuple:
     """(ok, model_ids, error) from GET {base}/models."""
-    status, body, err = _request("GET", f"{cfg['base_url']}/models",
+    status, body, err = _request("GET", _request_url(cfg["base_url"], "/models"),
                                  api_key=cfg["api_key"], timeout=timeout)
     if err or status != 200 or not isinstance(body, dict):
         return False, [], err or f"HTTP {status}: {str(body)[:160]}"
@@ -335,7 +352,7 @@ def check_tools(cfg: dict, timeout: float = 60.0) -> tuple:
             "parameters": {"type": "object", "properties": {}}}}],
         "tool_choice": "auto",
     }
-    status, body, err = _request("POST", f"{cfg['base_url']}/chat/completions",
+    status, body, err = _request("POST", _request_url(cfg["base_url"], "/chat/completions"),
                                  payload=payload, api_key=cfg["api_key"],
                                  timeout=timeout)
     if err:
@@ -486,7 +503,7 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
                # above covers the thinking trace plus the answer.
                "chat_template_kwargs": {"enable_thinking": True}}
     status, body, err = _request_with_retry(
-        "POST", f"{cfg['base_url']}/chat/completions",
+        "POST", _request_url(cfg["base_url"], "/chat/completions"),
         payload=payload, api_key=cfg["api_key"], timeout=600.0)
     if err or status != 200 or not isinstance(body, dict):
         return "", err or f"HTTP {status}: {str(body)[:400]}"
