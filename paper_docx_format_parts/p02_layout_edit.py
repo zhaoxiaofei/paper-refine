@@ -227,9 +227,14 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
     if _tail_zero:
         _ins = ('<w:r><w:t xml:space="preserve">' + esc("".join(_tail_zero))
                 + "</w:t></w:r>")
-        _close = new_para.rfind("</w:p>")
-        if _close != -1 and not new_para[_close + len("</w:p>"):].strip():
-            new_para = new_para[:_close] + _ins + new_para[_close:]
+        # XML permits whitespace before the `>` of an end tag: `rfind("</w:p>")`
+        # returned -1 for `</w:p >` and the run was appended OUTSIDE the
+        # paragraph (as a sibling, or outside a table cell) (F007).
+        _cm = None
+        for _m in re.finditer(r"</w:p\s*>", new_para):
+            _cm = _m
+        if _cm is not None and not new_para[_cm.end():].strip():
+            new_para = new_para[:_cm.start()] + _ins + new_para[_cm.start():]
         else:
             new_para += _ins
 
@@ -951,7 +956,10 @@ def attr_of(element: str, name: str):
     m = re.search(r"\b" + re.escape(name) + r"""\s*=\s*("([^"]*)"|'([^']*)')""", element or "")
     if not m:
         return None
-    return m.group(2) if m.group(2) is not None else m.group(3)
+    # Decode the attribute VALUE once: a legal `PartName="...&amp;..."` or a
+    # style id carrying `&amp;` must compare equal to the decoded table key
+    # (F058).
+    return unesc(m.group(2) if m.group(2) is not None else m.group(3))
 
 
 def style_survey(xml: str, styles: dict) -> dict:
@@ -3704,7 +3712,12 @@ def figure_text_size_rows(docx_path: Path, policy: dict = None) -> list:
                     if key in seen:
                         continue
                     seen.add(key)
-                    zip_name = "word/" + str(target).lstrip("/").replace("\\", "/")
+                    # `part_rels` keeps an absolute OPC target as
+                    # `word/media/...` (leading `/` stripped), so prefixing
+                    # `word/` unconditionally asked for `word/word/media/...`
+                    # and skipped every absolute-relationship image (F011).
+                    _tgt = str(target).lstrip("/").replace("\\", "/")
+                    zip_name = _tgt if _tgt.startswith("word/") else "word/" + _tgt
                     try:
                         data = pkg.read(zip_name)
                     except KeyError:

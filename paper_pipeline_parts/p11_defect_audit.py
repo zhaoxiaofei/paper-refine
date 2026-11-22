@@ -96,7 +96,12 @@ def _defect_audit_row_label(item):
     """(label or None, reason) for one audit row."""
     if not isinstance(item, dict):
         return None, ""
-    raw = item.get("label", item.get("verdict"))
+    raw = item.get("label")
+    if raw is None:
+        # An EXPLICIT null label must fall back to the recorded verdict alias
+        # (`{"label": null, "verdict": "TP"}`); dict.get's default only applies
+        # to an absent key, so the valid alias was suppressed (F077).
+        raw = item.get("verdict")
     if isinstance(raw, bool):
         label = "TP" if raw else "FP"
     else:
@@ -150,6 +155,14 @@ def _defect_audit_reason_ok(reason) -> bool:
              if not _DEFECT_AUDIT_FILLER_TOKEN_RE.match(w)]
     content = [w for w in words if re.search(r"[A-Za-z0-9]", w)]
     if len({w.lower() for w in content}) < 2:
+        return False
+    # An anonymous pointer ("see above", "as discussed") names no artifact,
+    # location or computation; the review-coverage gate already refuses it as
+    # F040 filler, so the audit reason gate refuses the same phrase (F132).
+    if re.fullmatch(
+            r"(?i)(?:see\s+(?:above|below|here|there|prior|previous|report|details?)|"
+            r"as\s+(?:discussed|above|before|noted|stated)|ditto|ibid(?:\.|em)?)"
+            r"[.!]?", text):
         return False
     return len(re.findall(r"[A-Za-z0-9]", text)) >= 3
 
@@ -779,7 +792,26 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
         return {"used": False, "reason": "the LLM defect audit is off",
                 "rows": len(rows), "removed": removed}
     if not rows:
-        return {"used": False, "reason": "no defect rows to audit", "rows": 0}
+        # An ON audit with no rows must clear a previous SUCCESS's TP-only
+        # family and record why this invocation produced none: returning here
+        # before the removal left stale `round<r>_auditedTP_*` files and an old
+        # `ok: true` meta on disk, exactly the failure the disabled path
+        # already guards (F068).
+        removed = []
+        reports_dir = getattr(ctx, "reports_dir", None)
+        if reports_dir is not None:
+            removed = _remove_audited_defect_reports(ctx, r)
+            meta_path = reports_dir / f"round{int(r)}_defect_audit.json"
+            try:
+                write_json_atomic(meta_path, {
+                    "run": ctx.root.name, "round": r, "generated": utcnow(),
+                    "ok": False, "used": False,
+                    "reason": "no defect rows to audit", "rows": 0})
+            except OSError as e:                                 # noqa: BLE001
+                print(f"[defect-audit] WARNING: could not record the empty audit at "
+                      f"{meta_path}: {e}")
+        return {"used": False, "reason": "no defect rows to audit", "rows": 0,
+                "removed": removed}
     judge_runs = {}
     for rec in ctx.runs(kind="judge", round_no=r):
         judge_runs[str(rec.get("id"))] = {

@@ -604,8 +604,13 @@ def compact_state(st: dict, root: Path = None) -> int:
                 # otherwise destroy the evidence: compact only when the full
                 # artifact really exists and is non-empty (F063).
                 try:
-                    artifact = Path(root) / path_rel
-                    if not artifact.is_file() or artifact.stat().st_size <= 0:
+                    # `path_rel` embeds the record's own sandbox string: an
+                    # absolute/`..` value made the probe stat (and the pointer
+                    # name) a file outside --root (F147). Compact only a
+                    # contained artifact.
+                    artifact = contained_under_or_none(root, path_rel)
+                    if artifact is None or not artifact.is_file() \
+                            or artifact.stat().st_size <= 0:
                         continue
                 except OSError:
                     continue
@@ -624,6 +629,11 @@ def biggest_run_fields(st: dict, limit: int = 5) -> list:
             if isinstance(value, (dict, list)) and len(value) > 8:
                 out.append((len(json.dumps(value, default=str)), rid, field))
     return sorted(out, reverse=True)[:limit]
+
+
+# Run-record statuses the driver understands (plus the setup-owned "running"
+# intermediate used by template-rewrite/add-venue records).
+RUN_STATUSES = ("pending", "done", "failed", "stale", "running")
 
 
 class Ctx:
@@ -802,6 +812,10 @@ class Ctx:
                         f"{pin['id']!r} (it must be ONE path component under "
                         f"{self.pins_dir}).\n       {self.state_path}\n"
                         f"       Restore state.json from a backup.")
+                if "round" in pin and (not isinstance(pin.get("round"), int)
+                                       or isinstance(pin.get("round"), bool)):
+                    die(f"state.json is damaged: pinned entry {i} has a non-integer "
+                        f"'round' ({pin.get('round')!r}).\n       {self.state_path}")
             # A root created before the 2026-10 renames records `review`/`probe`
             # (and, after the intermediate rename, `targeted_review`). The current
             # vocabulary has no handler for those kinds, so say so once, here,
@@ -839,6 +853,29 @@ class Ctx:
                 except (TypeError, ValueError):
                     die(f"state.json is damaged: run record {rid!r} has a non-numeric 'round' "
                         f"({rec['round']!r}).\n       {self.state_path}")
+                if rec.get("status") not in RUN_STATUSES:
+                    die(f"state.json is damaged: run record {rid!r} has unknown status "
+                        f"{rec.get('status')!r} (expected one of "
+                        f"{', '.join(RUN_STATUSES)}).\n       {self.state_path}")
+                if rec.get("kind") == "judge":
+                    _lm = rec.get("label_map")
+                    if "label_map" in rec and not (
+                            isinstance(_lm, dict)
+                            and all(isinstance(k, str) and isinstance(v, str)
+                                    for k, v in _lm.items())):
+                        die(f"state.json is damaged: judge record {rid!r} has a malformed "
+                            f"'label_map' (must be an object of string labels).\n"
+                            f"       {self.state_path}")
+                    _ji = rec.get("judge_index")
+                    if "judge_index" in rec and (
+                            not isinstance(_ji, int) or isinstance(_ji, bool)):
+                        die(f"state.json is damaged: judge record {rid!r} has a "
+                            f"non-integer 'judge_index' ({_ji!r}).\n"
+                            f"       {self.state_path}")
+                    _tid = rec.get("target_id")
+                    if "target_id" in rec and not isinstance(_tid, str):
+                        die(f"state.json is damaged: judge record {rid!r} has a "
+                            f"non-string 'target_id'.\n       {self.state_path}")
                 # The run id is a PATH COMPONENT in failed_sandbox_dir,
                 # stash_logs and prune: `../x` moved or deleted outside the root
                 # (F24). Checked after the shape checks so the message still
@@ -1213,6 +1250,24 @@ class Ctx:
             die(f"state.json is damaged: run record {rec.get('id')!r} points OUTSIDE the root "
                 f"({raw} -> {full}).\n       {self.state_path}\n"
                 f"       A sandbox must stay below {root}; refusing to use it.")
+        # `sandbox: "."` made the whole pipeline root, and `non_revised` the
+        # pristine source, a move/rmtree target (F023). Bare-id sandboxes
+        # (`r1_x`, the shape older roots and many fixtures use) stay legal, so
+        # reject the ROOT itself and the pipeline's protected trees rather than
+        # requiring a strict runs/ child.
+        protected = [self.runs_dir.resolve(), self.pristine.resolve(),
+                     self.pins_dir.resolve()]
+        try:
+            if full == root or full in protected:
+                raise ValueError("the root or a protected tree is not a run sandbox")
+            full.relative_to(root)
+            for tree in (self.pristine.resolve(), self.pins_dir.resolve()):
+                if full.is_relative_to(tree):
+                    raise ValueError("the pristine/pin tree is not a run sandbox")
+        except ValueError:
+            die(f"state.json is damaged: run record {rec.get('id')!r} names {raw!r} as its "
+                f"sandbox, which is the root or a protected read-only tree; refusing to "
+                f"use (or move/remove) it.")
         return full
 
     def round_rec(self, r: int) -> dict:
@@ -4095,8 +4150,14 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
         except OSError:
             # Copy the TREE, not the files its links point at: the default
             # symlinks=False materialized every link (legitimate evidence areas
-            # and agent-planted links alike) as its target (F065).
-            shutil.copytree(sb, dest, symlinks=True)
+            # and agent-planted links alike) as its target (F065). Remove a
+            # PARTIAL destination on failure: a tree with no record.json was
+            # later scored as an unknown archive (F115).
+            try:
+                shutil.copytree(sb, dest, symlinks=True)
+            except OSError:
+                rmtree_force(dest, ignore_errors=True)
+                raise
             rmtree_force(sb, ignore_errors=True)
         write_json_atomic(dest / "record.json", record)
     if entry is not None:
@@ -4386,14 +4447,27 @@ def use_best_failed_trial(ctx: Ctx, rec: dict) -> bool:
         # A tolerated candidate must still be pinnable: record the digest of the
         # package the trial actually left on disk. Without it the round close
         # refuses to pin the version (and the collection run loses the row).
+        def _unpromote() -> None:
+            """Put the trial back where it came from after a failed promotion."""
+            try:
+                if active.exists() or active.is_symlink():
+                    active.rename(chosen)
+                write_json_atomic(chosen / "record.json",
+                                  dict(best.get("record") or {}))
+            except OSError:
+                pass
+
         vid = freshness_vid(rec)
         if not vid:
+            _unpromote()
             return False
         try:
             digest = recompute_corpus_digest(ctx, rec["round"], vid)
         except Exception:                            # noqa: BLE001
+            _unpromote()
             return False
         if not digest:
+            _unpromote()
             return False
     rec["tolerated_fail"] = {
         "mode": "on",
@@ -4514,7 +4588,7 @@ def attempt_history_lines(ctx: Ctx, indent: str = "  ", limit: int = 40) -> list
     return out
 
 
-def archive_stale_marker(sb: Path, rid: str) -> None:
+def archive_stale_marker(sb: Path, rid: str) -> list:
     """Move any pre-existing completion signal aside before a fresh attempt, so
     a crashed retry can never be scored on the previous attempt's marker.
 
@@ -4524,6 +4598,7 @@ def archive_stale_marker(sb: Path, rid: str) -> None:
     """
     logs = sb.parent / LOGS_DIRNAME
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    failures = []
     for rel, tag in ((MARKER_FILE, "prev_marker"), (SCORES_FILE, "prev_scores")):
         p = sb / rel
         if not p.exists():
@@ -4534,8 +4609,9 @@ def archive_stale_marker(sb: Path, rid: str) -> None:
         except OSError:
             try:
                 p.unlink()
-            except OSError:
-                pass
+            except OSError as e:
+                failures.append(f"{rel}: {e}")
+    return failures
 
 
 def materialize_a1(ctx: Ctx, r: int) -> dict:
@@ -4783,7 +4859,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     # the review can file the real ones without touching the prior-round
     # finding list.
     prior_audit_dir = sb / "prior_audit"
-    if prior_audit_dir.exists():
+    if prior_audit_dir.exists() or prior_audit_dir.is_symlink():
         rmtree_force(prior_audit_dir, ignore_errors=True)
     if r > 1:
         audit_obs = prior_audit_observations(ctx, r - 1)
@@ -5143,10 +5219,14 @@ def cold_start_table_inventory(corpus: Path, limit: int = 400) -> list:
             rel = p.relative_to(corpus).as_posix()
             columns, count = "(non-tabular)", ""
             if suffix in (".tsv", ".csv"):
+                # An agent-writable package file: read through the shared
+                # no-follow/bounded reader, never a plain open that follows a
+                # symlink or blocks on a FIFO (F020).
                 try:
-                    with open(p, "r", encoding="utf-8", errors="replace", newline="") as f:
-                        header = f.readline().rstrip("\n")
-                        count = sum(1 for _ in f)
+                    data = read_regular_file(p, PACKAGE_TEXT_BYTES_LIMIT)
+                    lines = data.decode("utf-8", "replace").splitlines()
+                    header = lines[0] if lines else ""
+                    count = max(0, len(lines) - 1)
                     cells = header.split("\t" if suffix == ".tsv" else ",")
                     columns = " | ".join(str(c).strip()[:40] for c in cells[:14]) or "(empty)"
                 except OSError:

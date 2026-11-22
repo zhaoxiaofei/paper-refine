@@ -470,7 +470,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
         # every URL run in a mixed paragraph as a link, so a plain URL beside a
         # hyperlinked one never produced the FMT-T7a mixed-treatment row.
         link_spans = [(m.start(), m.end()) for m in
-                      re.finditer(r"<w:hyperlink\b[^>]*>.*?</w:hyperlink>", para, re.S)]
+                      re.finditer(r"<w:hyperlink\b[^>]*>.*?</w:hyperlink\s*>", para, re.S)]
         for r0, r1, run in runs(para):
             rtext = text_of(run)
             if not URL_RE.search(rtext):
@@ -1302,14 +1302,35 @@ def apply_edits(xml: str, edits: list) -> str:
     # sharing a start the WIDER one, so a containing range owns its contents --
     # and drop the ranges it subsumes or partially overlaps, exactly as
     # `rewrite_text_spans` resolves its overlapping edits.
-    accepted = []
+    accepted, insertions = [], []
     for start, end, new in sorted(edits, key=lambda e: (e[0], -e[1])):
+        if start == end:
+            # A ZERO-LENGTH insertion is not an overlapping range: sorting
+            # `(5,10)` before `(5,5)` made the insertion look contained and
+            # silently dropped it although `rewrite_text_spans` keeps both
+            # (F056).
+            insertions.append((start, end, new))
+            continue
         if accepted and start < accepted[-1][1]:
             continue
         accepted.append((start, end, new))
-    for start, end, new in reversed(accepted):
-        xml = xml[:start] + new + xml[end:]
-    return xml
+    # An insertion STRICTLY inside an accepted replacement is ambiguous (the
+    # replaced bytes are gone); one anchored at either boundary is well defined
+    # and is kept.
+    insertions = [ins for ins in insertions
+                  if not any(a < ins[0] < b for a, b, _n in accepted)]
+    events = ([(a, 1, b, n) for a, b, n in accepted]
+              + [(a, 0, b, n) for a, b, n in insertions])
+    events.sort(key=lambda e: (e[0], e[1], -e[2]))
+    out, cursor = [], 0
+    for start, _prio, end, new in events:
+        if start < cursor:
+            continue
+        out.append(xml[cursor:start])
+        out.append(new)
+        cursor = end
+    out.append(xml[cursor:])
+    return "".join(out)
 
 
 # CT_PPrBase's children that PRECEDE `w:spacing`, in schema order: a child spliced
@@ -1604,9 +1625,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
                                   _set_para_style(para, majority)))
                     n += 1
                 continue
-            at = plist[i][0] + para.find(pstyle)
+            span = _para_child_span(para, "pStyle")
+            if span is None:
+                continue
+            at = plist[i][0] + span[0]
             replacement = f'<w:pStyle w:val="{majority}"/>' if majority else ""
-            edits.append((at, at + len(pstyle), replacement))
+            edits.append((at, at + (span[1] - span[0]), replacement))
             n += 1
     if edits:
         xml = apply_edits(xml, edits)
@@ -1665,8 +1689,11 @@ def fix_document(xml: str, styles: dict, policy: dict,
                        and attr(old, "before") == str(policy["caption_space"])
                        and attr(old, "after") == str(policy["caption_space"]))
             if not already:
-                at = p0 + para.find(old)
-                edits.append((at, at + len(old), want_sp))
+                span = _para_child_span(para, "spacing")
+                if span is None:
+                    continue
+                at = p0 + span[0]
+                edits.append((at, at + (span[1] - span[0]), want_sp))
                 n += 1
         else:
             # `w:spacing` is late in CT_PPrBase's child sequence: anchoring it
@@ -1728,7 +1755,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # `<w:sectPr .../>`; the old non-greedy pattern ran past it to the NEXT
         # section's closing tag, so a self-closing first section never got its
         # w:titlePg added.
-        s = next(SECT_READ_RE.finditer(xml), None)
+        s = next(SECT_READ_RE.finditer(_mask_noncontent(xml)), None)
         if s is not None and "<w:headerReference" in s.group(0) \
                 and not is_on(s.group(0), "titlePg"):
             body = s.group(0)
@@ -1934,7 +1961,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
     # 7. URL/email treatment ----------------------------------------------------
     if policy["url_style"] == "plain":
         edits, n = [], 0
-        for m in re.finditer(r"<w:hyperlink(?=[\s>]).*?</w:hyperlink>", xml, re.S):
+        for m in re.finditer(r"<w:hyperlink(?=[\s>]).*?</w:hyperlink\s*>", xml, re.S):
             block = m.group(0)
             opening = block[:block.find(">") + 1]
             # An internal cross-reference (`w:anchor`) or a location in another
@@ -2810,6 +2837,58 @@ def _live_sect_pr(sect: str) -> str:
     return _SECT_CHANGE_RE.sub(lambda m: " " * len(m.group(0)), sect)
 
 
+def _noncontent_runs(text: str) -> list:
+    """(start, end, original) for every run `_mask_noncontent` blanks.
+
+    The mask is length-preserving, so a caller may locate a live span in the
+    masked copy and splice the ORIGINAL bytes. This helper recovers those
+    original runs for a protected edit.
+    """
+    masked = _mask_noncontent(text)
+    runs = []
+    i, n = 0, len(text)
+    while i < n:
+        if masked[i] == text[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and masked[j] != text[j]:
+            j += 1
+        runs.append((i, j, text[i:j]))
+        i = j
+    return runs
+
+
+def _protect_noncontent(text: str) -> tuple:
+    """(protected, runs): cover each masked span with a unique sentinel.
+
+    A section splice must FIND its anchors in `_mask_noncontent` (a
+    commented-out section is not the live one) but it must not REWRITE those
+    spans: the header/footer substitution regexes would otherwise edit a
+    reference inside a comment, and the splice would lose the comment or a
+    tracked deletion. The sentinel is a NUL-delimited index that no XML tag or
+    substitution can match; `_restore_noncontent` puts every original run back
+    after the live edit.
+    """
+    runs = _noncontent_runs(text)
+    if not runs:
+        return text, []
+    parts, pos = [], 0
+    for idx, (start, end, _orig) in enumerate(runs):
+        parts.append(text[pos:start])
+        parts.append(f"\x00{idx}\x00")
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts), [orig for _s, _e, orig in runs]
+
+
+def _restore_noncontent(text: str, runs: list) -> str:
+    """Put every span protected by `_protect_noncontent` back byte-for-byte."""
+    for idx, orig in enumerate(runs):
+        text = text.replace(f"\x00{idx}\x00", orig, 1)
+    return text
+
+
 def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
     """(xml, applied): give EVERY manuscript section the template's geometry.
 
@@ -2825,7 +2904,7 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
     # legal self-closing `<w:sectPr .../>` is an empty section and must not be
     # skipped, or page 1 silently keeps the author's geometry while the report
     # (which reads the first section correctly) shows the template's.
-    m_sects = list(SECT_READ_RE.finditer(doc_xml))
+    m_sects = list(SECT_READ_RE.finditer(_mask_noncontent(doc_xml)))
     if not t_sects or not m_sects:
         return doc_xml, False
     # CT_SectPr's child order; a replacement must keep the sequence valid even
@@ -2884,8 +2963,18 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
         return body
 
     for m in reversed(m_sects):                     # backwards: offsets stay valid
-        doc_xml = doc_xml[:m.start()] + adopt(m.group(0)) + doc_xml[m.end():]
+        body, runs = _protect_noncontent(doc_xml[m.start():m.end()])
+        doc_xml = (doc_xml[:m.start()] + _restore_noncontent(adopt(body), runs)
+                   + doc_xml[m.end():])
     return doc_xml, True
+
+
+def _ct_has_partname(ct: str, partname: str) -> bool:
+    """Whether the content-types part already declares `partname` (decoded)."""
+    for m in re.finditer(r"<Override(?=[\s/>])[^>]*>", ct or ""):
+        if attr_of(m.group(0), "PartName") == partname:
+            return True
+    return False
 
 
 def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> dict:
@@ -3088,7 +3177,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     ct, ct_encode = _ooxml_part_codec(parts.get("[Content_Types].xml", b""))
     for name in copied:
         kind = "header" if name.startswith("header") else "footer"
-        if f'PartName="/word/{name}"' not in ct:
+        if not _ct_has_partname(ct, f"/word/{name}"):
             ct = ct.replace("</Types>",
                             f'<Override PartName="/word/{name}" ContentType="application/vnd.'
                             f'openxmlformats-officedocument.wordprocessingml.{kind}+xml"/>'
@@ -3455,7 +3544,7 @@ def _bold_label_runs(para_xml: str) -> str:
     at the colon so only the label is bold -- the concatenated w:t text stays
     byte-identical.
     """
-    RPR_RE = re.compile(r"<w:rPr(?=[\s/>])(?:[^>]*/>|[^>]*>[\s\S]*?</w:rPr>)")
+    RPR_RE = re.compile(r"<w:rPr(?=[\s/>])(?:[^>]*/>|[^>]*>[\s\S]*?</w:rPr\s*>)")
 
     raw_text = text_of(para_xml)
     m = _CORRESP_RE.match(raw_text.strip())
@@ -3580,8 +3669,27 @@ def _insert_ppr_extra(ppr_xml: str, extra: str) -> str:
     elif change:
         head = head + extra
     else:
-        head = head.replace("</w:pPr>", extra + "</w:pPr>", 1)
+        close = re.search(r"</w:pPr\s*>", head)
+        if close is not None:
+            head = head[:close.start()] + extra + head[close.start():]
     return head + change
+
+
+def _para_child_span(para: str, tag: str):
+    """(start, end) of a DIRECT live child of the paragraph's own pPr.
+
+    `str.find(element)` matched an identical COMMENTED-OUT property before the
+    live one, so a splice repaired the comment while `changes` claimed the live
+    property was fixed (F012).
+    """
+    ps = _property_element_span(para, "pPr")
+    if ps is None:
+        return None
+    ppr = para[ps[0]:ps[1]]
+    span = _child_element_span(ppr, tag)
+    if span is None:
+        return None
+    return ps[0] + span[0], ps[0] + span[1]
 
 
 def _apply_ppr_extra(frag: str, extra: str) -> str:
@@ -3822,7 +3930,7 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
     # A self-closing `<w:sectPr .../>` IS the page-1 section (see
     # `first_section_props`): skipping it put the venue's logo/title-page
     # furniture on the BODY section while page 1 kept the author's own.
-    sects = list(SECT_READ_RE.finditer(doc_xml))
+    sects = list(SECT_READ_RE.finditer(_mask_noncontent(doc_xml)))
     if not sects:
         return doc_xml, False
     refs_all, refs_body = "", ""
@@ -3857,15 +3965,19 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
 
         # `w:sectPrChange` is revision history: its nested old section must stay
         # byte-identical. Apply the substitutions/splices only to the LIVE part
-        # and re-attach the record unchanged.
-        body = m.group(0)
+        # and re-attach the record unchanged. The span offsets come from the
+        # masked copy, but the bytes edited are the ORIGINAL section: a comment
+        # or tracked deletion inside it must survive byte-for-byte (the
+        # header/footer regexes must not rewrite a reference inside a comment).
+        body, runs = _protect_noncontent(doc_xml[m.start():m.end()])
         change = _SECT_CHANGE_RE.search(body)
         history = ""
         if change is not None:
             history = body[change.start():]
             body = body[:change.start()]
-        body = re.sub(r"<w:(header|footer)Reference(?=[\s/>])[^>]*/>",
-                      keep_source_ref, body)
+        body = re.sub(
+            r"<w:(header|footer)Reference(?=[\s/>])[^>]*(?:/>|>\s*</w:\1\s*>)",
+            keep_source_ref, body)
         body = re.sub(r"<w:titlePg[^>]*/>", "", body)
         # The OPENING tag only: `[^>]*` greedily consumed the `/` of a legal
         # `<w:sectPr att="x"/>`, so the references were inserted AFTER the
@@ -3903,10 +4015,11 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
             if at is not None:
                 body = body[:at] + "<w:titlePg/>" + body[at:]
         body += history
+        body = _restore_noncontent(body, runs)
         out = out[:m.start()] + body + out[m.end():]
     if refs_all:
         root = re.search(r"<w:document\b[^>]*>", out)
-        if root and "xmlns:r=" not in root.group(0):
+        if root and not re.search(r"xmlns:r\s*=", root.group(0)):
             out = out.replace(
                 root.group(0), root.group(0)[:-1] + ' xmlns:r="http://schemas.'
                 'openxmlformats.org/officeDocument/2006/relationships">', 1)
@@ -3929,7 +4042,7 @@ def _with_even_odd_headers(parts: dict) -> bool:
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
             '2006/main"><w:evenAndOddHeaders/></w:settings>').encode("utf-8")
-        if 'PartName="/word/settings.xml"' not in ct:
+        if not _ct_has_partname(ct, "/word/settings.xml"):
             ct = ct.replace(
                 "</Types>", '<Override PartName="/word/settings.xml" ContentType='
                             '"application/vnd.openxmlformats-officedocument.wordprocessingml.'
@@ -3976,7 +4089,14 @@ def _with_even_odd_headers(parts: dict) -> bool:
         if j != -1:
             text = text[:j + 2] + element + text[j + 2:]
         else:
-            text = text.replace("</w:settings>", element + "</w:settings>", 1)
+            cm = re.search(r"</w:settings\s*>", text)
+            if cm is None:
+                # No live close to anchor on: refuse rather than report a
+                # setting that was never written (F092).
+                return False
+            text = text[:cm.start()] + element + text[cm.start():]
+    if element not in text:
+        return False
     parts["word/settings.xml"] = settings_encode(text)
     return True
 
@@ -3995,7 +4115,8 @@ def _reorder_numbering_groups(xml: str, pics: str, abstracts: str, nums: str) ->
     the part. Each existing top-level block keeps its bytes; only the group
     order changes, and the three carried groups join their own group.
     """
-    close_at = xml.rfind("</w:numbering>")
+    _cm = re.search(r"</w:numbering\s*>", xml)
+    close_at = _cm.start() if _cm is not None else -1
     open_m = re.search(r"<w:numbering(?=[\s/>])[^>]*>", xml)
     if close_at == -1 or not open_m:
         return xml
@@ -4059,7 +4180,7 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     a numId the template DOES define keeps the template's definition.
     """
     tpl_numbering = _ooxml_part_codec(parts.get("word/numbering.xml", b""))[0]
-    if not tpl_numbering or "</w:numbering>" not in tpl_numbering:
+    if not tpl_numbering or not re.search(r"</w:numbering\s*>", tpl_numbering):
         return {}
     doc_names = [n for n in sorted(parts) if doc_part_re.fullmatch(n)]
     referenced = set()
@@ -4283,15 +4404,24 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                     xml = ooxml_part_text(parts[name])
                     ref_ids |= {m.group("val") for m in _STYLE_REF_RE.finditer(xml)}
             kept_styles = []
+            style_blocks = []
+            for start, end in _element_spans_by_name(src_styles, "style"):
+                cand = src_styles[start:end]
+                om = re.match(r"<w:style(?=[\s/>])[^>]*>", cand)
+                if om is not None:
+                    style_blocks.append((attr_of(om.group(0), "w:styleId"), cand))
             for sid in sorted((ref_ids - set(t_by_id) - set(mapping)) | set(collided)):
-                m = re.search(rf'<w:style\b[^>]*w:styleId="{re.escape(sid)}"[\s\S]*?</w:style>',
-                              src_styles)
-                if m:
-                    block = m.group(0)
+                # Read the style id through attr_of: a legal single-quoted
+                # `w:styleId='X'` was not found by the double-quote-only regex,
+                # so a manuscript-only style was dropped while the document
+                # still referenced it (F048).
+                block = next((b for (bsid, b) in style_blocks if bsid == sid), None)
+                if block is not None:
                     if sid in collided:
                         block = re.sub(
-                            rf'w:styleId="{re.escape(sid)}"',
-                            f'w:styleId="{_xml_attr_value(collided[sid])}"',
+                            rf"w:styleId\s*=\s*([\"']){re.escape(sid)}\1",
+                            lambda mm: "w:styleId=" + mm.group(1)
+                            + _xml_attr_value(collided[sid]) + mm.group(1),
                             block, count=1)
                     kept_styles.append(block)
             if kept_styles:

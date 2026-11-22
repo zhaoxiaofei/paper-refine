@@ -133,7 +133,10 @@ def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None, name: str = None)
                 out["opponent_label"] = _target
         out["member_n"] = st.get("n")
         out["member_median"] = st.get("median")
-        out["member_mean"] = (round(float(st["mean"]), 6)
+        # The docstring promises the RECORDED statistic, and the ranking
+        # compared aggregate_round's unrounded fmean; rounding to 6 dp made the
+        # file unable to reproduce that value (F137).
+        out["member_mean"] = (st["mean"]
                               if isinstance(st.get("mean"), (int, float)) else None)
         rows.append(out)
     rows.sort(key=lambda x: (order.get(str(x["member"]), 10 ** 6), str(x["member"]),

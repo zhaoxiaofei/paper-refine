@@ -20,7 +20,10 @@ def dir_size(path: Path) -> int:
     (F084).
     """
     total = 0
-    if not path.is_dir():
+    if path.is_symlink() or not path.is_dir():
+        # A symlinked ROOT was followed by is_dir()/rglob, so prune reported
+        # outside bytes as reclaimed while rmtree_force only unlinked the link
+        # (F118).
         return 0
     for p in path.rglob("*"):
         try:
@@ -107,7 +110,7 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
         # metacharacter in it (`*`, `?`, `[...]`) used to make this glob match
         # OTHER runs' attempt archives and delete them as this run's.
         for arch in sorted(ctx.runs_dir.glob(f"{glob.escape(str(rec['id']))}_try*_failed")):
-            if arch.is_dir():
+            if arch.is_dir() and not arch.is_symlink():
                 archives.append((rec["id"], r, arch, dir_size(arch)))
     total = sum(t[3] for t in targets) + sum(t[3] for t in archives)
     print(f"[prune] root: {ctx.root}")

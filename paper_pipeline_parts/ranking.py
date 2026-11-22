@@ -97,6 +97,31 @@ def _census_row(vid, census) -> dict:
     return ((census or {}).get(str(vid)) or {})
 
 
+def _census_row_measured(row) -> bool:
+    """Whether `row` is a MEASURED census row, not an empty placeholder.
+
+    `issue_matrix_and_cumulative` turns any row lacking `tiers` into an
+    all-zero row, and a PRESENT but empty row (`{}` / `tiers: {}`) was then
+    ranked as a defect-free version: it led a version with recorded fatal
+    defects and could win (F030). A census row written by the census builder
+    carries every `BASIS_TIERS` bucket, so a row missing one is a placeholder,
+    not evidence of zero defects; the caller treats it like an absent key and
+    leaves the ordered census missing (+inf), never a fabricated zero.
+    """
+    if not isinstance(row, dict):
+        return False
+    tiers = row.get("tiers")
+    if not isinstance(tiers, dict):
+        return False
+    return all(isinstance(tiers.get(tier), dict) and tiers.get(tier)
+               for tier in BASIS_TIERS)
+
+
+def _is_ranking_number(value) -> bool:
+    """A real numeric panel statistic (not bool, not a numeric string)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def issue_matrix_and_cumulative(census, versions) -> tuple:
     """(cell names, per-version counts per cell, per-version prefix sums).
 
@@ -293,7 +318,9 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
             trace.append(f"{label}: {st['author_placeholders']} pipeline hand-off placeholder(s) "
                          f"for the author -> reported only; a place-holder is a manual item, "
                          f"never a defect and never a score penalty")
-        absent_stats = [k for k in ("n", "median", "mean", "iqr") if k not in st]
+        absent_stats = [k for k in ("n", "median", "mean", "iqr")
+                        if k not in st or (st.get(k) is not None
+                                           and not _is_ranking_number(st.get(k)))]
         if absent_stats:
             # A complete/eligible-looking row from a legacy or partial stats
             # provider used to raise KeyError while the rows were built, which
@@ -341,11 +368,11 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     # the panel recorded a fatal defect against (F090). Keep such a version out
     # of the floor walk and leave its ordered census ABSENT, so
     # champion_sort_key's missing-evidence sentinel (+inf, never zero) applies.
-    known_reps = [rid for rid in rep_ids if rid in (census or {})]
+    known_reps = [rid for rid in rep_ids if _census_row_measured(_census_row(rid, census))]
     cell_names, _matrix, cumulative = issue_matrix_and_cumulative(census, known_reps)
     prefix_cells = tiebreak_prefix_cells(cumulative, known_reps, floor)
     for t in rows:
-        if str(t["rep"]) not in (census or {}):
+        if not _census_row_measured(_census_row(t["rep"], census)):
             t["defect_prefix_total"] = None
             t["defect_prefix_census"] = None
             t["tiebreak_prefix_cells"] = prefix_cells
@@ -403,8 +430,13 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
     # incomplete panel is filtered out of `rows`, and the old lookup then
     # silently skipped retention (F185). Compare against its recorded stats
     # directly.
+    # Rule 6 makes retention a property of "the field has an incumbent": the
+    # incumbent is EXEMPT from the eligibility gate, so an incomplete base panel
+    # does not disable retention. This is the F185 invariant; F004's
+    # `complete` guard reversed it and was withdrawn.
     base_stats = stats.get(base_rep) if base_rep else None
-    if base_row is None and base_stats is not None and champ_row["id"] != A1_ID:
+    if (base_row is None and base_stats is not None
+            and champ_row["id"] != A1_ID):
         base_row = {"id": A1_ID, "rep": base_rep, "is_base": True,
                     "median": base_stats.get("median"),
                     "mean": base_stats.get("mean"), "iqr": base_stats.get("iqr")}

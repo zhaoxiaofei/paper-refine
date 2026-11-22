@@ -1021,8 +1021,14 @@ def number_format_rows(paras: list) -> list:
         # not the year 1999.
         if "," not in n and len(digits) == 4 and digits[:2] in ("19", "20"):
             return False
-        if len(digits) <= 4:
-            return "," in n
+        # The rule is about 4+-DIGIT numbers. An ordinary count (`3`, `42`,
+        # `100`) is not a thousands-separator quantity: counting it reported
+        # `1,000 samples and 3 replicates` as a mixed convention.
+        if len(digits) < 4:
+            return False
+        # A plain 4-digit quantity participates exactly like a separated one:
+        # `1,000 samples and 2500 cells` is the mixed convention this rule
+        # exists to report (F036). Years were already excluded above.
         return True
     big = [n for n in nums if _is_quantity(n)]
 

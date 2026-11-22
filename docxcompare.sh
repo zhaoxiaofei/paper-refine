@@ -135,8 +135,9 @@ ORIG_WIN_PS="$(ps_escape "$ORIG_WIN")"
 REVISED_WIN_PS="$(ps_escape "$REVISED_WIN")"
 OUTPUT_WIN_PS="$(ps_escape "$OUTPUT_WIN")"
 
-# Remove any stale output so a previous run cannot masquerade as success.
-rm -f -- "$OUTPUT"
+# Do NOT remove an existing OUTPUT up front: the unique temp is renamed into
+# place only on success, so a failed render must leave the previous file intact
+# (F049).
 # Write to a UNIQUE temp beside the destination, verify THAT file, then rename
 # atomically into place: a shared final path let two runs delete/overwrite each
 # other's in-flight output while both announced success (F02), and a PowerShell
@@ -157,7 +158,7 @@ PIDFILE_WIN_PS="$(ps_escape "$PIDFILE_WIN")"
 _cleanup_partial() {
     local rc=$?
     if [[ $rc -ne 0 ]]; then
-        rm -f -- "$OUTPUT" "$OUTPUT_TMP"
+        rm -f -- "$OUTPUT_TMP"
     fi
 }
 trap _cleanup_partial EXIT
@@ -241,7 +242,7 @@ fi
 # corrupt comparison document.
 if ! command -v python3 >/dev/null 2>&1; then
     echo "Error: python3 is required to verify the comparison document; install Python 3 and re-run" >&2
-    rm -f -- "$OUTPUT"
+    rm -f -- "$OUTPUT_TMP"
     exit 1
 fi
 if ! python3 -c 'import sys, zipfile, xml.etree.ElementTree as ET

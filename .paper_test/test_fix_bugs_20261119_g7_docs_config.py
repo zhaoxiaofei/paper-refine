@@ -60,10 +60,12 @@ def test_prompt_ranges():
     readme = text("paper-skills/README.md")
     check("F112 the skills README indexes E13",
           "E1–E13, P1, C" in readme and "E1–E12" not in readme)
+    _sweeps = text("paper-skills/paper-review/references/sweeps.md")
     check("F116 the legend-spacing rule is venue-conditional",
-          "blanket" in text("paper-skills/paper-review/references/sweeps.md")
-          and "`w:line=240`), or legend" not in
-          text("paper-skills/paper-review/references/sweeps.md"))
+          "legend line spacing that contradicts the venue's own template/profile"
+          in _sweeps
+          and "must not be measured against a blanket" in _sweeps
+          and "`w:line=240`), or legend" not in _sweeps)
 
 
 def test_aux_stage_sidecar():

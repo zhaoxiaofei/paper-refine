@@ -176,8 +176,10 @@ def test_a2_missing_pdf_is_a_failure():
     check("A2 a converter that writes no PDF is not reported as success",
           proc.returncode != 0,
           f"rc={proc.returncode} stdout={proc.stdout.strip()!r}")
-    check("A2 the stale PDF does not survive as this run's output", not pdf.exists(),
-          f"stale pdf still present: {pdf.read_bytes()[:24]!r}" if pdf.exists() else "")
+    check("A2 a failed conversion leaves a pre-existing PDF untouched",
+          pdf.exists() and pdf.read_bytes().startswith(b"%PDF-1.4\nstale render"),
+          f"pre-existing pdf changed/removed: "
+          f"{pdf.read_bytes()[:24]!r}" if pdf.exists() else "pre-existing pdf removed")
 
 
 def test_a2_success_path_still_works():

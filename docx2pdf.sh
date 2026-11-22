@@ -115,7 +115,9 @@ else
     DOCX_BASE="$(basename -- "$DOCX_REAL")"
     PDF="$DOCX_DIR/${DOCX_BASE%.*}.pdf"
 fi
-rm -f -- "$PDF"
+# Do NOT delete an existing destination up front: the render goes to a unique
+# temp that is renamed into place only on success, so a failed conversion must
+# leave the operator's previous PDF intact (F049).
 # Render to a UNIQUE temp beside the destination, verify THAT file, then rename
 # atomically into place: a PowerShell failure left its partial PDF at the
 # requested path (F82), and two runs could delete each other's in-flight render
@@ -143,7 +145,7 @@ PIDFILE_WIN_PS="${PIDFILE_WIN//\'/\'\'}"
 _cleanup_partial() {
     local rc=$?
     if [[ $rc -ne 0 ]]; then
-        rm -f -- "$PDF" "$PDF_TMP"
+        rm -f -- "$PDF_TMP"
     fi
 }
 trap _cleanup_partial EXIT

@@ -629,7 +629,7 @@ python paper_pipeline.py set-venue frontiers-in-immunology  # a shipped journal 
 python paper_pipeline.py set-venue --journal "Cell"      # ... and the journal, atomically
 python paper_pipeline.py set-venue my-journal --profile my-journal.json   # install a profile of your own
 python paper_pipeline.py set-journal "Cell"              # change only the journal
-python paper_pipeline.py set-article-type --list         # the venue's content types + their caps
+python paper_pipeline.py set-article-type --list --root ./paper_rounds  # the venue's content types + their caps
 python paper_pipeline.py set-article-type brief-communication   # select the article type
 python paper_pipeline.py set-article-type --show         # current venue / type / journal / limits
 python paper_pipeline.py set-venue --show                # current venue, journal, resolved limits
@@ -3728,7 +3728,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 292 suites (a few
+any failure. They are independent, so run them in parallel — 293 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

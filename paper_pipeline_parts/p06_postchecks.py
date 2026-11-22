@@ -1153,10 +1153,17 @@ def _discovery_decision_cell(line: str, pid: str) -> str:
             # The id may share the DECISION cell ("KEPT-BASE: preserves X-001").
             if _DISCOVERY_DECISION_START_RE.match(cell):
                 return cell
+            # The decision may follow the id in the SAME cell (`| X-001 PORTED |`);
+            # requiring the cell to START with the token reported a correct
+            # ledger row as never reconciled (F091).
+            if _DISCOVERY_DECISIONS_RE.search(cell) \
+                    and not _DISCOVERY_NEGATED_RE.search(cell):
+                return cell
             for cand in cells[i + 1:]:
                 if _DISCOVERY_NEGATED_RE.search(cand):
                     continue
-                if _DISCOVERY_DECISION_START_RE.match(cand):
+                if _DISCOVERY_DECISION_START_RE.match(cand) \
+                        or _DISCOVERY_DECISIONS_RE.search(cand):
                     return cand
             return ""
         return ""
@@ -1189,7 +1196,9 @@ def discovery_ledger_missing(ledger_text: str, ids) -> list:
             cell = _discovery_decision_cell(line, pid)
             if _DISCOVERY_NEGATED_RE.search(cell):
                 continue
-            if _DISCOVERY_DECISION_START_RE.match(cell):
+            if (_DISCOVERY_DECISION_START_RE.match(cell)
+                    or (_DISCOVERY_DECISIONS_RE.search(cell)
+                        and not _DISCOVERY_NEGATED_RE.search(cell))):
                 disposed = True
                 break
         if not disposed:
@@ -1358,7 +1367,7 @@ def tiebreak_selfreport_warnings(ctx: Ctx, rec: dict, summ: dict, warns: list) -
         if summ["critical_remaining"] == 0:
             warns.append(f"marker reports critical_remaining=0 while the frozen review lists "
                          f"{n_crit_in} Critical finding(s); that self-reported number is only "
-                         f"used to break a statistical tie in the ranking -- verify it in the "
+                         f"reported and cross-checked only; it never affects eligibility, ranking or the champion -- verify it in the "
                          f"package's report before trusting the ranking")
     n_writing_in = writing_findings_input(ctx, rec)
     if is_int(summ.get("writing_remaining")) and n_writing_in:
@@ -1366,8 +1375,8 @@ def tiebreak_selfreport_warnings(ctx: Ctx, rec: dict, summ: dict, warns: list) -
         if summ["writing_remaining"] == 0:
             warns.append(f"marker reports writing_remaining=0 while the frozen review lists "
                          f"{n_writing_in} category-2 (writing quality/logic/repetition) "
-                         f"finding(s); that self-reported number is only used to break a "
-                         f"statistical tie in the ranking -- verify it in the package's report "
+                         f"finding(s); that self-reported number is reported and cross-checked only; it never "
+                         f"affects eligibility, ranking or the champion -- verify it in the package's report "
                          f"before trusting the ranking")
 
 
@@ -2053,7 +2062,14 @@ _COVERAGE_NOWORK_RE = re.compile(
     r"|\b(?:nothing|none)\s+(?:was\s+|were\s+)?(?:checked|reviewed|examined|verified|"
     r"inspected)\b"
     r"|\bno\s+[^.;\n]{0,25}?\b(?:sweep|pass|check|scan)s?\b[^.;\n]{0,20}?"
-    r"\b(?:ran|run|performed|executed)\b)")
+    r"\b(?:ran|run|performed|executed)\b"
+    r"|\b(?:skip(?:ped|s)?|deferred?|postponed?|not\s+attempted|tbd|todo)\b"
+    r"|\b(?:never|nobody|no\s+one)\s+(?:looked|checked|reviewed|examined|verified|"
+    r"inspected)\b"
+    r"|\bdid\s+not\s+happen\b"
+    r"|\b(?:work|check|sweep|pass|review|audit|scan)\s+(?:was|were|is|are)\s+"
+    r"(?:not\s+(?:done|performed|run|completed)|skipped|deferred)\b"
+    r"|\b(?:could|can)\s+not\s+(?:check|verify|review|examine|inspect)\s+anything\b)")
 _COVERAGE_NAMED_BASIS_RE = re.compile(
     r"(?i)(?:basis\s*:|unable\s*(?:--|—|–)"
     r"|out\s+of\s+scope\s*(?:--|—|–))\s*(.*)$")
@@ -2070,7 +2086,8 @@ _COVERAGE_MISSING_CAPABILITY_RE = re.compile(
     # basis, not an unavailable capability (R04).
     r"\s*(?:$|[.;,)]|(?:available|installed|detected|found|present)\b|(?:is|was)\b(?!\s+(?:not\s+)?(?:needed|required|necessary)\b))"
     r"|\b(?:renderer|rendering|tool|binary|executable|library|package|module|"
-    r"dependency)\s+(?:is\s+|was\s+)?"
+    r"dependency|pdftoppm|pdfinfo|libreoffice|soffice|python-docx|openpyxl|lxml)\s+"
+    r"(?:is\s+|was\s+)?"
     r"(?:unavailable|missing|not\s+(?:available|installed|present))\b"
     r"|\b(?:could|can|did|was|were)\s*(?:not|n[\'\u2019]t)\s+(?:be\s+)?"
     r"(?:produced|rendered|generated|opened)\b)")
@@ -2139,7 +2156,7 @@ def _coverage_disposition_ok(value) -> bool:
                   str(value or "").strip())
     if not COVERAGE_DISPOSITION_RE.fullmatch(text):
         return False
-    _count = re.match(r"(?i)^(\d+)\s+finding", text)
+    _count = re.match(r"(?i)^(\d+)\s+findings?\b", text)
     if _count:
         _tail = text[_count.end():]
         if int(_count.group(1)) > 0:
@@ -2152,7 +2169,11 @@ def _coverage_disposition_ok(value) -> bool:
                 return False
         if _COVERAGE_NEGATED_CHECK_RE.search(_tail) \
                 or _COVERAGE_COUNT_NEGATED_RE.search(_tail) \
-                or _COVERAGE_NOWORK_RE.search(_tail):
+                or _COVERAGE_NOWORK_RE.search(_tail) \
+                or re.search(
+                    r"(?i)^[\s;:,.-]*(?:see\s+(?:above|below|here|there|prior|previous|"
+                    r"report|details?)|as\s+(?:discussed|above|before|noted|stated))[.!]?\s*$",
+                    _tail):
             # The count form used to bypass the negation test entirely: `0 findings
             # -- not checked` (and `0 findings; the sweep did not run`) certified a
             # sweep that never ran (F112). The tail must not negate the check.
@@ -3025,15 +3046,29 @@ def _render_output_body_problem(path: Path) -> str:
     """
     try:
         size = path.stat().st_size
+        # A bounded HEAD supplies the body, a bounded TAIL the trailer: a valid
+        # PDF over 4 MiB keeps its %%EOF at the end (F098).
+        limit = min(size, 4 * 1024 * 1024)
+        tail_limit = min(size, 64 * 1024)
         with path.open("rb") as fh:
-            head = fh.read(1024)
+            data = fh.read(limit)
+            if size > limit:
+                fh.seek(max(0, size - tail_limit)); tail = fh.read(tail_limit)
+            else:
+                tail = data
     except OSError as e:
         return f"{type(e).__name__}: {e}"
-    _nl = head.find(b"\n")
-    _after = head[_nl + 1:] if _nl >= 0 else b""
-    _eof = _after.find(b"%%EOF")
-    _before = _after if _eof < 0 else _after[:_eof]
-    if not _before.strip() and (_eof >= 0 or size <= len(head)):
+    _nl = data.find(b"\n")
+    _after = data[_nl + 1:] if _nl >= 0 else b""
+    # For a small file `tail` IS `data`, so measure the trailer in `_after`.
+    _src = _after if size <= limit else tail
+    _eof = _src.rfind(b"%%EOF")
+    if _eof < 0:
+        return "no %%EOF trailer in the PDF body"
+    _before = _after[:_eof] if size <= limit else _after
+    if size > limit and not _before.strip():
+        _before = tail[:_eof]
+    if not _before.strip():
         return "no PDF body between the %PDF- header and the %%EOF trailer"
     return ""
 
@@ -3370,7 +3405,21 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                     tpl = {}
             except (OSError, ValueError):
                 tpl = {}
-            docs = [d for d in (tpl.get("documents") or []) if isinstance(d, dict) and d.get("ok")]
+            all_docs = [d for d in (tpl.get("documents") or []) if isinstance(d, dict)]
+            failed_docs = [d for d in all_docs if not d.get("ok")]
+            docs = [d for d in all_docs if d.get("ok")]
+            if failed_docs and docs:
+                # One successful render does not certify the OTHERS: a
+                # partially failed template render was silently ignored (F029).
+                # When NO template rendered, the existing all-failed branch
+                # below owns the outcome (an unrenderable template is a gap,
+                # not a partial success).
+                errs.append(
+                    f"{label}: {VISUAL_TEMPLATE_DIR}/manifest.json records "
+                    f"{len(failed_docs)} FAILED template render(s) "
+                    f"({', '.join(str(d.get('role') or d.get('source') or '?') for d in failed_docs[:4])}"
+                    f"): the required comparison against every venue template did not happen; "
+                    f"re-render it or hand the failure to the author")
             if not docs and venue_word:
                 errs.append(
                     f"{label}: the venue seeds {len(venue_word)} official Word template(s), but "
@@ -3417,10 +3466,21 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                 for d in docs:
                     name = str(d.get("source") or "").lower()
                     pages = str(d.get("pages") or "")
-                    if name and name not in text:
+                    # The artifact must COMPARE the template, not merely mention
+                    # it inside a denial: `main.docx: 3 pages were NOT visually
+                    # compared to the template` used to satisfy every substring
+                    # test (F103).
+                    name_lines = [ln for ln in text.splitlines() if name and name in ln]
+                    positive = [ln for ln in name_lines
+                                if not re.search(
+                                    r"(?i)\b(?:not|never|no|without)\b[^.;\n]{0,40}"
+                                    r"\b(?:compared|verified|checked|inspected|reviewed)\b",
+                                    ln)]
+                    if name and not positive:
                         missing.append(name)
-                    elif pages and not re.search(
-                            rf"\b{re.escape(pages)}[\s-]+pages?\b", text, re.I):
+                    elif pages and not any(re.search(
+                            rf"\b{re.escape(pages)}[\s-]+pages?\b", ln, re.I)
+                            for ln in (positive or [text])):
                         missing.append(f"{name} ({pages} page(s))")
                 if "template" not in text:
                     missing.append("a template-comparison section")
@@ -3466,7 +3526,22 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
     # dispose the other two letters.
     rows_cl = [ln for ln in text.splitlines()
                if ln.strip().startswith("|") and "FMT-CL1" in ln.upper()]
-    named = {w for w in want if any(w.lower() in ln.lower() for ln in rows_cl)}
+    def _row_names_document(wanted: str, line: str) -> bool:
+        """The row names THIS document, not a longer name containing it.
+
+        `report.docx.backup` (or any superset filename) used to satisfy the
+        wanted `report.docx` by raw substring (F086); compare the basename of
+        every path-like token in the row instead.
+        """
+        wb = Path(wanted).name
+        # Match the WHOLE basename with filename boundaries, not a token: a
+        # filename containing a space (`cover letter.docx`) was split into
+        # `letter.docx` and never matched. The boundaries still reject a longer
+        # superset name such as `report.docx.backup` (F086).
+        return bool(re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(wb)
+                              + r"(?![A-Za-z0-9_.-])", line, re.I))
+
+    named = {w for w in want if any(_row_names_document(w, ln) for ln in rows_cl)}
     if named == want:
         return []
     if len(want) == 1:
@@ -3552,10 +3627,37 @@ def _unable_reason_present(rest: str) -> bool:
     return len(re.findall(r"[0-9A-Za-z]+", rest or "")) >= 2
 
 
+# Placeholder class labels the D1 gate refuses: a row must name an issue CLASS,
+# not merely contain a four-letter filler token (F104).
+_DISCOVERY_GAP_PLACEHOLDER_WORDS = frozenset({
+    "none", "null", "n/a", "tbd", "todo", "test", "tests", "placeholder",
+    "xxx", "xxxx", "stuff", "thing", "things", "misc", "other", "others"})
+
+
 def discovery_gap_summary(sb: Path) -> dict:
     """{rows, covered, uncovered, unmarked} of guided_review/round2/gap_table.md."""
     covered = uncovered = unmarked = 0
-    rows = _discovery_rows(sb / GUIDED_REVIEW_DIR / "round2" / "gap_table.md")
+
+    def _names_a_class(row) -> bool:
+        """A gap row must name an issue CLASS, not just a row number/placeholder.
+
+        The D1 contract enumerates class candidates; a 25-row table whose only
+        content is `x`/a dash/a number satisfied the row-count gate (F104).
+        """
+        for cell in row.values():
+            t = " ".join(str(cell or "").split())
+            if not t or re.fullmatch(r"[0-9.\-–—]+", t):
+                continue
+            if re.search(r"(?i)\b(?:uncovered|covered|not[- ]covered|partially covered|"
+                         r"no check)\b", t):
+                continue
+            if any(len(w) >= 4 and w.lower() not in _DISCOVERY_GAP_PLACEHOLDER_WORDS
+                   for w in re.findall(r"[A-Za-z]{2,}", t)):
+                return True
+        return False
+
+    rows = [r for r in _discovery_rows(
+        sb / GUIDED_REVIEW_DIR / "round2" / "gap_table.md") if _names_a_class(r)]
     for r in rows:
         low = _row_text(r).lower()
         # The UNCOVERED spellings D1's own prose uses: "UNCOVERED", "not covered",
@@ -4497,14 +4599,17 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     want_parity_artifacts = (split_mode == "off"
                              or (split_mode == "phases" and not part_b)
                              or (split_mode == "aspects" and part_b))
+    want_m2_artifact = (split_mode == "off"
+                        or (split_mode == "aspects" and not part_b))
     if split_mode == "aspects":
         # Aspects puts M2 (reference integrity) in session A and the packaging
         # checks in B. Demanding M2 from B made B fail on a table its prompt
-        # told it not to duplicate, while nobody checked A's M2 disposal.
+        # told it not to duplicate; A's parity set must therefore KEEP M2 even
+        # though A does not own the M25-M29 parity artifacts (F054).
         parity = {k: v for k, v in parity.items()
-                  if (k == "M2_references.md") != part_b}
+                  if (k == "M2_references.md") == (not part_b)}
     want_architecture = (split_mode == "off" or part_b)
-    if want_parity_artifacts and art_dir.is_dir():
+    if (want_parity_artifacts or want_m2_artifact) and art_dir.is_dir():
         for fname, (cid, kind_phrase) in parity.items():
             p = art_dir / fname
             if p.is_symlink() or not p.is_file():
@@ -6181,6 +6286,10 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
         # Scan and drop every entry, and fail: an INPUT area that does not exist
         # in the original may not be created by a stage.
         dropped, failures = [], []
+        # A candidate CREATED the area even when it carries no entry (an empty
+        # directory is still a fabricated read-only input area); `dropped` alone
+        # missed that and the removal was silent (F025).
+        fabricated_area = area.is_symlink() or area.exists()
         if area.is_symlink() or (area.exists() and not area.is_dir()):
             try:
                 area.unlink()
@@ -6221,9 +6330,10 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
                     pass
             with contextlib.suppress(OSError):
                 area.rmdir()
-        if dropped:
+        if dropped or fabricated_area:
             warns.append(
-                f"READ-ONLY raw data: {len(dropped)} entr(y/ies) under {name}/ were removed "
+                f"READ-ONLY raw data: the package created the {name}/ input area "
+                f"({len(dropped)} entr(y/ies) removed) "
                 f"-- the pristine original has NO raw-data area, so the package may not create "
                 f"one (an input area is copied from the original, never authored)")
             failures.append(
@@ -6646,9 +6756,9 @@ def verify_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     # Enforced-input failures are a separate channel: they must fail the
     # attempt but must not be relabeled as the legacy-spelling list (F168).
     info["readonly_failures"] = list(info.get("failures") or [])
-    if info["readonly_failures"]:
-        warns.append("READ-ONLY input failure in the package: "
-                     + "; ".join(info["readonly_failures"]))
+    # The merged failure list is warned about ONCE, after the feedback areas are
+    # folded in; the raw-data-only append here duplicated every raw-data failure
+    # (F135).
     # The review-feedback areas are INPUTS like raw_data: same byte-for-byte
     # contract, same restore-from-pristine repair (human editors'/reviewers'
     # comments and the pre-filtered LLM review).
@@ -7509,6 +7619,11 @@ _DISPOSITION_FILLER_TAIL_RE = re.compile(
     r"pass|passed|tested|fine|good|clean|"
     r"see(?:\s+(?:above|below|here|there|report|details?))?|"
     r"as\s+(?:discussed|above|before|noted|stated)|"
+    r"unable\s+to\s+(?:check|verify|review|examine|inspect)|"
+    r"(?:not\s+|never\s+|failed\s+to\s+)?"
+    r"(?:checked|verified|reviewed|examined|inspected|confirmed|done|"
+    r"it\s+was\s+(?:checked|verified|reviewed|examined)|"
+    r"was\s+(?:checked|verified|reviewed|examined))|"
     r"[-—–_.:;,\s]+)$")
 
 
@@ -8162,8 +8277,6 @@ def review_seeded_row_counts(ctx: Ctx, base: Path) -> dict:
     """
     return {rel: sum(int(p.get("count") or 0) for p in pins)
             for rel, pins in review_seeded_row_pins(ctx, base).items()}
-
-
 def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: list) -> dict:
     """Record (and optionally fail) the review's decision-artifact quality."""
     # Re-derive the M20 seed from the read-only base/ the review was given, not
@@ -8210,8 +8323,6 @@ def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: lis
         for n in notes:
             warns.append(f"decision artifact {rel}: {n}")
     return report
-
-
 # =====================================================================
 # SCOPED ARTIFACT REPAIR (`--strict-artifacts fix`) -- ONE PROFILE PER STAGE
 #
@@ -8238,7 +8349,6 @@ def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: lis
 #     BEFORE it re-runs the identical postcheck. A repair that went outside its
 #     scope is a failed attempt, and everything it did stays in the archive.
 # =====================================================================
-
 REPAIR_PROMPT_FILE = "REPAIR_PROMPT.md"
 # A repair is a few hundred lines of editing, not a review session: cap it even
 # when the stage timeout is generous (an LLM that runs for an hour on this is
@@ -8280,8 +8390,6 @@ AGENT_CONTEXT_OVERFLOW_RE = re.compile(
     r"|\blength limit exceeded\b"
     r"|\brequest body\b[^\n]{0,80}\b(?:too large|limit exceeded)\b"
     r")")
-
-
 # A stdout line is evidence of a PROVIDER failure only when the line itself is
 # error-shaped. The overflow regex above must stay broad enough to recognise a
 # provider's own wording; applied to a session's normal output it also matched
@@ -8309,8 +8417,6 @@ _ERROR_SHAPED_STDOUT_RE = re.compile(
     r"|\{\s*\"(?:error|level)\"\s*:"
     r"|\{\s*\"type\"\s*:\s*\"[^\"]*(?:error|exceeded)\""
     r"|<\s*(?:!doctype|html|head|title)\b)")
-
-
 # The pipeline's own implementation is not provider evidence.  A review session
 # reads `paper_pipeline_parts/*` to find out what the postcheck wants (the
 # brief-communication run did it in 90 slices), and its transcript then carries
@@ -8336,22 +8442,16 @@ _STDERR_SOURCE_LINE_RE = re.compile(
 # A pretty-printed JSON error object puts its message on a `"key": value` line;
 # that line IS provider evidence, even though it starts with a quote.
 _STDERR_JSON_FIELD_RE = re.compile(r'^\s*"[^"\n]*"\s*:')
-
-
 def _stderr_evidence(stderr: str) -> str:
     return "\n".join(
         line for line in (stderr or "").splitlines()
         if _STDERR_JSON_FIELD_RE.match(line)
         or not _STDERR_SOURCE_LINE_RE.match(line))
-
-
 # The agent proxy stops a session that is looping (model-turn cap, compaction
 # cap, a repeated tool call) and prints its reason on stderr.  That reason is
 # the real failure: classify it BEFORE the overflow scan, which can otherwise
 # match an unrelated line the session printed (see `_stderr_evidence`).
 AGENT_RUNAWAY_RE = re.compile(r"(?im)\brunaway (?:agent )?guard\b")
-
-
 def _evidence_needles(exclude) -> list:
     """The excluded LINES that could be mistaken for a failure class.
 
@@ -8370,8 +8470,6 @@ def _evidence_needles(exclude) -> list:
             if AGENT_RUNAWAY_RE.search(folded) or AGENT_CONTEXT_OVERFLOW_RE.search(folded):
                 needles.append(folded)
     return needles
-
-
 def _without_excluded(text: str, needles: list) -> str:
     """`text` without the lines that echo one of the excluded needles.
 
@@ -8394,8 +8492,6 @@ def _without_excluded(text: str, needles: list) -> str:
             continue
         kept.append(line)
     return "\n".join(kept)
-
-
 def agent_runaway_reason(stderr: str, exclude=()) -> str:
     """The proxy's own sentence for a stopped loop, or "" when it is absent.
 
@@ -8432,8 +8528,6 @@ def agent_runaway_reason(stderr: str, exclude=()) -> str:
         if reason:
             return reason[:400]
     return ""
-
-
 def agent_failure_kind(stdout: str = "", stderr: str = "", exclude=()) -> str:
     """A stable failure class read from the CLI's own transport errors.
 
@@ -8482,8 +8576,6 @@ def agent_failure_kind(stdout: str = "", stderr: str = "", exclude=()) -> str:
     if AGENT_CONTEXT_OVERFLOW_RE.search(text):
         return "context_overflow"
     return ""
-
-
 # A continuation finishes a stage that is already 80% done: cap it well below
 # the stage timeout (which defaults to 4h).
 RESUME_TIMEOUT_MAX = 5400
@@ -8525,13 +8617,10 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
                       # is exactly the class no format check and no re-reading
                       # can see (see reference_integrity_rows).
                       "artifacts/M2_references.md")
-
 REVIEW_REPAIR_TABLES = tuple(DECISION_ARTIFACTS) + ("artifacts/M1_acronyms.md",)
 # The skip list of the attempt archive is the same one: re-derivable input
 # corpora are verified by the postcheck's own input manifests, not here.
 REPAIR_GUARD_SKIP_DIRS = ATTEMPT_ARCHIVE_SKIP_DIRS
-
-
 # --- which postcheck problems each stage may repair ------------------------
 # The messages are generated by the postchecks below this module section, so
 # prefix/regex matching is stable and testable. Two families are shared:
@@ -8559,7 +8648,6 @@ REPAIR_LANGUAGE_PATTERNS = tuple(
 # no reason AND the coverage row stays silent -- exactly the state a scoped repair
 # can finish from the rows' own context/location columns.
 REPAIR_M1B_PATTERNS = (r"^guided_review/artifacts/M1_acronyms\.md lists \d+ M1b long-form row\(s\)",)
-
 REPAIR_PROFILES = {
     # The reviewer's decision tables: the only stage where the postcheck itself
     # is the artifact-quality layer.
@@ -8646,13 +8734,9 @@ REPAIR_PROFILES = {
                  "existing coverage entries",
     },
 }
-
-
 def repair_profile(rec: dict) -> dict:
     """The repair profile of a run's kind ({} when the stage has none)."""
     return REPAIR_PROFILES.get(str(rec.get("kind") or "")) or {}
-
-
 def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
     """The problems ONE scoped repair session may fix for this attempt ([] if none).
 
@@ -8687,8 +8771,6 @@ def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
               f"{rec.get('kind')}`), or `retry --run {rec['id']}` first to reset it.")
         return []
     return errors
-
-
 # --- variant B: a repair completes files, it never creates them -------------
 # A problem of the "… is missing" family names a file the STAGE failed to write.
 # The repair may touch it only if it actually exists (present but empty/malformed
@@ -8703,8 +8785,6 @@ def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
 REPAIR_MISSING_RE = re.compile(r"\bis missing\b|\bmissing\b\s*[:(]|no work/r6_language\.md",
                                re.I)
 REPAIR_FILE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:md|json|docx|tex)")
-
-
 def _resolve_in_sandbox(sb: Path, rec: dict, cand: str) -> Path:
     """Resolve a file name from a postcheck message inside this sandbox."""
     rel = str(cand).strip("`'\"(),;:")
@@ -8716,8 +8796,6 @@ def _resolve_in_sandbox(sb: Path, rec: dict, cand: str) -> Path:
         if p.is_file():
             return p
     return sb / rel
-
-
 def repair_missing_deliverable(ctx: Ctx, rec: dict, problems: list) -> str:
     """The file an "… is missing" problem names, when a repair may NOT supply it ("" if none).
 
@@ -8764,8 +8842,6 @@ def repair_missing_deliverable(ctx: Ctx, rec: dict, problems: list) -> str:
             continue                       # present: its CONTENT is what the repair fixes
         return cands[0]
     return ""
-
-
 # --- what a repair may write, per stage ------------------------------------
 def _repair_path_writable(rel: Path, kind: str) -> bool:
     """May the repair overwrite this sandbox-relative FILE (or create it)?"""
@@ -8801,8 +8877,6 @@ def _repair_path_writable(rel: Path, kind: str) -> bool:
             return False
         return (len(parts) > 1 and parts[1] == "work") or is_bookkeeping_name(name)
     return False
-
-
 def _repair_path_creatable(rel: Path, kind: str) -> bool:
     """May the repair CREATE this file?
 
@@ -8824,8 +8898,6 @@ def _repair_path_creatable(rel: Path, kind: str) -> bool:
         pkg = output_dir_for_kind(kind)
         return len(parts) > 1 and parts[0] == pkg and parts[1] == "work"
     return False
-
-
 def _repair_scope_of(rel: Path, kind: str) -> str:
     """`scratch` (write freely) | `cells` (a decision table: fill cells only) |
     `protected` (byte-identical).
@@ -8849,18 +8921,12 @@ def _repair_scope_of(rel: Path, kind: str) -> str:
     if parts and parts[0] == GUIDED_REVIEW_DIR and len(parts) > 1 and parts[1] == "work":
         return "scratch"
     return "file"
-
-
 def decision_artifact_rel_paths(sb: Path) -> list:
     """The decision artifacts this sandbox actually has (as guided_review/-relative paths)."""
     return [rel for rel in DECISION_ARTIFACTS if (sb / GUIDED_REVIEW_DIR / rel).is_file()]
-
-
 def review_repair_table_rel_paths(sb: Path) -> list:
     """The review tables a repair may fill (decision artifacts + the M1b table)."""
     return [rel for rel in REVIEW_REPAIR_TABLES if (sb / GUIDED_REVIEW_DIR / rel).is_file()]
-
-
 def _repair_starts_new_header(lines: list, i: int, cells: list, header) -> bool:
     """Is line `i` a NEW table header, or a ragged ROW of the current table?
 
@@ -8883,8 +8949,6 @@ def _repair_starts_new_header(lines: list, i: int, cells: list, header) -> bool:
             continue
         return len(nxt) == len(cells)
     return False
-
-
 def _repair_table_rows(md_text: str) -> list:
     """The row IDENTITY of every table in one decision artifact, in order.
 
@@ -8930,8 +8994,6 @@ def _repair_table_rows(md_text: str) -> list:
         keep = [i for i, h in enumerate(header) if h not in REPAIR_EDITABLE_CELLS]
         out.append(tuple((cells[i].strip() if i < len(cells) else "") for i in keep))
     return out
-
-
 def _repair_table_skeleton(md_text: str) -> str:
     """The artifact's text with every repair-editable CELL blanked.
 
@@ -8983,8 +9045,6 @@ def _repair_table_skeleton(md_text: str) -> str:
         blanked += cells[len(header):]
         out.append("| " + " | ".join(blanked) + " |")
     return "\n".join(out)
-
-
 def _repair_scope_symlinks(sb: Path, kind: str) -> list:
     """Symlinks whose lexical path lies inside the repair's writable scope.
 
@@ -9015,8 +9075,6 @@ def _repair_scope_symlinks(sb: Path, kind: str) -> list:
             if anc.as_posix() not in out and ap.is_symlink():
                 out.append(anc.as_posix())
     return sorted(set(out))
-
-
 def _repair_guard_files(sb: Path, kind: str) -> dict:
     """{rel path: sha256} for every file a repair may NOT touch.
 
@@ -9048,8 +9106,6 @@ def _repair_guard_files(sb: Path, kind: str) -> dict:
         except OSError:
             continue
     return out
-
-
 def _repair_read_json(path: Path):
     # Agent-written audit/repair JSON: shared regular-file/no-follow/byte-budget
     # reader (F38).
@@ -9060,8 +9116,6 @@ def _repair_read_json(path: Path):
         return _json_from_text(text, lenient=True)
     except ValueError:
         return None
-
-
 def _repair_add_identity(row: dict) -> str:
     """Canonical text of one auditor `adds` row: its whole evidence, pinned.
 
@@ -9071,8 +9125,6 @@ def _repair_add_identity(row: dict) -> str:
     judgement, so the canonical JSON of the whole row is the identity.
     """
     return json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
-
-
 def _repair_adds_map(rows) -> dict:
     """{add id: canonical row text} of a guard's `adds` snapshot."""
     out = {}
@@ -9080,8 +9132,6 @@ def _repair_adds_map(rows) -> dict:
         if isinstance(item, (list, tuple)) and len(item) == 2:
             out[str(item[0])] = str(item[1])
     return out
-
-
 def _repair_audit_rows(sb: Path) -> dict:
     """{frozen id: (verdict, reason, evidence)} of an audit sheet, plus its adds."""
     audit = _repair_read_json(sb / "audit" / "audit.json")
@@ -9100,8 +9150,6 @@ def _repair_audit_rows(sb: Path) -> dict:
                               _repair_add_identity(r)]
                              for r in audit["adds"] if isinstance(r, dict))
     return out
-
-
 def _repair_judge_rows(sb: Path) -> dict:
     """{label: {ledger, checks, score}} of a judge sheet: what may not move."""
     sj = _repair_read_json(sb / SCORES_FILE)
@@ -9121,8 +9169,6 @@ def _repair_judge_rows(sb: Path) -> dict:
                           "checks": checks, "score": c.get("score"),
                           "basis": str(c.get("basis") or "").strip().lower()}
     return out
-
-
 def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     """What the repair must leave alone: protected bytes + pinned structure.
 
@@ -9155,8 +9201,6 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
             "symlinks": _repair_scope_symlinks(sb, kind),
             "artifacts": digests, "audit": _repair_audit_rows(sb),
             "judge": _repair_judge_rows(sb)}
-
-
 def _repair_writable_files(sb: Path, kind: str) -> list:
     """Every file that exists inside the repair's own writable scope."""
     out = []
@@ -9176,14 +9220,10 @@ def _repair_writable_files(sb: Path, kind: str) -> list:
         if _repair_path_writable(rel, kind):
             out.append(p)
     return out
-
-
 def _is_repair_plumbing(rel) -> bool:
     """The orchestrator's own repair-session files (never 'the stage's writing')."""
     name = Path(str(rel)).name
     return name == REPAIR_PROMPT_FILE or name.startswith("_agent.log")
-
-
 def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
     """The review profile's structural guard: every table's row identity."""
     problems = []
@@ -9220,8 +9260,6 @@ def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
         if len(problems) >= 6:
             break
     return problems
-
-
 def _repair_audit_problems(sb: Path, guard: dict) -> list:
     """The audit profile's guard: existing verdicts stand; only confirms may be added.
 
@@ -9264,8 +9302,6 @@ def _repair_audit_problems(sb: Path, guard: dict) -> list:
             f"`adds` (its location/severity/evidence/explanation changed); an added "
             f"finding's own cells are the auditor's judgement and may not be edited")
     return problems[:6]
-
-
 def _repair_judge_problems(sb: Path, guard: dict) -> list:
     """The judge profile's guard: the ledger is the judgement and stays untouched.
 
@@ -9302,8 +9338,6 @@ def _repair_judge_problems(sb: Path, guard: dict) -> list:
         if len(problems) >= 6:
             break
     return problems[:6]
-
-
 def repair_guard_problems(sb: Path, guard: dict, rec: dict = None) -> list:
     """Out-of-scope changes made by a repair session ([] means in scope)."""
     kind = str((rec or {}).get("kind") or guard.get("kind") or "")
@@ -9365,15 +9399,12 @@ def _repair_prompt_body(ctx: Ctx, rec: dict, problems: list) -> str:
     header = (f"ARTIFACT REPAIR — SCOPED SESSION (run {rec['id']}, stage {kind}, "
               f"round {rec['round']})")
     common_head = f"""{header}
-
 You are NOT the {kind} session. That stage finished, and the orchestrator rejected its
 BOOKKEEPING -- the report/ledger/sheet files the postcheck reads -- as unfilled, inconsistent or
 unfinished. Your single job: repair exactly the problems below, from evidence that is ALREADY in
 this sandbox. The manuscript/package itself is NOT yours to touch.
-
 --- WHAT THE ORCHESTRATOR REJECTED ({len(problems)} problem(s)) ---
 {listed}
-
 --- WHERE YOU MAY WRITE (verified byte-for-byte / structurally afterwards) ---
   * {profile.get('scope')}
   * /tmp  -- scratch outside the sandbox
@@ -9396,7 +9427,6 @@ Everything else must stay BYTE-IDENTICAL, above all:
         return common_head + f"""
 --- THE TABLES IN PLAY ---
 {files}
-
 --- HOW TO DISPOSE A ROW (the rule the postcheck applies) ---
   * One disposition per row and it must be about THAT row's own bar, not a blanket judgement:
     either a finding id (`F-004`), or `OK — <the bar this instance is inside, and why>`.
@@ -9486,13 +9516,9 @@ Everything else must stay BYTE-IDENTICAL, above all:
     reading and measuring, never guessing.
 """ + REPAIR_TAIL
     return common_head + REPAIR_TAIL
-
-
 def repair_prompt(ctx: Ctx, rec: dict, problems: list) -> str:
     """The scoped repair prompt, with the shared context-budget rule."""
     return with_context_budget(CONTRADICTION_RULE + _repair_prompt_body(ctx, rec, problems))
-
-
 REPAIR_TAIL = """
 --- IF YOU CANNOT DO IT HONESTLY ---
 Write the pipeline's escape instead of a claim: `unable — manual verification required: <what the
@@ -9504,8 +9530,6 @@ The orchestrator re-runs the SAME postcheck over this same sandbox; a repair tha
 every problem above is recorded as a failed attempt like any other. Keep your final message
 short: which files you completed, and which rows you left `unable` (with the reason).
 """
-
-
 def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
     """Write the repair prompt, pin the scope, record the attempt. None if impossible.
 
@@ -9544,8 +9568,6 @@ def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
           f"scoped repair session (scoped repair {repair_no}; record attempt {n}; it may "
           f"write {scope} and nothing else)")
     return flight
-
-
 def start_repair_session(ctx: Ctx, ex, running: dict, flight: dict, rec: dict, problems: list,
                          cmd: list, timeout: int) -> bool:
     """Submit a prepared repair session to the round's executor (production stages)."""
@@ -9559,8 +9581,6 @@ def start_repair_session(ctx: Ctx, ex, running: dict, flight: dict, rec: dict, p
     flight[fut] = prepared
     ctx.save_state()
     return True
-
-
 def run_repair_session_now(ctx: Ctx, rec: dict, problems: list, cmd: list, timeout: int) -> bool:
     """Run a repair session synchronously (the round-based `run_phase` driver).
 
@@ -9576,8 +9596,6 @@ def run_repair_session_now(ctx: Ctx, rec: dict, problems: list, cmd: list, timeo
                               REPAIR_PROMPT_FILE, "_agent.log", False)
     finish_repair_session(ctx, rec, prepared, res)
     return True
-
-
 # --- the CONTINUATION of a stopped session ---------------------------------
 def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: str,
                            mode: str = "cli"):
@@ -9624,8 +9642,6 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
             # The console line names HOW it continues; without this key every
             # continuation (sandbox included) printed "continuing session ...".
             "mode": "cli" if resumed_cli else "sandbox"}
-
-
 def _resume_mode_line(prepared: dict, key: str) -> str:
     """The console sentence for one continuation, naming HOW it continues."""
     reason = str(prepared.get("reason") or "")
@@ -9633,8 +9649,6 @@ def _resume_mode_line(prepared: dict, key: str) -> str:
         return ("continuing in the SAME SANDBOX with a fresh process (no CLI resume "
                 f"form; artifacts kept) — {reason}")
     return f"continuing session {key[:8]} — {reason}"
-
-
 def start_resume_session(ctx: Ctx, ex, running: dict, flight_map: dict, rec: dict,
                          argv: list, key: str, reason: str, timeout: int,
                          mode: str = "cli") -> bool:
@@ -9651,8 +9665,6 @@ def start_resume_session(ctx: Ctx, ex, running: dict, flight_map: dict, rec: dic
     flight_map[fut] = prepared
     ctx.save_state()
     return True
-
-
 def run_resume_session_now(ctx: Ctx, rec: dict, argv: list, key: str, reason: str,
                            timeout: int, mode: str = "cli") -> bool:
     """Run a continuation synchronously (the `run_phase` driver)."""
@@ -9667,8 +9679,6 @@ def run_resume_session_now(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
                               RESUME_PROMPT_FILE, "_agent.log", True)
     finish_resume_session(ctx, rec, prepared, res)
     return True
-
-
 def _safe_remove_prompt(path: Path) -> None:
     """Remove a seeded prompt that an agent may have replaced by a directory.
 
@@ -9683,8 +9693,6 @@ def _safe_remove_prompt(path: Path) -> None:
             rmtree_force(path, ignore_errors=True)
     except OSError:
         pass
-
-
 def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     """Judge a continuation with the SAME postcheck and record the attempt."""
     sb = ctx.sandbox_of(rec)
@@ -9722,8 +9730,6 @@ def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
             f"{RESUME_ATTEMPT_LIMIT}: {'ok' if rec['status'] == 'done' else 'failed'}")
     ctx.save_state()
     return rec
-
-
 def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     """Verify one repair session's scope, re-postcheck the sandbox, record it.
 
@@ -9783,8 +9789,6 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
                       else record["postcheck_errors"],
                       note=f"after scoped repair {flight.get('repair')}", ctx=ctx)
     return record
-
-
 def guard_changed_paths(sb: Path, guard: dict) -> list:
     """The artifact files the repair actually rewrote (its diff, for the record)."""
     before = dict(guard.get("files") or {})
@@ -9824,7 +9828,6 @@ def guard_changed_paths(sb: Path, guard: dict) -> list:
         if rel not in before_writable:
             changed.append(rel)
     return sorted(set(changed))
-
 def _lookup_answers(sb: Path) -> dict:
     """{kind: [lookup row]} for lookups with a conclusive verdict."""
     answers = {}
@@ -9836,8 +9839,6 @@ def _lookup_answers(sb: Path) -> dict:
             key = str(row.get("kind") or "").strip().lower()
             answers.setdefault(key, []).append(dict(row, verdict=verdict))
     return answers
-
-
 def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
                                 enforce: bool, errs: list, warns: list) -> dict:
     """Searchable hand-off markers that the orchestrator could already answer."""
@@ -9860,10 +9861,8 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
         for r in mod.placeholder_ledger([x[0] for x in rows]):
             searchable.append(dict(r, document=name))
     answers = _lookup_answers(sb)
-
     def _lookup_norm(value) -> str:
         return " ".join(re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).split())
-
     def _has_own_lookup(row) -> bool:
         """Only a marker with its OWN question answered is answerable.
 
@@ -9876,10 +9875,13 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
             query = _lookup_norm(a.get("query"))
             if not query or not payload:
                 continue
-            if query == payload or query in payload or payload in query:
+            # A raw substring match let an answered longer accession
+            # (`GSE123456`) mark a different, unanswered marker (`GSE123`), and
+            # the opposite containment did the same (F045). Only the marker's
+            # OWN normalised question counts.
+            if query == payload:
                 return True
         return False
-
     answerable = [r for r in searchable if _has_own_lookup(r)]
     # EVERY marker in the delivered package, searchable or not: the count is a
     # diagnostic under `author_to_complete: document` (the marker is the
@@ -9959,8 +9961,6 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
                      f"evidence in the sandbox -- run with `setup --placeholder-lookup online` "
                      f"so the pipeline can answer them")
     return report
-
-
 def number_provenance_report(sb: Path, sources: list) -> dict:
     """Numbers in the abstract/legends that no shipped table proves (advisory)."""
     mod = _format_module()
@@ -9995,6 +9995,4 @@ def number_provenance_report(sb: Path, sources: list) -> dict:
                                   "sentence": re.sub(r"\s+", " ", text)[:110]})
     return {"unsourced": len(unsourced), "proved": len(proved),
             "examples": unsourced[:8]}
-
-
 AUDIT_ID_RE = re.compile(r"^AU-\d+$")

@@ -332,8 +332,8 @@ def test_docxcompare_script():
         skip("an output that IS an input is refused (the input must survive)",
              "no powershell.exe + wslpath/cygpath here: docxcompare.sh refuses to run "
              "without a Windows Word shell")
-    # a PowerShell that writes nothing must never look like success, and a stale
-    # output must not survive it
+    # a PowerShell that writes nothing must never look like success; a FAILED
+    # run leaves a pre-existing destination untouched (it was never written)
     fake_powershell(tmp, "none")
     out = tmp / "redline.docx"
     out.write_bytes(b"PK stale")
@@ -341,10 +341,11 @@ def test_docxcompare_script():
     if word_shell:
         p = subprocess.run([str(script), str(docx), str(docx2), str(out)],
                            capture_output=True, text=True, env=env)
-        check("a converter that writes nothing FAILS and leaves no stale output",
-              p.returncode != 0 and not out.exists(), f"rc={p.returncode} {p.stderr[:120]}")
+        check("a converter that writes nothing FAILS and leaves the old output untouched",
+              p.returncode != 0 and out.read_bytes() == b"PK stale",
+              f"rc={p.returncode} {p.stderr[:120]}")
     else:
-        skip("a converter that writes nothing FAILS and leaves no stale output",
+        skip("a converter that writes nothing FAILS and leaves the old output untouched",
              "no powershell.exe + wslpath/cygpath here: the fake Word shell cannot run")
     # a PowerShell that writes the file makes the script succeed
     fake_powershell(tmp, "write")

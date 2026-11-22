@@ -529,6 +529,14 @@ PIPELINE_REQUIRED_ASSET_FILES = (
     "paper-skills/paper-review/scripts/convert_corpus.py",
     "paper-skills/paper-review/scripts/enumerate_conventions.py",
     "paper-skills/paper-review/scripts/count_words.py",
+    # The prompts tell the review session to RUN these five extractors and to
+    # carry their shared companion; a trimmed checkout passed the bundle
+    # preflight and then pointed at missing scripts (F070).
+    "paper-skills/paper-review/scripts/extract_acronyms.py",
+    "paper-skills/paper-review/scripts/extract_citations.py",
+    "paper-skills/paper-review/scripts/extract_numbers.py",
+    "paper-skills/paper-review/scripts/extract_occurrences.py",
+    "paper-skills/paper-review/scripts/evidence_names.py",
     "paper-skills/paper-revise/SKILL.md",
     "paper-skills/paper-revise/references/ledger.md",
     "paper-skills/paper-revise/references/edit_rules.md",

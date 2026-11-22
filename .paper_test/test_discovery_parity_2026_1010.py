@@ -279,7 +279,8 @@ def judge_sandbox(tmp: Path, labels=("v1", "v2"), sides=("target", "v1", "v2"), 
         body = []
         for i in range(rows):
             row = f"| class {i} | probe the class | {side}/f000{i}.md | "
-            row += (f"finding - X-{i + 1:03d}: {side}/f000{i}.md: evidence"
+            row += (f"finding - X-{i + 1:03d} (category 2, Major): "
+                    f"{side}/f000{i}.md: `evidence`"
                     if finding and i == 0
                     else f"clean - checked: {side}/f000{i}.md")
             body.append(row + " |")

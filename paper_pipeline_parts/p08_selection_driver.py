@@ -119,6 +119,15 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
     for rec in sorted(sheets, key=lambda x: (str(x.get("finished") or x.get("created") or ""),
                                              str(x.get("id")))):
         slot = (rec.get("target_id"), rec.get("judge_index"))
+        # A newer DONE record with no usable score sheet must not SUPERSEDE an
+        # earlier valid one: only a sheet that can contribute scores is a
+        # candidate for its slot (F055).
+        _sj = rec.get("scores")
+        if not isinstance(_sj, dict) or not (_sj.get("comparisons") or []):
+            diags.setdefault("unusable_newer_sheets", []).append(
+                f"{rec.get('id')}: no usable score sheet; an earlier sheet for "
+                f"{slot[0]} judge j{slot[1]} stays in force")
+            continue
         if slot in newest:
             old = newest[slot]
             diags["superseded_sheets"].append(
@@ -2143,8 +2152,17 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     turn_counter = None
     turn_cap_hit = False
     if archive_marker:
-        # A previous attempt's marker must never be mistaken for this attempt's result.
-        archive_stale_marker(sb, rec["id"])
+        # A previous attempt's marker must never be mistaken for this attempt's
+        # result. When it could not be archived or removed, refuse to launch:
+        # the stale marker would be read as THIS attempt's completion (F057).
+        stale_failures = archive_stale_marker(sb, rec["id"])
+        if stale_failures:
+            return {"rc": None, "dur": 0.0, "log": str(logf),
+                    "failure_kind": "stale_marker",
+                    "error": ("the previous attempt's completion marker could not be "
+                              "archived or removed (" + "; ".join(stale_failures)
+                              + "); refusing to launch an attempt that could be scored "
+                                "on stale evidence")}
     t0 = time.time()
     # The header is WRITTEN after the agent returns (the log is appended once), so
     # it must carry the time the attempt actually started -- it used to print
@@ -4929,7 +4947,7 @@ def round_tracking(ctx: Ctx, r: int, enabled: bool,
         fb_n = sum(1 for v in versions for c in v["comparisons"]
                    if c.get("ok") and not c.get("tool"))
         bad_n = sum(1 for v in versions for c in v["comparisons"]
-                    if not c.get("ok"))
+                    if not c.get("ok") and not c.get("skipped"))
         tools = sorted({c["tool"] for v in versions for c in v["comparisons"]
                         if c.get("ok") and c.get("tool")})
         print(f"[run] round {r} difference tracking: {ok_n} tracked copy(ies)"

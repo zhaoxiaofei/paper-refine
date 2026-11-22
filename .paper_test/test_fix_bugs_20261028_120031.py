@@ -448,10 +448,11 @@ def test_f77_f78_f80() -> None:
         check("F78 node is available for the installer check", False, "node not on PATH")
 
     script = (WS / "docxcompare.sh").read_text(encoding="utf-8", errors="replace")
-    check("F80 a missing python3 is reported as a dependency error, output removed",
+    check("F80 a missing python3 is a dependency error; only the temp is removed",
           "command -v python3" in script
           and "required to verify the comparison document" in script
-          and 'rm -f -- "$OUTPUT"' in script)
+          and 'rm -f -- "$OUTPUT_TMP"' in script
+          and 'rm -f -- "$OUTPUT"\n' not in script)
 
 
 def main() -> int:

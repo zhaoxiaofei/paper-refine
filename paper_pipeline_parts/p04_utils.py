@@ -9360,9 +9360,16 @@ def contained_under_or_none(root, rel):
     try:
         base = Path(root).resolve()
         raw = Path(str(rel or ""))
+        if str(rel or "").strip() in ("", ".") or raw == base:
+            # The ROOT itself is not a contained descendant: `rel == "."`
+            # otherwise made the whole pipeline root a manuscript base or a
+            # published winner (F019).
+            return None
         target = raw if raw.is_absolute() else base / raw
         resolved = target.resolve()
         resolved.relative_to(base)
+        if resolved == base:
+            return None
         return resolved
     except (OSError, RuntimeError, ValueError):
         return None
@@ -9377,6 +9384,9 @@ def contained_under(root, rel) -> Path:
     """
     base = Path(root).resolve()
     raw = Path(str(rel or ""))
+    if str(rel or "").strip() in ("", "."):
+        die(f"the recorded path {rel!r} is the pipeline root itself, not a contained "
+            f"descendant of {base}")
     target = raw if raw.is_absolute() else base / raw
     try:
         resolved = target.resolve()
@@ -9386,6 +9396,9 @@ def contained_under(root, rel) -> Path:
         # be reported, not traceback out of a read-only command.
         die(f"the recorded path {rel!r} cannot be resolved under {base}: {e}")
     try:
+        if resolved == base:
+            die(f"the recorded path {rel!r} resolves to the pipeline root itself {base}, "
+                f"not a contained descendant")
         resolved.relative_to(base)
     except ValueError:
         die(f"the recorded path {rel!r} escapes the pipeline root {base}; refusing to "

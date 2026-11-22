@@ -550,7 +550,7 @@ def audit_coverage_problems(audit) -> list:
     return problems
 
 
-def audit_artifact_problems(audit, frozen_ids) -> list:
+def audit_artifact_problems(audit, frozen_ids, expected_round=None) -> list:
     """Every problem that makes an `audit/audit.json` unusable (pure, testable).
 
     The contract is deliberately about DISPOSITIONS, not opinions: every frozen
@@ -592,7 +592,11 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
             if len(reason) < 20:
                 problems.append(f"{fid}: a drop needs a reason (>=20 characters) the human "
                                 f"can re-check")
-            if len(evid) < 40:
+            # The prompt allows `the verbatim text, or the file:line derivation`;
+            # a precise short locator (`base/main.md:12`) is the documented form
+            # and must not fail the prose-length bar (F027).
+            _locator = re.fullmatch(r"[\w./\-]+:\d+(?:-\d+)?", evid)
+            if len(evid) < 40 and _locator is None:
                 problems.append(f"{fid}: a drop needs EVIDENCE (>=40 characters: the verbatim "
                                 f"text, or the file:line derivation, that refutes the finding)")
             else:
@@ -631,9 +635,43 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
     adds = audit.get("adds")
     if adds is None:
         adds = []
+    # The counts block calls len(adds): guard the list FIRST (F059/R05).
     if not isinstance(adds, list):
         problems.append("audit/audit.json 'adds' is not a list")
         adds = []
+    # F059: round/counts/notes are schema fields; their VALUES are checked when
+    # present and their PRESENCE is required only when the expected round is known.
+    if "round" in audit:
+        if not isinstance(audit.get("round"), int) or isinstance(audit.get("round"), bool):
+            problems.append("audit/audit.json 'round' must be an integer")
+        elif expected_round is not None and audit.get("round") != int(expected_round):
+            problems.append(f"audit/audit.json 'round' is {audit.get('round')!r}, not this "
+                            f"run's round {int(expected_round)}")
+    elif expected_round is not None:
+        problems.append("audit/audit.json has no 'round': the audit must name the round it "
+                        "disposes")
+    if "notes" in audit and not str(audit.get("notes") or "").strip():
+        problems.append("audit/audit.json 'notes' is empty; the prompt requires a note")
+    elif "notes" not in audit and expected_round is not None:
+        problems.append("audit/audit.json has no 'notes': the prompt requires a note")
+    _conf = sum(1 for v in seen.values() if v == "confirm")
+    _drop = sum(1 for v in seen.values() if v == "drop")
+    if "counts" in audit:
+        _counts = audit.get("counts")
+        if not isinstance(_counts, dict):
+            problems.append("audit/audit.json 'counts' must be an object")
+        else:
+            _want_counts = {"confirmed": _conf, "dropped": _drop, "added": len(adds)}
+            for _k, _want in _want_counts.items():
+                _got = _counts.get(_k)
+                if not isinstance(_got, int) or isinstance(_got, bool) or _got < 0:
+                    problems.append(f"audit/audit.json counts.{_k} must be a non-negative "
+                                    f"integer")
+                elif _got != _want:
+                    problems.append(f"audit/audit.json counts.{_k} is {_got}, but the "
+                                    f"dispositions/adds record {_want}")
+    elif expected_round is not None:
+        problems.append("audit/audit.json has no 'counts': the prompt requires counts")
     if adds:
         # AGENTS Rule 1: the AUDIT disposes the frozen findings and GENERATES
         # NO NEW FINDINGS. An observation the auditor cannot dispose belongs in
@@ -818,7 +856,12 @@ def postcheck_audit(ctx: Ctx, rec: dict):
                     "observations belong in audit/UNRESOLVED.md, never in an `AU-` adds row)")
     else:
         audit = read_json(aj, revive=False, lenient=True)         # agent-written
-        problems = audit_artifact_problems(audit, frozen_ids)
+        # The authoritative gate must enforce the SAME schema the prompt states
+        # and the selfcheck previews: a `round` copied from another round (or
+        # absent), and absent `counts`/`notes`, are problems here, not only in
+        # the pre-flight.
+        problems = audit_artifact_problems(audit, frozen_ids,
+                                           expected_round=rec.get("round"))
         coverage_problems = audit_coverage_problems(audit)
         problems += coverage_problems
         errs.extend(problems)
@@ -1998,6 +2041,9 @@ DEDUP_DOC_RE = re.compile(
     r"([\w][\w./-]*\.(?:md|markdown|txt|tex|ltx|docx|doc|rtf|pdf|csv|tsv|json|py|bib))"
     r"(?::\d+|\b)", re.I)
 _NUMERIC_CHECK_RE = re.compile(r"^M0*(\d+)$", re.I)
+# The FROZEN vocabulary also contains J ids, and the review contract's
+# norm() maps `J05` to `J5`; the judge-side mapping must do the same (F069).
+_FROZEN_NUMERIC_CHECK_RE = re.compile(r"^([MJ])0*(\d+)$", re.I)
 
 
 def dedup_mode_of(ctx=None) -> str:
@@ -2486,8 +2532,8 @@ def _frozen_check_id(raw) -> str:
     same kind the FMT-*/Q1-Q12 mappings above exist to close.
     """
     cid = _norm_check_id(raw)
-    m = _NUMERIC_CHECK_RE.match(cid)
-    return f"M{int(m.group(1))}" if m else cid
+    m = _FROZEN_NUMERIC_CHECK_RE.match(cid)
+    return f"{m.group(1).upper()}{int(m.group(2))}" if m else cid
 
 
 def _coverage_disposition(text: str):
@@ -2713,8 +2759,8 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
                 continue
             seen_rows.add(row_key)
             if len(norm[2].split()) > EVIDENCE_MAX_WORDS:
-                out_w.append(f"{where}.{side}[{k}].evidence is {len(norm[2].split())} words "
-                             f"(schema: <={EVIDENCE_MAX_WORDS})")
+                emit(f"{prefix}{where}.{side}[{k}].evidence is {len(norm[2].split())} words "
+                     f"(schema: <={EVIDENCE_MAX_WORDS})")
             if _is_length_guard_check(cid) and (norm[0] != "formatting" or norm[1] != "minor"):
                 emit(f"{prefix}{where}.{side}[{k}]: a length/caption row (`{cid}`) is a "
                      f"formatting-tier MINOR row -- length may enter a comparison by at most +-1 "
@@ -2893,7 +2939,7 @@ JUDGE_DISCOVERY_DIR = "judge_review/discovery"
 # (the block tells the judge to read that skill, and the module's own
 # `_DISCOVERY_STATUS_TOKENS` already accepts both for the review's probes).
 JUDGE_DISPOSITION_RE = re.compile(
-    r"\b(?:clean|finding|unable|limitation|no anomal(?:y|ies))\b", re.I)
+    r"\b(?:clean|finding|unable|unknown|limitation|no anomal(?:y|ies))\b", re.I)
 
 
 def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
@@ -2951,6 +2997,32 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
         ids_in_file = []
         for r in rows:
             text = _row_text(r)
+            # The shape gate applies to the DISPOSITION cell, not any mention:
+            # a clean row saying "(no finding)" is not a finding row.
+            disp_cell = ""
+            for _k, _v in r.items():
+                if str(_k or "").strip().lower() in ("disposition", "status", "verdict"):
+                    disp_cell = " ".join(str(_v or "").split()); break
+            if not disp_cell:
+                for _v in reversed(list(r.values())):
+                    _cell = " ".join(str(_v or "").split())
+                    if JUDGE_DISPOSITION_RE.search(_cell):
+                        disp_cell = _cell; break
+            if re.match(r"(?i)\s*finding\b", disp_cell):
+                # A finding row carries location, category (0-5), severity and
+                # a verbatim evidence quote (F038).
+                _has_sev = bool(re.search(r"(?i)\b(?:fatal|critical|major|minor)\b", text))
+                _has_cat = bool(re.search(r"(?i)\bcategory\b\s*[:=]?\s*[0-5]\b", text)
+                                or re.search(r"(?<!X-)(?<![A-Za-z0-9])[0-5](?![A-Za-z0-9])", text))
+                _has_loc = bool(re.search(
+                    r"[\w./-]+\.(?:md|txt|tex|docx|doc|json|csv|tsv|py|bib|pdf|xlsx?|"
+                    r"html?|xml)\b|\bline\s*\d+|\bp\.?\s*\d+\b", text, re.I))
+                _has_quote = bool(re.search(r"`[^`]{3,}`|[\"'][^\"']{4,}[\"']", text))
+                if not (_has_sev and _has_cat and (_has_loc or _has_quote)):
+                    out_e.append(
+                        f"{JUDGE_DISCOVERY_DIR}/{side}.md has a `finding` row without the "
+                        f"required location/category/severity/verbatim evidence: "
+                        f"{text[:110]!r}")
             if not JUDGE_DISPOSITION_RE.search(text):
                 out_w.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md has a row with no disposition "
                              f"cell (`clean -- checked: <locations>` or a finding row): "
@@ -3010,6 +3082,7 @@ def postcheck_judge(ctx: Ctx, rec: dict):
     # seeded into the sandbox, so the judge cannot lean on it) and check that the
     # judge produced the M18/M19/M20 rows itself. A missing row is a warning, not
     # a failure: the panel's validity must not depend on an agent's file naming.
+    cl_scan_ok = False
     try:
         ev = code_side_evidence(ctx, sb / "target", f"{rec['id']}:judge")
         rec["judge_evidence"] = ev
@@ -3037,10 +3110,18 @@ def postcheck_judge(ctx: Ctx, rec: dict):
         # in the scan/report write downgrade it to a warning (F137).
         cl_target = [r for r in ((ev.get("format") or {}).get("rows") or [])
                      if str(r.get("rule") or "").upper() in COVER_LETTER_STAMP_RULES]
+        cl_scan_ok = True
     except Exception as e:                                            # noqa: BLE001
         cl_target = []
         warns.append(f"BLIND JUDGE GROUNDING: the code-side scan of the blinded target failed "
                      f"({type(e).__name__}: {e})")
+    if not cl_scan_ok:
+        # A scan that could not run did not find "no cover letter": fail CLOSED
+        # (the comment above already promised the gate was enforced outside the
+        # try, while `cl_target = []` silently switched it off) (F003).
+        errs.append("FMT-CL1: the code-side scan of the blinded target could not run, so the "
+                    "cover-letter gate is UNVERIFIED; re-run the judge or check the report "
+                    "manually")
     if cl_target:
         try:
             errs.extend(judge_cover_letter_artifact_problems(sb, cl_target))
@@ -3765,6 +3846,24 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
             if not isinstance(c, dict):
                 continue
             op = str(c.get("operation") or "edit").strip().lower()
+            if op == "remove":
+                # A whole-file removal's `before` is the preimage (or a named
+                # role/content) and `after` is empty; the old `continue` below
+                # read neither, so a remove row could carry no preimage at all
+                # (F031).
+                _loc = str(c.get("location") or "").strip()
+                if (not str(c.get("before") or "").strip()
+                        and not re.search(r"(?i)\b(?:whole|entire|full)\s+file\b|"
+                                          r"\bwhole\b", _loc)):
+                    problems.append(
+                        f"response row {cid!r}: the `remove` change to "
+                        f"{str(c.get('file') or '').strip()!r} has no `before` (quote the "
+                        f"deleted file's preimage or name its role/content)")
+                if str(c.get("after") or "").strip():
+                    problems.append(
+                        f"response row {cid!r}: the `remove` change to "
+                        f"{str(c.get('file') or '').strip()!r} carries a non-empty `after`; "
+                        f"a whole-file deletion has no post-image")
             if op != "edit" and not str(c.get("location") or "").strip():
                 # Every change entry names WHERE, including a whole-file
                 # `remove`: the letter's `**Changes:**` line is
@@ -5033,8 +5132,13 @@ def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) ->
         elif status == "already-addressed" and not str(row.get("location") or "").strip():
             errs.append(f"reconciliation row {cid!r}: 'already-addressed' needs the base/ "
                         f"location")
-        elif status in ("manual", "not-applicable") and not str(row.get("rationale") or "").strip():
-            errs.append(f"reconciliation row {cid!r}: {status!r} needs a rationale")
+        elif status in ("manual", "not-applicable") and not _coverage_reason_named(
+                row.get("rationale")):
+            # A one-character rationale ("x") discharged a manual/not-applicable
+            # row although the docstring requires a reason (F101); the shared
+            # coverage gate rejects filler and anonymous pointers.
+            errs.append(f"reconciliation row {cid!r}: {status!r} needs a real rationale "
+                        f"(not filler or an anonymous pointer)")
     return errs
 
 
@@ -5055,7 +5159,11 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
         return str(row.get("check") or row.get("name") or "").strip().lower()
 
     def text(row) -> str:
-        return " ".join(str(v) for v in row.values() if isinstance(v, str)).lower()
+        # The KEY counts as a payload location: a dedicated `gap:` field whose
+        # value carries the excluded classes must satisfy the gate without the
+        # word "gap" being repeated inside the value (F134).
+        return " ".join(f"{k} {v}" for k, v in row.items()
+                        if isinstance(v, str)).lower()
 
     # "not a gap" / "no gap" is the opposite of the required statement; a bare
     # substring test would accept it.
@@ -5069,7 +5177,7 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
     gap_placeholder = re.compile(
         # A bare placeholder (`-`, `.`, `none`) is a non-word string, so a
         # trailing `\b` would not match at end-of-string: accept `$` as well.
-        r"^(?:none|n/?a|nothing|-+|\.+)(?:\b|$)"
+        r"^(?:none|n/?a|nothing|-+|\.+|x)(?:\b|$)"
         # `gap: none found`, `gap: no gaps`, `gap: not applicable`: a payload
         # that DENIES a gap is the opposite of the required list.
         r"|^(?:none|no|not|never|nothing|zero|n/?a)\b",
@@ -5082,7 +5190,8 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
         """Does one row FIELD's `gap:` carry class text (not a placeholder)?"""
         for m in gap_list.finditer(field.lower()):
             payload = m.group("payload").strip().strip(" \t.,;:`'\"")
-            if payload and not gap_placeholder.match(payload):
+            if (payload and not gap_placeholder.match(payload)
+                    and len(re.findall(r"[A-Za-z0-9]", payload)) >= 3):
                 return True
         return False
 
@@ -5094,6 +5203,10 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
             t = text(r)
             if "gap" not in t or gap_denied.search(t):
                 continue
+            dedicated = " ".join(str(r.get(k) or "") for k in ("gap", "gaps")).strip()
+            if dedicated and not gap_placeholder.match(dedicated) \
+                    and len(re.findall(r"[A-Za-z0-9]", dedicated)) >= 3:
+                return True
             if gap_unknown.search(t) or any(named_gap_payload(f) for f in fields):
                 return True
         return False
@@ -5149,6 +5262,19 @@ def concerns_finding_list_problems(sb: Path, data: dict) -> tuple:
                 by_concern[concern] = f
             if not str(f.get("evidence") or "").strip():
                 errs.append(f"finding {f.get('id')!r} has no evidence (quote the reviewer)")
+            else:
+                # The concerns prompt says `evidence` is the source's VERBATIM
+                # quote; a non-empty invented sentence passed (F037). When the
+                # concern row carries its quote, the finding's evidence must be
+                # that quote or a contiguous excerpt of it.
+                _concern_row = next((r for r in rows if str(r.get("id")) == concern), None)
+                _quote = " ".join(str((_concern_row or {}).get("quote") or "").split()).strip("\"'“”‘’")
+                _ev = " ".join(str(f.get("evidence") or "").split()).strip("\"'“”‘’")
+                if _quote and _ev and _ev.lower() not in _quote.lower() \
+                        and _quote.lower() not in _ev.lower():
+                    errs.append(f"finding {f.get('id')!r}: evidence is not the concern's "
+                                f"verbatim reviewer quote (quote the concern text or a "
+                                f"contiguous excerpt of it)")
             if not str(f.get("location") or "").strip():
                 errs.append(f"finding {f.get('id')!r} has no location")
             # The scoped finding schema the concerns prompt states is
@@ -8436,7 +8562,6 @@ def _collapse_ws(text: str) -> str:
     """
     return " ".join((text or "").split())
 
-
 def _pipeline_change_is_explained(base: Path, rev: Path, rel: str,
                                   removed=()) -> bool:
     """Is `rev/rel` exactly `base/rel` with the RECORDED removals applied?
@@ -8469,8 +8594,6 @@ def _pipeline_change_is_explained(base: Path, rev: Path, rel: str,
         if sentence in b:
             b = b.replace(sentence, "", 1)
     return _collapse_ws(b) == _collapse_ws(r)
-
-
 def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=(),
                           removed=()) -> list:
     """The major/minor scope guard: only concern-driven edits are allowed.
@@ -8603,7 +8726,6 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=(),
         # the same relative path; the FILE NAME ALONE is not (F02), and neither
         # is "../outside/x" (the old lstrip("./") made it "outside/x").
         return strip_leading_dot_slash(value)
-
     authorized_paths = {_ledger_rel(p) for p in authorized}
     added = sorted(set(got) - set(want))
     dropped = sorted(set(want) - set(got))
@@ -8666,8 +8788,6 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=(),
                         f"edit must trace to a reviewer concern. A bare basename does not "
                         f"authorize a same-named document in another directory")
     return errs
-
-
 POSTCHECK_HANDLERS.update({
     "feedback": postcheck_feedback,
     "concerns": postcheck_concerns,
@@ -8678,8 +8798,6 @@ REBUILD_HANDLERS.update({
     "concerns": lambda ctx, rec: materialize_concerns(ctx, int(rec["round"])),
     "response": lambda ctx, rec: materialize_response(ctx, int(rec["round"])),
 })
-
-
 def journal_final_target(ctx: Ctx) -> tuple:
     """(the package the submission is built from, a label for the prompt)."""
     mode = journal_mode_of(ctx)
@@ -8707,8 +8825,6 @@ def journal_final_target(ctx: Ctx) -> tuple:
         pin = pins[-1]
         return pinned_docs_dir(ctx, pin), f"the pinned champion {pin.get('id')}"
     return ctx.pristine, "the original (no round was pinned)"
-
-
 def journal_final_version_id(ctx: Ctx) -> str:
     """The round-version id whose tracked changes belong to the submission.
 
@@ -8722,8 +8838,6 @@ def journal_final_version_id(ctx: Ctx) -> str:
         return f"r{int(ctx.rounds_count())}_{revise_vid(1)}"
     pins = ctx.state.get("pinned") or []
     return str(pins[-1].get("id") or "") if pins else ""
-
-
 def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                                response_dir: Path = None) -> Path:
     """Assemble the JOURNAL SUBMISSION: the package minus the non-submitted areas.
@@ -9030,8 +9144,6 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     if backup is not None:
         rmtree_force(backup)
     return final_dst
-
-
 def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: int,
                            manual: bool, nowait: bool, poll: int,
                            retry_backoff: int = 0, retry_backoff_max: int = 0) -> tuple:
@@ -9071,8 +9183,6 @@ def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: i
           + (f"; response letter included ({', '.join(sorted(p.name for p in dst.iterdir() if p.name.startswith('RESPONSE') or p.name == 'response_map.json'))})" if response_dir else "; no response letter (transfer mode)")
           + ")")
     return True, False
-
-
 def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
     """Re-verify one attempt's deliverables and record its outcome.
 
@@ -9167,8 +9277,6 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
         record_attempt(ctx, rec, ok, errs, warns, source=source)
     ctx.log("postcheck", rec["id"], "ok" if ok else "failed")
     return ok
-
-
 # =====================================================================
 # THE SANDBOX SELF-CHECK (`selfcheck --sandbox <dir> --stage <kind>`)
 #
@@ -9188,7 +9296,6 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
 # self-check says so. Everything it prints comes from the same function the
 # postcheck calls, so the two can never disagree.
 # =====================================================================
-
 SELFCHECK_STAGES = ("rewrite", "guided_review", "cold_start_review", "audit", "revise",
                     "integrate", "judge",
                     # The journal-mode sessions are agent runs too: they had no
@@ -9196,7 +9303,6 @@ SELFCHECK_STAGES = ("rewrite", "guided_review", "cold_start_review", "audit", "r
                     # inconsistent concern ledger was only discovered by the
                     # postcheck after the attempt.
                     "feedback", "concerns", "response")
-
 # --- the stage's own bookkeeping deliverables --------------------------------
 # `required` FAILS an attempt when it is missing (the postcheck errors on it);
 # `expected` is recorded as a warning. Two layers read this table: the rescue
@@ -9242,8 +9348,6 @@ STAGE_DELIVERABLES = {
     # `signal_search_dirs` (judge_review/) rather than to this rescue.
     "judge": {"required": (), "expected": ("judge_review/artifacts/VIS_visual.md",)},
 }
-
-
 def _prompt_rewrite_level(sb: Path) -> str:
     """The rewrite level THIS sandbox's prompt declares ("" when unreadable).
 
@@ -9258,8 +9362,6 @@ def _prompt_rewrite_level(sb: Path) -> str:
     text = text[:20000]
     m = re.search(r"THIS ARM'S LEVEL:\s*(structural|sentence)", text, re.IGNORECASE)
     return m.group(1).lower() if m else ""
-
-
 def _sandbox_handoff_mode(sb: Path) -> str:
     """The author-to-complete policy THIS sandbox's prompt states.
 
@@ -9279,8 +9381,6 @@ def _sandbox_handoff_mode(sb: Path) -> str:
     if "PIPELINE HAND-OFF PLACEHOLDERS" in text:
         return "document"
     return DEFAULT_AUTHOR_TO_COMPLETE
-
-
 def _zero_item_handoff_package(mode, marker) -> bool:
     """True when the readme policy and the marker agree no manual item is owed.
 
@@ -9297,8 +9397,6 @@ def _zero_item_handoff_package(mode, marker) -> bool:
     summary = marker.get("summary") if isinstance(marker, dict) else None
     count = summary.get("manual_items") if isinstance(summary, dict) else None
     return is_int(count) and count == 0
-
-
 def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
     """Move a REQUIRED bookkeeping deliverable the session wrote one level up.
 
@@ -9339,6 +9437,20 @@ def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
         if src is None:
             continue
         src_rel = src.relative_to(sb).as_posix()
+        # Never write through a symlinked package directory: the rescue runs
+        # BEFORE the stage handler's symlinked-package refusal (F022).
+        _walk = target
+        _linked = None
+        while _walk != sb and sb in _walk.parents:
+            if _walk.is_symlink():
+                _linked = _walk
+                break
+            _walk = _walk.parent
+        if _linked is not None:
+            notes.append(f"the `{name}` written to `{src_rel}` was NOT adopted: "
+                         f"{_linked.relative_to(sb).as_posix()} is a symlink, so the move "
+                         f"would write outside the sandbox")
+            continue
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(target))
@@ -9350,8 +9462,6 @@ def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
                      f"ADOPTED (moved into place) -- the prompts pin the deliverable's path")
         print(f"  [warn] {rec.get('id')}: {notes[-1]}")
     return notes
-
-
 def stage_source_gates(sb: Path, kind: str, pkg_dir: Path) -> tuple:
     """(errs, warns) for the ctx-free source gates of a package-producing stage.
 
@@ -9393,8 +9503,6 @@ def stage_source_gates(sb: Path, kind: str, pkg_dir: Path) -> tuple:
     errs.extend(r_errs)
     warns.extend(r_warns)
     return errs, warns
-
-
 def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                       prompt_text: str | None = None) -> tuple:
     """(ok, errors, warnings) for the paperwork of one sandbox (read-only).
@@ -9450,7 +9558,6 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     # 2. the stage's own deliverables: the REQUIRED ones fail an attempt in the
     #    postcheck, the EXPECTED ones are warnings there too.
     table = STAGE_DELIVERABLES.get(kind) or {}
-
     def _adoptable_required(rel: str):
         """A stray copy `rescue_misplaced_deliverable` would move into place.
 
@@ -9465,7 +9572,6 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             cands.append(sb / pkg / "work" / name)
         cands.append(sb / "work" / name)
         return next((c for c in cands if _usable_deliverable(c)), None)
-
     for rel in table.get("required", ()):
         p = sb / rel
         if not p.is_file():
@@ -9601,7 +9707,8 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             errs.extend(audit_artifact_problems(
                 _audit,
                 [str(f.get("id") or "").strip() for f in _frozen_review_findings(sb)
-                 if str(f.get("id") or "").strip()]))
+                 if str(f.get("id") or "").strip()],
+                expected_round=rec.get("round")))
             # The coverage table is part of the contract the postcheck enforces:
             # `postcheck_audit` appends `audit_coverage_problems` to the same
             # disposition problems, so the pre-flight must run it too. It did
@@ -9872,8 +9979,6 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
         if _cl_rows:
             errs.extend(judge_cover_letter_artifact_problems(sb, _cl_rows))
     return (not errs), errs, warns
-
-
 def cmd_selfcheck(args) -> None:
     """`selfcheck`: print the postcheck's paperwork verdict for one sandbox."""
     sb = Path(args.sandbox).expanduser().resolve()

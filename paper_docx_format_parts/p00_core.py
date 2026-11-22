@@ -989,7 +989,10 @@ def attr(frag: str | None, name: str) -> str | None:
     m = re.search(rf"w:{name}\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", frag)
     if not m:
         return None
-    return m.group(1) if m.group(1) is not None else m.group(2)
+    # An attribute VALUE is decoded XML text: `Emph&amp;A` is the style id
+    # `Emph&A`, which is the key `parse_styles`/`style_chain` use. Returning the
+    # raw entity made a run style unresolved (F058).
+    return unesc(m.group(1) if m.group(1) is not None else m.group(2))
 
 
 def elem(frag: str | None, tag: str) -> str | None:
@@ -1011,7 +1014,10 @@ def elem(frag: str | None, tag: str) -> str | None:
     # Masking is length-preserving, so the returned slice is the live element's
     # own bytes.
     masked = _mask_noncontent(frag)
-    m = re.search(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}>",
+    # XML permits whitespace before the `>` of an end tag (`</w:b >`); an exact
+    # close missed the live element and writers then inserted a DUPLICATE
+    # property child (F060).
+    m = re.search(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}\s*>",
                   masked, re.S)
     return frag[m.start():m.end()] if m else None
 
@@ -1345,7 +1351,9 @@ def _fld_simple_instruction(tag: str) -> str:
     value = attr(tag, "instr")
     if value is None:
         return ""
-    return unesc(value).strip()
+    # attr() now decodes the attribute VALUE once; a second unesc() decoded
+    # `&amp;quot;` into a quote instead of the literal `&quot;` (F50).
+    return value.strip()
 
 
 def field_ranges(xml: str) -> list:
@@ -1624,7 +1632,9 @@ def zotero_field_report(xml: str) -> dict:
             # literal text `&quot;`, not a quote); the extra `.replace(...)`
             # decoded it a second time.
             _instr_raw = attr(attrs, "instr")
-            instr = unesc(_instr_raw) if _instr_raw is not None else ""
+            # attr() already decoded the VALUE once (F058); a second unesc here
+            # turned the literal `&quot;` into a quote (F50).
+            instr = _instr_raw if _instr_raw is not None else ""
             fields.append({"begin": m.start(), "end": m.end(), "instr": [instr],
                            "separate": m.start(),
                            "result": [text_of(body)]})

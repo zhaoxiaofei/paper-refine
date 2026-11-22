@@ -890,8 +890,23 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                 return False
             fallback = bool(c.get("fallback"))
             out_rel = c.get("fallback_out") if fallback else c.get("out")
-            if not out_rel or not _tracking_regular_file(ctx.root / str(out_rel)):
+            # `ctx.root / "/etc/passwd"` discards the root: a tampered or merged
+            # manifest row certified a pipeline copy outside --root (F145).
+            out_path = contained_under_or_none(ctx.root, out_rel)
+            if out_path is None:
                 return False
+            # Stat the RECORDED path, not its resolved target: a symlink at the
+            # copy path must read as stale (F209) even when it points inside
+            # the root.
+            _raw_out = Path(str(out_rel))
+            out_check = _raw_out if _raw_out.is_absolute() else ctx.root / _raw_out
+            if not _tracking_regular_file(out_check):
+                return False
+            in_pkg_path = (contained_under_or_none(ctx.root, c.get("in_package"))
+                           if c.get("in_package") else None)
+            if c.get("in_package"):
+                if in_pkg_path is None:
+                    return False
             in_pkg = c.get("in_package")
             if in_pkg:
                 if fallback:
@@ -899,22 +914,28 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                     # suffix (the recorded `in_package` path names the real
                     # copy's name), so it is derived, never assumed. A stale
                     # REAL copy beside it means the fallback is not fresh.
-                    if _tracking_regular_file(ctx.root / str(in_pkg)):
+                    _raw_in = Path(str(in_pkg))
+                    in_chk = _raw_in if _raw_in.is_absolute() else ctx.root / _raw_in
+                    if _tracking_regular_file(in_chk):
                         return False
-                    sib = (ctx.root / str(in_pkg)).parent / (
+                    sib = in_chk.parent / (
                         Path(str(c.get("revised_rel"))).stem
                         + tracking_aux_suffix(str(c.get("baseline")), str(c.get("ext")),
                                               fallback=True))
                 else:
-                    sib = ctx.root / str(in_pkg)
+                    _raw_in = Path(str(in_pkg))
+                    sib = _raw_in if _raw_in.is_absolute() else ctx.root / _raw_in
                 if not _tracking_regular_file(sib):
                     return False
             if c.get("pdf_ok"):
                 # The compiled marked-up PDF is part of the same auxiliary
                 # family: a row whose PDF vanished is refreshed, not reused.
                 for field in ("pdf", "pdf_in_package"):
-                    rel = c.get(field)
-                    if not rel or not _tracking_regular_file(ctx.root / str(rel)):
+                    if contained_under_or_none(ctx.root, c.get(field)) is None:
+                        return False
+                    _raw_pdf = Path(str(c.get(field)))
+                    pdf_path = _raw_pdf if _raw_pdf.is_absolute() else ctx.root / _raw_pdf
+                    if not _tracking_regular_file(pdf_path):
                         return False
             elif c.get("ext") == ".tex" and c.get("in_package") \
                     and not c.get("fallback") \
@@ -1311,6 +1332,9 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
     persist_root = ctx.root / TRACKING_DIRNAME / (out_key or f"r{r}_{vid}") / token
     persist_out = persist_root / rel_dir / f"{cand.stem}{suffix}"
     persist_fallback = persist_root / rel_dir / f"{cand.stem}{fb_suffix}"
+    # A planted symlink at tracking/<ver>/<token>/... redirected the plain
+    # mkdir+copy2 writes outside the root; only the in-package copy was guarded
+    # (F021).
     # The in-package copy: written beside the candidate document, EXCEPT for the
     # a1 base, whose `base/` is a raw hash-verified input manifest (writing into
     # it would read as a modified input). a1 keeps its copies under <root>/tracking/.
@@ -1329,6 +1353,17 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
            "base_digest": pair.get("base_digest"), "cand_digest": pair.get("cand_digest"),
            "fallback": None, "fallback_out": None, "tool": None, "ok": False,
            "attempts": [], "warning": None, "identical": False, "reused_from": None}
+    # A planted symlink at tracking/<ver>/<token>/... must not redirect the
+    # plain mkdir+copy2 writes outside the root (F021). A refusal is a RECORDED
+    # attempt, never a raise (the tracking pass reports, the round continues).
+    try:
+        _refuse_symlinked_parent(persist_out)
+        _refuse_symlinked_parent(persist_fallback)
+    except OSError as e:
+        rec["warning"] = f"difference tracking failed: {e}"
+        rec["attempts"] = [{"backend": "output-guard", "cmd": [], "rc": None,
+                            "ok": False, "detail": str(e)}]
+        return rec
     if tool == "none":
         # `--tool none` asks for NO difference tool at all (the same contract as
         # `redline --tool none`): the row is reported as skipped and no copy --

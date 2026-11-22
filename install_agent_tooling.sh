@@ -640,6 +640,7 @@ if [ "$codex_enabled" = 1 ]; then
             return 1
         fi
         chmod --reference="$codex_home/config.toml" "$target" 2>/dev/null || true
+        codex_config_backup_path="$target"
         echo "backed up: $codex_home/config.toml -> $target"
     }
 
@@ -666,7 +667,20 @@ if [ "$codex_enabled" = 1 ]; then
                 # $CODEX_HOME/mcp-tools): replace the entry.
                 backup_codex_config
                 CODEX_HOME="$codex_home" codex mcp remove "$name" >/dev/null
-                CODEX_HOME="$codex_home" codex mcp add "$name" -- "$command" "$script"
+                if ! CODEX_HOME="$codex_home" codex mcp add "$name" -- "$command" "$script"; then
+                    # The old row was removed before its replacement was added:
+                    # restore the pre-change config instead of leaving the
+                    # operator without a working entry (F124).
+                    if [ -n "${codex_config_backup_path:-}" ] \
+                            && [ -f "$codex_config_backup_path" ]; then
+                        _restore_tmp="$codex_home/.config.toml.restore.$$"
+                        if ( set -o noclobber; cat -- "$codex_config_backup_path" > "$_restore_tmp" ); then
+                            mv -f -- "$_restore_tmp" "$codex_home/config.toml"
+                            echo "error: restored $codex_home/config.toml from $codex_config_backup_path after a failed add" >&2
+                        fi
+                    fi
+                    exit 1
+                fi
                 echo "repointed codex MCP server: $name -> $script"
                 ;;
             *)

@@ -142,6 +142,11 @@ def _install_credential_key_vocabulary() -> None:
     """
     extra = frozenset({
         "sig", "signature", "xamzsignature", "xamzcredential", "xamzsecuritytoken",
+        # Google Cloud Storage signed URLs carry the same three credential
+        # spellings as the AWS entries above; without them a
+        # `?X-Goog-Signature=` value stayed in the base URL and reached the
+        # codex argv (F42).
+        "xgoogsignature", "xgoogcredential", "xgoogsecuritytoken",
         "sessiontoken", "jwt", "ticket", "code", "sas", "sastoken", "idtoken",
     })
     current = getattr(rt, "_CREDENTIAL_KEY_NAMES", None)

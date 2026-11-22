@@ -559,10 +559,13 @@ def test_harness_and_docs() -> None:
     base = ROOT / "tmp"
     try:
         base.mkdir(parents=True, exist_ok=True)
+        # An EXISTING but read-only `tmp/` makes mkdir succeed; the mkdtemp
+        # below then raises OSError, so attempt both inside the try (F150).
+        keep = Path(tempfile.mkdtemp(prefix="s092-", dir=base))
     except OSError:
         base = Path.home() / ".cache" / "paper-refine-tests"
         base.mkdir(parents=True, exist_ok=True)
-    keep = Path(tempfile.mkdtemp(prefix="s092-", dir=base))
+        keep = Path(tempfile.mkdtemp(prefix="s092-", dir=base))
     (keep / "precious.txt").write_text("keep", encoding="utf-8")
     try:
         refused = False

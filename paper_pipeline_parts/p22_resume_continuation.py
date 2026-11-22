@@ -56,7 +56,22 @@ def capture_agent_session_id(ctx: Ctx, rec: dict) -> str:
             for pattern in (SESSION_ID_RE, DSH_SESSION_ID_RE)
             for m in pattern.finditer(text)]
     hits.sort()
-    return str(hits[-1][1]) if hits else ""
+    if hits:
+        return str(hits[-1][1])
+    # dsh emits its `sessionId` ONCE at the HEAD of the NDJSON stream; a log
+    # over 16 MiB lost it entirely because only the tail was scanned (F047).
+    # Fall back to the first 64 KiB (the id is at the stream head) and prefer
+    # the last id on that side.
+    try:
+        with _open_regular_no_follow(log) as fh:
+            head = fh.read(64 * 1024).decode("utf-8", "replace")
+    except OSError:
+        return ""
+    head_hits = [(m.start(), m.group(1))
+                 for pattern in (SESSION_ID_RE, DSH_SESSION_ID_RE)
+                 for m in pattern.finditer(head)]
+    head_hits.sort()
+    return str(head_hits[-1][1]) if head_hits else ""
 
 
 def resume_argv_for(cmd: list, session_id: str) -> list:
@@ -343,6 +358,17 @@ _AUDIT_PROSE_VERB_RE = re.compile(
 _AUDIT_CHECK_SUBJECT_RE = re.compile(
     r"(?i)\b(?:sweep|pass|check|review|audit|scan|re-?derivation|verification|"
     r"coverage|table|session|attempt)\b")
+# A count whose tail records NO work at all ("the sweep was skipped",
+# "we could not check anything", "nobody looked") is not a disposition, even
+# though none of the negated-verb spellings above matches it (F001/F005).
+_AUDIT_NO_WORK_RE = re.compile(
+    r"(?i)(?:\b(?:skip(?:ped|s)?|deferred?|postponed?|not\s+attempted|tbd|todo)\b"
+    r"|\b(?:never|nobody|no\s+one)\s+(?:looked|checked|reviewed|examined|verified|"
+    r"inspected)\b"
+    r"|\bdid\s+not\s+happen\b"
+    r"|\b(?:work|check|sweep|pass|review|audit|scan)\s+(?:was|were|is|are)\s+"
+    r"(?:not\s+(?:done|performed|run|completed)|skipped|deferred)\b"
+    r"|\b(?:could|can)\s+not\s+(?:check|verify|review|examine|inspect)\s+anything\b)")
 _AUDIT_COUNT_NEGATION_RE = re.compile(
     r"(?i)\b(?:not|never|without|could\s+not|cannot|did\s+not|was\s+not|were\s+not|"
     r"has\s+not|have\s+not|is\s+not|are\s+not)\b"
@@ -410,7 +436,11 @@ def _audit_prose_names_object(tail) -> bool:
     `unable to check artwork/text parity` names the object it could not check.
     """
     rest = _AUDIT_PROSE_VERB_RE.sub("", str(tail or ""), count=1)
-    return _audit_names_content(rest.strip(" \t.,;:-\u2014\u2013"))
+    rest = rest.strip(" \t.,;:-\u2014\u2013")
+    # `unable to check x` names a one-letter object, which is filler exactly
+    # like a bare `unable to check` (F082): require a real content token.
+    return (_audit_names_content(rest)
+            and len(re.findall(r"[A-Za-z0-9]", rest)) >= 3)
 
 
 def _audit_count_tail_negates_check(text: str) -> bool:
@@ -466,7 +496,8 @@ def _audit_disposition_ok(value) -> bool:
         # shared no-work test is applied as well (F008). A ZERO count whose tail
         # carries a bare inability names no object and is not a verdict either
         # (`0 findings -- unable to check`).
-        if _COVERAGE_NOWORK_RE.search(text) or _audit_count_tail_negates_check(text):
+        if (_COVERAGE_NOWORK_RE.search(text) or _AUDIT_NO_WORK_RE.search(text)
+                or _audit_count_tail_negates_check(text)):
             return False
         if re.search(r"(?i)\b(?:0|zero|no)\s+finding", text):
             m = _AUDIT_PROSE_UNABLE_RE.search(text)
