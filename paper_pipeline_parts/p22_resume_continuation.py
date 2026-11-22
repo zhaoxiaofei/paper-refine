@@ -5,6 +5,8 @@
 # the single-file source.
 # Session continuation: capture the CLI session id, build its resume argv, decide
 # whether an unfinished attempt may continue, and write the continuation prompt.
+# Also carries the audit coverage/disposition gates, moved here when p07 crossed
+# the repository's 10,000-line limit (2026-11-22 wave).
 #
 # Split out of `p06_postchecks.py` when that part crossed the repository's
 # 10,000-line limit. The parts are executed in filename order into the same
@@ -244,3 +246,257 @@ def resume_prompt(rec: dict, problems: list, reason: str, used: int,
         f"language pass / visual record, record the item in {manual_target}, and say so in the "
         "marker.\n"
         "  * Stay inside this sandbox; never touch sibling sandboxes or parent directories.\n"))
+
+
+# =====================================================================
+# AUDIT COVERAGE / DISPOSITION GATES
+#
+# Split out of p07_stage_quality_journal.py to keep every part under the
+# documented 10,000-line limit (the 2026-11-22 fix-bugs wave pushed p07 over).
+# These names are resolved at CALL time from the shared module globals, so the
+# later part position changes nothing.
+# =====================================================================
+
+AUDIT_VERDICTS = ("confirm", "drop")
+AUDIT_SEVERITIES = ("critical", "major", "minor", "fatal")
+# The audit prompt's own coverage contract: every adopted check (M1-M36 and
+# J1-J5) gets a coverage row. The list is the same one the review prompt and
+# the sweep documents name (README, p03_prompts.py).
+AUDIT_COVERAGE_CHECKS = tuple([f"M{i}" for i in range(1, 37)]
+                              + [f"J{i}" for i in range(1, 6)])
+# A coverage disposition must be a REAL disposal, not one word of filler. The
+# review side's documented vocabulary is accepted verbatim; an audit row may
+# also state the re-derivation it performed ("stub: the sweep was re-derived;
+# clean"), which is what several stages' self-reports use. Bare `x`/`done` (or
+# a bare `clean`) records no re-derivation and is refused (F30).
+#
+# A NEGATED re-derivation ("never verified at all", "the sweep was not
+# re-derived", "could not be checked") is the absence of the check, so it stays
+# refused. The FIRST version of that guard was a whole-string negation search
+# (`(?!.*\b(?:not|never|cannot|unable to)\b)`), which rejected any true row
+# whose EVIDENCE happened to contain one of those words: the 2026-11-01 audit
+# lost an entire 39-minute attempt on
+#   "F-002, ... confirmed (...); X-910 confirmed (CI does not contain point estimate)"
+# and on "F-030 confirmed (...); X-949 dropped (... not a defect)". The negation
+# is only disqualifying when it GOVERNS THE VERB, so `_AUDIT_NEGATED_VERB_RE`
+# matches a negation, at most two words, and then the re-derivation verb; the
+# gate rejects a cell only when that phrase occurs. A negation elsewhere in the
+# sentence is evidence, not a missing check.
+#
+# The verdict may be preceded by a qualifier: "No cover letter in submission;
+# no findings" and "No rendered artwork files in corpus; unable to check
+# artwork/text parity" were refused by the anchored match although both are
+# real dispositions. Every shape is therefore searched anywhere in the cell,
+# while bare filler ("x", "done", "not checked") still matches nothing.
+#
+# `No findings ...` is the same verdict as `0 findings` and `unable to check X`
+# the same verdict as `unable -- <reason>`; both spellings are accepted, and the
+# reason-bearing ones still pass the shared filler gate in `_audit_disposition_ok`.
+_AUDIT_REDERIVATION_VERB = (
+    r"(?:re-?derived|confirmed|checked|verified|re-?derive|confirm|check|verify|"
+    r"review(?:ed)?)")
+_AUDIT_NEGATED_VERB_RE = (
+    r"\b(?:not|never|cannot|can\s+not|could\s+not|unable\s+to|no\s+longer)\b"
+    r"(?:\s+\w+){0,2}\s+" + _AUDIT_REDERIVATION_VERB + r"\b")
+_AUDIT_COUNT_RE = re.compile(r"(?i)(?:\b\d+\s+finding|\bno\s+finding)")
+_AUDIT_CANONICAL_TAIL_RE = re.compile(
+    r"(?i)(?:clean\s*(?:--|—|–)\s*basis\s*:\s*"
+    r"|unable\s*(?:--|—|–)\s*"
+    r"|out\s+of\s+scope\s*(?:--|—|–)\s*)(.*)$")
+_AUDIT_VERB_RE = re.compile(r"(?i)\b" + _AUDIT_REDERIVATION_VERB + r"\b")
+_AUDIT_NEGATED_VERB_COMPILED = re.compile(_AUDIT_NEGATED_VERB_RE, re.I)
+_AUDIT_PROSE_UNABLE_RE = re.compile(r"(?i)\bunable\s+to\s+(.*)$")
+# A re-derivation sentence must NAME what was re-derived or on what basis; a
+# one-word verb (`checked`, `confirmed`) records no object and is filler (F128).
+# A check id, a finding id or a named artifact satisfies that bar on its own.
+_AUDIT_NAMED_BASIS_RE = re.compile(
+    r"(?i)\b(?:[MJ]\d{1,2}|(?:F|X|AU)-\d+)\b"
+    r"|\b[\w-]+\.(?:md|markdown|json|txt|tex|docx|csv|pdf)\b")
+# F40: an inability must NAME an object or a reason. The old prose test counted
+# six alphanumeric characters after "unable to", so the bare verb plus a
+# determiner ("unable to check the", "unable to verify the") passed although it
+# names nothing; `_coverage_reason_named` likewise accepted `unable -- the`.
+# A reason/object therefore has to carry one CONTENT word (not a determiner,
+# pronoun, auxiliary or preposition), and a prose inability has to name one
+# after its verb.
+_AUDIT_FILLER_WORDS = frozenset("""
+    a an the this that these those it its they them their there here some any all
+    both each other another such own same so than then to of in on at by for with
+    from into onto over under about after before as and or but nor if while when
+    where which who whom whose what is are was were be been being am do does did
+    doing have has had having will would shall should may might must can could not
+    no none nothing nor too very also just only
+""".split())
+_AUDIT_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+\-/]*")
+# The verb that follows "unable to": it is the action, not its object, so the
+# object test strips it before asking whether anything is named.
+_AUDIT_PROSE_VERB_RE = re.compile(
+    r"(?i)^(?:re-?derive|re-?derived|confirm|confirmed|check|checked|verify|verified|"
+    r"review|reviewed|inspect|inspected|examine|examined|run|perform|performed|"
+    r"read|see|tell|assess|assessed|compare|compared|render)\b")
+# F01/F68: the count form answers the count first, but a count whose own tail
+# says the CHECK ITSELF did not run is not a verdict (`0 findings; the sweep
+# could not run`, `3 findings; the pass wasn't run`). A negation whose SUBJECT is
+# one item or one finding/check id is an EVIDENCE clause (`3 findings; unable to
+# check one quoted line`, `3 findings; X-910 could not be re-derived`) and must
+# not veto a legal count -- that is the F68 shape the whole-cell veto broke.
+_AUDIT_CHECK_SUBJECT_RE = re.compile(
+    r"(?i)\b(?:sweep|pass|check|review|audit|scan|re-?derivation|verification|"
+    r"coverage|table|session|attempt)\b")
+_AUDIT_COUNT_NEGATION_RE = re.compile(
+    r"(?i)\b(?:not|never|without|could\s+not|cannot|did\s+not|was\s+not|were\s+not|"
+    r"has\s+not|have\s+not|is\s+not|are\s+not)\b"
+    r"[^.;\n]{0,25}?\b(?:run(?:s|ning)?|execut(?:e|ed|ing)?|perform(?:ed|s|ing)?|"
+    r"check(?:ed|s|ing)?|verif(?:y|ied|ies)|re-?deriv(?:e|ed)?|examin(?:e|ed|ing)?|"
+    r"review(?:ed|s|ing)?|inspect(?:ed|s|ing)?)\b")
+
+AUDIT_COVERAGE_DISPOSITION_RE = re.compile(
+    # A verdict shape anywhere in the cell (the leading `.*?` lets a qualifier
+    # precede it).
+    r"(?i)^(?:.*?(?:\b\d+\s+finding"
+    r"|\bno\s+finding"
+    r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
+    r"|unable\s*(?:--|—|–)\s*\S"
+    r"|out\s+of\s+scope\s*(?:--|—|–)\s*\S"
+    # A prose inability that names an object ("unable to check artwork/text
+    # parity"): the `unable --` dash form is preferred, but the same recorded
+    # fact in a sentence is still a disposition, not filler.
+    r"|unable\s+to\s+\w+\s+\S)"
+    # ... or a re-derivation verb that no negation governs.
+    r"|(?!.*?" + _AUDIT_NEGATED_VERB_RE + r")"
+    r".*?\b" + _AUDIT_REDERIVATION_VERB + r"\b.*$)")
+
+
+def _audit_negated_verb(text: str) -> bool:
+    """Whether a negation governs the re-derivation verb in `text`.
+
+    `_AUDIT_NEGATED_VERB_RE` listed only `not/never/cannot/can not/could
+    not/unable to/no longer`, so a true refusal written with a contraction
+    ("wasn't re-derived") or with punctuation between the negation and the verb
+    ("was not, in fact, re-derived") was read as a POSITIVE re-derivation and
+    accepted by the coverage gate (F06). Normalise contractions to their
+    two-word form and the punctuation that separates the negation from the verb
+    to spaces, then apply the same bounded-window match.
+    """
+    probe = re.sub(r"n['\u2019]t\b", " not", str(text or ""), flags=re.I)
+    probe = re.sub(r"[,;:\u2014\u2013]", " ", probe)
+    return bool(_AUDIT_NEGATED_VERB_COMPILED.search(probe))
+
+
+def _audit_rederivation_named(text: str) -> bool:
+    """Whether a re-derivation sentence names an object/basis (not a bare verb).
+
+    `checked`, `confirmed`, `verified the` and `re-derived` are one- or two-word
+    labels: they state that a verb was said, not what was re-derived or on what
+    basis, so they are the filler shape the coverage gate must refuse. Three
+    words ("checked all rows") or any check/finding id or named artifact file
+    clears the bar.
+    """
+    stripped = str(text or "").strip()
+    return len(stripped.split()) >= 3 or bool(_AUDIT_NAMED_BASIS_RE.search(stripped))
+
+
+def _audit_names_content(text) -> bool:
+    """Whether `text` carries a content word, not only determiners/auxiliaries."""
+    return any(word.lower() not in _AUDIT_FILLER_WORDS
+               for word in _AUDIT_WORD_RE.findall(str(text or "")))
+
+
+def _audit_prose_names_object(tail) -> bool:
+    """Whether `unable to <verb> <tail>` names an object after the verb (F40).
+
+    `unable to check the` / `unable to verify the` name a determiner, and
+    `unable to check` names nothing at all: both are filler, while
+    `unable to check artwork/text parity` names the object it could not check.
+    """
+    rest = _AUDIT_PROSE_VERB_RE.sub("", str(tail or ""), count=1)
+    return _audit_names_content(rest.strip(" \t.,;:-\u2014\u2013"))
+
+
+def _audit_count_tail_negates_check(text: str) -> bool:
+    """Whether a count's own tail says the CHECK did not run (F01), not an item.
+
+    A negated check whose subject is the check itself (the sweep/pass/check/
+    review...), or that names no subject at all (`0 findings -- not checked`), is
+    a non-run: the count in front of it is not a verdict. A negated check whose
+    subject is one item or one id (`one location could not be verified`,
+    `X-910 could not be re-derived`) is EVIDENCE about that item and must not
+    veto a legal count (F68).
+    """
+    probe = re.sub(r"(?i)can['\u2019]t\b", "cannot", str(text or ""))
+    probe = re.sub(r"n['\u2019]t\b", " not", probe, flags=re.I)
+    for m in _AUDIT_COUNT_NEGATION_RE.finditer(probe):
+        # Only the negation's OWN clause decides its subject; an earlier clause
+        # ("0 findings; the check was clean ...") is not its subject.
+        clause = re.split(r"[;,:()\u2014\u2013]|\s--?\s", probe[:m.start()])[-1]
+        subject = _AUDIT_WORD_RE.findall(clause)[-4:]
+        if not subject or _AUDIT_CHECK_SUBJECT_RE.search(" ".join(subject)):
+            return True
+    return False
+
+
+def _audit_disposition_ok(value) -> bool:
+    """A real audit coverage disposition (negation- and filler-proof).
+
+    The regex alone accepts `unable -- no`, `clean -- basis: x` and a bare
+    `out of scope`; those are the review gate's documented FILLER shapes, so
+    route every reason-bearing form through the shared reason check
+    (`_coverage_reason_named` knows the difference between a named
+    artifact/reason and a one-letter or filler token). The prose equivalents get
+    the same treatment: `unable to <verb> <object>` must name an object, not
+    just the verb.
+
+    THE SHAPES ARE TESTED IN ORDER, STRONGEST FIRST, and each shape accepts on
+    its OWN evidence. Testing the prose-`unable` heuristic first let an inability
+    clause in an EVIDENCE sentence veto a perfectly good count:
+    `3 findings; unable to see` and `3 findings confirmed (the reviewer was
+    unable to tell)` were refused because the tail after "unable to" was short.
+    A finding count is a complete verdict, so it is answered first.
+    """
+    text = str(value or "").strip()
+    if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
+        return False
+    if _AUDIT_COUNT_RE.search(text):
+        # A count is a complete verdict, so the WHOLE-CELL negation veto is
+        # wrong in both directions (F01/F68). A tail that negates the check
+        # itself (`0 findings; the sweep could not run`, `3 findings; the pass
+        # wasn't run`) is refused; a tail that negates ONE item is evidence and
+        # leaves the count standing (`3 findings; unable to check one quoted
+        # line`). "nothing/nobody checked" names no negation verb at all, so the
+        # shared no-work test is applied as well (F008). A ZERO count whose tail
+        # carries a bare inability names no object and is not a verdict either
+        # (`0 findings -- unable to check`).
+        if _COVERAGE_NOWORK_RE.search(text) or _audit_count_tail_negates_check(text):
+            return False
+        if re.search(r"(?i)\b(?:0|zero|no)\s+finding", text):
+            m = _AUDIT_PROSE_UNABLE_RE.search(text)
+            if m is not None and not _audit_prose_names_object(m.group(1)):
+                return False
+        return True
+    m = _AUDIT_CANONICAL_TAIL_RE.search(text)
+    if m is not None:
+        # `unable -- <why it could not run>` is the documented inability form;
+        # its reason legitimately negates the check (F014), unlike `clean`.
+        # The reason must NAME something: `unable -- the` is filler (F40).
+        return (_audit_names_content(m.group(1))
+                and _coverage_reason_named(
+                    m.group(1),
+                    allow_negated=bool(re.match(r"(?i)^\s*unable\b", text))))
+    if _AUDIT_VERB_RE.search(text) and not _audit_negated_verb(text):
+        # a re-derivation sentence, e.g. "the sweep was re-derived". A BARE
+        # verb ("checked", "confirmed", "verified the") records no object and
+        # no basis, so it is the filler shape this gate exists to refuse (F128):
+        # a real disposition names what was re-derived, on what basis, or a
+        # finding/check id (the same bar the other shapes meet).
+        return _audit_rederivation_named(text)
+    m = _AUDIT_PROSE_UNABLE_RE.search(text)
+    if m is not None:
+        # "unable to check artwork/text parity" names what could not be
+        # checked; "unable to check" and "unable to check the" are filler (F40).
+        return _audit_prose_names_object(m.group(1))
+    if _AUDIT_VERB_RE.search(text) and _audit_negated_verb(text):
+        # The coverage regex's negative lookahead only knows the literal
+        # negation spellings; a contraction/punctuated negation reaches here and
+        # must still be REFUSED (F06).
+        return False
+    return True              # the gate regex matched some other accepted shape

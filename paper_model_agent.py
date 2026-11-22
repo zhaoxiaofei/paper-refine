@@ -235,8 +235,13 @@ def config(args=None) -> dict:
     harness = (getattr(args, "harness", None)
                or _env("PAPER_AGENT_HARNESS", DEFAULT_HARNESS))
     harness = str(harness).strip().lower().replace("_", "-").replace(" ", "-")
+    explicit_model = getattr(args, "model", None)
     endpoint = (getattr(args, "endpoint", None)
                 or _env("PAPER_AGENT_MODEL_ENDPOINT", "")).strip()
+    # `args > env` is the documented precedence: an explicit --model must not
+    # be silently overridden by the AMBIENT endpoint variable (F53).
+    if explicit_model and not getattr(args, "endpoint", None):
+        endpoint = ""
     api_key_env = (getattr(args, "api_key_env", None)
                    or _env("PAPER_AGENT_MODEL_API_KEY_ENV",
                            "PAPER_AGENT_MODEL_API_KEY"))
@@ -260,7 +265,7 @@ def config(args=None) -> dict:
                                    DEFAULT_ENDPOINT_MAX_TOKENS),
             "deepseek_key": _env("DEEPSEEK_API_KEY") or _env("PAPER_DEEPSEEK_API_KEY"),
         }
-    model = (getattr(args, "model", None)
+    model = (explicit_model
              or _env("PAPER_AGENT_MODEL", DEFAULT_MODEL))
     model = str(model).strip().lower().replace("_", "-").replace(" ", "-")
     info = MODELS.get(model) or {}

@@ -2536,16 +2536,31 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
 
 
 def _blank_xml_elements(data: bytes, tags, value: bytes = b"") -> bytes:
+    # A namespace is bound to a PREFIX, and any prefix (or the default
+    # namespace) is legal: `<d:creator xmlns:d="http://purl.org/dc/elements/
+    # 1.1/">` and `<p:Company xmlns:p="...extended-properties">` are the same
+    # properties as `<dc:creator>`/`<Company>`. Matching the literal spelling
+    # leaked author/company from a legal part with no note (F76), so the LOCAL
+    # name is the contract and any (or no) prefix is accepted.
     for tag in tags:
+        local = tag.rsplit(b":", 1)[-1]
+        _pfx = rb"(?:[A-Za-z_][A-Za-z0-9_.-]*:)?"
         # XML permits whitespace before `>` in a closing tag (`</dc:creator >`);
         # an exact close left the author value in a blinded judge view.
-        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb"\s*>)", re.S | re.I)
+        pat = re.compile(rb"(<" + _pfx + re.escape(local) + rb"\b[^>]*>)(.*?)(</"
+                         + _pfx + re.escape(local) + rb"\s*>)", re.S | re.I)
         data = pat.sub(lambda m: m.group(1) + value + m.group(3), data)
     return data
 
 
-_RELS_ENTRY_RE = re.compile(rb"<Relationship\b[^>]*/>")
-_CONTENT_TYPE_OVERRIDE_RE = re.compile(rb"<Override\b[^>]*/>")
+# XML permits an EMPTY element written with a start and an end tag
+# (`<Override ...></Override>`) as well as the self-closing spelling. Matching
+# only `<.../>` left the pointer at a part the sanitizer removed, so the judge
+# view was an invalid OPC package (F47).
+_RELS_ENTRY_RE = re.compile(
+    rb"<Relationship\b(?:[^>]*/>|[^>]*>.*?</Relationship\s*>)", re.S)
+_CONTENT_TYPE_OVERRIDE_RE = re.compile(
+    rb"<Override\b(?:[^>]*/>|[^>]*>.*?</Override\s*>)", re.S)
 
 
 def _rels_part_base_dir(name: str) -> str:
@@ -2590,43 +2605,102 @@ _WORD_NS_DECL_RE = re.compile(
     + re.escape(_WORD_NS) + rb"(?P=q)")
 
 
+_ANY_DEFAULT_DECL_RE = re.compile(
+    rb"xmlns\s*=\s*(?P<q>[\"'])(?P<uri>[^\"']*)(?P=q)")
+_XML_TAG_RE = re.compile(rb"<[^>]*>", re.S)
+
+
+def _prefix_decl_re(prefix: bytes):
+    return re.compile(rb"xmlns:" + re.escape(prefix)
+                      + rb"\s*=\s*(?P<q>[\"'])(?P<uri>[^\"']*)(?P=q)")
+
+
+def _qualify_default_word_ns(payload: bytes) -> bytes:
+    """Prefix every element that resolves to the Word DEFAULT namespace.
+
+    Every unprefixed element in a Word-default scope is WordprocessingML, so it
+    must be qualified for the byte transforms to see it. The default namespace
+    is SCOPED: a nested `<m:oMath xmlns="urn:math">` switches it for that
+    subtree only, so a global substitution would corrupt the part -- and the old
+    "another default declaration: not resolvable" bail-out leaked `delText` and
+    `author=` into the judge view (F20). Track the default per element instead.
+    """
+    out, pos, stack, w_scope = [], 0, [], False
+    for m in _XML_TAG_RE.finditer(payload):
+        tag = m.group(0)
+        new = tag
+        if tag.startswith(b"</"):
+            if stack:
+                cur, _w = stack.pop()
+                w_scope = stack[-1][1] if stack else False
+                if cur == _WORD_NS and re.match(rb"</[A-Za-z_][\w.-]*(?=[\s>])", tag):
+                    new = b"</w:" + tag[2:]
+        elif not tag.startswith((b"<?", b"<!")):
+            dm = _ANY_DEFAULT_DECL_RE.search(tag)
+            cur = dm.group("uri") if dm else (stack[-1][0] if stack else None)
+            own_w = bool(re.search(rb"xmlns:w\s*=", tag))
+            if cur == _WORD_NS and re.match(rb"<[A-Za-z_][\w.-]*(?=[\s/>])", tag):
+                new = b"<w:" + tag[1:]
+                if not (w_scope or own_w):
+                    nm = re.match(rb"<w:[A-Za-z_][\w.-]*", new)
+                    new = (new[:nm.end()] + b' xmlns:w="' + _WORD_NS + b'"'
+                           + new[nm.end():])
+                    own_w = True
+            if not re.search(rb"/\s*>$", tag):
+                stack.append((cur, w_scope or own_w))
+                w_scope = w_scope or own_w
+        if new != tag:
+            out.append(payload[pos:m.start()])
+            out.append(new)
+            pos = m.end()
+    if not out:
+        return payload
+    out.append(payload[pos:])
+    # Unqualified attributes (`author="..."` in a default-namespace part) are
+    # the same provenance fields; qualify them so the sanitizer rewrites them.
+    return re.sub(rb"(\s)(author|initials|date)=", rb"\1w:\2=", b"".join(out))
+
+
 def _normalize_word_prefix(payload: bytes) -> bytes:
-    """Rename a legal non-`w` Word namespace declaration to `w`.
+    """Bind the Word namespace to `w` however the part legally declares it.
 
     OOXML binds the Word namespace to a PREFIX, and `a:del`/`a:t` is exactly as
     valid as `w:del`/`w:t`. The sanitizer is byte-regex based, so normalizing
     the prefix before the transforms makes namespace identity, not spelling,
     the contract (F21).
 
-    XML allows either quote style and whitespace around `=`, and the Word
-    namespace may be the DEFAULT namespace (`<document xmlns="...">`). A
-    declaration the old double-quote-only pattern could not see left `a:del`,
-    `a:author` and `delText` in the judge view (R02).
+    XML allows either quote style/whitespace and the Word namespace may be the
+    DEFAULT namespace (`<document xmlns="...">`). A part may also bind the same
+    namespace to SEVERAL prefixes (`xmlns:w` and `xmlns:wp`); normalizing only
+    the first declaration left `wp:del`/`wp:delText` and `wp:author` in the
+    judge view (F20).
     """
-    m = _WORD_NS_DECL_RE.search(payload)
-    if not m:
+    decls = list(_WORD_NS_DECL_RE.finditer(payload))
+    if not decls:
         return payload
-    prefix = m.group("prefix")
-    if prefix == b"w":
-        return payload
-    if prefix is not None:
-        out = re.sub(rb"(?<=[<\s/])" + re.escape(prefix) + rb":", b"w:", payload)
-        return _WORD_NS_DECL_RE.sub(
-            lambda mm: b"xmlns:w=" + mm.group("q") + _WORD_NS + mm.group("q"),
-            out, count=1)
-    # Default namespace: every unprefixed element in the part is WordprocessingML.
-    # Declare `w:` explicitly and qualify the element names (and the tracked
-    # attributes the sanitizer rewrites), or the byte transforms see nothing.
-    if re.search(rb"xmlns\s*=", _WORD_NS_DECL_RE.sub(b"", payload, count=1)):
-        return payload            # another default declaration: not resolvable here
-    out = _WORD_NS_DECL_RE.sub(
-        lambda mm: b"xmlns:w=" + mm.group("q") + _WORD_NS + mm.group("q"),
-        payload, count=1)
-    out = re.sub(rb"<(?P<close>/?)(?P<name>[A-Za-z_][\w.-]*)(?=[\s/>])",
-                 lambda mm: b"<" + mm.group("close") + b"w:" + mm.group("name"), out)
-    # Unqualified attributes (`author="..."` in a default-namespace part) are
-    # the same provenance fields; qualify them so the sanitizer rewrites them.
-    return re.sub(rb"(\s)(author|initials|date)=", rb"\1w:\2=", out)
+    out = payload
+    # Rewrite every prefixed Word declaration to `xmlns:w` (in reverse so the
+    # earlier offsets stay valid), then rename that prefix's usages to `w:`.
+    renames = []
+    for m in reversed(decls):
+        prefix = m.group("prefix")
+        if prefix is None or prefix == b"w":
+            continue
+        # A prefix rebound to another namespace elsewhere cannot be renamed
+        # globally without corrupting that scope; leave it alone.
+        if any(d.group("uri") != _WORD_NS
+               for d in _prefix_decl_re(prefix).finditer(payload)):
+            continue
+        ts = out.rfind(b"<", 0, m.start())
+        te = out.find(b">", m.end())
+        tag = out[ts:te + 1] if ts >= 0 and te >= 0 else b""
+        repl = (b"" if re.search(rb"xmlns:w\s*=", tag)
+                else b"xmlns:w=" + m.group("q") + _WORD_NS + m.group("q"))
+        out = out[:m.start()] + repl + out[m.end():]
+        renames.append(prefix)
+    for prefix in renames:
+        out = re.sub(rb"(?<=[<\s/])" + re.escape(prefix) + rb":", b"w:", out)
+    return _qualify_default_word_ns(out)
 
 
 def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> bytes:
@@ -2759,7 +2833,23 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 return data, [f"not stripped: package expands to {total} bytes, over the "
                               f"OOXML total size budget ({MAX_DOCX_TOTAL_BYTES}); "
                               f"metadata left as is"]
-            items = [(i.filename, zin.read(i.filename)) for i in infos]
+            # `file_size` is attacker-controlled central-directory metadata:
+            # inflate through a bounded stream and count the REAL bytes, so a
+            # part that declares small and expands large is refused instead of
+            # materialized whole (F04).
+            items = []
+            actual_total = 0
+            for info in infos:
+                with zin.open(info) as fh:
+                    payload = fh.read(MAX_DOCX_PART_BYTES + 1)
+                if len(payload) > MAX_DOCX_PART_BYTES:
+                    return data, [f"not stripped: part {info.filename!r} expands over the "
+                                  f"OOXML size budget; metadata left as is"]
+                actual_total += len(payload)
+                if actual_total > MAX_DOCX_TOTAL_BYTES:
+                    return data, [f"not stripped: package expands to over "
+                                  f"{MAX_DOCX_TOTAL_BYTES} bytes; metadata left as is"]
+                items.append((info.filename, payload))
     except (zipfile.BadZipFile, OSError, KeyError, RuntimeError,
             NotImplementedError) as e:                            # noqa: BLE001
         return data, [f"not a readable OOXML zip ({e}); metadata left as is"]
@@ -3005,6 +3095,81 @@ def _blank_xmp_fields(stream: bytes) -> bytes:
     return stream
 
 
+_PDF_INFO_KEYS = (b"Author", b"Creator", b"Producer", b"Title", b"Subject", b"Keywords",
+                  b"CreationDate", b"ModDate", b"Trapped", b"GTS_PDFXVersion")
+
+_PDF_INFO_KEY_RE = re.compile(
+    rb"/(?P<key>" + b"|".join(_PDF_INFO_KEYS) + rb")\b[ \t\r\n]*")
+
+
+def _pdf_literal_end(buf: bytes, start: int) -> int:
+    """Index just past the balanced `)` of the literal starting at `start`.
+
+    A PDF literal string may contain BALANCED nested parentheses and `\\)`
+    escapes; the old regex could not span them, so `< /Author (Jane (J.)
+    Author) >` survived the blanking with no note (F78). -1 = not closed.
+    """
+    depth, i, n = 0, start, len(buf)
+    while i < n:
+        ch = buf[i:i + 1]
+        if ch == b"\\":
+            i += 2
+            continue
+        if ch == b"(":
+            depth += 1
+        elif ch == b")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def _pdf_blank_object_value(data: bytes, num: bytes) -> tuple:
+    """(bytes, changed): blank the string value(s) of an indirect `num 0 obj`.
+
+    `/Author 3 0 R` is a legal PDF Info value, so blanking only the reference
+    token left the author in object 3 (F10). Resolve the reference and blank
+    the string/hex values of that object IN PLACE (equal length, offsets hold).
+    """
+    m = re.search(rb"(?<![\w.])" + re.escape(num) + rb"\s+0\s+obj\b", data)
+    if not m:
+        return data, False
+    end = data.find(b"endobj", m.end())
+    if end < 0:
+        return data, False
+    body = data[m.end():end]
+    out, i, changed = [], 0, False
+    while i < len(body):
+        ch = body[i:i + 1]
+        if ch == b"\\":
+            out.append(body[i:i + 2])
+            i += 2
+            continue
+        if ch == b"(":
+            close = _pdf_literal_end(body, i)
+            if close < 0:
+                return data, False
+            out.append(_blank_pdf_value(body[i:close]))
+            i = close
+            changed = True
+            continue
+        if ch == b"<" and body[i:i + 2] != b"<<":
+            close = body.find(b">", i)
+            if close < 0:
+                return data, False
+            out.append(_blank_pdf_value(body[i:close + 1]))
+            i = close + 1
+            changed = True
+            continue
+        out.append(ch)
+        i += 1
+    new_body = b"".join(out)
+    if new_body == body:
+        return data, True              # resolved, and already blank
+    return data[:m.end()] + new_body + data[end:], True
+
+
 def _sanitize_pdf_bytes(data: bytes) -> tuple:
     """(bytes, notes): blank PDF Info/XMP/ID values in place (equal length)."""
     notes = []
@@ -3025,13 +3190,58 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
                 continue
             obj = om.group(0)
             new_obj = obj
-            for key in (b"Author", b"Creator", b"Producer", b"Title", b"Subject", b"Keywords",
-                        b"CreationDate", b"ModDate", b"Trapped", b"GTS_PDFXVersion"):
-                pat = re.compile(rb"(/" + key + rb"\s*)(\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>)")
-                new_obj = pat.sub(lambda mm: mm.group(1) + _blank_pdf_value(mm.group(2)), new_obj)
+            indirect = []
+            pos = 0
+            # Skip to the END of each value so a key name quoted inside another
+            # value cannot be mistaken for a dictionary key.
+            while True:
+                km = _PDF_INFO_KEY_RE.search(new_obj, pos)
+                if km is None:
+                    break
+                start = km.end()
+                key = km.group("key")
+                pos = start + 1
+                if new_obj[start:start + 1] == b"(":
+                    close = _pdf_literal_end(new_obj, start)
+                    if close < 0:
+                        notes.append(f"PDF /{key.decode()} value is not a delimited "
+                                     f"literal string; that metadata was left as is")
+                        continue
+                    new_obj = (new_obj[:start] + _blank_pdf_value(new_obj[start:close])
+                               + new_obj[close:])
+                    pos = close
+                elif new_obj[start:start + 1] == b"<" and new_obj[start:start + 2] != b"<<":
+                    close = new_obj.find(b">", start)
+                    if close < 0 or not re.fullmatch(
+                            rb"[0-9A-Fa-f\s]*", new_obj[start + 1:close]):
+                        continue
+                    new_obj = (new_obj[:start] + _blank_pdf_value(new_obj[start:close + 1])
+                               + new_obj[close + 1:])
+                    pos = close + 1
+                elif new_obj[start:start + 1] == b"/":
+                    nm = re.match(rb"/[^\s/<>\[\]()%]*", new_obj[start:])
+                    if nm and nm.end() > 1:       # a name value carries identity too
+                        new_obj = (new_obj[:start + 1] + b" " * (nm.end() - 1)
+                                   + new_obj[start + nm.end():])
+                        pos = start + nm.end()
+                else:
+                    rm = re.match(rb"(\d+)\s+(\d+)\s+R\b", new_obj[start:])
+                    if rm:
+                        indirect.append((rm.group(1), key))
+                        pos = start + rm.end()
             if new_obj != obj:
                 data = data[:om.start()] + new_obj + data[om.end():]
                 changed += 1
+            for num, key in indirect:
+                new_data, ok = _pdf_blank_object_value(data, num)
+                if not ok:
+                    notes.append(f"PDF /{key.decode()} is the indirect reference "
+                                 f"{num.decode()} 0 R, which could not be resolved; "
+                                 f"that metadata was left as is")
+                    continue
+                if new_data != data:
+                    data = new_data
+                    changed += 1
     else:
         notes.append("no uncompressed PDF /Info dictionary found; metadata was left as is")
     # /ID is in the trailer/xref at the END of the file, but a LINEARIZED PDF
@@ -3124,15 +3334,41 @@ _SVG_TOOL_ATTR_RE = re.compile(
     rb"(?i)\s+(?:inkscape|sodipodi|adobe|dc|cc|rdf|i):[\w:-]+\s*=\s*"
     rb"(?:\"[^\"]*\"|'[^']*')")
 
+_SVG_DC_NS = b"http://purl.org/dc/elements/1.1/"
+_SVG_RDF_NS = b"http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+_SVG_DC_LOCALS = (b"contributor", b"coverage", b"creator", b"date", b"description",
+                  b"format", b"identifier", b"language", b"publisher", b"relation",
+                  b"rights", b"source", b"subject", b"title", b"type")
+
+
+def _svg_bound_prefixes(raw: bytes, uri: bytes) -> list:
+    """Every prefix bound to `uri` (b"" for the DEFAULT namespace)."""
+    out = []
+    pat = re.compile(rb"xmlns(?::([A-Za-z_][\w.-]*))?\s*=\s*(?P<q>[\"'])"
+                     + re.escape(uri) + rb"(?P=q)")
+    for m in pat.finditer(raw):
+        prefix = m.group(1) or b""
+        if prefix not in out:
+            out.append(prefix)
+    return out
+
 
 def _sanitize_svg_bytes(raw: bytes) -> tuple:
     """Strip SVG metadata/comments/tool attributes; record an unparsable gap.
 
     An SVG is XML and can carry dc:creator/date, RDF metadata and
     inkscape/sodipodi tool attributes into a judge view byte-for-byte (F164).
+
+    XML binds Dublin Core to a PREFIX, so `<d:creator>` under
+    `xmlns:d="http://purl.org/dc/elements/1.1/"` is the same metadata as
+    `<dc:creator>`; matching the literal `dc:` spelling leaked the author from
+    a legal figure with no note (F84). Resolve the prefixes bound to the DC/RDF
+    URIs and strip by namespace.
     """
     if b"</svg" not in raw.lower():
         return raw, ["not a readable SVG document; metadata left as is"]
+    dc_prefixes = _svg_bound_prefixes(raw, _SVG_DC_NS)
+    rdf_prefixes = _svg_bound_prefixes(raw, _SVG_RDF_NS)
     out = _SVG_METADATA_RE.sub(b"", raw)
     out = _SVG_COMMENT_RE.sub(b"", out)
     out = _SVG_TOOL_ATTR_RE.sub(b"", out)
@@ -3141,10 +3377,35 @@ def _sanitize_svg_bytes(raw: bytes) -> tuple:
     # reach the judge view byte-for-byte (F027).
     out = re.sub(rb"(?is)<dc:[A-Za-z_][\w.-]*\b[^>]*>.*?</dc:[A-Za-z_][\w.-]*\s*>",
                  b"", out)
+    for prefix in dc_prefixes:
+        if prefix:
+            q = re.escape(prefix)
+            out = re.sub(rb"(?is)<" + q + rb":[A-Za-z_][\w.-]*\b[^>]*>.*?</" + q
+                         + rb":[A-Za-z_][\w.-]*\s*>", b"", out)
+            out = re.sub(rb"(?is)<" + q + rb":[A-Za-z_][\w.-]*\b[^>]*/>", b"", out)
+        else:
+            names = b"|".join(_SVG_DC_LOCALS)
+            out = re.sub(rb"(?is)<(" + names + rb")\b[^>]*>.*?</\1\s*>", b"", out)
+            out = re.sub(rb"(?is)<(?:" + names + rb")\b[^>]*/>", b"", out)
     out = re.sub(rb"(?is)<rdf:RDF\b[^>]*>.*?</rdf:RDF\s*>", b"", out)
+    for prefix in rdf_prefixes:
+        if prefix:
+            q = re.escape(prefix)
+            out = re.sub(rb"(?is)<" + q + rb":RDF\b[^>]*>.*?</" + q
+                         + rb":RDF\s*>", b"", out)
     out = re.sub(rb"(?is)<(title|desc)\b[^>]*>.*?</\1\s*>", b"", out)
+    # A metadata ATTRIBUTE in the same namespace (`d:creator="Alice"`) is not
+    # an element and survives the element pass.
+    for prefix in dc_prefixes + rdf_prefixes:
+        if prefix:
+            out = re.sub(rb"(?i)\s+" + re.escape(prefix)
+                         + rb":[\w:-]+\s*=\s*(?:\"[^\"]*\"|'[^']*')", b"", out)
     notes = []
-    if re.search(rb"(?is)<metadata\b|<dc:[A-Za-z_]", out):
+    residual = bool(re.search(rb"(?is)<metadata\b|<dc:[A-Za-z_]", out))
+    for prefix in dc_prefixes + rdf_prefixes:
+        if prefix and re.search(rb"(?is)<" + re.escape(prefix) + rb":[A-Za-z_]", out):
+            residual = True
+    if residual:
         notes.append("an SVG metadata element could not be stripped; inspect the "
                      "judge view for author metadata")
     return out, notes

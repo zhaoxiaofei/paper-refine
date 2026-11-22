@@ -164,7 +164,10 @@ MEDIUM_PROFILE_CONTRACT_INLINE = MEDIUM_PROFILE_CONTRACT.replace(
     "  5. THE PAGED RULES ARE BINDING. A pointer like\n"
     "     `[PROFILE RULES — SECTION: see INSTRUCTIONS/PROFILE_RULES.md]` replaces\n"
     "     rule text that this profile does not inline. Read the section your stage\n"
-    "     needs; it is authoritative and it is not optional.\n", "")
+    "     needs; it is authoritative and it is not optional.\n", "").replace(
+    # ... and the list must stay 1..N: deleting item 5 left a 4 -> 6 jump (F172).
+    "  6. THE POSTCHECKS ARE UNCHANGED.",
+    "  5. THE POSTCHECKS ARE UNCHANGED.")
 
 #: One stage's prompt pointer, substituted for a paged rule section.
 PROFILE_POINTER_TMPL = (
@@ -501,7 +504,7 @@ def _frozen_review_doc(r: int) -> dict:
     }
 
 
-def _cold_start_findings_md(rows: list, level: int = 3) -> str:
+def _cold_start_findings_md(rows: list, level: int = 1) -> str:
     """Render schema-valid cold-start X-9xx rows for the readable deliverables.
 
     The cold-start finding schema has no `title` (p03's COLD_START_DIRECTIVES
@@ -510,9 +513,19 @@ def _cold_start_findings_md(rows: list, level: int = 3) -> str:
     every field a reader needs. The machine-readable JSON always carried the
     row; these two markdown files are the human-readable copy, so they must
     carry the row's own identity, location, check, severity and evidence.
+
+    `level` is the nesting depth of the finding's OWN bullet (1 = top level).
+    Every field, the Verifier included, is indented one level further so none of
+    them escapes the finding's list item; the parameter used to be ignored and
+    the Verifier was emitted at column 0, becoming a sibling top-level item
+    (F179).
     """
     if not rows:
         return "- (none)"
+    # A finding bullet at depth N, its fields as a child list one level deeper.
+    depth = max(1, int(level or 1))
+    bullet = "  " * (depth - 1)
+    field = bullet + "  "
     blocks = []
     for row in rows:
         if not isinstance(row, dict):
@@ -532,20 +545,20 @@ def _cold_start_findings_md(rows: list, level: int = 3) -> str:
         # caller-supplied/frozen row) still displays it, and a schema-valid row
         # displays its severity/check instead of the old "(untitled)".
         headline = title or (" / ".join(label_bits) if label_bits else "finding")
-        lines = [f"- {rid} — {headline}", ""]
+        lines = [f"{bullet}- {rid} — {headline}", ""]
         if title and label_bits:
-            lines.append(f"  - Check: {' / '.join(label_bits)}")
+            lines.append(f"{field}- Check: {' / '.join(label_bits)}")
         if location:
-            lines.append(f"  - Location: {location}")
+            lines.append(f"{field}- Location: {location}")
         if evidence:
-            lines.append(f"  - Evidence: {evidence}")
+            lines.append(f"{field}- Evidence: {evidence}")
         if explanation:
-            lines.append(f"  - Explanation: {explanation}")
+            lines.append(f"{field}- Explanation: {explanation}")
         if status:
-            lines.append(f"  - Status: {status}")
+            lines.append(f"{field}- Status: {status}")
         verifier = row.get("verifier")
         if isinstance(verifier, dict) and verifier.get("computed"):
-            lines.append(f"- Verifier: `{verifier.get('script')}` -> "
+            lines.append(f"{field}- Verifier: `{verifier.get('script')}` -> "
                          f"`{verifier.get('computed')}`")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) if blocks else "- (none)"
@@ -572,7 +585,7 @@ def synthesize_frozen_review(ctx, r: int, sb) -> dict:
     target = safe_mkdir(sb / GUIDED_REVIEW_DIR)
     safe_mkdir(target / "round2")
     write_json_atomic(sb / FINDINGS_REL, _frozen_review_doc(r))
-    rows_md = _cold_start_findings_md(rows, level=3)
+    rows_md = _cold_start_findings_md(rows, level=1)
     write_text_atomic(sb / GUIDED_REVIEW_DIR / "findings.md",
                       "# Frozen finding list — cold-start review only\n\n"
                       f"{GUIDED_REVIEW_GAP}\n\n"

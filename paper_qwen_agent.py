@@ -167,6 +167,32 @@ def _qwen_api_key(args, url_secret: str) -> str:
     return url_secret or DEFAULT_API_KEY
 
 
+def _validate_base_url(url: str) -> str:
+    """Reject a malformed endpoint ONCE, as a clean ConfigError.
+
+    `urlsplit` raises ValueError for a bracketed host such as `http://[::1`
+    (which `config()` used to accept), and that raw traceback escaped every
+    request/probe path including the Dots key preflight (F15/F49). Validating
+    here also gives the dsh patch generator a usable URL (F48).
+    """
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+    except ValueError as e:
+        raise rt.ConfigError(f"invalid --base-url: {e}")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise rt.ConfigError(
+            f"--base-url must be an http(s) URL with a host: {url!r}")
+    return url
+
+
+def _effort_for(family: str, explicit: str) -> str:
+    """The shared effort table as a clean ConfigError (F66)."""
+    try:
+        return rt.normalize_reasoning_effort(family, explicit)
+    except rt.ConfigError as e:
+        raise rt.ConfigError(f"invalid reasoning effort: {e}")
+
+
 def config(args=None) -> dict:
     """Resolve the effective endpoint/harness configuration (args > env)."""
     args = args or argparse.Namespace()
@@ -177,6 +203,7 @@ def config(args=None) -> dict:
                 or _env("PAPER_QWEN_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
     base, url_secret = rt.split_endpoint_credentials(raw_base)
     base = base.rstrip("/")
+    _validate_base_url(base)
     return {
         "base_url": base,
         "model": getattr(args, "model", None) or _env("PAPER_QWEN_MODEL", DEFAULT_MODEL),
@@ -187,7 +214,7 @@ def config(args=None) -> dict:
         # PAPER_AGENT_REASONING_EFFORT override, then the adapter's family
         # variable; the shared table maps a level qwen's wire lacks (high/max
         # -> its highest, xhigh).
-        "effort": rt.normalize_reasoning_effort(
+        "effort": _effort_for(
             "qwen38-27b",
             getattr(args, "reasoning_effort", None)
             or _env("PAPER_AGENT_REASONING_EFFORT", DEFAULT_EFFORT),
@@ -364,8 +391,12 @@ def _local_tunnel_url(cfg: dict) -> str:
     """The URL the local end of the ssh forward actually listens on."""
     parsed = urllib.parse.urlsplit(str(cfg["base_url"]))
     path = parsed.path.rstrip("/")
+    # Keep the endpoint's query/fragment: `_request_url` preserves them, so
+    # dropping them here made tunneled requests lose the same model/query
+    # parameters the direct path sent (F177).
     return urllib.parse.urlunsplit(
-        (parsed.scheme or "http", "127.0.0.1:%s" % cfg["local_port"], path, "", "")
+        (parsed.scheme or "http", "127.0.0.1:%s" % cfg["local_port"], path,
+         parsed.query, parsed.fragment)
     )
 
 
@@ -690,7 +721,11 @@ def main(argv=None) -> int:
     p.add_argument("--chat", action="store_true",
                    help="read a prompt from stdin and print one chat completion")
     args = p.parse_args(argv)
-    cfg = config(args)
+    try:
+        cfg = config(args)
+    except rt.ConfigError as e:
+        print(f"qwen: {e}", file=sys.stderr)
+        return 2
     atexit.register(_cleanup)
     if cfg["harness"] not in ("codex", "dsh", "claude", "chat"):
         print(f"qwen: unknown harness {cfg['harness']!r}; use codex, dsh, claude or chat",

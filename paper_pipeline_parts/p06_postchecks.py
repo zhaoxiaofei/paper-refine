@@ -1134,8 +1134,13 @@ _DISCOVERY_DECISIONS_RE = re.compile(
 _DISCOVERY_DECISION_START_RE = re.compile(
     r"^[\s\-\u2013\u2014:|]*(PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED|DROPPED)\b",
     re.I)
+# A NEGATED DISPOSITION is not a disposition: "no disposition is recorded",
+# "no status given", "not PORTED". The phrase must negate the DECISION itself;
+# a note elsewhere in a disposed row ("no row changed") does not (F35), which is
+# why the guard below reads the decision cell, not the whole line.
 _DISCOVERY_NEGATED_RE = re.compile(
-    r"(?i)\b(?:no|not)\s+(?:disposition|decision|row|status|reconcil\w*)\b")
+    r"(?i)\b(?:no|not)\s+(?:disposition|decision|status|reconcil\w*)\b"
+    r"|\bnot\s+(?:PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED|DROPPED)\b")
 
 
 def _discovery_decision_cell(line: str, pid: str) -> str:
@@ -1178,10 +1183,13 @@ def discovery_ledger_missing(ledger_text: str, ids) -> list:
         for line in lines:
             if not _finding_id_mentioned(pid, line):
                 continue
-            if _DISCOVERY_NEGATED_RE.search(line):
+            # Scope the negation guard to the cell that carries the decision:
+            # the whole line used to be searched, so a compliant
+            # `| X-001 | PORTED | no row changed |` was reported missing (F35).
+            cell = _discovery_decision_cell(line, pid)
+            if _DISCOVERY_NEGATED_RE.search(cell):
                 continue
-            if _DISCOVERY_DECISION_START_RE.match(
-                    _discovery_decision_cell(line, pid)):
+            if _DISCOVERY_DECISION_START_RE.match(cell):
                 disposed = True
                 break
         if not disposed:
@@ -1706,7 +1714,11 @@ def _ledger_row_counts(ledger, wanted=()) -> dict:
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    visit(item, depth + 1)
+                    # A mapping keyed by finding id may carry a LIST of rows
+                    # under that id; the list descent used to drop the key, so
+                    # every row lost its id and the complete ledger read as
+                    # undisposed (F34).
+                    visit(item, depth + 1, keyed_id)
                 elif isinstance(item, str) and (not want or item.strip() in want):
                     continue          # an id list names, it does not dispose
 
@@ -1750,7 +1762,8 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    visit(item, depth + 1)
+                    # Carry the finding-id key through a list of rows (F34).
+                    visit(item, depth + 1, keyed_id)
                 elif allow_strings and isinstance(item, str) \
                         and (not want or item.strip() in want):
                     # A plain ID LIST is the documented "naming" shape; an id
@@ -1818,7 +1831,8 @@ def _ledger_rows_without_explanation(ledger, wanted=()) -> dict:
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    visit(item, depth + 1)
+                    # Carry the finding-id key through a list of rows (F34).
+                    visit(item, depth + 1, keyed_id)
 
     visit(ledger, 0)
     return bad
@@ -1863,7 +1877,8 @@ def _ledger_rows_without_reverification(ledger, wanted=()) -> set:
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    visit(item, depth + 1)
+                    # Carry the finding-id key through a list of rows (F34).
+                    visit(item, depth + 1, keyed_id)
 
     visit(ledger, 0)
     return bad
@@ -2013,7 +2028,16 @@ _COVERAGE_NEGATED_CHECK_RE = re.compile(
     # negated subject precedes the verb instead of following "not".
     r"|\bno\s+[^.;\n]{0,40}?\b(?:was|were)\s+"
     r"(?:check(?:ed|s)?|verif(?:ied|ies)|re-?deriv(?:ed)?|examin(?:e|ed)|"
-    r"review(?:ed)?|inspect(?:ed)?|ran|run)\b")
+    r"review(?:ed)?|inspect(?:ed)?|ran|run)\b"
+    # An INABILITY form is a negated check whichever auxiliary spells it:
+    # `wasn't able to check`, `was unable to check` and `failed to check` all
+    # said the sweep never ran, yet none of the "not <verb>" spellings above
+    # matched them and a CLEAN row certified the non-run (F03). `unable --`
+    # rows are exempt at the caller, where the inability IS the disposition.
+    r"|\b(?:(?:was|were|is|are|am)n['\u2019]t\s+able|unable|not\s+able|"
+    r"failed|forgot(?:ten)?)\s+to\s+"
+    r"(?:check(?:ed|s|ing)?|verif(?:y|ied|ies)|re-?deriv(?:e|ed)|"
+    r"examin(?:e|ed)|review(?:ed)?|inspect(?:ed)?|ran|run|perform(?:ed)?)\b")
 # A finding COUNT is not a reason-bearing form, so a count row whose tail says the
 # sweep never RAN contradicts its own "0 findings". This wider verb set is used
 # ONLY for the count form: `unable -- the pass was not performed` is a legitimate
@@ -2033,6 +2057,28 @@ _COVERAGE_NOWORK_RE = re.compile(
 _COVERAGE_NAMED_BASIS_RE = re.compile(
     r"(?i)(?:basis\s*:|unable\s*(?:--|—|–)"
     r"|out\s+of\s+scope\s*(?:--|—|–))\s*(.*)$")
+# A CLEAN basis that names a MISSING capability is the opposite of a clean
+# sweep: "clean -- basis: no PDF renderer" certified a visual pass the session
+# could not perform, while the documented inability form is `unable -- <reason>`
+# (F143). The inability spelling of a clean row is refused; `unable -- no PDF
+# renderer` stays a legitimate disposition (its reason IS the inability).
+_COVERAGE_MISSING_CAPABILITY_RE = re.compile(
+    r"(?i)(?:\b(?:no|without)\s+(?:[a-z0-9_.+-]+\s+){0,4}?"
+    r"(?:renderer|rendering|tool|binary|executable|pdftoppm|pdfinfo|libreoffice|"
+    r"soffice|python-docx|openpyxl|lxml)\b"
+    # `no tool errors` is a clean RESULT and `no renderer was needed` a clean
+    # basis, not an unavailable capability (R04).
+    r"\s*(?:$|[.;,)]|(?:available|installed|detected|found|present)\b|(?:is|was)\b(?!\s+(?:not\s+)?(?:needed|required|necessary)\b))"
+    r"|\b(?:renderer|rendering|tool|binary|executable|library|package|module|"
+    r"dependency)\s+(?:is\s+|was\s+)?"
+    r"(?:unavailable|missing|not\s+(?:available|installed|present))\b"
+    r"|\b(?:could|can|did|was|were)\s*(?:not|n[\'\u2019]t)\s+(?:be\s+)?"
+    r"(?:produced|rendered|generated|opened)\b)")
+
+
+def _coverage_basis_is_missing_capability(reason) -> bool:
+    """True when a CLEAN basis names an unavailable tool/renderer, not an artifact."""
+    return bool(_COVERAGE_MISSING_CAPABILITY_RE.search(str(reason or "")))
 
 
 def _coverage_reason_named(reason, allow_negated: bool = False) -> bool:
@@ -2118,8 +2164,12 @@ def _coverage_disposition_ok(value) -> bool:
     # The count-negation test used to run only for the "N findings" form, so
     # "clean -- basis: the sweep did not run" certified a non-run (F014). It is
     # NOT applied to `unable --`, where "could not run" is a legitimate reason.
-    if re.match(r"(?i)^\s*clean\b", text) \
-            and _COVERAGE_COUNT_NEGATED_RE.search(m.group(1) or ""):
+    # The same clean-only rule refuses a basis that names a MISSING capability
+    # ("no PDF renderer"): an unavailable tool is an `unable -- <reason>` row,
+    # not a clean sweep (F143).
+    if re.match(r"(?i)^\s*clean\b", text) and (
+            _COVERAGE_COUNT_NEGATED_RE.search(m.group(1) or "")
+            or _coverage_basis_is_missing_capability(m.group(1))):
         return False
     # The same exemption for `unable --`: "could not run" is its disposition.
     return _coverage_reason_named(
@@ -2177,7 +2227,9 @@ def _coverage_row_disposition_ok(row) -> bool:
     # The bare-`clean` route must refuse a basis that says the sweep never ran,
     # exactly like the inline `clean -- basis:` form (F014). `unable` keeps
     # "could not run" as a legitimate reason.
-    if bare == "clean" and _COVERAGE_COUNT_NEGATED_RE.search(reason):
+    if bare == "clean" and (
+            _COVERAGE_COUNT_NEGATED_RE.search(reason)
+            or _coverage_basis_is_missing_capability(reason)):
         return False
     return bool(_coverage_reason_named(reason, allow_negated=bare == "unable"))
 
@@ -2565,7 +2617,6 @@ def _toml_inline_table_values(raw: str):
         if i < n and inner[i] != ",":
             return None
     return out
-
 
 
 
@@ -2966,6 +3017,27 @@ def _run_render_subprocess(argv, timeout, cwd=None):
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
+def _render_output_body_problem(path: Path) -> str:
+    """'' when a renderer's PDF carries content between header and trailer.
+
+    A signature-only stub (`%PDF-1.4\n%%EOF\n`) has both markers and no body;
+    it is not a render even though it is, structurally, a "complete signature".
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            head = fh.read(1024)
+    except OSError as e:
+        return f"{type(e).__name__}: {e}"
+    _nl = head.find(b"\n")
+    _after = head[_nl + 1:] if _nl >= 0 else b""
+    _eof = _after.find(b"%%EOF")
+    _before = _after if _eof < 0 else _after[:_eof]
+    if not _before.strip() and (_eof >= 0 or size <= len(head)):
+        return "no PDF body between the %PDF- header and the %%EOF trailer"
+    return ""
+
+
 def pdf_signature_problem(path: Path) -> str:
     """'' when `path` looks like a complete PDF, else the reason it does not.
 
@@ -3083,6 +3155,20 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
                 .strip().replace("\n", " ")[:200]
             return {"ok": False, "renderer": name,
                     "error": f"the renderer produced a non-PDF file ({_sig})"
+                             + (f": {detail}" if detail else "")}
+        # A 15-byte `%PDF-1.4\n%%EOF\n` passes the two SIGNATURE markers but
+        # renders nothing: it was recorded as `ok: True, pages: 0`, so a
+        # converter that wrote a header and a trailer satisfied the render gate
+        # (F31). A real render always writes content between them. The check is
+        # applied to the renderer's OUTPUT only; `pdf_signature_problem` keeps
+        # its documented signature contract for evidence/cache readers.
+        _body = _render_output_body_problem(pdf)
+        if _body:
+            detail = (_child_output(getattr(proc, "stderr", None))
+                      + _child_output(getattr(proc, "stdout", None))) \
+                .strip().replace("\n", " ")[:200]
+            return {"ok": False, "renderer": name,
+                    "error": f"the renderer produced a non-render ({_body})"
                              + (f": {detail}" if detail else "")}
         final_pdf = out_dir / (docx.stem + ".pdf")
         shutil.move(str(pdf), str(final_pdf))
@@ -3305,8 +3391,19 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                         # A legacy/synthetic manifest may record only a source
                         # and page count; there is no render path to verify.
                         continue
-                    if not _render_evidence_is_real(
-                            sandbox / VISUAL_TEMPLATE_DIR / _role / _pdf):
+                    # The manifest is agent-written, so `role`/`pdf` are
+                    # untrusted input: `role: ".."` + `pdf: "../outside.pdf"`
+                    # escaped the sandbox and satisfied the template gate with a
+                    # PDF from outside (F18). Resolve under visual_template and
+                    # require the RESOLVED path (symlinks followed) to stay there;
+                    # absolute paths and `..` resolve outside and are rejected.
+                    try:
+                        _tpl_root = (sandbox / VISUAL_TEMPLATE_DIR).resolve()
+                        _render = (sandbox / VISUAL_TEMPLATE_DIR / _role / _pdf).resolve()
+                        _inside = _render.is_relative_to(_tpl_root)
+                    except (OSError, ValueError):
+                        _inside = False
+                    if not _inside or not _render_evidence_is_real(_render):
                         render_missing.append(_pdf)
                 if render_missing:
                     errs.append(
@@ -3806,6 +3903,11 @@ def discovery_contract_problems(sb: Path) -> tuple:
         # `## M37 Foo` block without the `-- <name>` separator) passed the review
         # and then died at adoption time with "carries no proposal block".
         proposals, problems = parse_sweep_proposals(text)
+        # The heading fallback reads the FENCED-MASKED text: `parse_sweep_proposals`
+        # masks an illustrative `## M37 -- Example` inside a fence, so the raw
+        # search contradicted the parser and failed a correct no-proposal document
+        # (F43).
+        masked = _mask_fenced_blocks(text)
         if proposals or problems:
             if problems:
                 errors.append(
@@ -3813,13 +3915,13 @@ def discovery_contract_problems(sb: Path) -> tuple:
                     + "; ".join(problems[:6])
                     + " (each proposal is `## M<NN> -- <name>` with Purpose, Enumeration, "
                       "Artifact and Finding rules, numbered from M37)")
-        elif re.search(r"(?m)^#{2,3}\s*(M\d+)\b", text):
+        elif re.search(r"(?m)^#{2,3}\s*(M\d+)\b", masked):
             errors.append(
                 "guided_review/round2/new_sweeps.md carries a `## M<NN>` heading that is not a "
                 "sweeps.md-shaped proposal block: a proposal is `## M<NN> -- <name>` with "
                 "Purpose, Enumeration, Artifact and Finding rules, numbered from M37, and the "
                 "`adopt-sweep` command reads the same shape")
-        elif not DISCOVERY_NO_PROPOSAL_RE.search(text):
+        elif not DISCOVERY_NO_PROPOSAL_RE.search(masked):
             errors.append(
                 "guided_review/round2/new_sweeps.md carries no `## M<NN>` proposal and does not state "
                 "that there were no new sweeps to propose: D5's zero-proposal outcome must be "
@@ -4828,7 +4930,11 @@ def m1b_audit_section_missing(m1_md: str) -> bool:
     # clean), so a bare heading proves no audit either (F035).
     if not any(_M1B_HEADING_RE.match(ln.strip()) for ln in text.splitlines()):
         return True
-    return not _m1b_table(text)[0]
+    # A `| |` line (or any header of empty cells) is not a table: requiring only
+    # a truthy header accepted a deleted M1b audit table with a bare pipe line
+    # left behind (F145). The header must carry at least one real cell.
+    header = _m1b_table(text)[0]
+    return not any(str(c).strip() for c in header)
 
 
 def m1b_row_count(m1_md: str) -> int:
@@ -7406,6 +7512,21 @@ _DISPOSITION_FILLER_TAIL_RE = re.compile(
     r"[-—–_.:;,\s]+)$")
 
 
+# A cell that is ONLY a separator or a bare filler token ("-", "\u2014", "n/a",
+# "none", "TBD") is an empty disposition, not a reason: the bare-closure test
+# above fires only for verdict words, so a short table could be "disposed" with
+# `-` and pass (F45). `m1b_rows_disposed` already reads these tokens as NOT
+# disposed, and the gate must share that contract.
+_DISPOSITION_FILLER_ONLY_RE = re.compile(
+    r"(?i)^[-\u2014\u2013_.:,;\s]*(?:x+|n/?a|none|nil|null|tbd|todo)?"
+    r"[-\u2014\u2013_.:,;\s]*$")
+
+
+def _disposition_is_filler_only(cell: str) -> bool:
+    """True for a disposition cell that is only a separator or a filler token."""
+    return bool(_DISPOSITION_FILLER_ONLY_RE.match(str(cell or "").strip()))
+
+
 def _disposition_filler_closure(cell: str) -> bool:
     """True for a verdict whose reason tail is only a separator or filler token."""
     text = re.sub(r"\s+", " ", str(cell or "")).strip()
@@ -7465,7 +7586,8 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
         problems.append(msg)
     bare = [r for r in filled
             if _DISPOSITION_BARE_CLOSURE_RE.match(str(r.get(key) or ""))
-            or _disposition_filler_closure(str(r.get(key) or ""))]
+            or _disposition_filler_closure(str(r.get(key) or ""))
+            or _disposition_is_filler_only(str(r.get(key) or ""))]
     if bare:
         where = [l for l in (row_label(r) for r in bare) if l][:4]
         problems.append(
@@ -7539,7 +7661,10 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
     # disposition must quote that requirement. The pipeline's own convention
     # ("the run carries the letter in the journal's styles") is not an override.
     for r in filled:
-        rule = str(r.get("rule") or "").strip().upper()
+        # `rule id` is the alias the seeded-table selector accepts (see the M20
+        # check below), so the cover-letter guard must read it too: a table
+        # re-emitted with `Rule ID` otherwise escaped the OK-closure gate (F55).
+        rule = str(r.get("rule") or r.get("rule id") or "").strip().upper()
         if not re.search(r"\bFMT-CL1\b", rule):
             continue
         disp = str(r.get(key) or "").strip()
@@ -7558,77 +7683,6 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
               "in the journal's styles\" is the pipeline's rule, not the journal's -- file "
               "the M20 finding, or quote the override")
     return problems
-
-
-def row_label(row: dict) -> str:
-    """A short, human-usable identifier for one artifact-table row."""
-    doc = str(row.get("document") or "").strip()
-    head = str(row.get("heading") or "").strip()
-    para = str(row.get("paragraph") or "").strip()
-    if doc or head or para:
-        bits = [b for b in (doc, head, (f"para {para}" if para else "")) if b]
-        return " / ".join(bits)[:80]
-    for k in ("acronym", "term", "figure", "caption", "item", "field", "check", "kind", "id"):
-        v = str(row.get(k) or "").strip()
-        if v:
-            return f"{k}={v}"[:80]
-    return ""
-
-
-def _quote(text: str, limit: int) -> str:
-    """`repr()` of a message excerpt, with an explicit marker when it is cut."""
-    text = str(text or "")
-    return repr(text[:limit]) + (" (truncated)" if len(text) > limit else "")
-
-
-def outline_artifact_problems(rows: list) -> list:
-    """An OUTLINE whose summaries are echoed first sentences / one verdict."""
-    problems = []
-    rows = [r for r in rows if r]
-    if not rows:
-        return problems
-    summaries = [str(r.get("summary") or "").strip() for r in rows]
-    firsts = [str(r.get("first sentence") or "").strip() for r in rows]
-    empty = sum(1 for s in summaries if not s)
-    echoed = 0
-    for s, f in zip(summaries, firsts):
-        if s and f and len(s) > 12 and (f.startswith(s) or s.startswith(f[:len(s)])):
-            echoed += 1
-    if empty > max(2, int(len(rows) * 0.2)):
-        where = [l for l in (row_label(r) for r in rows
-                             if not str(r.get("summary") or "").strip()) if l][:4]
-        problems.append(f"{empty} of {len(rows)} OUTLINE rows carry no summary "
-                        f"(the hierarchy pass cannot be audited)"
-                        + (f" -- e.g. {', '.join(where)}" if where else ""))
-    if echoed > int(len(rows) * 0.5):
-        problems.append(f"{echoed} of {len(rows)} summaries are copies of the row's first "
-                        f"sentence -- write what the paragraph CLAIMS")
-    verdicts = [str(r.get("disposition") or "").strip().lower() for r in rows
-                if str(r.get("disposition") or "").strip()]
-    if verdicts:
-        text, n = Counter(verdicts).most_common(1)[0]
-        if n >= 10 and n / len(rows) >= 0.8 and not _names_check_or_finding(text):
-            same = [r for r in rows
-                    if str(r.get("disposition") or "").strip().lower() == text]
-            where = [l for l in (row_label(r) for r in same) if l][:4]
-            problems.append(f"{n} of {len(rows)} OUTLINE rows carry the same verdict "
-                            f"({_quote(text, 120)}) -- dispose each row against its own heading"
-                            + (f" -- rows: {', '.join(where)}" if where else ""))
-    return problems
-
-
-DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_words.md",
-                      "artifacts/M19_length.md", "artifacts/M8_terms.md",
-                      "artifacts/M24_concepts.md", "artifacts/GLOSSARY.md",
-                      "artifacts/PLACEHOLDERS.md", "artifacts/PLACEHOLDER_LOOKUP.md",
-                      "artifacts/OUTLINE.md", "artifacts/CLAIM_STRENGTH.md",
-                      "artifacts/M30_hierarchy_reconciliation.md",
-                      # M2's reference-integrity seed: the entries' own DOIs with
-                      # the resolver's verdict. Gated like every other seeded
-                      # table, because "the entry's DOI resolves to another work"
-                      # is exactly the class no format check and no re-reading
-                      # can see (see reference_integrity_rows).
-                      "artifacts/M2_references.md")
 
 
 def artifact_quality_report(review_dir: Path, require_files: bool = False,
@@ -7791,8 +7845,17 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
             # session's own note/coverage tables and must not restore a deleted
             # seeded row's count.
             _seed_blocks = _seed_blocks[:1]
-            present_counts = Counter(str(r.get("rule") or "").strip().upper()
-                                     for block in _seed_blocks for r in block["rows"])
+            present_counts = Counter()
+            for block in _seed_blocks:
+                # Read the rule cell through the header key that matched: the
+                # selector accepts `rule` OR `rule id`, but the counter read only
+                # `rule`, so a `Rule ID` table reported every seeded row deleted
+                # (F70).
+                rkey = next((h for h in ("rule", "rule id") if h in block["header"]), "")
+                if not rkey:
+                    continue
+                for r in block["rows"]:
+                    present_counts[str(r.get(rkey) or "").strip().upper()] += 1
             present_counts.pop("", None)
             lost = {rule: n - present_counts.get(rule, 0)
                     for rule, n in seeded_counts.items()
@@ -8450,6 +8513,19 @@ REPAIR_EDITABLE_CELLS = ("disposition", "resolution", "verdict", "summary", "dec
 # the artifact-quality layer judges; `M1_acronyms.md` carries the M1b long-form
 # table, whose per-row disposition is what its own gate reads. Everything else
 # under guided_review/artifacts/ stays byte-identical.
+DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_words.md",
+                      "artifacts/M19_length.md", "artifacts/M8_terms.md",
+                      "artifacts/M24_concepts.md", "artifacts/GLOSSARY.md",
+                      "artifacts/PLACEHOLDERS.md", "artifacts/PLACEHOLDER_LOOKUP.md",
+                      "artifacts/OUTLINE.md", "artifacts/CLAIM_STRENGTH.md",
+                      "artifacts/M30_hierarchy_reconciliation.md",
+                      # M2's reference-integrity seed: the entries' own DOIs with
+                      # the resolver's verdict. Gated like every other seeded
+                      # table, because "the entry's DOI resolves to another work"
+                      # is exactly the class no format check and no re-reading
+                      # can see (see reference_integrity_rows).
+                      "artifacts/M2_references.md")
+
 REVIEW_REPAIR_TABLES = tuple(DECISION_ARTIFACTS) + ("artifacts/M1_acronyms.md",)
 # The skip list of the attempt archive is the same one: re-derivable input
 # corpora are verified by the postcheck's own input manifests, not here.

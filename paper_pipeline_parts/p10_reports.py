@@ -95,7 +95,13 @@ def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None, name: str = None)
                                `opponent_id`; `credited` is that integer;
       * `direction = received` another member's session scored THAT member against
                                this one; the entry in this member's list is the
-                               negation, so `credited = -score_as_written`.
+                               negation, so `credited = -score_as_written`. Here
+                               `opponent_id` is the SOURCE sheet's target, so
+                               `opponent_label` names that target
+                               (`sheet_target`), never the label the source sheet
+                               used for this member: copying the latter made the
+                               (opponent_id, opponent_label) pair identify a
+                               different version (F166).
 
     `member_n` / `member_median` / `member_mean` repeat the RECORDED statistic for
     the member on every one of its rows, so the file answers "why do the median
@@ -115,6 +121,16 @@ def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None, name: str = None)
     for row in agg.get("score_rows") or []:
         st = stats.get(row["member"]) or {}
         out = dict(row)
+        if str(out.get("direction") or "") == "received":
+            # The row's opponent is the SOURCE sheet's target; in that sheet the
+            # target is identified by its version id, not by an issued label.
+            # Copying the sheet's `opponent_label` here named this row's MEMBER,
+            # so (opponent_id, opponent_label) pointed at a different version
+            # (F166). Only relabel when the two columns really are the same
+            # version, so a hand-built row is never rewritten on a guess.
+            _target = str(out.get("sheet_target") or "")
+            if _target and _target == str(out.get("opponent_id") or ""):
+                out["opponent_label"] = _target
         out["member_n"] = st.get("n")
         out["member_median"] = st.get("median")
         out["member_mean"] = (round(float(st["mean"]), 6)

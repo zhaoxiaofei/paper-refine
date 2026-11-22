@@ -107,6 +107,11 @@ else
     exit 1
 fi
 
+win_path() {
+    if command -v wslpath >/dev/null 2>&1; then wslpath -w "$1"
+    else cygpath -w "$1"; fi
+}
+
 # Never let the output BE one of the inputs: the stale-output cleanup below
 # would delete the very file Word is about to read. The comparison is
 # case-insensitive because the real destination is a Windows filesystem, where
@@ -132,12 +137,43 @@ OUTPUT_WIN_PS="$(ps_escape "$OUTPUT_WIN")"
 
 # Remove any stale output so a previous run cannot masquerade as success.
 rm -f -- "$OUTPUT"
+# Write to a UNIQUE temp beside the destination, verify THAT file, then rename
+# atomically into place: a shared final path let two runs delete/overwrite each
+# other's in-flight output while both announced success (F02), and a PowerShell
+# failure left its partial file at the requested path (F82).
+OUTPUT_TMP="${OUTPUT}.tmp.$$.$RANDOM.docx"
+OUTPUT_TMP_WIN="$(win_path "$OUTPUT_TMP")"
+OUTPUT_TMP_WIN_PS="$(ps_escape "$OUTPUT_TMP_WIN")"
+# F133: on WSL every process here is process.platform 'linux'; the Node runner
+# can only SIGKILL the Unix process group, which does not reach a Windows
+# powershell.exe or the Word/COM server it starts. Record their WINDOWS pids so
+# the runner can taskkill.exe them on a timeout. The pid file lives beside the
+# output (a path both WSL and Windows can write), so convert it here.
+PIDFILE_WIN=""
+if [[ -n "${DOCX_MCP_WINDOWS_PID_FILE:-}" ]]; then
+    PIDFILE_WIN="$(win_path "$DOCX_MCP_WINDOWS_PID_FILE")"
+fi
+PIDFILE_WIN_PS="$(ps_escape "$PIDFILE_WIN")"
+_cleanup_partial() {
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        rm -f -- "$OUTPUT" "$OUTPUT_TMP"
+    fi
+}
+trap _cleanup_partial EXIT
 
 PS_SCRIPT=$(cat <<EOF
 \$ErrorActionPreference = 'Stop'
 \$originalPath = '$ORIG_WIN_PS'
 \$revisedPath  = '$REVISED_WIN_PS'
-\$outputPath   = '$OUTPUT_WIN_PS'
+\$outputPath   = '$OUTPUT_TMP_WIN_PS'
+\$pidFile      = '$PIDFILE_WIN_PS'
+
+# Record this PowerShell's Windows PID BEFORE Word starts: if COM activation
+# itself hangs, the runner still has a Windows pid to kill.
+if (\$pidFile) {
+    try { \$PID | Set-Content -LiteralPath \$pidFile -Encoding ascii } catch { }
+}
 
 if (-not (Test-Path -LiteralPath \$originalPath)) { Write-Error "Original not found: \$originalPath"; exit 1 }
 if (-not (Test-Path -LiteralPath \$revisedPath))  { Write-Error "Revised not found: \$revisedPath";  exit 1 }
@@ -147,7 +183,22 @@ if (-not (Test-Path -LiteralPath \$revisedPath))  { Write-Error "Revised not fou
 \$revised = \$null
 \$comparison = \$null
 try {
+    # Word is launched by COM, not as this process's child, so taskkill /T on
+    # the PowerShell pid need not reach it. Record the WINWORD pid(s) that
+    # appear while this run creates its instance.
+    \$wordBefore = @(Get-Process -Name WINWORD -ErrorAction SilentlyContinue |
+                    ForEach-Object { \$_.Id })
     \$word = New-Object -ComObject Word.Application
+    if (\$pidFile) {
+        try {
+            \$wordAfter = @(Get-Process -Name WINWORD -ErrorAction SilentlyContinue |
+                           ForEach-Object { \$_.Id })
+            \$newWord = @(\$wordAfter | Where-Object { \$wordBefore -notcontains \$_ })
+            if (\$newWord.Count -gt 0) {
+                Add-Content -LiteralPath \$pidFile -Value \$newWord -Encoding ascii
+            }
+        } catch { }
+    }
     \$word.Visible = \$false
     \$word.DisplayAlerts = 0
     # msoAutomationSecurityForceDisable = 3 -- disable macros.
@@ -179,7 +230,7 @@ EOF
 ENCODED="$(printf '%s' "$PS_SCRIPT" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)"
 powershell.exe -NoProfile -NonInteractive -EncodedCommand "$ENCODED"
 
-if [[ ! -s "$OUTPUT" ]]; then
+if [[ ! -s "$OUTPUT_TMP" ]]; then
     echo "Error: no comparison document was written: $OUTPUT" >&2
     exit 1
 fi
@@ -193,12 +244,19 @@ if ! command -v python3 >/dev/null 2>&1; then
     rm -f -- "$OUTPUT"
     exit 1
 fi
-if ! python3 -c 'import sys, zipfile
+if ! python3 -c 'import sys, zipfile, xml.etree.ElementTree as ET
 z = zipfile.ZipFile(sys.argv[1]); names = set(z.namelist())
-raise SystemExit(0 if "[Content_Types].xml" in names and "word/document.xml" in names else 1)'         "$OUTPUT" 2>/dev/null; then
+for required in ("[Content_Types].xml", "word/document.xml", "word/_rels/document.xml.rels"):
+    if required not in names:
+        raise SystemExit(1)
+ET.fromstring(z.read("[Content_Types].xml"))
+doc = z.read("word/document.xml")
+ET.fromstring(doc)
+raise SystemExit(0 if doc.strip() else 1)'         "$OUTPUT_TMP" 2>/dev/null; then
     echo "Error: the comparison document is not a readable DOCX package: $OUTPUT" >&2
-    rm -f -- "$OUTPUT"
+    rm -f -- "$OUTPUT_TMP"
     exit 1
 fi
+mv -f -- "$OUTPUT_TMP" "$OUTPUT"
 
 echo "Redline written: $OUTPUT"

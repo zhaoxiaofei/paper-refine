@@ -270,7 +270,7 @@ counted and named as a gap) and every OS by-product (`:Zone.Identifier`,
 `.DS_Store`, a Word owner file — never documents, stripped from the delivered
 copy). Two shipped surfaces that attribute one display item to different tools
 are `PKG-5` (a resources-table row against the item's own legend — the pipeline
-reports it and picks NO side), and three classes of statement a package makes
+reports it and picks NO side), and four classes of statement a package makes
 about ITSELF are `PKG-6/7/8/9` (2026-10-15): one text that both denies
 generative-AI use and describes the AI workflow it used (PKG-6, with scoped
 denials — "no AI tools were used for the statistical analysis" — deliberately
@@ -1613,7 +1613,7 @@ producer, and a claim resting only on one is `unable -- placeholder input`. The
 real partner of a DECLARED placeholder stays evidence (declaring the ACT copy
 must not silence the HG008 original).
 
-### Package self-consistency: PKG-11 to PKG-26
+### Package self-consistency: PKG-11, PKG-12, PKG-14 to PKG-26
 
 Every scan below runs on each produced package and on every published copy, and
 its rows are seeded in the guided-review/audit/revision evidence pack. The table-
@@ -3728,7 +3728,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 274 suites (a few
+any failure. They are independent, so run them in parallel — 292 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

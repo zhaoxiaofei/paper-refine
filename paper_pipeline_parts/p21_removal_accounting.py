@@ -610,3 +610,74 @@ def _deletion_disposition_ok(value, allow_nothing_removed: bool = True) -> bool:
     if re.match(r"(?i)^fact\s+removed\s*[\u2014\u2013:-]\s*RP-\d+\b", text):
         return True
     return False
+
+
+# =====================================================================
+# OUTLINE / DISPOSITION-ARTIFACT GATE
+#
+# Split out of p06_postchecks.py to keep every part under the documented
+# 10,000-line limit (the 2026-11-22 fix-bugs wave pushed p06 over). Resolved at
+# CALL time from the shared globals.
+# =====================================================================
+
+def row_label(row: dict) -> str:
+    """A short, human-usable identifier for one artifact-table row."""
+    doc = str(row.get("document") or "").strip()
+    head = str(row.get("heading") or "").strip()
+    para = str(row.get("paragraph") or "").strip()
+    if doc or head or para:
+        bits = [b for b in (doc, head, (f"para {para}" if para else "")) if b]
+        return " / ".join(bits)[:80]
+    for k in ("acronym", "term", "figure", "caption", "item", "field", "check", "kind", "id"):
+        v = str(row.get(k) or "").strip()
+        if v:
+            return f"{k}={v}"[:80]
+    return ""
+
+
+def _quote(text: str, limit: int) -> str:
+    """`repr()` of a message excerpt, with an explicit marker when it is cut."""
+    text = str(text or "")
+    return repr(text[:limit]) + (" (truncated)" if len(text) > limit else "")
+
+
+def outline_artifact_problems(rows: list) -> list:
+    """An OUTLINE whose summaries are echoed first sentences / one verdict."""
+    problems = []
+    rows = [r for r in rows if r]
+    if not rows:
+        return problems
+    summaries = [str(r.get("summary") or "").strip() for r in rows]
+    firsts = [str(r.get("first sentence") or "").strip() for r in rows]
+    empty = sum(1 for s in summaries if not s)
+    echoed = 0
+    for s, f in zip(summaries, firsts):
+        if s and f and len(s) > 12 and (f.startswith(s) or s.startswith(f[:len(s)])):
+            echoed += 1
+    if empty > max(2, int(len(rows) * 0.2)):
+        where = [l for l in (row_label(r) for r in rows
+                             if not str(r.get("summary") or "").strip()) if l][:4]
+        problems.append(f"{empty} of {len(rows)} OUTLINE rows carry no summary "
+                        f"(the hierarchy pass cannot be audited)"
+                        + (f" -- e.g. {', '.join(where)}" if where else ""))
+    if echoed > int(len(rows) * 0.5):
+        problems.append(f"{echoed} of {len(rows)} summaries are copies of the row's first "
+                        f"sentence -- write what the paragraph CLAIMS")
+    # The OUTLINE table's disposition column may be spelled `resolution`/`verdict`
+    # (DISPOSITION_COLUMNS); reading only `disposition` let a repeated boilerplate
+    # verdict hide in the alias column (F159).
+    _dkey = next((k for k in DISPOSITION_COLUMNS if k in rows[0]), "disposition")
+    verdicts = [str(r.get(_dkey) or "").strip().lower() for r in rows
+                if str(r.get(_dkey) or "").strip()]
+    if verdicts:
+        text, n = Counter(verdicts).most_common(1)[0]
+        if n >= 10 and n / len(rows) >= 0.8 and not _names_check_or_finding(text):
+            same = [r for r in rows
+                    if str(r.get(_dkey) or "").strip().lower() == text]
+            where = [l for l in (row_label(r) for r in same) if l][:4]
+            problems.append(f"{n} of {len(rows)} OUTLINE rows carry the same verdict "
+                            f"({_quote(text, 120)}) -- dispose each row against its own heading"
+                            + (f" -- rows: {', '.join(where)}" if where else ""))
+    return problems
+
+

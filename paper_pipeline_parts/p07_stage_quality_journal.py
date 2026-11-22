@@ -282,6 +282,17 @@ def display_rule_errors(info: dict, label: str) -> list:
 INTEGRATION_LEDGER_COLUMNS = ("donor", "artifact", "size", "finding effect", "verdict",
                               "revalidated")
 
+# The DIFF_LEDGER prompt's fixed vocabularies (F65). `verdict` classifies a
+# difference as an edit (port/synthesize) or a deliberate non-edit; a token
+# outside this set is unclassified, so the Rule 1B port gate cannot see it.
+INTEGRATION_LEDGER_VERDICTS = ("port", "keep-self", "synthesize", "ignore-cosmetic")
+# A legacy NON-EDIT spelling an already-shipped integration fixture uses
+# (`drop`). It names the same disposition as keep-self -- do not adopt the donor
+# item -- so it is not an unclassified row; it is NOT part of the documented
+# vocabulary above (the prompt still asks for keep-self).
+INTEGRATION_LEDGER_LEGACY_VERDICTS = ("drop",)
+INTEGRATION_LEDGER_SIZES = ("small", "large")
+
 
 def _ledger_header_key(cell) -> str:
     """A ledger header without its prompt's parenthetical explanation."""
@@ -327,13 +338,19 @@ def integration_ledger_rows(path: Path) -> list:
             for row in _ledger_block_rows(b)]
 
 
+def _ledger_verdict_token(verdict_key: str, vocabulary=INTEGRATION_LEDGER_VERDICTS) -> str:
+    """The documented token a normalized `verdict` cell starts with ('' if none)."""
+    return next((tok for tok in vocabulary
+                 if re.match(r"^" + re.escape(tok) + r"\b", verdict_key)), "")
+
+
 def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool) -> dict:
     """Parse integrated/DIFF_LEDGER.md: size classes, artifacts, finding effects,
     and the Rule 1B re-verification verdict."""
     rows = integration_ledger_rows(out / "DIFF_LEDGER.md")
     sizes, missing_artifact, missing_finding, undoes, seen_donors = Counter(), [], [], [], set()
     missing_revalidated, invalid_ports, invalid_revalidated = [], [], []
-    missing_verdict = []
+    missing_verdict, invalid_verdict, invalid_size = [], [], []
     edit_rows = 0
     # The presence test and the value reader must use ONE vocabulary: the value
     # is read from `revalidated` OR the prompt's `re_validation` spelling, so a
@@ -341,11 +358,21 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
     has_revalidated_column = any("revalidated" in r or "re_validation" in r for r in rows)
     has_verdict_column = any("verdict" in r for r in rows)
     for r in rows:
-        size = str(r.get("size") or "").strip().lower()
+        size = " ".join(str(r.get("size") or "").split()).strip().lower()
         sizes[size] += 1
         donor = str(r.get("donor") or "").strip()
         if donor:
             seen_donors.add(donor)
+        # F65: the prompt FIXES the two vocabularies (`verdict (port / keep-self
+        # / synthesize / ignore-cosmetic)`, `size (small / large)`). The reader
+        # only tested "starts with port/synth" and counted any size token, so
+        # `delete`/`maybe` passed as a non-edit (bypassing the port gate) and
+        # `huge` collapsed the size-class requirement. A cell that starts with a
+        # documented token is that token (the prompt shows `port (from w2)`);
+        # anything else is unclassified and reported, never silently kept.
+        if size and not any(re.match(r"^" + re.escape(tok) + r"\b", size)
+                            for tok in INTEGRATION_LEDGER_SIZES):
+            invalid_size.append(f"{donor or '?'}: size={size}")
         if not str(r.get("artifact") or "").strip():
             missing_artifact.append(donor or "?")
         fe_raw = str(r.get("finding effect") or r.get("finding_effect") or "").strip()
@@ -357,8 +384,13 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
             # warning goes to a human and to the change log.
             undoes.append(f"{donor or '?'}: {fe_raw}")
         reval = str(r.get("revalidated") or r.get("re_validation") or "").strip().lower()
-        verdict = str(r.get("verdict") or "").strip().lower()
-        edits = verdict.startswith("port") or verdict.startswith("synth")
+        verdict_raw = str(r.get("verdict") or "").strip()
+        verdict = " ".join(verdict_raw.split()).lower()
+        verdict_key = re.sub(r"[\s_]+", "-", verdict)
+        verdict_token = _ledger_verdict_token(verdict_key)
+        legacy_token = (not verdict_token) and _ledger_verdict_token(
+            verdict_key, INTEGRATION_LEDGER_LEGACY_VERDICTS)
+        edits = verdict_token in ("port", "synthesize")
         if edits:
             edit_rows += 1
         # The edit CLASS is derived from the verdict cell, so a ledger that
@@ -368,6 +400,8 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
         # verdict nor the revalidated column is the tolerated legacy shape.
         if not verdict and (has_verdict_column or has_revalidated_column):
             missing_verdict.append(donor or "?")
+        elif verdict and not (verdict_token or legacy_token):
+            invalid_verdict.append(f"{donor or '?'}: verdict={verdict_raw}")
         if not edits and not reval:
             missing_revalidated.append(donor or "?")
         # The prompt: `revalidated` is mandatory on EVERY row and records the
@@ -387,6 +421,8 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
             "missing_revalidated": missing_revalidated, "invalid_ports": invalid_ports,
             "invalid_revalidated": invalid_revalidated,
             "missing_verdict": missing_verdict,
+            "invalid_verdict": invalid_verdict,
+            "invalid_size": invalid_size,
             "legacy_no_revalidated": legacy,
             # A legacy (no `revalidated` column) table is tolerated only when it
             # carries no edit row; a `port`/`synthesize` row there is an outright
@@ -459,160 +495,6 @@ def add_stage_quality_checks(ctx: Ctx, rec: dict, before_sources: list, after_so
     todo_errs, todo_warns = manual_todo_gate(pkg, mode=author_to_complete_mode_of(ctx))
     errs.extend(todo_errs)
     warns.extend(todo_warns)
-AUDIT_VERDICTS = ("confirm", "drop")
-AUDIT_SEVERITIES = ("critical", "major", "minor", "fatal")
-# The audit prompt's own coverage contract: every adopted check (M1-M36 and
-# J1-J5) gets a coverage row. The list is the same one the review prompt and
-# the sweep documents name (README, p03_prompts.py).
-AUDIT_COVERAGE_CHECKS = tuple([f"M{i}" for i in range(1, 37)]
-                              + [f"J{i}" for i in range(1, 6)])
-# A coverage disposition must be a REAL disposal, not one word of filler. The
-# review side's documented vocabulary is accepted verbatim; an audit row may
-# also state the re-derivation it performed ("stub: the sweep was re-derived;
-# clean"), which is what several stages' self-reports use. Bare `x`/`done` (or
-# a bare `clean`) records no re-derivation and is refused (F30).
-#
-# A NEGATED re-derivation ("never verified at all", "the sweep was not
-# re-derived", "could not be checked") is the absence of the check, so it stays
-# refused. The FIRST version of that guard was a whole-string negation search
-# (`(?!.*\b(?:not|never|cannot|unable to)\b)`), which rejected any true row
-# whose EVIDENCE happened to contain one of those words: the 2026-11-01 audit
-# lost an entire 39-minute attempt on
-#   "F-002, ... confirmed (...); X-910 confirmed (CI does not contain point estimate)"
-# and on "F-030 confirmed (...); X-949 dropped (... not a defect)". The negation
-# is only disqualifying when it GOVERNS THE VERB, so `_AUDIT_NEGATED_VERB_RE`
-# matches a negation, at most two words, and then the re-derivation verb; the
-# gate rejects a cell only when that phrase occurs. A negation elsewhere in the
-# sentence is evidence, not a missing check.
-#
-# The verdict may be preceded by a qualifier: "No cover letter in submission;
-# no findings" and "No rendered artwork files in corpus; unable to check
-# artwork/text parity" were refused by the anchored match although both are
-# real dispositions. Every shape is therefore searched anywhere in the cell,
-# while bare filler ("x", "done", "not checked") still matches nothing.
-#
-# `No findings ...` is the same verdict as `0 findings` and `unable to check X`
-# the same verdict as `unable -- <reason>`; both spellings are accepted, and the
-# reason-bearing ones still pass the shared filler gate in `_audit_disposition_ok`.
-_AUDIT_REDERIVATION_VERB = (
-    r"(?:re-?derived|confirmed|checked|verified|re-?derive|confirm|check|verify|"
-    r"review(?:ed)?)")
-_AUDIT_NEGATED_VERB_RE = (
-    r"\b(?:not|never|cannot|can\s+not|could\s+not|unable\s+to|no\s+longer)\b"
-    r"(?:\s+\w+){0,2}\s+" + _AUDIT_REDERIVATION_VERB + r"\b")
-_AUDIT_COUNT_RE = re.compile(r"(?i)(?:\b\d+\s+finding|\bno\s+finding)")
-_AUDIT_CANONICAL_TAIL_RE = re.compile(
-    r"(?i)(?:clean\s*(?:--|—|–)\s*basis\s*:\s*"
-    r"|unable\s*(?:--|—|–)\s*"
-    r"|out\s+of\s+scope\s*(?:--|—|–)\s*)(.*)$")
-_AUDIT_VERB_RE = re.compile(r"(?i)\b" + _AUDIT_REDERIVATION_VERB + r"\b")
-_AUDIT_NEGATED_VERB_COMPILED = re.compile(_AUDIT_NEGATED_VERB_RE, re.I)
-_AUDIT_PROSE_UNABLE_RE = re.compile(r"(?i)\bunable\s+to\s+(.*)$")
-# A re-derivation sentence must NAME what was re-derived or on what basis; a
-# one-word verb (`checked`, `confirmed`) records no object and is filler (F128).
-# A check id, a finding id or a named artifact satisfies that bar on its own.
-_AUDIT_NAMED_BASIS_RE = re.compile(
-    r"(?i)\b(?:[MJ]\d{1,2}|(?:F|X|AU)-\d+)\b"
-    r"|\b[\w-]+\.(?:md|markdown|json|txt|tex|docx|csv|pdf)\b")
-AUDIT_COVERAGE_DISPOSITION_RE = re.compile(
-    # A verdict shape anywhere in the cell (the leading `.*?` lets a qualifier
-    # precede it).
-    r"(?i)^(?:.*?(?:\b\d+\s+finding"
-    r"|\bno\s+finding"
-    r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
-    r"|unable\s*(?:--|—|–)\s*\S"
-    r"|out\s+of\s+scope\s*(?:--|—|–)\s*\S"
-    # A prose inability that names an object ("unable to check artwork/text
-    # parity"): the `unable --` dash form is preferred, but the same recorded
-    # fact in a sentence is still a disposition, not filler.
-    r"|unable\s+to\s+\w+\s+\S)"
-    # ... or a re-derivation verb that no negation governs.
-    r"|(?!.*?" + _AUDIT_NEGATED_VERB_RE + r")"
-    r".*?\b" + _AUDIT_REDERIVATION_VERB + r"\b.*$)")
-
-
-def _audit_negated_verb(text: str) -> bool:
-    """Whether a negation governs the re-derivation verb in `text`.
-
-    `_AUDIT_NEGATED_VERB_RE` listed only `not/never/cannot/can not/could
-    not/unable to/no longer`, so a true refusal written with a contraction
-    ("wasn't re-derived") or with punctuation between the negation and the verb
-    ("was not, in fact, re-derived") was read as a POSITIVE re-derivation and
-    accepted by the coverage gate (F06). Normalise contractions to their
-    two-word form and the punctuation that separates the negation from the verb
-    to spaces, then apply the same bounded-window match.
-    """
-    probe = re.sub(r"n['\u2019]t\b", " not", str(text or ""), flags=re.I)
-    probe = re.sub(r"[,;:\u2014\u2013]", " ", probe)
-    return bool(_AUDIT_NEGATED_VERB_COMPILED.search(probe))
-
-
-def _audit_rederivation_named(text: str) -> bool:
-    """Whether a re-derivation sentence names an object/basis (not a bare verb).
-
-    `checked`, `confirmed`, `verified the` and `re-derived` are one- or two-word
-    labels: they state that a verb was said, not what was re-derived or on what
-    basis, so they are the filler shape the coverage gate must refuse. Three
-    words ("checked all rows") or any check/finding id or named artifact file
-    clears the bar.
-    """
-    stripped = str(text or "").strip()
-    return len(stripped.split()) >= 3 or bool(_AUDIT_NAMED_BASIS_RE.search(stripped))
-
-
-def _audit_disposition_ok(value) -> bool:
-    """A real audit coverage disposition (negation- and filler-proof).
-
-    The regex alone accepts `unable -- no`, `clean -- basis: x` and a bare
-    `out of scope`; those are the review gate's documented FILLER shapes, so
-    route every reason-bearing form through the shared reason check
-    (`_coverage_reason_named` knows the difference between a named
-    artifact/reason and a one-letter or filler token). The prose equivalents get
-    the same treatment: `unable to <verb> <object>` must name an object, not
-    just the verb.
-
-    THE SHAPES ARE TESTED IN ORDER, STRONGEST FIRST, and each shape accepts on
-    its OWN evidence. Testing the prose-`unable` heuristic first let an inability
-    clause in an EVIDENCE sentence veto a perfectly good count:
-    `3 findings; unable to see` and `3 findings confirmed (the reviewer was
-    unable to tell)` were refused because the tail after "unable to" was short.
-    A finding count is a complete verdict, so it is answered first.
-    """
-    text = str(value or "").strip()
-    if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
-        return False
-    if _AUDIT_COUNT_RE.search(text):
-        # A count is a complete verdict only when it is not negated:
-        # `0 findings -- not checked` used to take this shortcut and pass, and a
-        # "nothing/nobody checked" tail names no negation verb at all (F008).
-        return (not _audit_negated_verb(text)
-                and not _COVERAGE_NOWORK_RE.search(text))
-    m = _AUDIT_CANONICAL_TAIL_RE.search(text)
-    if m is not None:
-        # `unable -- <why it could not run>` is the documented inability form;
-        # its reason legitimately negates the check (F014), unlike `clean`.
-        return _coverage_reason_named(
-            m.group(1), allow_negated=bool(re.match(r"(?i)^\s*unable\b", text)))
-    if _AUDIT_VERB_RE.search(text) and not _audit_negated_verb(text):
-        # a re-derivation sentence, e.g. "the sweep was re-derived". A BARE
-        # verb ("checked", "confirmed", "verified the") records no object and
-        # no basis, so it is the filler shape this gate exists to refuse (F128):
-        # a real disposition names what was re-derived, on what basis, or a
-        # finding/check id (the same bar the other shapes meet).
-        return _audit_rederivation_named(text)
-    m = _AUDIT_PROSE_UNABLE_RE.search(text)
-    if m is not None:
-        # "unable to check artwork/text parity" names what could not be
-        # checked; "unable to check" alone is the filler shape.
-        return len(re.findall(r"[A-Za-z0-9]", m.group(1))) >= 6
-    if _AUDIT_VERB_RE.search(text) and _audit_negated_verb(text):
-        # The coverage regex's negative lookahead only knows the literal
-        # negation spellings; a contraction/punctuated negation reaches here and
-        # must still be REFUSED (F06).
-        return False
-    return True              # the gate regex matched some other accepted shape
-
-
 def audit_coverage_problems(audit) -> list:
     """Problems with the auditor's own coverage table.
 
@@ -846,7 +728,12 @@ def _probe_audit_verdict(row) -> str:
                 and "reviewer" not in str(k or "").strip().lower()]
     for k in keys:
         cell = " ".join(str(row.get(k) or "").split())
-        low = cell.lower()
+        # The prompt documents the verdict as a backticked `stands`, so a
+        # session copying that spelling wrote a leading backtick and the row
+        # was reported as "carries no verdict" (F144). Compare the cell without
+        # its markdown emphasis decoration; the returned verdict keeps the
+        # cell's own text.
+        low = cell.strip("`*_~ ").lower()
         if low.startswith(("stands", "needs-evidence", "needs evidence")):
             return cell
     return ""
@@ -1779,6 +1666,15 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
                         f"`verdict` (port / keep-self / synthesize / ignore-cosmetic) -- the "
                         f"verdict is what classifies a row as an edit, so without it Rule 1B's "
                         f"`revalidated: confirmed` requirement cannot be enforced")
+        if led["invalid_verdict"]:
+            errs.append(f"integrate: {len(led['invalid_verdict'])} ledger row(s) carry a "
+                        f"`verdict` outside port / keep-self / synthesize / ignore-cosmetic -- "
+                        f"an unclassified row is not a disposed difference and the port gate "
+                        f"cannot see it: " + "; ".join(led["invalid_verdict"][:4]))
+        if led["invalid_size"]:
+            errs.append(f"integrate: {len(led['invalid_size'])} ledger row(s) carry a `size` "
+                        f"outside small / large -- the size-class requirement cannot be read: "
+                        + "; ".join(led["invalid_size"][:4]))
         if led["legacy_ports"]:
             errs.append("integrate: DIFF_LEDGER.md has no `revalidated` column but carries "
                         "port/synthesize row(s) -- Rule 1B forbids editing an unverified item, "
@@ -3790,7 +3686,15 @@ def _response_location_problem(cid: str, rel: str, location, before, after,
                 f"section (or a page/line locator in this file)")
     if _RESPONSE_LOCATION_SKIP_RE.match(loc):
         return None
-    anchor = re.split(r"[,;:—–]|\s+-\s+", loc, 1)[0].strip()
+    # F161: `Results (page 7)` is as legal a locator as `Results, page 7` and
+    # `Results p. 7`, but the parenthesised qualifier survived into the anchor
+    # and the section name then did not resolve. Drop it before the anchor is
+    # parsed (the comma inside `(page 7, line 3)` would truncate the anchor, so
+    # this must happen before the first-comma split).
+    _loc_no_pages = re.sub(
+        r"(?i)\s*\(\s*(?:see\s+)?(?:p|pp|page|line|paragraph|para)\.?\s*\d+[^)]*\)\s*$",
+        "", loc).strip()
+    anchor = re.split(r"[,;:—–]|\s+-\s+", _loc_no_pages, 1)[0].strip()
     anchor = re.sub(r"(?i)\s+(?:p|pp|page|line|paragraph|para)\.?\s*\d+.*$",
                     "", anchor).strip()
     if not anchor:
@@ -9829,6 +9733,15 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                                 f"no `verdict` (port / keep-self / synthesize / "
                                 f"ignore-cosmetic) -- without it no row is classified as an "
                                 f"edit, so Rule 1B cannot be enforced")
+                if led["invalid_verdict"]:
+                    errs.append(f"integrate: {len(led['invalid_verdict'])} ledger row(s) carry a "
+                                f"`verdict` outside port / keep-self / synthesize / "
+                                f"ignore-cosmetic -- an unclassified row is not a disposed "
+                                f"difference: " + "; ".join(led["invalid_verdict"][:4]))
+                if led["invalid_size"]:
+                    errs.append(f"integrate: {len(led['invalid_size'])} ledger row(s) carry a "
+                                f"`size` outside small / large -- the size-class requirement "
+                                f"cannot be read: " + "; ".join(led["invalid_size"][:4]))
                 if led["legacy_ports"]:
                     errs.append("integrate: DIFF_LEDGER.md has no `revalidated` column but "
                                 "carries port/synthesize row(s) -- Rule 1B forbids editing an "

@@ -19,6 +19,23 @@ _PARAGRAPH_PROPERTIES_RE = re.compile(
 _PAGE_BREAK_DISABLED_RE = re.compile(r"""\sw:val\s*=\s*(?:"(?:0|false|off)"|'(?:0|false|off)')""")
 
 
+def _revision_scan_text(xml: str) -> str:
+    """`xml` with what a reader cannot see blanked, tracked DELETIONS kept.
+
+    `_mask_noncontent` also blanks `<w:del>`, but a tracked deletion IS a
+    revision mark the FMT-S4 counter must report. Only comments/PIs and the
+    unrendered `mc:Fallback` branch are removed here, so a retired
+    `<w:ins>`/`<w:proofErr>` inside `<!-- ... -->` no longer reads as live.
+    """
+    text = xml or ""
+    if "<!--" in text or "<?" in text:
+        text = _XML_MISC_SPAN_RE.sub(
+            lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+    if "<mc:AlternateContent" in text:
+        text = _blank_spans(text, _mc_hidden_spans(text))
+    return text
+
+
 def _break_only_paragraph(para: str) -> bool:
     return (bool(PAGEBREAK_RE.search(para)) and not text_of(para).strip()
             and not has_drawing(para) and not has_field(para) and not has_anchor(para)
@@ -529,15 +546,20 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             and policy["title_page_header"] == "suppress":
         row("FMT-S3", "low", "document", "the running head is printed on the title page",
             "add w:titlePg to the section properties so page 1 carries no header")
-    n_ins = len(re.findall(r"<w:ins(?=[\s/>])", xml))
-    n_del = len(re.findall(r"<w:del(?=[\s/>])", xml))
-    n_other_rev = len(OTHER_REVISION_MARK_RE.findall(xml))
+    # A revision mark the reader cannot see (inside an XML comment, or in the
+    # unrendered mc:Fallback branch) is not a live tracked change; count the
+    # visible part. `w:del` itself stays visible to the counter (see
+    # `_revision_scan_text`).
+    revision_text = _revision_scan_text(xml)
+    n_ins = len(re.findall(r"<w:ins(?=[\s/>])", revision_text))
+    n_del = len(re.findall(r"<w:del(?=[\s/>])", revision_text))
+    n_other_rev = len(OTHER_REVISION_MARK_RE.findall(revision_text))
     if n_ins or n_del or n_other_rev:
         other = f" / {n_other_rev} other revision mark(s)" if n_other_rev else ""
         row("FMT-S4", "high", "document",
             f"tracked changes present: {n_ins} ins / {n_del} del{other}",
             "a final package must not carry revision marks; accept or reject them first")
-    n_proof = len(PROOFERR_RE.findall(xml))
+    n_proof = len(PROOFERR_RE.findall(revision_text))
     if n_proof:
         row("FMT-S5", "low", "document", f"{n_proof} proofing marker(s) (w:proofErr)",
             "the file was last saved with unaccepted spelling/grammar marks")
@@ -546,7 +568,10 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # stop -- counting it reported "1 literal tab character" on paragraphs that
     # carry no tab at all (the `<w:tab[^>]*/>` regex cannot tell them apart).
     n_tabs, _tab_depth = 0, 0
-    for _tok in re.finditer(r"<w:tabs(?=[\s/>])[^>]*>|</w:tabs>|<w:tab(?=[\s/>])[^>]*/>",
+    # The close tag is matched with optional whitespace: an exact `</w:tabs>`
+    # left `_tab_depth` stuck at 1 after a legal `</w:tabs >`, so every later
+    # run-level `<w:tab/>` was misread as a tab-stop DEFINITION.
+    for _tok in re.finditer(r"<w:tabs(?=[\s/>])[^>]*>|</w:tabs\s*>|<w:tab(?=[\s/>])[^>]*/>",
                             xml):
         _raw = _tok.group(0)
         if _raw.startswith("</"):
@@ -1042,9 +1067,11 @@ def analyse_package(path: Path, policy: dict) -> dict:
                     _aux_rev_parts.append(
                         (_n, ooxml_part_text(_pkg.read(_n))))
     for name, ax in _aux_rev_parts:
-        _n_ins = len(re.findall(r"<w:ins(?=[\s/>])", ax))
-        _n_del = len(re.findall(r"<w:del(?=[\s/>])", ax))
-        _n_other = len(OTHER_REVISION_MARK_RE.findall(ax))
+        # Same live-content reading as the document counter above.
+        ax_scan = _revision_scan_text(ax)
+        _n_ins = len(re.findall(r"<w:ins(?=[\s/>])", ax_scan))
+        _n_del = len(re.findall(r"<w:del(?=[\s/>])", ax_scan))
+        _n_other = len(OTHER_REVISION_MARK_RE.findall(ax_scan))
         if _n_ins or _n_del or _n_other:
             _other = f" / {_n_other} other revision mark(s)" if _n_other else ""
             res["rows"].append({
@@ -1055,7 +1082,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
                 "detail": ("a final package must not carry revision marks; accept "
                            "or reject them first"),
                 "fix": "manual", "protected": False, "tier": tier_of("FMT-S4")})
-        _n_proof = len(PROOFERR_RE.findall(ax))
+        _n_proof = len(PROOFERR_RE.findall(ax_scan))
         if _n_proof:
             res["rows"].append({
                 "rule": "FMT-S5", "severity": "low", "document": path.name,
@@ -3003,12 +3030,23 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         if not target:
             return False
         xml = ooxml_part_text(tpkg.read(f"word/{target}"))
-        if not re.search(r'<w:instrText[^>]*>[^<]*\bPAGE\b'
-                         r'|<w:fldSimple[^>]*w:instr="[^"]*\bPAGE\b', xml, re.I):
+        has_page = bool(re.search(r"<w:instrText[^>]*>[^<]*\bPAGE\b", xml, re.I))
+        if not has_page:
+            # `w:instr` may be either quote character; a double-quote-only
+            # pattern read a legal single-quoted field as "no PAGE field".
+            for m in re.finditer(r"<w:fldSimple(?=[\s/>])[^>]*>", xml):
+                if re.search(r"\bPAGE\b", attr_of(m.group(0), "w:instr") or "", re.I):
+                    has_page = True
+                    break
+        if not has_page:
             return False
         if re.search(r"<w:txbxContent|<wps:wsp|<w:pict\b", xml):
             return False
-        visible = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", xml))
+        # `text_of` reads every legal `w:t` close (`</w:t >`, attributes in any
+        # order) and decodes entities. The private exact-close regex saw an
+        # empty string for a prose footer ending `</w:t >`, so the template's
+        # own "Typeset by ..." note was classified as plain pagination.
+        visible = text_of(xml)
         return not re.search(r"[A-Za-z]", visible)
 
     out = {"footer_replaced": []}
@@ -3146,8 +3184,13 @@ def template_style_roles(template: Path) -> dict:
         if "caption" in keys and "caption" not in roles:
             roles["caption"] = sid
     used = {}
-    for m in re.finditer(r'<w:pStyle w:val="([^"]+)"', doc):
-        used[m.group(1)] = used.get(m.group(1), 0) + 1
+    # Read the tag's own `w:val` through `attr_of`: the double-quote-only
+    # pattern also required `w:val` to be the first attribute, so a legal
+    # `w:pStyle w:val='Heading1'` made the depth fall back to 2.
+    for m in re.finditer(r"<w:pStyle(?=[\s/>])[^>]*>", doc):
+        sid = attr_of(m.group(0), "w:val")
+        if sid:
+            used[sid] = used.get(sid, 0) + 1
     depth = 0
     for level, sid in roles["headings"].items():
         if used.get(sid, 0) >= 2:
@@ -3202,7 +3245,7 @@ def _body_run_size(doc_xml: str):
     for _p0, _p1, frag in paragraphs(doc_xml):
         if len(text_of(frag).split()) < 25:
             continue
-        for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", frag):
+        for run in re.findall(r"<w:r\b[\s\S]*?</w:r\s*>", frag):
             t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run))
             for s in _run_sizes(run):
                 weights[s] += len(t)
@@ -3271,7 +3314,7 @@ def heading_like_paragraphs(doc_xml: str, containers=()) -> list:
         if "<w:numPr" in frag:
             continue
         sizes, all_bold, has_text = [], True, False
-        for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", frag):
+        for run in re.findall(r"<w:r\b[\s\S]*?</w:r\s*>", frag):
             if not "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run)).strip():
                 continue
             has_text = True
@@ -3395,7 +3438,7 @@ def _correspondence_lead(para_xml: str) -> int:
     before it is skipped by the walk itself, so counting its characters here
     would shift the bold span into the name.
     """
-    for rm in re.finditer(r"<w:r\b[\s\S]*?</w:r>", para_xml):
+    for rm in re.finditer(r"<w:r\b[\s\S]*?</w:r\s*>", para_xml):
         tm = re.search(r"<w:t[^>]*>([\s\S]*?)</w:t\s*>", rm.group(0))
         if not tm:
             continue
@@ -3420,7 +3463,7 @@ def _bold_label_runs(para_xml: str) -> str:
         return para_xml
     left = len(m.group(0)) + _correspondence_lead(para_xml)
     out = para_xml
-    for rm in list(re.finditer(r"<w:r\b[\s\S]*?</w:r>", out)):
+    for rm in list(re.finditer(r"<w:r\b[\s\S]*?</w:r\s*>", out)):
         run = rm.group(0)
         tm = re.search(r"(<w:t[^>]*>)([\s\S]*?)(</w:t\s*>)", run)
         if not tm:
@@ -3486,7 +3529,7 @@ def _label_is_bold(para_xml: str) -> bool:
     if not m:
         return False
     left = len(m.group(0)) + _correspondence_lead(para_xml)
-    for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", para_xml):
+    for run in re.findall(r"<w:r\b[\s\S]*?</w:r\s*>", para_xml):
         text = "".join(unesc(t) for t in re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run))
         if not text.strip():
             continue
@@ -3989,6 +4032,21 @@ def _reorder_numbering_groups(xml: str, pics: str, abstracts: str, nums: str) ->
             + xml[close_at:])
 
 
+def _numbering_block(numbering: str, tag: str, id_attr: str, wanted: str) -> str:
+    """The balanced `<w:tag ...>` definition whose `id_attr` equals `wanted`.
+
+    The value may be single- or double-quoted and the attribute may sit in any
+    order; a lazy exact-quote regex read neither. `_element_spans_by_name`
+    balances the element and skips commented-out copies.
+    """
+    for start, end in _element_spans_by_name(numbering, tag):
+        block = numbering[start:end]
+        open_tag = re.match(rf"<w:{tag}(?=[\s/>])[^>]*>", block)
+        if open_tag and attr_of(open_tag.group(0), id_attr) == wanted:
+            return block
+    return ""
+
+
 def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     """Keep the source's list definitions that the template does not define.
 
@@ -4006,64 +4064,81 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     doc_names = [n for n in sorted(parts) if doc_part_re.fullmatch(n)]
     referenced = set()
     for name in doc_names:
-        referenced |= set(re.findall(r'<w:numId(?=[\s/>])[^>]*w:val="(\d+)"',
-                                     _ooxml_part_codec(parts[name])[0]))
-    defined = set(re.findall(r'<w:num(?=[\s/>])[^>]*w:numId="(\d+)"', tpl_numbering))
+        for tag in re.findall(r"<w:numId(?=[\s/>])[^>]*>",
+                              _ooxml_part_codec(parts[name])[0]):
+            val = attr_of(tag, "w:val")
+            if val is not None and val.strip().isdigit():
+                referenced.add(val.strip())
+    defined = set()
+    for tag in re.findall(r"<w:num(?=[\s/>])[^>]*>", tpl_numbering):
+        val = attr_of(tag, "w:numId")
+        if val is not None:
+            defined.add(val.strip())
     missing = sorted(referenced - defined, key=lambda s: (len(s), s))
     if not missing:
         return {}
     both = tpl_numbering + src_numbering
-    next_abs = max((int(x) for x in re.findall(r'w:abstractNumId="(\d+)"', both)), default=0) + 1
-    next_num = max((int(x) for x in re.findall(r'<w:num(?=[\s/>])[^>]*w:numId="(\d+)"', both)),
-                   default=0) + 1
-    next_pic = max((int(x) for x in re.findall(r'w:numPicBulletId="(\d+)"', both)), default=0) + 1
+    next_abs = max((int(x) for x in re.findall(
+        r"w:abstractNumId\s*=\s*[\"'](\d+)[\"']", both)), default=0) + 1
+    next_num = max((int(x) for x in re.findall(
+        r"<w:num(?=[\s/>])[^>]*w:numId\s*=\s*[\"'](\d+)[\"']", both)), default=0) + 1
+    next_pic = max((int(x) for x in re.findall(
+        r"w:numPicBulletId\s*=\s*[\"'](\d+)[\"']", both)), default=0) + 1
     abs_map, abs_blocks, num_blocks, pic_blocks = {}, [], [], []
     num_map = {}
     for old_num in missing:
-        num_block = re.search(
-            rf'<w:num(?=[\s/>])[^>]*w:numId="{re.escape(old_num)}"[\s\S]*?</w:num>', src_numbering)
+        num_block = _numbering_block(src_numbering, "num", "w:numId", old_num)
         if not num_block:
             continue
-        abs_ref = re.search(r'<w:abstractNumId(?=[\s/>])[^>]*w:val="(\d+)"', num_block.group(0))
+        abs_ref = elem_val(num_block, "abstractNumId")
         if not abs_ref:
             continue
-        old_abs = abs_ref.group(1)
+        old_abs = abs_ref
         if old_abs not in abs_map:
-            abs_block = re.search(
-                rf'<w:abstractNum(?=[\s/>])[^>]*w:abstractNumId="{re.escape(old_abs)}"'
-                r'[\s\S]*?</w:abstractNum>', src_numbering)
+            abs_block = _numbering_block(src_numbering, "abstractNum",
+                                         "w:abstractNumId", old_abs)
             if not abs_block:
                 continue
             new_abs = str(next_abs)
             next_abs += 1
-            block = re.sub(rf'w:abstractNumId="{re.escape(old_abs)}"',
-                           f'w:abstractNumId="{new_abs}"', abs_block.group(0), count=1)
+            block = re.sub(
+                r"(<w:abstractNum(?=[\s/>])[^>]*w:abstractNumId\s*=\s*)([\"'])[^\"']*\2",
+                lambda m: m.group(1) + m.group(2) + new_abs + m.group(2),
+                abs_block, count=1)
             # a picture-bullet level references a numPicBullet element that must
             # travel with the copied list (schema order: numPicBullet, abstractNum, num)
             pic_map = {}
-            for pid in sorted(set(re.findall(
-                    r'<w:lvlPicBulletId(?=[\s/>])[^>]*w:val="(\d+)"', block))):
-                pic = re.search(
-                    rf'<w:numPicBullet(?=[\s/>])[^>]*w:numPicBulletId="{re.escape(pid)}"'
-                    r'[\s\S]*?</w:numPicBullet>', src_numbering)
+            for pic_tag in re.finditer(r"<w:lvlPicBulletId(?=[\s/>])[^>]*>", block):
+                pid = attr_of(pic_tag.group(0), "w:val")
+                if not pid:
+                    continue
+                pic = _numbering_block(src_numbering, "numPicBullet",
+                                       "w:numPicBulletId", pid)
                 if not pic:
                     continue
                 new_pid = str(next_pic)
                 next_pic += 1
                 pic_map[pid] = new_pid
-                pic_blocks.append(re.sub(rf'w:numPicBulletId="{re.escape(pid)}"',
-                                         f'w:numPicBulletId="{new_pid}"', pic.group(0), count=1))
+                pic_blocks.append(re.sub(
+                    r"(<w:numPicBullet(?=[\s/>])[^>]*w:numPicBulletId\s*=\s*)([\"'])[^\"']*\2",
+                    lambda m: m.group(1) + m.group(2) + new_pid + m.group(2),
+                    pic, count=1))
             for pid, new_pid in pic_map.items():
-                block = re.sub(rf'(<w:lvlPicBulletId(?=[\s/>])[^>]*w:val="){re.escape(pid)}(")',
-                               rf'\g<1>{new_pid}\g<2>', block)
+                block = re.sub(
+                    rf"(<w:lvlPicBulletId(?=[\s/>])[^>]*w:val\s*=\s*)([\"']){re.escape(pid)}\2",
+                    lambda m: m.group(1) + m.group(2) + new_pid + m.group(2), block)
             abs_map[old_abs] = new_abs
             abs_blocks.append(block)
         new_num = str(next_num)
         next_num += 1
-        carried = re.sub(r'(<w:abstractNumId(?=[\s/>])[^>]*w:val=")[^"]*(")',
-                         rf'\g<1>{abs_map[old_abs]}\g<2>', num_block.group(0), count=1)
-        carried = re.sub(r'(<w:num(?=[\s/>])[^>]*w:numId=")[^"]*(")',
-                         rf'\g<1>{new_num}\g<2>', carried, count=1)
+        carried = re.sub(
+            r"(<w:abstractNumId(?=[\s/>])[^>]*w:val\s*=\s*)([\"'])[^\"']*\2",
+            lambda m: m.group(1) + m.group(2) + abs_map[old_abs] + m.group(2),
+            num_block, count=1)
+        carried = re.sub(
+            r"(<w:num(?=[\s/>])[^>]*w:numId\s*=\s*)([\"'])[^\"']*\2",
+            lambda m: m.group(1) + m.group(2) + new_num + m.group(2),
+            carried, count=1)
         num_blocks.append(carried)
         num_map[old_num] = new_num
     if not num_map:
@@ -4080,8 +4155,9 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     for name in doc_names:
         xml, _doc_encode = _ooxml_part_codec(parts[name])
         new_xml = re.sub(
-            r'(<w:numId(?=[\s/>])[^>]*w:val=")(\d+)(")',
-            lambda m: m.group(1) + num_map.get(m.group(2), m.group(2)) + m.group(3), xml)
+            r"(<w:numId(?=[\s/>])[^>]*w:val\s*=\s*)([\"'])(\d+)\2",
+            lambda m: (m.group(1) + m.group(2)
+                       + num_map.get(m.group(3), m.group(3)) + m.group(2)), xml)
         if new_xml != xml:
             parts[name] = _doc_encode(new_xml)
     return num_map
@@ -4219,10 +4295,16 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                             block, count=1)
                     kept_styles.append(block)
             if kept_styles:
-                tpl_styles = tpl_styles.replace("</w:styles>",
-                                                "".join(kept_styles) + "</w:styles>")
-                parts["word/styles.xml"] = _ooxml_part_codec(
-                    parts["word/styles.xml"])[1](tpl_styles)
+                # Splice before the LIVE close, which may be spelled `</w:styles >`
+                # (XML allows whitespace before `>`): an exact-close replace was a
+                # silent no-op, so the manuscript's style was dropped while the
+                # document kept referencing it.
+                mclose = re.search(r"</w:styles\s*>", tpl_styles)
+                if mclose:
+                    tpl_styles = (tpl_styles[:mclose.start()] + "".join(kept_styles)
+                                  + tpl_styles[mclose.start():])
+                    parts["word/styles.xml"] = _ooxml_part_codec(
+                        parts["word/styles.xml"])[1](tpl_styles)
 
             remapped = stripped = carried_lists = 0
             page_ok = False
@@ -4293,13 +4375,13 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
     try:
         text_ok = _text(src) == _text(out)
         with zipfile.ZipFile(out) as z:
-            check_parts = ["word/document.xml", "word/styles.xml"]
-            if "word/settings.xml" in z.namelist():
-                # The parity setting is spliced into this part; parse it too, or
-                # an encoding mistake there ships inside an ok:true report.
-                check_parts.append("word/settings.xml")
-            if "word/numbering.xml" in copied or carried_lists:
-                check_parts.append("word/numbering.xml")
+            # Parse EVERY XML/rels part the package now carries, not only the
+            # document/styles/settings/numbering set: a malformed copied
+            # header/footer part (or a rels/content-types part written here)
+            # used to ship inside an ok:true report. `[Content_Types].xml` is
+            # an .xml part and is covered by the same walk.
+            check_parts = [n for n in z.namelist()
+                           if n.lower().endswith((".xml", ".rels"))]
             for name in check_parts:
                 ET.fromstring(_docx_xml_part_guarded(z, name))
     except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError, RuntimeError,
@@ -5441,9 +5523,13 @@ def _cell_font_pt(styles: dict, cell: str) -> float:
             sizes.append(int(val) / 2.0)
     if sizes:
         return max(sizes)
-    st = re.search(r'<w:pStyle[^>]*w:val="([^"]+)"', cell)
-    if st:
-        sz = style_sz(styles, st.group(1))
+    # `attr_of` accepts either legal quote style (and any attribute order): the
+    # double-quote-only read returned None for `w:pStyle w:val='...'` and the
+    # cell was measured at the 10 pt fallback.
+    st = re.search(r"<w:pStyle(?=[\s/>])[^>]*>", cell)
+    sid = attr_of(st.group(0), "w:val") if st else None
+    if sid:
+        sz = style_sz(styles, sid)
         if sz:
             try:
                 return int(sz) / 2.0
@@ -5737,7 +5823,11 @@ def page_field_rows(aux_parts: list, doc: str) -> list:
         if n <= 1:
             continue
         boxed = 0
-        for m in re.finditer(r"<w:txbxContent(?=[\s/>]).*?</w:txbxContent>", xml or "", re.S):
+        # A legal whitespace close (`</w:txbxContent >`) is the same element; an
+        # exact-close pattern missed it, so the note claimed the duplicate
+        # fields were not in a floating text box and gave the wrong repair.
+        for m in re.finditer(r"<w:txbxContent(?=[\s/>]).*?</w:txbxContent\s*>",
+                             xml or "", re.S):
             boxed += len(PAGE_FIELD_INSTR_RE.findall(m.group(0)))
         where = (f"; {boxed} of them sit in a floating text box" if boxed else "")
         rows.append({

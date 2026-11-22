@@ -377,7 +377,7 @@ def test_report_and_format() -> None:
                                      "figure_text": {"min_pt": 80}}) == [])
     sl = {"sentence_words": {"methods": 61}, "paragraph_words": 250}
     mrows = [r for r in fmt.long_text_rows(
-        [" ".join(["word"] * 61) + "."], [False], ["methods"], style_limits=sl)
+        [" ".join(["word"] * 62) + "."], [False], ["methods"], style_limits=sl)
         if r["rule"] == "FMT-T9c" and "long sentence" in r["evidence"]]
     check("F080 a venue-declared methods sentence bar is finding-tier",
           bool(mrows) and mrows[0]["tier"] == "finding", mrows[:1])

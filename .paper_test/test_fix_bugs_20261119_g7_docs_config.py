@@ -38,10 +38,15 @@ def text(rel):
 
 def test_prompt_ranges():
     src = text("paper_pipeline_parts/p03_prompts.py")
+    # F109: assert on the RENDERED guided-review prompt, not on any occurrence
+    # of the string anywhere in the 140k-line prompt module (a string moved to
+    # another builder would otherwise keep the check green).
+    rendered = pp.review_prompt(scratch("f109"), "r1_guided_review", 1)
     check("F109 the attached Phase-1 brief names M1-M36",
-          "mechanical sweeps M1–M36" in src and "mechanical sweeps M1–M17" not in src)
+          "mechanical sweeps M1–M36" in rendered
+          and "mechanical sweeps M1–M17" not in rendered)
     check("F109 the attached Phase-1 brief names J1-J5",
-          "passes J1–J5" in src and "passes J1–J4" not in src)
+          "passes J1–J5" in rendered and "passes J1–J4" not in rendered)
     check("F112 the revise prompt names edit rules E1-E13",
           "the edit rules E1–E13" in src and "under rules E1-E13" in src
           and "E1–E12" not in src and "E1-E12" not in src)
@@ -96,7 +101,7 @@ def test_readme_mismatches():
     check("F159 README frozen-runtime row includes dsh_events.py",
           "`dsh_events.py`" in readme)
     check("F185 README package-consistency heading reaches PKG-26",
-          "Package self-consistency: PKG-11 to PKG-26" in readme)
+          "Package self-consistency: PKG-11, PKG-12, PKG-14 to PKG-26" in readme)
 
 
 def test_venue_length_limits_fallback():

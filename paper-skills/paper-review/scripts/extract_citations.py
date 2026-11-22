@@ -279,6 +279,12 @@ ENTRY_HINT_RE = re.compile(
 AUTHOR_START_RE = re.compile(r"^\s*[A-Z][A-Za-z'\-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)")
 # tail of a wrapped entry: "Nature. 2019;570:1-9." / "Science 2020;11:20-30."
 JOURNAL_TAIL_RE = re.compile(r"^[A-Z][A-Za-z&.\s]{2,40}[.,;:]?\s*\(?(?:19|20)\d{2}\b")
+# A new entry can start with a lowercase nobiliary particle ("van der Waals,
+# J. (2020). ..."), which the wrapped-entry rule below used to read as a
+# continuation of the previous entry and silently dropped (F114).
+NOBILIARY_ENTRY_RE = re.compile(
+    r"^(?:van|von|de|del|della|der|den|da|di|du|le|la|dos|das)\b"
+    r"[^()]{0,80}\((?:19|20)\d{2}\)")
 
 
 # A reference entry's author block: "Smith J.", "Smith JA,", "Smith, J.".
@@ -598,8 +604,11 @@ def main():
                 elif raw.strip():
                     s = raw.strip()
                     prev = ref_entries[-1] if ref_entries else None
-                    if prev and prev["file"] == fname and prev_line.strip() and \
-                            (s[:1].islower() or JOURNAL_TAIL_RE.match(s)):
+                    is_wrapped = ((s[:1].islower()
+                                   and not NOBILIARY_ENTRY_RE.match(s))
+                                  or bool(JOURNAL_TAIL_RE.match(s)))
+                    if prev and prev["file"] == fname and prev_line.strip() \
+                            and is_wrapped:
                         prev["text"] = (prev["text"] + " " + s)[:300]  # wrapped entry
                     else:
                         ref_entries.append({"file": fname, "line": li, "num": None,

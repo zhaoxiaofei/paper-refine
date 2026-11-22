@@ -494,7 +494,9 @@ def test_end_to_end_without_guided_review() -> None:
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
     runs = state.get("runs") or {}
     kinds = [rec.get("kind") for rec in runs.values()]
-    check("e2e: no review run was recorded", "review" not in kinds, str(sorted(set(kinds))))
+    check("e2e: no review run was recorded",
+          not ({"guided_review", "guided_review_b", "review"} & set(kinds)),
+          str(sorted(set(kinds))))
     check("e2e: the cold-start review, audit and revise runs exist",
           {"cold_start_review", "audit", "revise"} <= set(kinds), str(sorted(set(kinds))))
     for sandbox in sorted(root.glob("runs/*")):

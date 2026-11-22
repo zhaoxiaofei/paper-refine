@@ -263,10 +263,25 @@ def test_decide_end_to_end():
           (second.stdout + second.stderr)[-300:])
     j2 = json.loads((root / "reports" / "decision.json").read_text(encoding="utf-8"))
     r2 = (root / "reports" / "DECISION_REPORT.md").read_text(encoding="utf-8")
-    j1.pop("generated", None)
-    j2.pop("generated", None)
-    check("HC6 decision.json is identical (minus the generation time)", j1 == j2)
-    norm = lambda t: re.sub(r"Generated: [^\n]+", "Generated: X", t)
+    def stable_decision(j):
+        # F44 records what THIS decision did to final_clean_version/: the first
+        # decide publishes it, the second leaves the byte-identical copy
+        # unchanged. Those two disposition fields are expected to differ; the
+        # decision data must not.
+        j = json.loads(json.dumps(j))
+        j.pop("generated", None)
+        cv = (j.get("certification") or {}).get("clean_version")
+        if isinstance(cv, dict):
+            cv.pop("published", None)
+            cv.pop("action", None)
+        return j
+
+    check("HC6 decision.json is identical (minus the generation time)",
+          stable_decision(j1) == stable_decision(j2))
+    def norm(t):
+        t = re.sub(r"Generated: [^\n]+", "Generated: X", t)
+        return re.sub(r"(published by this decision|left unchanged from an earlier "
+                      r"decision)", "final_clean_version disposition", t)
     check("HC6 DECISION_REPORT.md is identical (minus the generation time)",
           norm(r1) == norm(r2))
     clean = root / f"final_clean_version_{root.name}"

@@ -76,7 +76,7 @@ def tmpdir(tag: str) -> Path:
 # =====================================================================
 
 PS_SHIM = r'''#!/usr/bin/env python3
-import base64, os, sys
+import base64, os, re, sys
 argv = sys.argv[1:]
 enc = argv[argv.index("-EncodedCommand") + 1]
 script = base64.b64decode(enc).decode("utf-16-le")
@@ -85,7 +85,15 @@ if dump:
     open(dump, "w", encoding="utf-8").write(script)
 fake = os.environ.get("PS_FAKE_PDF")
 if fake:
-    open(fake, "wb").write(b"%PDF-1.4\n% fake render\n" + b"x" * 2048 + b"\n%%EOF\n")
+    # docx2pdf.sh renders to a unique .tmp PDF and renames it into place, so
+    # the fake must write the path the encoded script names (not the final one).
+    m = re.search(r"\$pdf\s*=\s*'(.*)'", script)
+    target = fake
+    if m:
+        p = m.group(1).replace("''", "'")
+        if p[:2].lower() == "c:":
+            target = "/" + p[2:].replace("\\", "/").lstrip("/")
+    open(target, "wb").write(b"%PDF-1.4\n% fake render\n" + b"x" * 2048 + b"\n%%EOF\n")
 sys.exit(int(os.environ.get("PS_RC", "0")))
 '''
 

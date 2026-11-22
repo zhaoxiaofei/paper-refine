@@ -192,12 +192,15 @@ def test_f07() -> None:
     _write(d / "b.tex", "\\caption{A table-ish caption long enough to be seen.}\n")
     rep = pp.scan_captions_in_sources([(d, "", ())])
     check("F07 captions are found normally", rep.get("count", 0) >= 1, str(rep)[:200])
+    # Load the venue profile BEFORE lowering the budget: the profile read is
+    # itself bounded now (F32), and an 8-byte budget would reject the profile
+    # rather than the fixture sources this check is about.
+    profile = pp.load_venue_profile("nature-biotechnology")
     old = pp.MAX_JSON_BYTES
     pp.MAX_JSON_BYTES = 8
     try:
         rep2 = pp.scan_captions_in_sources([(d, "", ())])
-        lengths = pp.scan_lengths_in_sources(
-            [(d, "", ())], profile=pp.load_venue_profile("nature-biotechnology"))
+        lengths = pp.scan_lengths_in_sources([(d, "", ())], profile=profile)
         check("F07 an over-budget caption source is a named gap",
               {"a.md", "b.tex"} <= set(rep2.get("unparsed") or []), str(rep2.get("unparsed")))
         check("F07 an over-budget manuscript source is a named gap",

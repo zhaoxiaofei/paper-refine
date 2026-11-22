@@ -254,7 +254,9 @@ USAGE_EXAMPLES = """usage:
           the suggested-length caption report for the final winner: caption
           length is advisory in this pipeline, so the flag deliberately no
           longer exits non-zero.
-          exit codes: 2 nothing to decide | 4 incomplete (--require-complete) |
+          exit codes: 2 nothing to decide | 4 a provisional answer under
+          --require-complete (incomplete rounds, a tolerated stage failure and
+          an auto-promoted unjudged winner are all provisional) |
           5 broken evidence / recomputed champion differs from the stored one /
           an incomplete judge panel (never certified).
   retry   --root <dir> --run <ID>
@@ -895,8 +897,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "stops INLINING the elaborative ones: each stage prompt carries the "
                          "contract, the finding schema and the completion marker, and the long "
                          "rule sections are written to INSTRUCTIONS/PROFILE_RULES.md in the "
-                         "session sandbox and referenced for a bounded read. It is for a "
-                         "limited-context model (one GPU, ~100k tokens or less); the "
+                         "session sandbox and referenced for a bounded read. It is a payload "
+                         "choice, not a model-class claim: it is valid for any harness whose "
+                         "per-call instruction budget makes inlining expensive, and it asserts "
+                         "nothing about the model or its context window. The "
                          "postchecks, the coverage table and every deliverable are UNCHANGED. "
                          "Not to be confused with the model's reasoning effort (see "
                          "PAPER_AGENT_REASONING_EFFORT), which this flag does not touch")
@@ -972,11 +976,15 @@ def build_parser() -> argparse.ArgumentParser:
     decide_opts = argparse.ArgumentParser(add_help=False)  # shared by decide / run-decide
     decide_opts.add_argument("--package-winner", action="store_true",
                              help="copy the final champion's pinned corpus into <root>/final/; "
-                                  "REFUSED unless every configured round is complete and every "
-                                  "ranked panel is complete (a provisional or short-panel winner "
-                                  "is never packaged)")
+                                  "REFUSED when the champion cannot be re-derived, the "
+                                  "content-addressed chain is broken, an enabled gate fails, the "
+                                  "final round is incomplete or a ranked panel is incomplete. An "
+                                  "auto-promoted (unjudged) winner IS packaged, but it is "
+                                  "labelled PROVISIONAL -- never a certified panel result")
     decide_opts.add_argument("--require-complete", action="store_true",
-                             help="exit non-zero unless all configured rounds are complete")
+                             help="exit 4 unless the answer is a complete, non-provisional "
+                                  "decision: an incomplete round, a tolerated stage failure and "
+                                  "an auto-promoted (unjudged) winner also exit 4")
     decide_opts.add_argument("--require-clean-captions", action="store_true",
                              help="print the suggested-length caption report for the final winner; "
                                   "kept for CLI compatibility. Caption length is advisory, so this "

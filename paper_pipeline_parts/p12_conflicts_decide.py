@@ -391,32 +391,35 @@ def _extglob_to_regex(pat: str):
     """A bash extglob (`*`, `?`, `[a-f]`, `@(docx|pdf)`) as a regex, or None.
 
     `*` never crosses a `/` (the patterns name files, and a directory-crossing
-    wildcard would silently widen the submitted set).
+    wildcard would silently widen the submitted set). Each `@(...)` alternative
+    is translated by the SAME rules, recursively: `re.escape`-ing it turned the
+    wildcard in `@(ms-*.docx|ms-*.pdf)` into a literal star, so a legal bash
+    declaration matched no file and was discarded (F90).
     """
-    out, i, n = [], 0, len(str(pat or ""))
-    try:
+    def _translate(text: str) -> str:
+        out, i, n = [], 0, len(text)
         while i < n:
-            c = pat[i]
+            c = text[i]
             if c == "*":
                 out.append("[^/]*")
             elif c == "?":
                 out.append("[^/]")
-            elif pat.startswith("@(", i):
-                j = pat.index(")", i)
-                alts = [a for a in pat[i + 2:j].split("|") if a]
+            elif text.startswith("@(", i):
+                j = text.index(")", i)
+                alts = [a for a in text[i + 2:j].split("|") if a]
                 if not alts:
-                    return None
-                out.append("(?:" + "|".join(re.escape(a) for a in alts) + ")")
+                    raise ValueError("empty extglob")
+                out.append("(?:" + "|".join(_translate(a) for a in alts) + ")")
                 i = j
             elif c == "[":
-                j = pat.index("]", i)
-                cls = pat[i:j + 1]
+                j = text.index("]", i)
+                cls = text[i:j + 1]
                 if not re.fullmatch(r"\[[^\]\\]{1,40}\]", cls):
-                    return None
+                    raise ValueError("malformed class")
                 if cls[1] in ("!", "^"):
                     body = cls[2:-1]
                     if not body:
-                        return None
+                        raise ValueError("empty negated class")
                     out.append("[^" + body + "]")
                 else:
                     out.append(cls)
@@ -424,14 +427,13 @@ def _extglob_to_regex(pat: str):
             else:
                 out.append(re.escape(c))
             i += 1
-    except (ValueError, IndexError):
-        return None
+        return "".join(out)
     try:
         # A class the shape test accepts can still be invalid regex (`[z-a]`):
         # the compile must be inside the guard, or declaring it crashed every
         # scan that reads the submission declaration.
-        return re.compile("^" + "".join(out) + "$")
-    except re.error:
+        return re.compile("^" + _translate(str(pat or "")) + "$")
+    except (ValueError, IndexError, re.error):
         return None
 
 
@@ -1647,14 +1649,22 @@ def _parse_ci(cell: str):
 
 def _parse_p(cell: str):
     t = re.sub(r"\\textbf\{|\\emph\{|\}", "", str(cell or "")).strip()
-    t = re.sub(r"^\$?(?:p|P)?\$?\s*(?:=|<=|>=|<|>|≤|≥)?\s*", "", t)
+    # The prefix may spell the label out (`p-value`, `P value`); stripping only
+    # a bare p/P left the remainder unparsed, so the whole PKG-12 check skipped
+    # every table that used the standard p-value spelling (F12).
+    t = re.sub(r"^\$?(?:p|P)?\$?(?:[- ]?[Vv]alue)?\s*"
+               r"(?:=|<=|>=|<|>|≤|≥)?\s*", "", t)
     # the VALUE is the leading number; a qualifier after it is not part of it
     m = re.match(NUMBER_CELL_RE, t)
     return float(m.group(0)) if m else None
 
 
-def _p_reports_significant(cell: str, parsed=None) -> bool:
-    """Whether a p-value CELL states significance (star or inequality aware)."""
+def _p_reports_significant(cell: str, parsed=None, strict: bool = False) -> bool:
+    """Whether a p-value CELL states significance (star or inequality aware).
+
+    `strict` mirrors the table caption's own rule: under a caption that states
+    `p < 0.05`, a cell reporting exactly 0.05 is NOT significant (F120).
+    """
     text = re.sub(r"\\textbf\{|\\emph\{|\}", "", str(cell or "")).strip()
     if re.search(r"\*+\s*\$?\s*$", text):
         return True
@@ -1670,7 +1680,9 @@ def _p_reports_significant(cell: str, parsed=None) -> bool:
     if re.search(r"(?:>=|≥|>)\s*\$?\s*\d", text):
         return False
     value = _parse_p(text) if parsed is None else parsed
-    return value is not None and value <= 0.05
+    if value is None:
+        return False
+    return value < 0.05 if strict else value <= 0.05
 
 
 def _latex_command_bodies(text: str, command: str) -> list:
@@ -1760,10 +1772,25 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
         if not caption or not (MCB_P_SMALL_RULE_RE.search(caption)
                                and MCB_CI_RULE_RE.search(caption)):
             continue
+        # The caption's own boundary decides the equality case: `p < 0.05`
+        # makes a cell reporting exactly 0.05 non-significant, while `p ≤ 0.05`
+        # does not (F120).
+        caption_strict = bool(re.search(
+            r"(?i)\bp\s*<\s*(?!=)\s*\$?\s*(?:0?\.\d+|\d+)", caption))
         for line_no, line in enumerate(text.splitlines(), 1):
             if "&" not in line or line.lstrip().startswith("%"):
                 continue
             cells = [c.strip() for c in re.sub(r"\\\\.*$", "", line).split("&")]
+            # A legal LaTeX row may begin or end with an empty cell (`a & b & c
+            # & d & e &` splits to 6); the exact-length test skipped such a row
+            # with no gap, so a contradictory row in a table with an empty edge
+            # column was silently unchecked (F79). The edge cells are not
+            # columns: drop them, but keep a supported row exactly as it is.
+            if len(cells) not in (5, 10):
+                while len(cells) > 1 and not cells[-1]:
+                    cells.pop()
+                while len(cells) > 1 and not cells[0]:
+                    cells.pop(0)
             if len(cells) == 10:
                 blocks = [(cells[2], cells[3], cells[5]), (cells[6], cells[7], cells[9])]
                 label = cells[1]
@@ -1778,7 +1805,7 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
                 pval, ci = _parse_p(p_cell), _parse_ci(ci_cell)
                 if pval is None or ci is None:
                     continue
-                inferior_by_p = _p_reports_significant(p_cell, pval)
+                inferior_by_p = _p_reports_significant(p_cell, pval, strict=caption_strict)
                 inferior_by_ci = ci[0] > 0 or ci[1] < 0
                 if inferior_by_p == inferior_by_ci:
                     continue
@@ -1845,7 +1872,10 @@ def _pooled_units_by_method(path: Path, gaps: list = None) -> dict:
         if len(r) <= max(mi, vi):
             continue
         try:
-            val = float(str(r[vi]).strip())
+            # An exported table may spell a negative mean with the typographic
+            # minus; float() raises on it, and the bare `continue` dropped the
+            # whole row with no gap (F13).
+            val = float(str(r[vi]).strip().replace("\u2212", "-"))
         except ValueError:
             continue
         groups.setdefault(str(r[mi]).strip(), []).append(val)
@@ -2101,6 +2131,10 @@ def _package_document_texts(root: Path, texts=None) -> list:
         except ValueError:
             continue
         if rel.split("/", 1)[0].lower() in areas or is_code_rel(rel):
+            continue
+        # The stage's own `work/` scratch is not package prose: a scratch
+        # snapshot was read as a manuscript surface (F107).
+        if excluded_corpus_component(rel, ("work",)):
             continue
         if not is_submitted(rel):
             continue
@@ -2504,11 +2538,16 @@ def scan_definition_overreach(root: Path, texts=None, limit: int = 8) -> list:
 NEGATED_NOTE_RE = re.compile(
     # Only an INTERPRETATION denial counts ("should not be read as", "not
     # evidence", "does not demonstrate"). A bare limitation ("we cannot test
-    # this") is not a contradiction of the citing sentence.
-    r"(?i)(?:should\s+(?:therefore\s+)?not|not\s+be\s+interpreted|"
+    # this") is not a contradiction of the citing sentence. The contracted
+    # spellings are the same denial, and Word's autocorrect writes U+2019: a
+    # sentence using "doesn't" was a silent clean PKG-22 (F80).
+    r"(?i)(?:should\s+(?:therefore\s+)?not|shouldn['\u2019]t|"
+    r"not\s+be\s+interpreted|"
     r"cannot\s+be\s+interpreted|not\s+evidence|no\s+evidence|"
-    r"does\s+not\s+demonstrat\w*|does\s+not\s+show|not\s+an?\s+intrinsic|"
-    r"not\s+the\s+same\s+as)")
+    r"does\s+not\s+demonstrat\w*|doesn['\u2019]t\s+demonstrat\w*|"
+    r"does\s+not\s+show|doesn['\u2019]t\s+show|"
+    r"isn['\u2019]t\s+an?\s+intrinsic|not\s+an?\s+intrinsic|"
+    r"isn['\u2019]t\s+the\s+same\s+as|not\s+the\s+same\s+as)")
 ASSERTIVE_MAIN_RE = re.compile(
     r"(?i)(?:\bexposed\b|\bdemonstrat\w*|\bshows? that\b|\breveals?\b|\bindicates?\b|"
     r"\bconfirms?\b|\bproves?\b|\bperformed\s+(?:near-?)?randomly\b|"
@@ -3092,8 +3131,11 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
             if method not in units:
                 continue
             try:
-                n_table = int(float(str(r[ni]).strip()))
-                mean_table = float(str(r[avi]).strip())
+                # Typographic minus (U+2212) is a legal minus in an exported
+                # table: normalising it keeps the row comparable instead of
+                # dropping it silently (F13).
+                n_table = int(float(str(r[ni]).strip().replace("\u2212", "-")))
+                mean_table = float(str(r[avi]).strip().replace("\u2212", "-"))
             except ValueError:
                 continue
             n_units, mean_units = units[method]
@@ -4462,6 +4504,17 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
             continue
         try:
             if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+                # A file too large to scan is a COVERAGE GAP, never a clean
+                # result: the bare `continue` let a 2.4 MB notes file carry the
+                # pipeline's own ledger through the blocking PKG-1 gate unseen
+                # (F11). The PKG-2 scan records its own gap the same way.
+                rows.append({
+                    "rule": "PKG-1", "severity": "low", "fix": "none", "file": rel,
+                    "line": 0, "gap": True, "advisory": True,
+                    "detail": (f"{rel}: the file is too large to scan "
+                               f"({p.stat().st_size} bytes > {PACKAGE_TEXT_BYTES_LIMIT}), so "
+                               f"its internal working material was NOT checked; inspect it by "
+                               f"hand")})
                 continue
             text = p.read_text("utf-8", "replace")
         except OSError:
@@ -5136,7 +5189,7 @@ PKG4_FIGURE_CITE_RE = re.compile(
     # refuses a digit continuation or a thousands grouping ("Figure 2 and 3,000
     # cells" must not yield labels 3 and 000).
     r"(?P<labels>(?:S?\d+(?!(?:st|nd|rd|th)\b)(?!\d)(?!,\d{3}(?!\d))[a-z]?)"
-    r"(?:\s*(?:,|and|&|;|\u2013|-)\s*S?\d+(?!(?:st|nd|rd|th)\b)(?!\d)"
+    r"(?:\s*(?:,|and|&|;|\u2013|\u2014|-|to)\s*S?\d+(?!(?:st|nd|rd|th)\b)(?!\d)"
     r"(?!,\d{3}(?!\d))[a-z]?)*)")
 
 
@@ -5145,7 +5198,10 @@ def _pkg4_cited_labels(expr: str, plural: bool = True) -> list:
 
     Comma/and lists yield each token; a same-prefix numeric range expands
     ("Figures 2-4" cites 2, 3 and 4), capped so a typo cannot enumerate a
-    thousand labels. A comma-separated token is a LIST item only when the
+    thousand labels. A hyphen, an en dash, an em dash (Word's autocorrect)
+    and a spelled-out "to" all delimit the range: an em-dash row cited only
+    its endpoints, so the interior figure was never checked (F81). A
+    comma-separated token is a LIST item only when the
     keyword is plural or another separator follows it: "Fig. 2, 3 clusters"
     is a citation of Figure 2 followed by the count 3, not a two-item list.
     """
@@ -5161,7 +5217,7 @@ def _pkg4_cited_labels(expr: str, plural: bool = True) -> list:
         if sep == "," and not plural and not next_sep:
             continue
         m = re.fullmatch(
-            r"(?i)(S?)(\d+)[a-z]?\s*[\u2013-]\s*(S?)(\d+)[a-z]?", token)
+            r"(?i)(S?)(\d+)[a-z]?(?:\s*[\u2013\u2014-]\s*|\s+to\s+)(S?)(\d+)[a-z]?", token)
         if m and m.group(1).lower() == m.group(3).lower():
             lo, hi = int(m.group(2)), int(m.group(4))
             if lo <= hi and hi - lo <= 50:
@@ -6251,6 +6307,18 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"own model (the corpus minus the evidence areas, `code/` and the author's "
                  f"READMEs)")
     internal = hygiene.get("internal_artifacts") or []
+    # A too-large file's PKG-1 row is a coverage gap, not a finding: printing it
+    # under "must remove or rewrite" accused the package of material nobody read
+    # (F11). The gap is reported in its own paragraph.
+    _internal_gaps = [r for r in internal if r.get("gap") or r.get("coverage_gap")]
+    internal = [r for r in internal if not (r.get("gap") or r.get("coverage_gap"))]
+    if _internal_gaps:
+        L.append("")
+        L.append(f"**{len(_internal_gaps)} file(s) could NOT be scanned for internal "
+                 f"material (PKG-1 coverage gap) -- whether they carry the pipeline's own "
+                 f"ledger/report text is UNKNOWN; inspect them by hand:**")
+        for r in _internal_gaps[:12]:
+            L.append(f"  - `{r.get('file')}`: {str(r.get('detail'))[:240]}")
     if internal:
         L.append("")
         L.append(f"**{len(internal)} internal-artifact finding(s) in the published package "
@@ -7041,7 +7109,11 @@ def package_readiness(final_clean: dict, residuals: dict = None,
             "detail": f"hand-off marker coverage is UNVERIFIED in this file: {_detail}"})
     for r in hyg.get("internal_artifacts") or []:
         findings.append({"rule": r.get("rule") or "PKG-1",
-                         "document": r.get("file"), "detail": r.get("detail")})
+                         "document": r.get("file"), "detail": r.get("detail"),
+                         # A file the scan could not read is a gap, not an
+                         # accusation: reported, never gated (F11).
+                         "advisory": bool(r.get("advisory") or r.get("gap")
+                                          or r.get("coverage_gap"))})
     for rel in hyg.get("present_non_shippable") or []:
         findings.append({
             "rule": "PKG-1", "document": rel,
@@ -7185,10 +7257,17 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                 "single_cell_citation_mismatch", "caption_definition_gaps",
                 "form_failure_claims", "document_read_gaps"):
         for r in pc.get(key) or []:
+            # A coverage-gap row names its document in `document` and carries
+            # file="" (F121), has no line (F198), and is a report of what the
+            # scan could not inspect -- never a defect the package is accused of.
+            _gap = bool(r.get("gap") or r.get("coverage_gap"))
+            _line = r.get("line")
             findings.append({"rule": r.get("rule") or "PKG-11",
-                             "document": r.get("file"),
-                             "advisory": bool(r.get("advisory")),
-                             "detail": f"line {r.get('line')}: {r.get('detail')}"})
+                             "document": r.get("document") or r.get("file"),
+                             "advisory": bool(r.get("advisory") or _gap),
+                             "detail": (str(r.get("detail") or "")
+                                        if _gap or not _line else
+                                        f"line {_line}: {r.get('detail')}")})
     for r in hyg.get("front_matter_gaps") or []:
         findings.append({"rule": r.get("rule") or "FMT-TP1", "document": r.get("file"),
                          "advisory": True, "detail": r.get("detail")})
@@ -8292,13 +8371,23 @@ def cmd_sync_code(args) -> None:
             copy_asset_dirs(src, root, names=(name,))
             changed.append(name + "/")
         # The skills pack and the venue profiles are frozen and manifest-recorded
-        # too. A trimmed checkout may legitimately omit either (module_manifest
-        # records None), so a missing maintained directory is not a partial
-        # bundle; a root that lacks one when the maintained tree has it is
-        # brought up to date.
+        # too. A trimmed checkout may legitimately omit either, so a missing
+        # maintained directory is not a partial bundle; a root that lacks one
+        # when the maintained tree has it is brought up to date.
+        #
+        # A directory the maintained tree no longer carries while the ROOT does
+        # is UNMANAGED, never "brought up to date": the old code skipped it and
+        # then recorded the maintained manifest's None, so the root silently
+        # kept stale profiles that no drift check could see (a falsy recorded
+        # hash is skipped) and the note below claimed a copy that never ran
+        # (F127). Keep the root's directory, record the ROOT's own digest so
+        # state.json describes what the root actually has, and name it.
+        unmanaged_assets = []
         for name in PIPELINE_SKILL_ASSET_DIRS + PIPELINE_VENUE_ASSET_DIRS:
             s = src / name
             if not s.is_dir():
+                if (root / name).is_dir():
+                    unmanaged_assets.append(name)
                 continue
             try:
                 same = asset_dir_digest(src, name) == asset_dir_digest(root, name)
@@ -8310,6 +8399,10 @@ def cmd_sync_code(args) -> None:
             copy_asset_dirs(src, root, names=(name,))
             changed.append(name + "/")
         ident = pipeline_identity()
+        for name in unmanaged_assets:
+            ident["modules"][name] = asset_dir_digest(root, name)
+        if unmanaged_assets:
+            ident["unmanaged_assets"] = list(unmanaged_assets)
         ident["synced_at"] = utcnow()
         ctx.state["pipeline"] = ident
         ctx.save_state()
@@ -8320,7 +8413,14 @@ def cmd_sync_code(args) -> None:
         print(f"[sync-code] already current: {', '.join(unchanged)}")
     print(f"[sync-code] recorded module manifest: "
           f"{', '.join(f'{k}={str(v)[:12]}' for k, v in ident['modules'].items())}")
-    if (root / VENUE_PROFILES_DIRNAME).is_dir():
+    for name in unmanaged_assets:
+        print(f"[sync-code] WARNING: {root / name} exists in this root but NOT in the "
+              f"maintained tree, so it was left UNMANAGED (recorded with its root digest, "
+              f"not as absent); its content may be stale. Reconcile or remove it before the "
+              f"next run.")
+    if (src / VENUE_PROFILES_DIRNAME).is_dir():
+        # The note is true only when the maintained tree actually carries the
+        # directory: with it trimmed away nothing was copied (F127).
         print(f"[sync-code] note: {root / VENUE_PROFILES_DIRNAME} is part of the frozen "
               f"asset manifest and was brought up to date with the maintained tree above. "
               f"A root-specific profile installed with `{Path(__file__).name} "
@@ -9353,6 +9453,10 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
               f"the directory is kept")
     _hyg = final_clean.get("hygiene") or {}
     for r in (_hyg.get("internal_artifacts") or [])[:5]:
+        if r.get("gap") or r.get("coverage_gap"):
+            print(f"[decide] PACKAGE HYGIENE (PKG-1 COVERAGE GAP, NOT a package defect): "
+                  f"{r.get('file')} -- {r.get('detail')}")
+            continue
         print(f"[decide] PACKAGE HYGIENE (PKG-1, author action required): "
               f"{r.get('file')} line {r.get('line')} -- {r.get('evidence')}")
     for r in (_hyg.get("pdf_artifacts") or [])[:5]:

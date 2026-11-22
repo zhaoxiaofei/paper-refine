@@ -722,14 +722,16 @@ def test_skill_scripts():
     # the later-source override applies to the text scanners too
     root2 = scratch("dbg1013_ovr_")
     a, b = root2 / "a", root2 / "b"
-    (a / "code").mkdir(parents=True)
-    (b / "code").mkdir(parents=True)
-    (a / "code" / "notes.md").write_text("STALE note text here.\n", encoding="utf-8")
-    (b / "code" / "notes.md").write_text("FRESH note text here.\n", encoding="utf-8")
+    # `code/` is revision content, never manuscript prose (F108), so the
+    # later-source override is exercised on a prose area instead.
+    (a / "notes").mkdir(parents=True)
+    (b / "notes").mkdir(parents=True)
+    (a / "notes" / "shared.md").write_text("STALE note text here.\n", encoding="utf-8")
+    (b / "notes" / "shared.md").write_text("FRESH note text here.\n", encoding="utf-8")
     sources = [(a, "", ()), (b, "", ())]
     docs = nb.corpus_text_documents(sources)
     check("D8 a path two sources provide is read ONCE, from the later source",
-          [d[0] for d in docs] == ["code/notes.md"]
+          [d[0] for d in docs] == ["notes/shared.md"]
           and docs[0][1][0][0].startswith("FRESH"),
           str([(d[0], d[1][0][0][:12]) for d in docs]))
 

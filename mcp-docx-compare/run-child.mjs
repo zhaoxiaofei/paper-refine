@@ -6,7 +6,37 @@
 // process can then overwrite the output while a retry is using it. Spawning in
 // a new process group lets the timeout kill the group, not just the wrapper.
 import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
+
+/** True on WSL (Linux userland, Windows interop), where the POSIX group kill
+ * does not reach the Windows powershell.exe/Word process the script started. */
+export function isWsl(platform = process.platform) {
+  if (platform !== 'linux') return false;
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
+  try {
+    return /microsoft|wsl/i.test(readFileSync('/proc/sys/kernel/osrelease', 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/** The Windows pids the child recorded (one per line/space). */
+function windowsPids(file) {
+  if (!file) return [];
+  let text = '';
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return [];
+  }
+  const seen = new Set();
+  for (const part of text.split(/\s+/)) {
+    const n = Number(part);
+    if (Number.isInteger(n) && n > 0 && n < 2 ** 32) seen.add(n);
+  }
+  return [...seen];
+}
 
 // Kill the WHOLE process tree `child` started. POSIX uses a new process group;
 // Windows cannot (`detached` is false there), and `child.kill` reaches only the
@@ -19,12 +49,16 @@ export function killProcessTree(child, options = {}) {
   const detached = options.detached !== undefined ? options.detached : platform !== 'win32';
   const run = options.spawnSync || spawnSync;
   const kill = options.kill || process.kill;
+  const wsl = options.wsl !== undefined
+    ? options.wsl
+    : platform === 'linux' && isWsl(platform);
   const pid = child && child.pid;
   try {
     if (platform === 'win32' && pid) {
       let taskkill = null;
       try {
-        taskkill = run('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+        taskkill = run('taskkill', ['/pid', String(pid), '/T', '/F'],
+                          { stdio: 'ignore', timeout: 15000 });
       } catch (err) {
         taskkill = { error: err };
       }
@@ -45,7 +79,7 @@ export function killProcessTree(child, options = {}) {
       try {
         const ps = run('powershell', ['-NoProfile', '-NonInteractive', '-Command',
           `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`],
-          { stdio: 'ignore' });
+          { stdio: 'ignore', timeout: 15000 });
         notes.push(ps && ps.status === 0
           ? 'PowerShell Stop-Process sent'
           : 'PowerShell Stop-Process failed');
@@ -60,7 +94,50 @@ export function killProcessTree(child, options = {}) {
       return { ok: false, error: detail };
     }
     if (detached && pid) {
-      kill(-pid, 'SIGKILL');
+      if (!wsl) {
+        kill(-pid, 'SIGKILL');
+        return { ok: true };
+      }
+      // WSL interop: the Unix process group does not contain the Windows
+      // powershell.exe, and Word is launched by COM outside both groups. The
+      // wrapper records those Windows pids; kill the Unix group first, then
+      // taskkill.exe every recorded Windows pid. 128 is taskkill's "process
+      // not found" (it already died with its group), which is success here.
+      let groupError = '';
+      try {
+        kill(-pid, 'SIGKILL');
+      } catch (err) {
+        groupError = String((err && err.message) || err);
+      }
+      const pids = windowsPids(options.windowsPidFile
+                               || (child && child.windowsPidFile));
+      const failures = [];
+      for (const wp of pids) {
+        let result = null;
+        try {
+          result = run('taskkill.exe', ['/PID', String(wp), '/T', '/F'],
+                       { stdio: 'ignore', timeout: 15000 });
+        } catch (err) {
+          failures.push(`taskkill.exe /PID ${wp} failed `
+                        + `(${(err && err.message) || err})`);
+          continue;
+        }
+        if (result && (result.status === 0 || result.status === 128)) continue;
+        const why = result && result.error
+          ? (result.error.message || String(result.error))
+          : `status ${result ? result.status : 'none'}`;
+        failures.push(`taskkill.exe /PID ${wp} failed (${why})`);
+      }
+      if (failures.length) {
+        const detail = failures.join('; ');
+        if (child && typeof child === 'object') child.treeKillError = detail;
+        return { ok: false, error: detail };
+      }
+      if (groupError) {
+        const detail = `process-group kill failed (${groupError})`;
+        if (child && typeof child === 'object') child.treeKillError = detail;
+        return { ok: false, error: detail };
+      }
       return { ok: true };
     }
     if (child && typeof child.kill === 'function') child.kill('SIGKILL');
@@ -74,14 +151,23 @@ export function killProcessTree(child, options = {}) {
 
 export function runFile(file, args, options = {}) {
   const { timeout = 0, maxBuffer = 4 * 1024 * 1024, killGraceMs = 5000,
-    killTree = killProcessTree, ...spawnOptions } = options;
+    killTree = killProcessTree, windowsPidFile = '', ...spawnOptions } = options;
   const detached = process.platform !== 'win32';
+  // The wrapper records its Windows pids here; the timeout path reads the same
+  // path back. The caller places the file beside the output (a path both WSL
+  // and Windows can write) and removes it after the run.
+  const env = windowsPidFile
+    ? { ...(spawnOptions.env || process.env),
+        DOCX_MCP_WINDOWS_PID_FILE: windowsPidFile }
+    : spawnOptions.env;
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, {
       ...spawnOptions,
+      env,
       detached,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    if (windowsPidFile) child.windowsPidFile = windowsPidFile;
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -89,7 +175,7 @@ export function runFile(file, args, options = {}) {
     let treeKillError = '';
     const killGroup = () => {
       try {
-        const result = killTree(child, { detached });
+        const result = killTree(child, { detached, windowsPidFile });
         if (result && result.error) treeKillError = result.error;
       } catch (err) {
         treeKillError = String((err && err.message) || err);

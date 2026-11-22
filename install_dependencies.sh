@@ -77,6 +77,20 @@ usage() {
 }
 
 note() { printf '[install] %s\n' "$*"; }
+
+# Write stdin to $1 through a sibling created with mktemp (O_EXCL), then
+# rename(2) into place. A plain `> "$dest"` follows a symlink planted at the
+# destination and writes the generated file outside the checkout (F117).
+safe_write_file() {
+    local dest="$1" tmp
+    tmp="$(mktemp -- "${dest}.tmp.XXXXXXXX")" || return 1
+    if ! cat > "$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f -- "$tmp" "$dest"
+}
 warn() { printf '[install] warning: %s\n' "$*" >&2; }
 step() { printf '\n[install] == %s ==\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -535,9 +549,9 @@ if [ "$DRY_RUN" = 0 ]; then
         else
             printf '# ZOTERO_BRIDGE_ROOT not installed (%s)\n' "$ZOTERO_BRIDGE_DIR"
         fi
-    } > "$REPO_ROOT/deps.env"
+    } | safe_write_file "$REPO_ROOT/deps.env"
 
-    cat > "$REPO_ROOT/activate-deps.sh" <<'EOF'
+    cat <<'EOF' | safe_write_file "$REPO_ROOT/activate-deps.sh"
 #!/usr/bin/env bash
 # Source this file to export this checkout's dependency paths for the current shell.
 # The values in deps.env are relative to this directory (absolute for a
@@ -579,12 +593,12 @@ EOF
                 printf '    "%s": {"commit": "%s"}' "$name" "$commit"
             done
             printf '\n  }\n}\n'
-        } > "$DEPS_DIR/INSTALLED.json"
+        } | safe_write_file "$DEPS_DIR/INSTALLED.json"
     fi
     note "wrote deps.env and activate-deps.sh (checkout-relative paths; absolute for the Zotero bridge)"
 
     if [ "$DO_EXTERNAL" = 1 ]; then
-    cat > "$DEPS_DIR/README.md" <<'EOF'
+    cat <<'EOF' | safe_write_file "$DEPS_DIR/README.md"
 # External dependencies
 
 Installed by `./install_dependencies.sh` when the checkout was reachable, and

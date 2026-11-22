@@ -2,10 +2,12 @@
 //   node containment.test.mjs
 // Needs no npm install: the module under test imports node: core only.
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync,
+         writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { allowedRoots, containsPath, containedSpawnPath } from './containment.mjs';
+import { allowedRoots, containsPath, containedSpawnPath,
+         stageContainedInput } from './containment.mjs';
 
 const fails = [];
 function check(name, fn) {
@@ -21,8 +23,10 @@ function check(name, fn) {
 const work = mkdtempSync(path.join(tmpdir(), 'docx-containment-'));
 const root = path.join(work, 'allowed');
 const outside = path.join(work, 'outside');
+const stage = path.join(work, 'stage');
 mkdirSync(root);
 mkdirSync(outside);
+mkdirSync(stage, { mode: 0o700 });
 const insideDoc = path.join(root, 'inside.docx');
 writeFileSync(insideDoc, 'x');
 const outsideDoc = path.join(outside, 'secret.docx');
@@ -92,6 +96,33 @@ try {
     symlinkSync(path.join(outside, 'missing.docx'), dead);
     assert.throws(() => containedSpawnPath(dead, allowedRoots(root)),
                   /dangling symlink/);
+  });
+  check('the spawn-time stage copies an allowed file into the private dir', () => {
+    const dest = stageContainedInput(insideDoc, allowedRoots(root), stage, 'copy.docx');
+    assert.ok(dest.startsWith(stage + path.sep), `copy landed at ${dest}`);
+    assert.equal(readFileSync(dest, 'utf8'), 'x');
+  });
+  check('a symlink to an INSIDE file is staged from its target', () => {
+    const alias = path.join(root, 'alias-inside.docx');
+    symlinkSync(insideDoc, alias);
+    const dest = stageContainedInput(alias, allowedRoots(root), stage, 'alias.docx');
+    assert.equal(readFileSync(dest, 'utf8'), 'x');
+  });
+  check('a post-check swap cannot change what the staged copy reads', () => {
+    const victim = path.join(root, 'victim.docx');
+    const secret = path.join(outside, 'secret.docx');
+    writeFileSync(victim, 'INSIDE-CONTENT');
+    writeFileSync(secret, 'SECRET-OUTSIDE');
+    // The server validated the file; the child would open this string later.
+    const dest = stageContainedInput(victim, allowedRoots(root), stage, 'victim.docx');
+    rmSync(victim);
+    symlinkSync(secret, victim);
+    assert.equal(readFileSync(dest, 'utf8'), 'INSIDE-CONTENT',
+                 'the staged copy must keep the validated bytes');
+    // A swap that happens BEFORE the staging open is refused, not followed.
+    assert.throws(() => stageContainedInput(victim, allowedRoots(root), stage,
+                                            'victim-2.docx'),
+                  /outside DOCX_MCP_ALLOWED_ROOTS|symlink/);
   });
   check('a set-but-empty root list fails closed instead of allowing anything', () => {
     assert.throws(() => allowedRoots(path.delimiter), /names no roots/);

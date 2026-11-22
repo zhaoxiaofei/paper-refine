@@ -413,10 +413,35 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
         out.parent.mkdir(parents=True, exist_ok=True)
 
         def _write_tracked(f) -> None:
+            # The candidate is an AGENT-written package: never decompress a part
+            # just because the central directory declares it small. Inflate each
+            # part through a bounded stream and refuse an over-budget part, so
+            # the outer handler records the copy as unverifiable instead of a
+            # zip-bomb being materialized whole in memory (F131).
+            total = 0
             with zipfile.ZipFile(cand) as zin, \
                     zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zout:
                 for item in zin.infolist():
-                    data = zin.read(item.filename)
+                    try:
+                        info = zin.getinfo(item.filename)
+                    except KeyError:
+                        continue
+                    if int(info.file_size) > MAX_DOCX_PART_BYTES:
+                        raise ValueError(
+                            f"tracking copy refused: part {item.filename} declares "
+                            f"{info.file_size} decompressed bytes (budget "
+                            f"{MAX_DOCX_PART_BYTES})")
+                    with zin.open(info) as fh:
+                        data = fh.read(MAX_DOCX_PART_BYTES + 1)
+                    if len(data) > MAX_DOCX_PART_BYTES:
+                        raise ValueError(
+                            f"tracking copy refused: part {item.filename} exceeds the "
+                            f"{MAX_DOCX_PART_BYTES}-byte decompression budget")
+                    total += len(data)
+                    if total > MAX_DOCX_TOTAL_BYTES:
+                        raise ValueError(
+                            f"tracking copy refused: the package exceeds the "
+                            f"{MAX_DOCX_TOTAL_BYTES}-byte decompression budget")
                     if item.filename == "word/document.xml":
                         data = payload
                     zout.writestr(item, data)
@@ -463,12 +488,17 @@ def write_text_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
         "", f"--- {base.name}", f"+++ {cand.name}"]
     lines += list(difflib.unified_diff(read_lines(base), read_lines(cand),
                                        fromfile=base.name, tofile=cand.name, lineterm=""))[2:]
-    out.parent.mkdir(parents=True, exist_ok=True)
     if is_bib:
         text = "@comment{\n" + "\n".join(lines).replace("{", "(").replace("}", ")") + "\n}\n"
     else:
         text = "\n".join("% " + ln for ln in lines) + "\n"
     try:
+        # The parent mkdir used to sit OUTSIDE the guard and the try: a regular
+        # file at the parent raised FileExistsError out of a function documented
+        # to never raise, and a symlinked per-version dir created a directory
+        # outside --root before the write was refused (F118).
+        _refuse_symlinked_parent(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
         write_text_atomic(out, text)
     except OSError as e:                                        # noqa: BLE001
         return {"ok": False, "error": f"the logging fallback could not be written: {e}"}
@@ -810,6 +840,19 @@ def tracking_summary_line(entry: dict, where: str = "") -> str:
     return line + (f" -> {where}" if where else "")
 
 
+def _tracking_regular_file(p: Path) -> bool:
+    """Is `p` a REGULAR file (never a symlink)?
+
+    The freshness check used `Path.is_file()`, which follows a link a staged
+    agent can plant at the recorded output path, making a missing/stale copy
+    look fresh so the round-close pass never regenerates it (F209).
+    """
+    try:
+        return stat.S_ISREG(Path(p).lstat().st_mode)
+    except OSError:
+        return False
+
+
 def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) -> bool:
     """Does a stored manifest entry still describe THIS version's copies?
 
@@ -829,7 +872,15 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
             if not token or not any(s.is_dir() for s, _p, _e in base_sources):
                 continue
             for ext in TRACKABLE_EXTS:
-                pairs, _ub, _uc = match_track_pairs(base_sources, srcs, ext)
+                # An unreadable document is a PROBLEM, not an absence:
+                # list_track_files drops it, expected and have then agree, and
+                # a stale entry was declared fresh (F212).
+                base_problems, cand_problems = [], []
+                pairs, _ub, _uc = match_track_pairs(
+                    base_sources, srcs, ext,
+                    base_problems=base_problems, cand_problems=cand_problems)
+                if base_problems or cand_problems:
+                    return False
                 for pair in pairs:
                     expected[(token, ext, pair["base_rel"], pair["cand_rel"])] = (
                         pair["base_digest"], pair["cand_digest"])
@@ -839,7 +890,7 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                 return False
             fallback = bool(c.get("fallback"))
             out_rel = c.get("fallback_out") if fallback else c.get("out")
-            if not out_rel or not (ctx.root / str(out_rel)).is_file():
+            if not out_rel or not _tracking_regular_file(ctx.root / str(out_rel)):
                 return False
             in_pkg = c.get("in_package")
             if in_pkg:
@@ -848,7 +899,7 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                     # suffix (the recorded `in_package` path names the real
                     # copy's name), so it is derived, never assumed. A stale
                     # REAL copy beside it means the fallback is not fresh.
-                    if (ctx.root / str(in_pkg)).is_file():
+                    if _tracking_regular_file(ctx.root / str(in_pkg)):
                         return False
                     sib = (ctx.root / str(in_pkg)).parent / (
                         Path(str(c.get("revised_rel"))).stem
@@ -856,14 +907,14 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                                               fallback=True))
                 else:
                     sib = ctx.root / str(in_pkg)
-                if not sib.is_file():
+                if not _tracking_regular_file(sib):
                     return False
             if c.get("pdf_ok"):
                 # The compiled marked-up PDF is part of the same auxiliary
                 # family: a row whose PDF vanished is refreshed, not reused.
                 for field in ("pdf", "pdf_in_package"):
                     rel = c.get(field)
-                    if not rel or not (ctx.root / str(rel)).is_file():
+                    if not rel or not _tracking_regular_file(ctx.root / str(rel)):
                         return False
             elif c.get("ext") == ".tex" and c.get("in_package") \
                     and not c.get("fallback") \
@@ -1515,9 +1566,26 @@ def _cmd_track_locked(ctx: Ctx, args) -> None:
     manifest = run_difference_tracking(ctx, rounds=rounds, versions=versions, tool=args.tool,
                                        redline_cmd=cmd_template)
     tracking_summary(manifest, rounds=rounds)
+    # A requested version that was never materialized produces ZERO comparison
+    # rows, so the summary said "0 tracked copy(ies)" and `track` exited 0 while
+    # `redline` (fixed as F034) exited 4 for the same input. Mirror that check
+    # (F138).
+    selected_rounds = set(rounds or range(1, ctx.rounds_count() + 1))
+    have_versions = {(v.get("round"), str(v.get("version")))
+                     for v in manifest["versions"]
+                     if v.get("round") in selected_rounds
+                     and str(v.get("status") or "") != "not materialized"}
+    missing_versions = ([vid for vid in versions
+                         if not any(ver == vid for _r, ver in have_versions)]
+                        if versions is not None else [])
+    if missing_versions:
+        print(f"[track] {len(missing_versions)} requested version(s) were never materialized "
+              f"in the selected round(s): {', '.join(missing_versions)}")
     if not getattr(args, "no_pdf", False):
         pdfs = run_pdf_conversion(ctx, rounds=rounds, versions=versions)
         pdf_summary(pdfs, rounds=rounds)
+    if missing_versions:
+        sys.exit(4)
 
 
 def tracking_summary(manifest: dict, rounds=None) -> None:

@@ -747,9 +747,12 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     top_limits = _clean_length_limits(out.get("length_limits"), "length_limits",
                                       problems) if explicit_article_types else None
     # A venue-level abstract/main-text block written next to an article_types
-    # table is the venue-wide fallback for a type that states NO number for
-    # that section. Only the cover-letter block used to be inherited, so M19
-    # enforced no limit at all on such a profile.
+    # table populates ONLY the default type. A default type that states no
+    # number for a section inherits the top-level one; a NON-default type never
+    # borrows it (the README's "a type with null bases carries no numbers" --
+    # the stages name the venue's own table limit instead). The old comment
+    # called this a venue-wide fallback and promised every type the numbers,
+    # which the code never did (F176).
     if top_limits is not None:
         _type_limits = default_entry.get("length_limits")
         if not isinstance(_type_limits, dict):
@@ -757,6 +760,14 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
                             "abstract": {"base": None, "relaxation": None},
                             "main_text": {"base": None, "relaxation": None}}
             default_entry["length_limits"] = _type_limits
+        # The top-level block's `source` is the citation for the numbers it
+        # supplies. The synthesized block used to start with source "" and
+        # `length_limits_source` fell back to the type's label, so the accepted
+        # venue-level source was silently dropped whenever a table was present
+        # (F37). A source the type states itself still wins.
+        if not str(_type_limits.get("source") or "").strip() \
+                and str(top_limits.get("source") or "").strip():
+            _type_limits["source"] = top_limits["source"]
         for _section in ("abstract", "main_text"):
             _type = _type_limits.get(_section) or {}
             _top = top_limits.get(_section) or {}
@@ -1018,7 +1029,10 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # profile's own `sources` field names where its numbers come from"), and
     # the rebuilt return value used to drop the key, so a stage reading the
     # profile through VenueProfile.data could not name the guideline it used.
-    clean_sources = ({str(k): str(v) for k, v in raw_sources.items()}
+    # The README promises the map is "carried through the loader unchanged":
+    # `str(v)` turned a nested list/dict value into an unparseable Python repr,
+    # so values (not just keys) are preserved here (F186).
+    clean_sources = ({str(k): copy.deepcopy(v) for k, v in raw_sources.items()}
                      if isinstance(raw_sources, dict) else {})
     result = {
         "id": venue_id,
@@ -1371,11 +1385,18 @@ def available_venue_profiles(root=None) -> dict:
                 continue
             origin = f"root: {d}" if root is not None and \
                 Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else f"shipped: {d}"
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as e:
+            # `path.read_text()` here had no regular-file/symlink refusal, no
+            # size cap and no O_NONBLOCK: a FIFO named `*.json` blocked
+            # `set-venue --list`, `status` and every prompt command forever, and
+            # a multi-GB profile was read whole before validation (F32). Use the
+            # same bounded, no-follow reader the state loader uses, and list a
+            # refused entry as INVALID instead of following/blocking on it.
+            data = read_json(path, revive=False)
+            if data is None:
                 found.setdefault(key, {"id": key, "label": key,
-                                       "error": f"{path}: not readable JSON: {e}",
+                                       "error": f"{path}: not readable JSON (missing, a "
+                                                f"symlink/FIFO/device, over the size budget, or "
+                                                f"malformed)",
                                        "origin": origin, "path": str(path)})
                 continue
             declared = (str(data.get("id") or "").strip().lower()
@@ -1466,10 +1487,13 @@ def load_venue_profile(venue_id, root=None) -> VenueProfile:
             if len(matches) != 1:
                 continue
             path = matches[0]
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            raise VenueProfileError(f"{path}: not readable JSON: {e}")
+        # Bounded, no-follow read: a symlinked/FIFO/oversized profile must be
+        # refused rather than followed or read whole (F32).
+        data = read_json(path, revive=False)
+        if data is None:
+            raise VenueProfileError(
+                f"{path}: not readable JSON (missing, a symlink/FIFO/device, over the "
+                f"size budget, or malformed)")
         origin = "root-local profile" if root is not None and \
             Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else "shipped profile"
         # Resolution is by FILE NAME. A hand-added file whose JSON declares a
@@ -3867,11 +3891,40 @@ def venue_config_findings(ctx) -> tuple:
                         f"{prof.id!r} describes ({known}). Set the venue that matches the journal "
                         f"(`set-venue <id>`) or the journal the venue describes "
                         f"(`set-journal <name>`).")
-    state_cfg = ((getattr(ctx, "state", None) or {}).get("config") or {})
+    _state = getattr(ctx, "state", None)
+    if not isinstance(_state, dict):
+        _state = {}
+    state_cfg = _state.get("config")
+    if state_cfg is None:
+        state_cfg = {}
+    elif not isinstance(state_cfg, dict):
+        # A JSON-VALID non-object `config` passed every shape check in the
+        # loader and got here, where `state_cfg.get` died with a bare
+        # AttributeError on every command that opens the root (F126). Refuse
+        # with the same actionable damaged-registry message the loader uses for
+        # its other containers.
+        die(f"state.json is damaged: 'config' must be an object (got "
+            f"{type(state_cfg).__name__}).\n"
+            f"       {getattr(ctx, 'state_path', 'state.json')}\n"
+            f"       Restore state.json from a backup.")
     mirrored = str(state_cfg.get("venue") or "").strip().lower()
     if mirrored and mirrored != recorded:
         notes.append(f"state.json records venue {mirrored!r} but pipeline_config.json selects "
                      f"{recorded!r}: the config file wins (`set-venue` re-mirrors it).")
+    # The mirror carries every key `setup`/`set-*` writes, and README:431 says a
+    # config/state disagreement is reported. Only the venue was compared, so a
+    # stale journal or article type was silently ignored (F175). One note per
+    # disagreeing key; the config file wins in every case.
+    for _key, _what, _fix in (("journal", "journal", "set-journal"),
+                              ("article_type", "article type", "set-article-type")):
+        _mirrored = str(state_cfg.get(_key) or "").strip()
+        if not _mirrored:
+            continue
+        _configured = str(cfg.get(_key) or "").strip()
+        if _mirrored.casefold() != _configured.casefold():
+            notes.append(f"state.json records {_what} {_mirrored!r} but "
+                         f"pipeline_config.json selects {_configured!r}: the config file "
+                         f"wins (`{_fix}` re-mirrors it).")
     return notes, problems
 
 AGENT_PRESETS = {

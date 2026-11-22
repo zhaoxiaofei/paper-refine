@@ -237,52 +237,35 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         with contextlib.suppress(OSError):
             (work / rel).with_suffix(".pdf").unlink()
         argv = [exe, "-pdf", "-interaction=nonstopmode", "-halt-on-error", Path(rel).name]
-        # latexmk spawns pdflatex/bibtex children. Starting it in its own
-        # process group and killing the GROUP on timeout stops those children
-        # from writing into the build tree while `finally` removes it (a bare
-        # `subprocess.run(timeout=...)` kills only latexmk itself). Output goes
-        # to temporary FILES: a verbose document must not accumulate unbounded
-        # bytes in the orchestrator (F61).
-        with tempfile.TemporaryFile() as out_tmp, tempfile.TemporaryFile() as err_tmp:
-            proc = subprocess.Popen(argv, cwd=str((work / rel).parent),
-                                    stdout=out_tmp, stderr=err_tmp,
-                                    **_tool_popen_kwargs())
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _kill_process_group(proc)
-                try:
-                    proc.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    pass
-                raise
-            out_tmp.seek(0, os.SEEK_END)
-            out_size = out_tmp.tell()
-            err_tmp.seek(0, os.SEEK_END)
-            err_size = err_tmp.tell()
-            if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
-                return {"ok": False, "tool": "latexmk", "pages": 0,
-                        "error": f"latexmk output over the {MAX_TOOL_OUTPUT_BYTES}-byte budget "
-                                 f"(stdout={out_size}, stderr={err_size}); refusing it"}
-            out_tmp.seek(0)
-            err_tmp.seek(0)
-            stdout = out_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1)
-            stderr = err_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1)
-        out = (stdout or b"").decode("utf-8", "replace") \
-            + (stderr or b"").decode("utf-8", "replace")
+        # latexmk spawns pdflatex/bibtex children. `run_bounded` starts it in its
+        # own process group, kills the GROUP on timeout, and drains stdout and
+        # stderr through capped reader threads: the old TemporaryFile pair wrote
+        # UNBOUNDED bytes to disk and only checked the size after `proc.wait()`,
+        # so an error loop under -interaction=nonstopmode could fill TMPDIR for
+        # the whole timeout before the budget was ever consulted (F142).
+        try:
+            proc_rc, out_b, err_b = run_bounded(
+                argv, timeout=timeout, cwd=str((work / rel).parent))
+        except ToolOutputOverBudget as e:
+            return {"ok": False, "tool": "latexmk", "pages": 0,
+                    "error": f"latexmk output over the {MAX_TOOL_OUTPUT_BYTES}-byte budget "
+                             f"({e}); refusing it",
+                    "skipped_links": skipped_links}
+        out = (out_b or b"").decode("utf-8", "replace") \
+            + (err_b or b"").decode("utf-8", "replace")
         pdf = (work / rel).with_suffix(".pdf")
         # A non-empty file is not a render. The reuse path already refuses a
         # file pdf_signature_problem() rejects; the first compile must apply
         # the same check or the two runs disagree about the same artifact.
         sig_problem = ""
-        if proc.returncode == 0:
+        if proc_rc == 0:
             if not pdf.is_file():
                 sig_problem = "latexmk exited 0 without writing a PDF"
             elif pdf.stat().st_size <= 0:
                 sig_problem = "latexmk wrote an empty PDF"
             else:
                 sig_problem = pdf_signature_problem(pdf) or ""
-        ok = bool(proc.returncode == 0 and not sig_problem)
+        ok = bool(proc_rc == 0 and not sig_problem)
         if ok:
             out_pdf.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(pdf, out_pdf)
@@ -306,7 +289,7 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                 "error": (None if ok else
                           (errors[0] if errors
                            else (sig_problem or
-                                 f"latexmk exited {proc.returncode} without a PDF"))[:300]),
+                                 f"latexmk exited {proc_rc} without a PDF"))[:300]),
                 "errors": errors, "skipped_links": skipped_links}
     except (OSError, subprocess.SubprocessError, shutil.Error) as e:    # noqa: BLE001
         return {"ok": False, "tool": "latexmk", "error": f"{type(e).__name__}: {e}",

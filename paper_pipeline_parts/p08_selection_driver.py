@@ -1455,6 +1455,12 @@ def resolve_agent_model_cmd(harness: str, model: str, agent_cmd_arg: str,
     return argv
 
 
+# How long the `dsh --help` capability probe may boot before its process tree is
+# killed (F139). A module constant (not a literal) so the probe's timeout path
+# is testable without a 180 s wait.
+DSH_PROBE_TIMEOUT_SECONDS = 180
+
+
 def _probe_dsh_headless(exe: str) -> str:
     """Read the installed harness's own headless help ('' = it declares the contract).
 
@@ -1466,12 +1472,38 @@ def _probe_dsh_headless(exe: str) -> str:
     read -- reports '' (see dsh_harness_problem).
     """
     try:
-        proc = subprocess.run([exe, "--profile", "headless", "--help"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, encoding="utf-8", errors="replace", timeout=180)
+        # The probe is a TOOL run: give it its own process group and kill that
+        # group on the timeout, exactly like every other tool call. Without it
+        # `subprocess.run` killed only the direct `dsh` process and the Node
+        # worker/MCP children it spawned survived the 180 s timeout, holding
+        # $DSH_HOME locks/logs (F139). The timeout is recorded instead of
+        # silently reading as "the build declares no contract".
+        proc = subprocess.Popen([exe, "--profile", "headless", "--help"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                encoding="utf-8", errors="replace",
+                                **_tool_popen_kwargs())
+        try:
+            out, _ = proc.communicate(timeout=DSH_PROBE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            # killpg reaches the children that stayed in the probe's group; a
+            # helper that called setsid escaped it, so the subtree is collected
+            # first (same walk the agent sessions use) and killed before the
+            # group is signalled.
+            for pid_ in reversed(_descendant_pids(proc.pid)):
+                with contextlib.suppress(OSError):
+                    os.kill(pid_, signal.SIGKILL)
+            _kill_process_group(proc)
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=5)
+            print(f"  [warn] the `dsh` headless capability probe timed out after "
+                  f"{DSH_PROBE_TIMEOUT_SECONDS} s; its process tree was killed and the "
+                  f"capability check is skipped (the sessions will speak for themselves)",
+                  flush=True)
+            return ""
+        text = out or ""
     except Exception:                                                # noqa: BLE001
         return ""
-    text = proc.stdout or ""
     # The harness is a Node >= 22 application (`node:util` parseEnv): under an
     # older `node` on PATH it dies at import, and the box's own node may well be
     # the older one while the harness was installed by a newer one. That crash
@@ -1636,7 +1668,43 @@ class _TurnCounter:
                 return
 
 
-def _read_stream_capped(stream, cap: int, on_chunk=None, tail_cap: int = 0) -> tuple:
+class _StreamCapture:
+    """A live view of one pipe reader's captured output (F30).
+
+    A timed-out descendant that left the agent's process group can keep the
+    stdout/stderr pipe open, so its reader thread stays blocked and the attempt
+    record ended up EMPTY with no truncation marker -- the failure evidence was
+    lost. The reader publishes its growing buffer as it reads, so the caller can
+    snapshot what arrived even when the reader never returns.
+    """
+
+    def __init__(self):
+        self.chunks: list = []
+        self.size = 0
+        self.tail_chunks: list = []
+        self.tail_cap = 0
+        self.done = None
+
+    def snapshot(self) -> tuple:
+        """(kept text, total characters read, tail text) of what has arrived."""
+        if self.done is not None:
+            return self.done
+        tail = ("".join(list(self.tail_chunks))[-self.tail_cap:]
+                if self.tail_cap > 0 else "")
+        return ("".join(list(self.chunks)), self.size, tail)
+
+
+def _stream_result(capture) -> tuple:
+    """The (kept, total, tail) triple of one captured pipe, live or finished."""
+    if capture is None:
+        return ("", 0, "")
+    if isinstance(capture, _StreamCapture):
+        return capture.snapshot()
+    return capture
+
+
+def _read_stream_capped(stream, cap: int, on_chunk=None, tail_cap: int = 0,
+                        capture=None) -> tuple:
     """(kept text, total characters read, tail text) for one agent pipe.
 
     The overflow is DISCARDED as it arrives (the child is not blocked on a full
@@ -1656,6 +1724,12 @@ def _read_stream_capped(stream, cap: int, on_chunk=None, tail_cap: int = 0) -> t
     kept, size = [], 0
     tail: list = []
     tail_len = 0
+    if capture is not None:
+        # Share the live lists: the reader appends to them, so a snapshot taken
+        # from another thread sees every chunk read so far.
+        capture.chunks = kept
+        capture.tail_chunks = tail
+        capture.tail_cap = tail_cap
     try:
         while True:
             chunk = stream.read(65536)
@@ -1673,12 +1747,61 @@ def _read_stream_capped(stream, cap: int, on_chunk=None, tail_cap: int = 0) -> t
                 while len(tail) > 1 and tail_len - len(tail[0]) >= tail_cap:
                     tail_len -= len(tail.pop(0))
             size += len(chunk)
+            if capture is not None:
+                capture.size = size
     except (OSError, ValueError):
         pass
     finally:
         with contextlib.suppress(OSError, ValueError):
             stream.close()
-    return "".join(kept), size, ("".join(tail)[-tail_cap:] if tail_cap > 0 else "")
+    result = ("".join(kept), size, ("".join(tail)[-tail_cap:] if tail_cap > 0 else ""))
+    if capture is not None:
+        capture.done = result
+    return result
+
+
+def _proc_children(pid: int) -> list:
+    """Best-effort live child PIDs of `pid` (POSIX /proc; [] where unavailable)."""
+    kids = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return kids
+    for ent in entries:
+        if not ent.isdigit():
+            continue
+        try:
+            with open(f"/proc/{ent}/stat", "rb") as fh:
+                data = fh.read(4096).decode("utf-8", "replace")
+        except OSError:
+            continue
+        # The `comm` field may contain spaces and parentheses, so parse the
+        # fields AFTER its closing parenthesis: state, ppid, ...
+        rest = data.rsplit(")", 1)[-1].split()
+        if len(rest) >= 2 and rest[1].isdigit() and int(rest[1]) == pid:
+            kids.append(int(ent))
+    return kids
+
+
+def _descendant_pids(root_pid: int) -> list:
+    """Live descendants of `root_pid`, parents before children (F30).
+
+    A descendant that calls setsid leaves the session's process GROUP, so the
+    group kill below cannot reach it, and it can keep the agent's stdout/stderr
+    pipe open for as long as it lives. The PPID chain still names it until its
+    parent dies, so the whole subtree is collected BEFORE any signal is sent and
+    SIGKILLed first. Best effort: no /proc, no walk (the group kill still runs).
+    """
+    out, queue, seen = [], [int(root_pid)], {int(root_pid)}
+    while queue:
+        cur = queue.pop(0)
+        for kid in _proc_children(cur):
+            if kid in seen:
+                continue
+            seen.add(kid)
+            out.append(kid)
+            queue.append(kid)
+    return out
 
 
 def _terminate_agent_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
@@ -1709,6 +1832,14 @@ def _terminate_agent_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
             # its PID is also the group id, so this still names the surviving
             # descendants (F11).
             pgid = proc.pid
+    # A descendant that called setsid left the group: collect it first, while
+    # its PPID chain still names it, and SIGKILL it before the group is
+    # signalled (F30). Killing the children first also keeps them from being
+    # reparented before the group signal lands.
+    escaped = _descendant_pids(proc.pid) if pgid else []
+    for pid_ in reversed(escaped):
+        with contextlib.suppress(OSError):
+            os.kill(pid_, signal.SIGKILL)
     try:
         if pgid:
             os.killpg(pgid, signal.SIGTERM)
@@ -2069,15 +2200,20 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         feeder = threading.Thread(target=_feed, daemon=True)
         feeder.start()
         readers.append(feeder)
+        pipe_readers = []
         for key, stream in (("out", proc.stdout), ("err", proc.stderr)):
-            def _pump(stream=stream, key=key):
-                captured[key] = _read_stream_capped(
+            pipe_capture = _StreamCapture()
+            captured[key] = pipe_capture
+
+            def _pump(stream=stream, key=key, pipe_capture=pipe_capture):
+                pipe_capture.done = _read_stream_capped(
                     stream, MAX_TOOL_OUTPUT_BYTES,
                     turn_counter.feed if (key == "out" and turn_counter is not None) else None,
-                    tail_cap=EVIDENCE_TAIL_BYTES)
+                    tail_cap=EVIDENCE_TAIL_BYTES, capture=pipe_capture)
             reader = threading.Thread(target=_pump, daemon=True)
             reader.start()
             readers.append(reader)
+            pipe_readers.append(reader)
         try:
             try:
                 rc, exc = proc.wait(timeout=(timeout or None)), None
@@ -2087,13 +2223,27 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
             except Exception as e:  # noqa: BLE001
                 _terminate_agent_tree(proc)
                 rc, exc = None, f"execution error: {e}"
+            # ONE shared wait budget, not a full join per reader: a descendant
+            # that escaped the process group can hold the pipe open, and two
+            # 15 s joins turned a 1 s timeout into a 31 s stall (F30). The
+            # readers publish what they read, so the transcript survives even
+            # when a reader cannot return.
+            deadline = time.monotonic() + 5.0
             for reader in readers:
-                reader.join(15)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                reader.join(remaining)
         finally:
             service_stop.set()
             _unregister_active_agent(proc)
-        out, out_total, out_tail = captured.get("out", ("", 0, ""))
-        err, err_total, err_tail = captured.get("err", ("", 0, ""))
+        out, out_total, out_tail = _stream_result(captured.get("out"))
+        err, err_total, err_tail = _stream_result(captured.get("err"))
+        if any(reader.is_alive() for reader in pipe_readers):
+            truncation += ("\n[TRANSCRIPT INCOMPLETE: the agent's stdout/stderr pipe was "
+                           "still held open after the timeout (a descendant escaped the "
+                           "process group); the transcript below is what had arrived when "
+                           "the wait budget expired]\n")
         dropped = []
         if out_total > len(out):
             dropped.append(f"stdout {out_total} chars -> {len(out)}")
@@ -3805,6 +3955,14 @@ def revision_chain_pending(rec: dict) -> bool:
     return True
 
 
+# The attempt-identity fields `_execute_attempt_in` writes onto the run record.
+# An auxiliary session runs through the same executor, so all of them are
+# snapshotted and restored around it (F122).
+_AUX_SESSION_IDENTITY_FIELDS = ("agent_command", "prompt_file", "prompt_sha256",
+                                "agent_model", "max_turns", "turn_cap_hit",
+                                "turn_cap_enforced", "last_attempt_started")
+
+
 def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
                      prompt_file: str, log_name: str) -> dict:
     """Run one audit/repair session WITHOUT changing the stage attempt's clock.
@@ -3813,6 +3971,15 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
     are part of the accepted revise attempt, so the attempt's start (and the
     history row `postcheck` later writes) must keep the revise session's own
     values, and the audit/repair durations live in their own records.
+
+    The SAME rule covers the rest of the attempt's identity (F122):
+    `_execute_attempt_in` also writes `agent_command`, `prompt_file`,
+    `prompt_sha256`, `agent_model`, `max_turns` and the turn flags, so after a
+    revision audit the done revise record claimed it had received
+    `REVISION_AUDIT_PROMPT.md` with the audit's digest, command and model. The
+    accepted attempt's identity is snapshotted before the auxiliary session and
+    restored after it, so the run record still identifies the bytes that
+    produced `revised/`.
 
     The PARENT's completion marker is restored after the aux session. The
     sandbox root has one `_pipeline_done.json` (`MARKER_FILE`) and the aux
@@ -3828,7 +3995,10 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
     disposed deletion table, the repair ledger), not from re-labelling the
     parent's marker.
     """
-    started = rec.get("last_attempt_started")
+    # The fields `_execute_attempt_in` writes onto `rec`: the attempt's identity
+    # (F122). Snapshot presence AND value so a field the stage never set is
+    # removed again instead of inheriting the aux session's value.
+    saved_identity = {k: rec[k] for k in _AUX_SESSION_IDENTITY_FIELDS if k in rec}
     marker = sb / MARKER_FILE
     saved_marker = None
     if marker.is_file() and not marker.is_symlink():
@@ -3843,8 +4013,11 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
         result = _execute_attempt_in(sb, rec, cmd, timeout, prompt_file, log_name, False)
         return result
     finally:
-        if started is not None:
-            rec["last_attempt_started"] = started
+        for _field in _AUX_SESSION_IDENTITY_FIELDS:
+            if _field in saved_identity:
+                rec[_field] = saved_identity[_field]
+            else:
+                rec.pop(_field, None)
         restore_error = ""
         try:
             if saved_marker is not None:

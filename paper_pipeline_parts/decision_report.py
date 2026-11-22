@@ -36,6 +36,12 @@ def header_lines(*, generated, root, version, config_line, venue_lines, certific
             L.append(f"- final_clean_version/: published by this decision "
                      f"({_cv.get('status') or _verdict.lower()}); status in "
                      f"`{_cv.get('readme') or clean_readme_name}`")
+        elif _cv.get("action") == "unchanged":
+            # The copy was already there and byte-identical: this invocation
+            # built nothing, so the line must not claim it did (F44).
+            L.append(f"- final_clean_version/: left unchanged from an earlier decision "
+                     f"({_cv.get('status') or _verdict.lower()}); status in "
+                     f"`{_cv.get('readme') or clean_readme_name}`")
         else:
             L.append(f"- final_clean_version/: NOT (re)built by this decision"
                      + (f" -- {_cv['skipped_reason']}" if _cv.get("skipped_reason") else "")

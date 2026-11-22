@@ -117,10 +117,15 @@ def test_sentence_bar_tiers():
           str(hit[:1]))
     body = fmt.long_text_rows([ABSTRACT_SENTENCE], [False], ["body"],
                               style_limits=STYLE_LIMITS)
-    check("the same sentence in the body is INSIDE the body bar (46, >=)",
+    check("the same sentence in the body is INSIDE the body bar (46, >)",
           not [r for r in body if "long sentence" in r["evidence"]])
-    body_long = " ".join(["word"] * 46) + "."
-    check("a 46-word body sentence IS a row (the old >45 behaviour, kept)",
+    body_bar = " ".join(["word"] * 46) + "."
+    check("a 46-word body sentence AT the declared bar is legal",
+          not any("long sentence" in r["evidence"]
+                  for r in fmt.long_text_rows([body_bar], [False], ["body"],
+                                              style_limits=STYLE_LIMITS)))
+    body_long = " ".join(["word"] * 47) + "."
+    check("a 47-word body sentence IS a row (one over the declared bar)",
           any("long sentence" in r["evidence"]
               for r in fmt.long_text_rows([body_long], [False], ["body"],
                                           style_limits=STYLE_LIMITS)))
@@ -129,11 +134,11 @@ def test_sentence_bar_tiers():
           not [r for r in fmt.long_text_rows([short_methods], [False], ["methods"],
                                              style_limits=STYLE_LIMITS)
                if "long sentence" in r["evidence"]])
-    long_methods = " ".join(["word"] * 61) + "."
+    long_methods = " ".join(["word"] * 62) + "."
     mrows = [r for r in fmt.long_text_rows([long_methods], [False], ["methods"],
                                            style_limits=STYLE_LIMITS)
              if "long sentence" in r["evidence"]]
-    check("a 61-word Methods sentence is FMT-T9c finding-tier at the declared bar",
+    check("a 62-word Methods sentence is FMT-T9c finding-tier over the declared bar",
           bool(mrows) and mrows[0]["tier"] == "finding", str(mrows[:1])[:160])
     mega = fmt.long_text_rows(["word " * 260], [False], ["body"],
                               style_limits=STYLE_LIMITS)

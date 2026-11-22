@@ -334,7 +334,9 @@ def test_selfcheck_scope():
     check("A8b a full-scope selfcheck still demands them",
           any(a in e for e in errs for a in content_artifacts), str(errs)[:300])
     check("A8c the scope marker is what flips the demand",
-          bool(errs_fw) != bool(errs) or True)
+          any(a in e for e in errs_fw for a in content_artifacts)
+          != any(a in e for e in errs for a in content_artifacts),
+          f"formatting-writing demand={errs_fw!r} full demand={errs!r}")
 
 
 # =====================================================================

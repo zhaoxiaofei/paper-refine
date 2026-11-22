@@ -1126,8 +1126,18 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
                         f"refusing {Path(path).name}: its decompressed parts exceed the "
                         f"redline byte budget ({info.filename} claims {size} bytes; "
                         f"{total} already read)")
-                out[info.filename] = z.read(info.filename)
-                total += size
+                # The declared size is attacker-controlled: read through a
+                # bounded stream and count the REAL bytes (F04).
+                with z.open(info) as fh:
+                    payload = fh.read(REDLINE_PART_MAX_BYTES + 1)
+                if len(payload) > REDLINE_PART_MAX_BYTES \
+                        or total + len(payload) > REDLINE_TOTAL_MAX_BYTES:
+                    raise OSError(
+                        f"refusing {Path(path).name}: its decompressed parts exceed the "
+                        f"redline byte budget ({info.filename} expanded to "
+                        f"{len(payload)} bytes; {total} already read)")
+                out[info.filename] = payload
+                total += len(payload)
         return out
 
     base_parts, rev_parts = _parts(base_docx), _parts(revised_docx)

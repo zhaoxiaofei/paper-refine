@@ -156,8 +156,11 @@ def test_f023_backup_writers_no_follow() -> None:
           'fs.openSync(target, "wx"' in src
           or "fs.openSync(target, 'wx'" in src)
     shell = (ROOT / "install_agent_tooling.sh").read_text(encoding="utf-8")
+    # The shell backup writers are `cp -p`-shaped bash, not the embedded node
+    # repair JS: assert the ACTUAL backup command, or this check passes on
+    # exactly the symlink regression it names (F169).
     check("F023 the shell installer backup creates with O_EXCL",
-          'fs.openSync(target, "wx"' in shell or "O_NOFOLLOW" in shell)
+          "set -o noclobber" in shell and "cp -p --" not in shell)
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
         dsh = base / "dsh-home"

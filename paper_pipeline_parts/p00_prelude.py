@@ -497,6 +497,17 @@ PIPELINE_REQUIRED_PARTS = (
     "paper_pipeline_parts/p20_judge_conflicts.py",
     "paper_pipeline_parts/p21_removal_accounting.py",
     "paper_pipeline_parts/p22_resume_continuation.py",
+    # The FORMATTER's ordered parts are a separate tree with the same
+    # all-or-nothing requirement: `paper_docx_format.py` executes whatever
+    # `p[0-9][0-9]_*.py` it finds and has no completeness check of its own, so a
+    # root missing one passed this preflight and died later with a `NameError`
+    # (`paper_docx_format.py --version` -> `name 'main' is not defined`) (F89).
+    # `PIPELINE_ASSET_DIRS` carries the directory; every file below is checked
+    # beside the loader by `_missing_bundle_assets`.
+    "paper_docx_format_parts/p00_core.py",
+    "paper_docx_format_parts/p01_text_rules.py",
+    "paper_docx_format_parts/p02_layout_edit.py",
+    "paper_docx_format_parts/p03_report_cli.py",
 )
 PIPELINE_REQUIRED_ASSET_FILES = (
     "agent-common/agent_common/model_runtime.py",

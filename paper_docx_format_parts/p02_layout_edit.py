@@ -1651,9 +1651,12 @@ def _caption_para_split(para: str):
     if ppr and not inner.startswith(ppr):
         return None
     content = inner[len(ppr):]
-    if not content.endswith("</w:p>"):
+    # A legal paragraph close may carry whitespace before '>': accept it and
+    # strip the tag actually matched, so a '<w:p>…</w:p >' caption merges.
+    close = re.search(r"</w:p\s*>$", content)
+    if not close:
         return None
-    return head, ppr, content[:-len("</w:p>")]
+    return head, ppr, content[:close.start()]
 
 
 def caption_block_mergeable(parts: list) -> bool:
@@ -1712,6 +1715,13 @@ def element_span(xml: str, start: int, tag: str) -> tuple:
             if depth <= 0:
                 return start, start + m.end()
         else:
+            # A self-closing `<w:p/>` is a COMPLETE element, not an opener: it
+            # used to add a depth with no matching close, so a body paragraph
+            # carrying an empty text-box paragraph swallowed every following
+            # body block into one span.
+            close = xml.find(">", start + m.end())
+            if close != -1 and xml[close - 1] == "/":
+                continue
             depth += 1
     return start, len(xml)
 
@@ -2356,7 +2366,11 @@ def cover_letter_stamp_rows(path: Path, policy: dict) -> list:
                 raise OSError(problem)
             xml = ooxml_part_text(
                 _docx_xml_part_guarded(pkg, "word/document.xml"))
-            used_styles = set(re.findall(r'<w:pStyle w:val="([^"]+)"', xml))
+            # XML allows either quote character and whitespace around `=`:
+            # read every pStyle element's w:val through the shared accessor so
+            # a legal '<w:pStyle w:val='TitleMSS'/>' is not read as absent.
+            used_styles = {v for v in (attr_of(m.group(0), "w:val") for m in
+                                       re.finditer(r"<w:pStyle\b[^>]*>", xml)) if v}
             if want_parts:
                 for name in pkg.namelist():
                     if not re.match(r"word/(?:header|footer)\w*\.xml$", name):
@@ -3260,15 +3274,15 @@ def image_pixel_size(data: bytes):
             return (w, h) if w > 0 and h > 0 else None
         if data[:5] == b"<?xml" or data[:4] == b"<svg" or b"<svg" in data[:200]:
             head = data[:4000].decode("utf-8", "replace")
-            box = re.search(r'viewBox\s*=\s*"([-\d.eE\s,]+)"', head)
+            box = re.search(r"""viewBox\s*=\s*(["'])([-\d.eE\s,]+)\1""", head)
             if box:
-                nums = [float(x) for x in re.split(r"[\s,]+", box.group(1).strip()) if x]
+                nums = [float(x) for x in re.split(r"[\s,]+", box.group(2).strip()) if x]
                 if len(nums) == 4 and nums[2] > 0 and nums[3] > 0:
                     return (nums[2], nums[3])
-            wm = re.search(r'\bwidth\s*=\s*"([\d.]+)', head)
-            hm = re.search(r'\bheight\s*=\s*"([\d.]+)', head)
-            if wm and hm and float(wm.group(1)) > 0 and float(hm.group(1)) > 0:
-                return (float(wm.group(1)), float(hm.group(1)))
+            wm = re.search(r"""\bwidth\s*=\s*(["'])([\d.]+)\1""", head)
+            hm = re.search(r"""\bheight\s*=\s*(["'])([\d.]+)\1""", head)
+            if wm and hm and float(wm.group(2)) > 0 and float(hm.group(2)) > 0:
+                return (float(wm.group(2)), float(hm.group(2)))
             return None
         if data[:4] in (b"II*\x00", b"MM\x00*"):
             endian = "<" if data[:2] == b"II" else ">"
@@ -3392,11 +3406,13 @@ def _ratio_fixes(block: str, expected: float) -> list:
                              tag, count=1)))
     for m in re.finditer(r"<v:shape(?=[\s/>])[^>]*>", block):
         tag = m.group(0)
-        style = re.search(r'style="([^"]*)"', tag)
+        # A legacy shape's geometry lives in its `style` attribute; XML allows
+        # either quote character, so read it through the shared accessor.
+        style = attr_of(tag, "style")
         if not style:
             continue
-        width = re.search(r"width:\s*([0-9.]+)([a-z%]+)", style.group(1), re.I)
-        height = re.search(r"height:\s*([0-9.]+)([a-z%]+)", style.group(1), re.I)
+        width = re.search(r"width:\s*([0-9.]+)([a-z%]+)", style, re.I)
+        height = re.search(r"height:\s*([0-9.]+)([a-z%]+)", style, re.I)
         if not (width and height) or width.group(2).lower() != height.group(2).lower():
             continue
         want = _nearest_image_height(float(width.group(1)), expected, width.group(2))
@@ -3405,9 +3421,9 @@ def _ratio_fixes(block: str, expected: float) -> list:
         # Use a round-trippable decimal without exponent notation so the
         # scanner reads the same height on the next pass.
         length = format(Decimal(str(want)), "f")
-        new_style = style.group(1)[:height.start()] + \
-            f"height:{length}{height.group(2)}" + style.group(1)[height.end():]
-        fixes.append((m.start(), m.end(), tag.replace(style.group(1), new_style, 1)))
+        new_style = style[:height.start()] + \
+            f"height:{length}{height.group(2)}" + style[height.end():]
+        fixes.append((m.start(), m.end(), tag.replace(style, new_style, 1)))
     return fixes
 
 
@@ -3470,8 +3486,11 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
             # rotated drawing.
             src_rect = re.search(r"<a:srcRect(?=[\s/>])([^>]*)/?>", block)
             if src_rect:
-                rect = {k: v for k, v in re.findall(r'([A-Za-z]+)="([^"]*)"',
-                                                    src_rect.group(1))}
+                # XML allows either quote character: a legal single-quoted
+                # srcRect must yield the same cropped region as a double-quoted
+                # one, or a correctly cropped picture is "repaired" to the full
+                # image's ratio and squashed.
+                rect = {k: attr_of(src_rect.group(1), k) for k in ("l", "r", "t", "b")}
                 try:
                     frac_w = 1 - (float(rect.get("l") or 0)
                                   + float(rect.get("r") or 0)) / 100000.0
@@ -3490,11 +3509,11 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
             if not (cx and cy):
                 vm = re.search(r"<v:shape(?=[\s/>])[^>]*>", block)
                 if vm:
-                    style = re.search(r'style="([^"]*)"', vm.group(0))
+                    style = attr_of(vm.group(0), "style") or ""
                     wm = re.search(r"width:\s*([0-9.]+)([a-z%]+)",
-                                   style.group(1) if style else "", re.I)
+                                   style, re.I)
                     hm = re.search(r"height:\s*([0-9.]+)([a-z%]+)",
-                                   style.group(1) if style else "", re.I)
+                                   style, re.I)
                     if wm and hm and wm.group(2).lower() == hm.group(2).lower():
                         cx, cy = float(wm.group(1)), float(hm.group(1))
                         unit = wm.group(2)
@@ -3670,9 +3689,9 @@ def figure_text_size_rows(docx_path: Path, policy: dict = None) -> list:
                         # the shape's style, not in `<wp:extent>`
                         # (drawing_geometry_rows already reads that fallback).
                         vm = re.search(r"<v:shape(?=[\s/>])[^>]*>", block)
-                        style = re.search(r'style="([^"]*)"', vm.group(0)) if vm else None
+                        style = (attr_of(vm.group(0), "style") or "") if vm else ""
                         wm = re.search(r"width:\s*([0-9.]+)\s*([a-z%]+)",
-                                       style.group(1) if style else "", re.I)
+                                       style, re.I)
                         factor = {"in": 914400.0, "pt": 12700.0, "cm": 360000.0,
                                   "mm": 36000.0, "px": 9525.0}.get(
                                       (wm.group(2).lower() if wm else ""))
@@ -5327,8 +5346,9 @@ def _zotero_result_region(xml: str, frame: dict):
             return None
         # EXACTLY one `w:t`: the rebuilt result run is cloned from the first
         # run and its text replaced, so a run carrying a second `w:t` would
-        # keep that element's stale text beside the new number.
-        if len(re.findall(r"<w:t(?:\s[^>]*)?>.*?</w:t>", run, re.S)) != 1:
+        # keep that element's stale text beside the new number. A legal close
+        # tag may carry whitespace before `>`.
+        if len(re.findall(r"<w:t(?:\s[^>]*)?>.*?</w:t\s*>", run, re.S)) != 1:
             return None
         if template is None:
             template = run
@@ -5339,57 +5359,91 @@ def _zotero_result_region(xml: str, frame: dict):
 
 def _zotero_result_run(template_run: str, text: str) -> str:
     """A run cloned from the field's own result run, carrying `text`."""
-    return re.sub(r"<w:t(?:\s[^>]*)?>.*?</w:t>",
+    return re.sub(r"<w:t(?:\s[^>]*)?>.*?</w:t\s*>",
                   '<w:t xml:space="preserve">' + esc(text) + "</w:t>",
                   template_run, count=1, flags=re.S)
 
 
 def _zotero_entry_span_of_run(content: str):
-    """(start, end, number) of an entry's leading 'N.' text run, or None."""
-    m = re.match(r"^\s*(<w:r(?: [^>]*)?>.*?</w:r>)", content, flags=re.S)
-    if not m:
-        return None
-    run = m.group(1)
-    t = text_of(run)
-    nm = re.fullmatch(r"\s*(\d+)\s*[\.\)]?\s*", t)
-    if not nm:
-        return None
-    return m.start(1), m.end(1), int(nm.group(1))
+    """(start, end, number) of an entry's leading 'N.' text, or None.
+
+    Word may split ONE number across consecutive runs ("1" then "0. Smith...",
+    which renders "10. Smith..."): the span covers every leading run that
+    carries the number, not only the first, so a rewrite replaces the whole
+    visible number instead of its first fragment.
+    """
+    start = len(content) - len(content.lstrip())
+    pos = start
+    taken = []
+    while True:
+        m = RUN_RE.match(content, pos)
+        if not m:
+            break
+        taken.append(m.group(0))
+        end = m.end()
+        text = text_of("".join(taken))
+        # `10. Smith` / `1.` -- a delimiter followed by whitespace or the end
+        # terminates the number; `10 Smith` terminates it at the space.
+        nm = re.match(r"\s*(\d+)\s*[\.\)](?=\s|$)", text) or \
+            re.match(r"\s*(\d+)\s+(?=\S)", text)
+        if nm:
+            return start, end, int(nm.group(1))
+        # A digits-only prefix is the WHOLE number only when the next run does
+        # not begin with another digit (otherwise it is "1" + "0. ...").
+        nm = re.fullmatch(r"\s*(\d+)\s*", text)
+        rest = content[end:]
+        gap = len(rest) - len(rest.lstrip())
+        nxt = RUN_RE.match(content, end + gap) if end + gap < len(content) else None
+        if nm and (nxt is None or not re.match(r"\s*\d", text_of(nxt.group(0)))):
+            return start, end, int(nm.group(1))
+        if nxt is None:
+            return None
+        pos = end + gap
+    return None
 
 
 def _zotero_renumber_run(run: str, rank: int) -> str:
-    """Rewrite the WHOLE visible number of one bibliography entry run.
+    """Rewrite the WHOLE visible number of one bibliography entry run group.
 
     Word may split one number across several `<w:t>` elements ("1" + "0." =
-    "10."): `_zotero_entry_span_of_run` accepts the joined run, but a
-    `re.sub(..., count=1)` rewrote only the FIRST element, leaving the rest of
-    the old number in place ("10." stayed "10." while the marker said 1). Put
-    the complete replacement number in the first text element and clear the
-    others, so the run's rendered text is exactly the new rank and every run
-    wrapper/property stays where it was.
+    "10.") or several runs ("1" then "0. Smith..."): the number is the leading
+    digits of the joined text. Only those digits are replaced and every run
+    wrapper/property and all trailing entry text stays where it was, so the
+    run's rendered text becomes exactly the new number plus what followed the
+    old one.
     """
-    pieces = list(re.finditer(r"<w:t(?:\s[^>]*)?(?<!/)>(.*?)</w:t>", run, re.S))
+    pieces = list(re.finditer(r"<w:t(?:\s[^>]*)?(?<!/)>(.*?)</w:t\s*>", run, re.S))
     if not pieces:
         return run
     # Match against the run's TEXT ELEMENTS only: `text_of` renders a
     # `w:tab`/`w:br` as "\n", and that placeholder was captured by group 3, so
     # "1"+tab came back as "5\n" and the surviving tab made the entry's text
     # "5\n\n". The tab is structure, not part of the number being renumbered.
-    wt_text = text_of("".join(run[pm.start():pm.end()] for pm in pieces))
-    m = re.fullmatch(r"(\s*)(\d+)(\s*[\.\)]?\s*)", wt_text)
+    wt_text = text_of("".join(pm.group(0) for pm in pieces))
+    m = re.match(r"\s*(\d+)", wt_text)
     if not m:
         return run
-    new_text = m.group(1) + str(rank) + m.group(3)
-    out, cursor = [], 0
-    for k, pm in enumerate(pieces):
-        out.append(run[cursor:pm.start()])
-        open_tag = run[pm.start():run.find(">", pm.start()) + 1]
-        if "xml:space" not in open_tag:
-            open_tag = open_tag[:-1] + ' xml:space="preserve">'
-        out.append(open_tag + (esc(new_text) if k == 0 else "") + "</w:t>")
+    digit_start, digit_end = m.span(1)
+    out, cursor, text_pos, placed = [], 0, 0, False
+    for pm in pieces:
+        local = unesc(pm.group(1))
+        a, b = text_pos, text_pos + len(local)
+        lo, hi = max(a, digit_start), min(b, digit_end)
+        if lo < hi:
+            out.append(run[cursor:pm.start()])
+            open_tag = run[pm.start():run.find(">", pm.start()) + 1]
+            if "xml:space" not in open_tag:
+                open_tag = open_tag[:-1] + ' xml:space="preserve">'
+            new_local = (local[:lo - a] + ("" if placed else str(rank))
+                         + local[hi - a:])
+            out.append(open_tag + esc(new_local) + "</w:t>")
+            placed = True
+        else:
+            out.append(run[cursor:pm.end()])
         cursor = pm.end()
+        text_pos = b
     out.append(run[cursor:])
-    return "".join(out)
+    return "".join(out) if placed else run
 
 
 def _zotero_entry_match_score(entry_text: str, item: dict) -> int:
@@ -5604,8 +5658,17 @@ def _zotero_bibliography_plan(xml: str, frame: dict, items_by_rank: dict):
         # Rewriting with a count=1 `re.sub` left the rest of a split number in
         # place, so the entry stayed "10." while its marker was rewritten to 1.
         new_run = _zotero_renumber_run(run, rank)
-        contents_by_rank[rank] = (st["contents"][idx][:span[0]] + new_run
-                                  + st["contents"][idx][span[1]:])
+        new_content = (st["contents"][idx][:span[0]] + new_run
+                       + st["contents"][idx][span[1]:])
+        # Post-condition: the rebuilt entry must actually SHOW the new rank.
+        # Without it the refresh reported success while the number had not
+        # been rewritten (a legal split/whitespace spelling used to be a
+        # silent no-op), and the citation marker now pointed at a stale entry.
+        shown = re.match(r"\s*(\d+)", text_of(new_content))
+        if not shown or int(shown.group(1)) != rank:
+            return {"needed": True, "xml": None,
+                    "skip": "a bibliography entry's number could not be rewritten"}
+        contents_by_rank[rank] = new_content
     reordered = any(rank != idx + 1 for idx, rank in assignment.items())
     pieces = []
     for k, rank in enumerate(ranks):
@@ -5660,7 +5723,7 @@ def zotero_refresh_document(xml: str, para_texts: list = None,
             out["skip"] = "a citation field carries no instruction"
             return out
         instr_text = "".join(
-            unesc(re.sub(r"^<w:instrText[^>]*>|</w:instrText>$", "",
+            unesc(re.sub(r"^<w:instrText[^>]*>|</w:instrText\s*>$", "",
                          pm.group(0), flags=re.S)) for pm in instr_pieces)
         js_span = _zotero_json_span(instr_text)
         if js_span is None:

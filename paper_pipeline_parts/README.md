@@ -23,14 +23,14 @@ it executes is a real Python file (each carries
 | `p11_defect_audit.py` | the diagnostic LLM defect audit |
 | `p12_conflicts_decide.py` | package-hygiene scans, PKG-2 repair, decision report, `decide`, `status`, `trend` |
 | `p20_judge_conflicts.py` | the cross-judge conflict audit (split from `p12` to keep every part under 10,000 lines) |
-| `p21_removal_accounting.py` | removal accounting: soft-deletion unit filter, finding-removal ledger gate, and the revision-ledger final-status reader (split from `p06`/`p07` to keep every part under 10,000 lines) |
-| `p22_resume_continuation.py` | session continuation: CLI session-id capture, resume argv, the continuation gate and the continuation prompt (split from `p06` to keep every part under 10,000 lines) |
+| `p21_removal_accounting.py` | removal accounting: soft-deletion unit filter, finding-removal ledger gate, the revision-ledger final-status reader, and the outline/disposition-artifact gate (split from `p06`/`p07` to keep every part under 10,000 lines) |
+| `p22_resume_continuation.py` | session continuation: CLI session-id capture, resume argv, the continuation gate and the continuation prompt, plus the audit coverage/disposition gates (split from `p06`/`p07` to keep every part under 10,000 lines) |
 | `p13_redlines.py` | tracked-changes generation |
 | `p14_tracking.py` | difference-tracking copies and persistent renders |
 | `p15_pdf.py` | PDF rendering |
 | `p16_retry.py` | `retry` |
 | `p17_cli.py` | the argument parser and `main()` |
-| `p18_helpers.py` | the `--only`/`--runs` ROUND/STAGE/SESSION selection grammar (`OnlySpec` and its parsers) plus shared bounded-subprocess/aux-root/text helpers -- split out to keep `p04_utils.py` under 10,000 lines |
+| `p18_helpers.py` | the `--only`/`--runs` ROUND/STAGE/SESSION selection grammar (`OnlySpec` and its parsers), shared bounded-subprocess/aux-root/text helpers, and the lenient JSON recovery (`_json_from_text`) -- split out to keep `p04_utils.py` under 10,000 lines |
 | `p19_profiles.py` | the EXECUTION PROFILE (`high` / `medium`: `medium` pages the elaborative rule blocks out of every stage prompt into `INSTRUCTIONS/PROFILE_RULES.md`) and the GUIDED-REVIEW switch (`--no-guided-review`: the cold-start review alone, with the guided classes recorded as a named gap) |
 
 `ranking.py` and `decision_report.py` are **not** executed parts: the loader

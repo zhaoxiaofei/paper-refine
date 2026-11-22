@@ -275,7 +275,8 @@ def fake_powershell(tmp: Path, mode: str) -> Path:
         "    import zipfile\n"
         "    with zipfile.ZipFile(path, 'w') as zf:\n"
         "        zf.writestr('[Content_Types].xml', '<Types/>')\n"
-        "        zf.writestr('word/document.xml', '<w:document/>')\n"
+        "        zf.writestr('word/document.xml', '<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>')\n"
+        "        zf.writestr('word/_rels/document.xml.rels', '<Relationships/>')\n"
         "print(path)\n",
         encoding="utf-8")
     exe = tmp / "powershell.exe"

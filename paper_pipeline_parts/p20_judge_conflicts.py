@@ -552,7 +552,6 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
                 # opponent twice must not shift the median (F045).
                 _drop("duplicate_opponent")
                 continue
-            _seen_opinions.add(_dup_key)
             if not is_int(score):
                 _drop("missing_score")
                 continue
@@ -565,6 +564,11 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
             if judge_comparison_abstained(comp):
                 _drop("abstained")
                 continue
+            # Reserve the (target, judge_index, opponent) slot only for an
+            # opinion that actually counts: a rejected first occurrence
+            # (missing/out-of-range score, abstention) must not mask a valid
+            # later row for the same opponent (F67).
+            _seen_opinions.add(_dup_key)
             opinions.append({
                 "judge_run": str(rec.get("id") or ""),
                 "judge_index": int(rec.get("judge_index")),
@@ -1693,6 +1697,13 @@ def decide_certification(gate_problems, rounds_data, chain_ok, panel_gaps, final
             f"never a certified panel result")
     status = ("certified" if (not blockers and not provisional)
               else ("provisional" if (provisional and not blockers) else "not_certified"))
+    _fc = final_clean or {}
+    _clean_action = str(_fc.get("action") or "") or None
+    # `published` describes THIS invocation. A decide run that finds the copy
+    # already on disk (`action == "unchanged"`) neither published nor rebuilt
+    # it, so the report must not say it did (F44). A direct caller that passes
+    # only `{"files": N}` keeps the historical "published" meaning.
+    _clean_published = bool(_fc.get("files")) and _clean_action != "unchanged"
     return {"certified": bool(not blockers and not provisional),
             "provisional": bool(provisional),
             "auto_promoted": auto_promoted,
@@ -1703,7 +1714,8 @@ def decide_certification(gate_problems, rounds_data, chain_ok, panel_gaps, final
             # provisional answer without the flag).
             "exit_code": (5 if blockers
                           else (4 if (provisional and require_complete) else 0)),
-            "clean_version": {"published": bool((final_clean or {}).get("files")),
+            "clean_version": {"published": _clean_published,
+                              "action": _clean_action,
                               "status": status,
                               "readme": FINAL_CLEAN_README_NAME,
                               "skipped_reason": clean_reason or None}}

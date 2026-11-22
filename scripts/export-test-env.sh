@@ -30,6 +30,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "${HERE}/.." && pwd)"
 ENV_NAME="${PAPER_REFINE_TEST_ENV:-paper-refine-test}"
+# ENV_NAME is joined to --out below: a `../` (or an absolute value) escaped the
+# output directory (F135).
+if [[ -z "${ENV_NAME}" || "${ENV_NAME}" == "." || "${ENV_NAME}" == ".." || "${ENV_NAME}" == */* ]]; then
+  echo "error: PAPER_REFINE_TEST_ENV must be one filename component: ${ENV_NAME}" >&2
+  exit 2
+fi
 ENV_PREFIX="${PAPER_REFINE_TEST_PREFIX:-}"
 OUT="${WS}/env"
 CONDA="${CONDA_EXE:-$(command -v conda || true)}"
@@ -176,6 +182,10 @@ safe_replace "${freeze_tmp}" "${STEM}.requirements.list_e.txt"
   | safe_write "${STEM}.conda.packages.txt"
 if [[ -s "${STEM}.conda.packages.txt" ]]; then
   _no_pypi_tmp="$(mktemp -- "${STEM}.requirements.list_e_no_pypi.txt.tmp.XXXXXXXXXX")"
+  # `set -e`/pipefail used to abort on grep's legitimate exit 1 BEFORE the
+  # PIPESTATUS branch could handle it, so the documented 0/1 test was dead
+  # (F102). Run the pipeline with errexit off and read the statuses.
+  set +e
   awk 'BEGIN{FS="=="} {n=tolower($1); gsub(/_/,"-",n); print n"\t"$0}' \
       "${STEM}.requirements.list_e.txt" \
     | grep -v -F -f <(sed 's/$/\t/' "${STEM}.conda.packages.txt") \
@@ -184,6 +194,7 @@ if [[ -s "${STEM}.conda.packages.txt" ]]; then
   # non-zero stage is a failure, and `|| true` used to install partial output
   # while exiting 0 (F037).
   _ps=("${PIPESTATUS[@]}")
+  set -e
   if [[ "${_ps[0]}" -ne 0 || "${_ps[1]}" -gt 1 || "${_ps[2]}" -ne 0 ]]; then
     echo "error: could not derive the pip-only package list" >&2
     rm -f -- "${_no_pypi_tmp}"

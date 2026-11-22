@@ -6,7 +6,8 @@
 // while `execFile` opens the target outside the root. Both sides are therefore
 // resolved with `realpath` before the comparison. Kept dependency-free (node:
 // core only) so the rule is unit-testable without the MCP SDK installed.
-import { lstatSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync,
+         realpathSync, statSync, writeSync } from 'node:fs';
 import * as path from 'node:path';
 
 function realOrResolved(p) {
@@ -39,7 +40,18 @@ export function allowedRoots(value) {
     .split(path.delimiter)
     .map((r) => r.trim())
     .filter(Boolean)
-    .map((r) => realOrResolved(r));
+    .map((r) => {
+      // A FILE accepted as an allowed "root" disabled the write containment:
+      // the derived PDF beside it landed outside the intended tree (F148).
+      const real = realOrResolved(r);
+      let st = null;
+      try { st = statSync(real); } catch { st = null; }
+      if (!st || !st.isDirectory()) {
+        throw new Error(`DOCX_MCP_ALLOWED_ROOTS entry is not an existing `
+                        + `directory: ${r}`);
+      }
+      return real;
+    });
   if (!roots.length) {
     // Set but carrying only delimiters/whitespace. `containsPath` used to read
     // the empty list as "allow anything", so a malformed value silently
@@ -81,16 +93,19 @@ function hasDanglingSymlink(p) {
   return false;
 }
 
-/** True when `target` is under one of `roots` (an empty list = variable unset). */
-export function containsPath(target, roots) {
-  if (!roots || !roots.length) return true;
-  if (hasDanglingSymlink(target)) return false;
-  const abs = realOrResolved(target);
+function isInside(abs, roots) {
   // A root that already ENDS with the separator is the filesystem root: adding
   // another one turned "/" into "//", which no absolute path starts with, so
   // the "allow everything" spelling DOCX_MCP_ALLOWED_ROOTS=/ refused every file.
   return roots.some((r) => abs === r
     || abs.startsWith(r.endsWith(path.sep) ? r : r + path.sep));
+}
+
+/** True when `target` is under one of `roots` (an empty list = variable unset). */
+export function containsPath(target, roots) {
+  if (!roots || !roots.length) return true;
+  if (hasDanglingSymlink(target)) return false;
+  return isInside(realOrResolved(target), roots);
 }
 
 
@@ -110,8 +125,84 @@ export function containedSpawnPath(target, roots) {
     throw new Error(`${abs} is a dangling symlink (it escapes DOCX_MCP_ALLOWED_ROOTS)`);
   }
   const real = realOrResolved(abs);
-  const ok = roots.some((r) => real === r
-    || real.startsWith(r.endsWith(path.sep) ? r : r + path.sep));
-  if (!ok) throw new Error(`${abs} is outside DOCX_MCP_ALLOWED_ROOTS`);
+  if (!isInside(real, roots)) {
+    throw new Error(`${abs} is outside DOCX_MCP_ALLOWED_ROOTS`);
+  }
   return real;
+}
+
+/** Copy a validated input into a PRIVATE staging directory and return that copy.
+ *
+ * `containedSpawnPath()` still returns a path STRING: after it is re-validated,
+ * a writer inside an allowed root can replace the file with a symlink to an
+ * outside file, and the child opens the string and follows it (F14). The child
+ * must therefore never receive the user's path. This helper opens the validated
+ * file ONCE, refuses a swapped-in symlink (O_NOFOLLOW) and a directory-component
+ * swap (the opened inode is re-checked through /proc/self/fd on Linux), then
+ * copies the bytes READ FROM THAT DESCRIPTOR into a private directory. The child
+ * opens the private copy, so a later swap of the original path cannot change
+ * what it reads.
+ */
+export function stageContainedInput(target, roots, stagingDir, name) {
+  if (!stagingDir) {
+    throw new Error('stageContainedInput requires a private staging directory');
+  }
+  const real = containedSpawnPath(target, roots);
+  let fd;
+  try {
+    fd = openSync(real, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+  } catch (error) {
+    if (error && (error.code === 'ELOOP' || error.code === 'EMLINK')) {
+      throw new Error(`${target} is a symlink (it escapes `
+                      + `DOCX_MCP_ALLOWED_ROOTS)`);
+    }
+    throw error;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new Error(`${target} is not a regular file`);
+    }
+    if (process.platform === 'linux') {
+      // The final component is covered by O_NOFOLLOW; a swapped DIRECTORY
+      // component is not. /proc/self/fd names the inode the descriptor holds,
+      // so re-checking its real path catches the directory swap as well.
+      let opened = null;
+      try { opened = realpathSync(`/proc/self/fd/${fd}`); } catch { opened = null; }
+      if (opened && !isInside(opened, roots)) {
+        throw new Error(`${target} changed while it was opened (it escapes `
+                        + `DOCX_MCP_ALLOWED_ROOTS)`);
+      }
+    }
+    const dest = path.join(stagingDir, name);
+    const out = openSync(dest,
+                         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+                         0o600);
+    try {
+      const buf = Buffer.allocUnsafe(1 << 20);
+      for (;;) {
+        let n;
+        try {
+          n = readSync(fd, buf, 0, buf.length, null);
+        } catch (error) {
+          if (error && error.code === 'EINTR') continue;
+          throw error;
+        }
+        if (n === 0) break;
+        let off = 0;
+        while (off < n) {
+          try {
+            off += writeSync(out, buf, off, n - off);
+          } catch (error) {
+            if (error && error.code === 'EINTR') continue;
+            throw error;
+          }
+        }
+      }
+    } finally {
+      closeSync(out);
+    }
+    return dest;
+  } finally {
+    closeSync(fd);
+  }
 }

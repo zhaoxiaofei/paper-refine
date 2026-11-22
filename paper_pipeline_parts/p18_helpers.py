@@ -39,6 +39,20 @@ def ensure_aux_output_root(root, dirname: str) -> Path:
 # the repository's 10,000-line cap; the loader shares one namespace.
 # ---------------------------------------------------------------------------
 
+def _style_limit_int(value):
+    """A positive int style limit, or None for an invalid entry (F181).
+
+    `int(3.9)` truncates to 3 and `int(True)` is 1, so the old blind conversion
+    silently enforced a STRICTER bar than the profile recorded while the
+    docstring promised the invalid entry was dropped. Accept only a real
+    positive int -- the rule `normalize_venue_profile` applies to a profile's
+    `style_limits` block (a bool is not an int here).
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
 def _venue_style_limits(ctx: Ctx) -> dict:
     """The venue profile's `style_limits` block, validated and copied.
 
@@ -58,19 +72,14 @@ def _venue_style_limits(ctx: Ctx) -> dict:
     if isinstance(bars, dict):
         clean = {}
         for kind, value in bars.items():
-            try:
-                n = int(value)
-            except (TypeError, ValueError):
+            n = _style_limit_int(value)
+            if n is None:
                 continue
-            if n > 0:
-                clean[str(kind)] = n
+            clean[str(kind)] = n
         if clean:
             out["sentence_words"] = clean
-    try:
-        cap = int(block.get("paragraph_words") or 0)
-    except (TypeError, ValueError):
-        cap = 0
-    if cap > 0:
+    cap = _style_limit_int(block.get("paragraph_words"))
+    if cap is not None:
         out["paragraph_words"] = cap
     return out
 
@@ -520,7 +529,12 @@ def _visible_docx_part_texts(xml: str) -> list:
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
-        return [re.sub(r"<[^>]+>", " ", xml)]
+        # A part that is not well-formed XML has no visible-node walk, and the
+        # old tag-strip fallback returned the text of HIDDEN/deleted runs -- a
+        # hidden e-mail address became visible to the gate, contrary to this
+        # function's "as Word RENDERS them" contract (F182). Word cannot render
+        # such a part either: report no visible text rather than raw markup.
+        return []
     out = []
     for para in _docx_visible_paragraphs(root, ns, mc):
         parts = []
@@ -619,7 +633,9 @@ def _reference_entry_keys(package: Path) -> set:
     Reference entries were stripped before they became content units, so a
     fabricated entry could be added (or a real one deleted) with no
     missing/added unit and no fact loss (F005). The entries are compared as
-    text; `.bib`/`.bbl` entries are compared by key.
+    text (a .tex `\\bibitem` by its key); a `.bib`/`.bbl` database is not a
+    rendered reference-list entry and is deliberately not read here, so adding
+    an uncited key to it changes nothing.
     """
     entries = set()
     package = Path(package)
@@ -1701,15 +1717,30 @@ def _session_token(raw: str, part: str, flag: str = "--only") -> str:
             f"`rewriter1`, `integrator2`, `w2`, `r1_w2` or `r1_judge_w2_j1`)", code=2)
     m = re.fullmatch(r"(rewriter|writer|w)(\d+)", tok)
     if m:
-        return f"w{int(m.group(2))}"
+        n = int(m.group(2))
+        if n < 1:
+            die(f"{flag}: {part!r} names {tok}: session indices are 1-based "
+                f"(`rewriter1`/`w1` is the first rewrite arm)", code=2)
+        return f"w{n}"
     m = re.fullmatch(r"(reviser|revise|a)(\d+)", tok)
     if m:
         # The pipeline numbers its revise arms a2, a3, ... (a1 is the base copy),
-        # so reviser N is the a{N+1} arm.
-        return f"a{int(m.group(2)) + 1}"
+        # so reviser N is the a{N+1} arm. N=0 would therefore map onto a1, the
+        # round base COPY that _add_session_id() refuses; returning it here made
+        # `--only reviser0` select a session no round-plan entry carries (a
+        # silent no-op) instead of dying like every other a1 spelling (F96).
+        n = int(m.group(2))
+        if n < 1:
+            die(f"{flag}: {part!r} names {tok}: revise sessions are 1-based "
+                f"(`reviser1` is the first reviser, which edits a1 into a2)", code=2)
+        return f"a{n + 1}"
     m = re.fullmatch(r"(integrator|integrate|i)(\d+)", tok)
     if m:
-        return f"i{int(m.group(2))}"
+        n = int(m.group(2))
+        if n < 1:
+            die(f"{flag}: {part!r} names {tok}: session indices are 1-based "
+                f"(`integrator1`/`i1` is the first integrate arm)", code=2)
+        return f"i{n}"
     # Canonical `guided_review`/`guided_review_b`, plus the pre-rename
     # `review`/`reviewer`/`review_b` spellings the CLI help and README still
     # document: the parser accepts them, so this mapper must too (F12).
@@ -1786,11 +1817,20 @@ def parse_only_stages(raw) -> set:
 
     Kept for the stage-only callers and tests: None/empty/`all` selects every
     stage (the default). A round-qualified item (`2:review`) contributes its
-    stage; the round filter itself lives in parse_only_spec(), which is what the
-    `run` command uses.
+    stage -- `stage_filter()` returns `set()` as soon as ANY round-qualified
+    item exists, so returning it here gave the broadest possible filter for a
+    narrow selection (F194). The round filter itself lives in
+    parse_only_spec(), which is what the `run` command uses.
     """
     spec = parse_only_spec(raw)
-    return spec.stage_filter() if spec else set()
+    if spec is None or spec.all_stages or spec.rounds_in_full:
+        return set()
+    if any(not stages for stages in spec.pairs.values()):
+        return set()                    # `2:all` -- every stage of round 2
+    stages = set(spec.stages)
+    for round_stages in spec.pairs.values():
+        stages |= set(round_stages)
+    return stages
 
 
 # --- filesystem/path helpers (moved here from p04 to keep every part under
@@ -2501,8 +2541,10 @@ def pid_alive(pid: int) -> bool:
         return True
     except OSError:
         # A POSIX signal-0 probe that failed for any other reason cannot tell
-        # us the process is gone; never steal a live lock.
-        return False
+        # us the process is gone; never steal a live lock. ProcessLookupError
+        # is the ONLY dead result, matching the Windows probe's unknown=>alive
+        # rule (F195).
+        return True
     return True
 
 
@@ -2557,10 +2599,32 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
             if qtext is None:
                 continue
             tex_cache[q.resolve()] = qtext
-            for inc in TEX_INCLUDE_RE.finditer(strip_tex_comment(qtext)):
-                child = _tex_include_path(q.parent, inc.group(1))
-                if child is not None and child != q.resolve():
+        # Resolve includes exactly as _tex_expand_includes() does: from the
+        # directory of the MASTER being expanded, at every nesting level. The
+        # old per-file `q.parent` lookup matched only a child-relative
+        # convention, so a nested `\input{chapters/method}` inside
+        # `chapters/intro.tex` was expanded into the master's count yet left
+        # out of `tex_included`, and method.tex was counted a second time on
+        # its own (F75). Each cached .tex is a potential master (the second
+        # loop scans every one that is not itself included), so walk from each
+        # with that master's own base.
+        for master in list(tex_cache):
+            base = master.parent
+            pending, reachable = [(master, 0)], {master}
+            while pending:
+                cur, depth = pending.pop()
+                if depth + 1 >= TEX_MAX_INCLUDE_DEPTH:
+                    continue            # expansion stops here too (named gap)
+                cur_text = tex_cache.get(cur)
+                if cur_text is None:
+                    continue
+                for inc in TEX_INCLUDE_RE.finditer(strip_tex_comment(cur_text)):
+                    child = _tex_include_path(base, inc.group(1))
+                    if child is None or child in reachable:
+                        continue
+                    reachable.add(child)
                     tex_included.add(child)
+                    pending.append((child, depth + 1))
         for p in _iter_tree_files(src, gaps=src_gaps):
             # `_iter_tree_files` is the corpus walker: a file symlink is not
             # package content (copy_into refuses it), so a scan that followed
@@ -2769,7 +2833,12 @@ def mcp_server_spec(name: str) -> dict:
             r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
             + quoted + r"'|" + quoted + r")\s*\.\s*env\s*\]\s*(?:#.*)?$",
             re.MULTILINE)
-        eh = env_header.search(text)
+        # The header is TOML STRUCTURE, exactly like the main entry's header:
+        # search the unquoted mask so a `[mcp_servers.<name>.env]` line inside
+        # another entry's multi-line string is not read as a real subtable.
+        # The mask keeps every offset, so the body slice below indexes the real
+        # text (F119).
+        eh = env_header.search(_toml_unquoted_mask(text))
         if eh:
             rest_env = text[eh.end():]
             next_hdr = re.search(r"^\s*\[", rest_env, re.MULTILINE)
@@ -3308,3 +3377,173 @@ def _selfcheck_artifact_policy(sb: Path) -> str:
     return DEFAULT_ARTIFACT_POLICY
 
 
+# =====================================================================
+# LENIENT JSON RECOVERY
+#
+# Split out of p04_utils.py to keep every part under the documented
+# 10,000-line limit (the 2026-11-22 fix-bugs wave pushed p04 over). Resolved at
+# CALL time from the shared globals, so the later part position is irrelevant.
+# =====================================================================
+
+JSON_MAX_NESTING = 1000
+
+
+def _json_from_text(text: str, lenient: bool):
+    """Parse `text` as JSON, optionally recovering JSON embedded in prose.
+
+    `lenient` is for AGENT-written files only. Models very often wrap the
+    document they were told to write in a markdown fence (```json ... ```) or
+    introduce it ("Here is the marker:"), which is not a content error -- the
+    JSON is complete and unambiguous. Trying `raw_decode` at each `{`/`[` start
+    token recovers exactly that document and nothing else: a TRUNCATED payload
+    still fails to parse (the decoder demands the closing brace), and a document
+    whose JSON is followed by lots of prose around it is not accepted unless the
+    parsed value spans the text (`min_end` guard), so this cannot turn a
+    half-written file into a pass.
+    """
+    text = text.lstrip("\ufeff")
+    if not lenient:
+        try:
+            return json.loads(text)
+        except (ValueError, RecursionError):
+            # A deeply nested but valid JSON document raises RecursionError,
+            # not ValueError: it is malformed AGENT OUTPUT for this pipeline's
+            # purposes and must take the retry path, not crash the postcheck.
+            return None
+    decoder = json.JSONDecoder()
+    total = len(text)
+    # Only BALANCED values are document candidates. Trying every `{`/`[` made
+    # a truncated payload quadratic. Top-level values are preferred; a value
+    # that closes while an EARLIER, still-unmatched prose opener is on the
+    # stack is kept as a fallback, so one literal "{" in the prose cannot hide
+    # a complete JSON document that follows it (F13). The lists are separate
+    # and bounded: counting nested values against one cap made a large ordinary
+    # JSON document exceed the cap before its own closing brace.
+    top_starts, nested_starts = [], []      # (start, end) / (start, end, outer_start)
+    stack = []                              # (expected closer, start), innermost last
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append(("}" if ch == "{" else "]", i))
+            if len(stack) > JSON_MAX_NESTING:
+                # The input byte cap bounds the FILE, not this scanner's
+                # auxiliary stack: one tuple per unmatched opener made a 64 MiB
+                # brace file allocate several GB during a lenient parse (F056).
+                # Nothing this pipeline can parse nests this deep -- json.loads
+                # itself raises RecursionError around the interpreter limit --
+                # so a deeper stack is malformed agent input, not a document.
+                return None
+        elif ch in "}]":
+            if stack and stack[-1][0] == ch:
+                _closer, start = stack.pop()
+                if not stack:
+                    if len(top_starts) < 64:
+                        top_starts.append((start, i + 1))
+                elif len(nested_starts) < 64:
+                    # `stack[0]` is the OUTERMOST still-open bracket: the opener
+                    # this value is nested inside.
+                    nested_starts.append((start, i + 1, stack[0][1]))
+            elif stack:
+                # Mismatched prose brackets: no value can start here.
+                stack.clear()
+    # Try BOTH candidate lists, in document order: an earlier `{}` in prose is
+    # a complete top-level value, and it must not hide a later complete
+    # document that closes while that prose opener is still unmatched.
+    top_start_at = {s for s, _e in top_starts}
+    starts = list(top_starts)
+    for s, _end, outer in nested_starts:
+        # A nested value is a FALLBACK for a stray prose opener, never a
+        # replacement for the document itself (F86): an opener that is a
+        # complete top-level value (the malformed `[{"a":1},]`) or that opens
+        # the text -- bare or right after a markdown fence (the truncated
+        # `[{"a":1}`, "```json\n[{"a":1}") -- is the document's own bracket,
+        # so a complete child of it is a fragment, not the payload.
+        prefix = text[:outer].strip()
+        if (outer in top_start_at or not prefix
+                or re.fullmatch(r"[`~]{3,}[^\n]*", prefix)):
+            continue
+        # The unmatched opener must be PROVABLY PROSE, not the truncated
+        # document's own bracket. An opener directly followed by JSON syntax (a
+        # key/`:` pair or a value token) opens a value of the half-written
+        # document, so its complete child is a fragment: `Here is the
+        # document:\n{"findings": [{"id": "F1"}]` used to return the child list
+        # although the object never closed (F07). A prose opener (`prose {
+        # unclosed then {"a":1}`) keeps the fallback, so one literal brace in
+        # prose still cannot hide the document (F13/F86).
+        gap = text[outer + 1:s].lstrip()
+        if not gap or re.match(r'["\[\{\-0-9]|true\b|false\b|null\b', gap):
+            continue
+        starts.append((s, _end))
+    starts = sorted(set(starts))
+    found = []                       # (start, end, value)
+    for i, _end in starts:
+        try:
+            obj, end = decoder.raw_decode(text, i)
+        except (ValueError, RecursionError):
+            continue
+        found.append((i, end, obj))
+    if not found:
+        return None
+
+    def outside_prose(i: int, end: int) -> int:
+        """Text outside [i, end) that is not another candidate's own JSON.
+
+        Counting an earlier candidate as prose is what let a trailing in-prose
+        EXAMPLE outscore the payload that preceded it.
+        """
+        other = 0
+        for s, e, _o in found:
+            if (s, e) == (i, end):
+                continue
+            other += max(0, min(e, i) - s) + max(0, e - max(s, end))
+        return max(0, total - (end - i) - other)
+
+    # The document is the candidate that SPANS the text -- the LARGEST parsed
+    # value, not merely the first `{` ("The schema is {"example": true}. And the
+    # data is: {…}" returned the in-prose EXAMPLE) and not merely the last one
+    # (a file ending in an example -- "… Note the schema example is {"example":
+    # true}" -- returned the example). A value whose surrounding prose dwarfs it
+    # is a fragment: "A"*1000 + '{...}' + "B"*1000 names an example, not a
+    # document, and is still refused. A value that runs to the end of the text
+    # is the document whatever precedes it (a fenced or introduced file); the
+    # prose counted here is the text outside this value that is not another
+    # candidate's own JSON, so a document carrying a nested object or a second
+    # value is not penalized for either.
+    best, best_key = None, None
+    best_end = None
+    rejected = []                    # (start, end) refused only by the prose test
+    for i, end, obj in found:
+        json_len = end - i
+        tail = text[end:].strip()
+        fenced = not tail or set(tail) <= set("`~")
+        prose = outside_prose(i, end)
+        if not fenced and prose > 2 * json_len:
+            rejected.append((i, end))
+            continue
+        # A value that runs to the end of the text is the document even when an
+        # earlier top-level value is the same length: prefer it on a tie.
+        key = (json_len, 1 if fenced else 0)
+        if best_key is None or key > best_key:
+            best, best_key, best_end = obj, key, end
+    if best is not None and not text[best_end:].strip():
+        # The winner runs to the end, so its `fenced` admission is what let it
+        # through. When a LARGER complete candidate before it was rejected only
+        # by the prose test, the tail is an in-prose EXAMPLE that must not be
+        # returned as the document ("… Here is why. One row looks like
+        # {"foo": 1}") -- report the ambiguity as malformed instead (F105).
+        best_len = best_key[0] if best_key else 0
+        best_start = best_end - best_len
+        if any(s < best_start and (e - s) > best_len for s, e in rejected):
+            return None
+    return best
