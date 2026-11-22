@@ -532,7 +532,10 @@ def load_state_file(path: Path) -> tuple:
         # (inf became a string, a real string gained a NUL); read_json() is the
         # matching reader and every other pipeline-written JSON already uses it.
         return _json_revive(json.loads(text)), ""
-    except ValueError as e:                                       # noqa: BLE001
+    except (ValueError, RecursionError) as e:                     # noqa: BLE001
+        # A deeply nested but valid JSON document raises RecursionError, not
+        # ValueError; it must take the documented problem-string path instead of
+        # crashing every command with a bare traceback (F066).
         return None, f"is not valid JSON ({e})"
 
 
@@ -568,7 +571,7 @@ def _format_fix_summary(rep: dict, path_rel: str) -> dict:
     return out
 
 
-def compact_state(st: dict) -> int:
+def compact_state(st: dict, root: Path = None) -> int:
     """Replace the registry's redundant BULK with summaries; return bytes freed.
 
     Only write-only fields whose full payload is already on disk are touched, and
@@ -594,6 +597,18 @@ def compact_state(st: dict) -> int:
             payload = rec.get(field)
             if not isinstance(payload, dict) or payload.get("compacted"):
                 continue
+            if root is not None:
+                # The summary REPLACES the only in-registry copy with a pointer.
+                # A crash between assigning the payload and writing its artifact
+                # (or a restored state.json whose reports/ was lost) would
+                # otherwise destroy the evidence: compact only when the full
+                # artifact really exists and is non-empty (F063).
+                try:
+                    artifact = Path(root) / path_rel
+                    if not artifact.is_file() or artifact.stat().st_size <= 0:
+                        continue
+                except OSError:
+                    continue
             freed += len(json.dumps(payload, default=str))
             rec[field] = summarize(payload, path_rel)
     return freed
@@ -902,7 +917,7 @@ class Ctx:
         # COMPACT before writing: the fields `compact_state` drops are copies of
         # files that live on disk anyway, and keeping them here is what turned
         # the 2026-09-24 registry into 78 MiB (and then into a refused root).
-        freed = compact_state(self.state)
+        freed = compact_state(self.state, self.root)
         if freed:
             self.state.setdefault("log", []).append(
                 {"ts": utcnow(), "event": "state-compacted", "run_id": None,
@@ -925,6 +940,11 @@ class Ctx:
                     # Hardlinks unavailable (drvfs) or a concurrent save: fall
                     # back to a copy, never to a missing backup.
                     shutil.copy2(self.state_path, tmp_prev)
+                # The registry carries `judge_salt`; keep the backup private
+                # too. A hardlink shares the live inode, so this also tightens
+                # an existing 0644 registry before the new bytes are written.
+                with contextlib.suppress(OSError):
+                    os.chmod(tmp_prev, 0o600)
                 os.replace(tmp_prev, prev)
         except OSError:
             pass                        # best effort; the new state is written below
@@ -934,7 +954,7 @@ class Ctx:
             except OSError:
                 pass
         try:
-            write_json_atomic(self.state_path, self.state)
+            write_json_atomic(self.state_path, self.state, mode=0o600)
         except BaseException:
             # A failed/crashed write must not leave the LIVE registry hard-linked
             # to `.prev`: load_state_file() refuses a multiply-linked path, so an
@@ -2516,14 +2536,31 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
 
 
 def _blank_xml_elements(data: bytes, tags, value: bytes = b"") -> bytes:
+    # A namespace is bound to a PREFIX, and any prefix (or the default
+    # namespace) is legal: `<d:creator xmlns:d="http://purl.org/dc/elements/
+    # 1.1/">` and `<p:Company xmlns:p="...extended-properties">` are the same
+    # properties as `<dc:creator>`/`<Company>`. Matching the literal spelling
+    # leaked author/company from a legal part with no note (F76), so the LOCAL
+    # name is the contract and any (or no) prefix is accepted.
     for tag in tags:
-        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb">)", re.S | re.I)
+        local = tag.rsplit(b":", 1)[-1]
+        _pfx = rb"(?:[A-Za-z_][A-Za-z0-9_.-]*:)?"
+        # XML permits whitespace before `>` in a closing tag (`</dc:creator >`);
+        # an exact close left the author value in a blinded judge view.
+        pat = re.compile(rb"(<" + _pfx + re.escape(local) + rb"\b[^>]*>)(.*?)(</"
+                         + _pfx + re.escape(local) + rb"\s*>)", re.S | re.I)
         data = pat.sub(lambda m: m.group(1) + value + m.group(3), data)
     return data
 
 
-_RELS_ENTRY_RE = re.compile(rb"<Relationship\b[^>]*/>")
-_CONTENT_TYPE_OVERRIDE_RE = re.compile(rb"<Override\b[^>]*/>")
+# XML permits an EMPTY element written with a start and an end tag
+# (`<Override ...></Override>`) as well as the self-closing spelling. Matching
+# only `<.../>` left the pointer at a part the sanitizer removed, so the judge
+# view was an invalid OPC package (F47).
+_RELS_ENTRY_RE = re.compile(
+    rb"<Relationship\b(?:[^>]*/>|[^>]*>.*?</Relationship\s*>)", re.S)
+_CONTENT_TYPE_OVERRIDE_RE = re.compile(
+    rb"<Override\b(?:[^>]*/>|[^>]*>.*?</Override\s*>)", re.S)
 
 
 def _rels_part_base_dir(name: str) -> str:
@@ -2568,43 +2605,102 @@ _WORD_NS_DECL_RE = re.compile(
     + re.escape(_WORD_NS) + rb"(?P=q)")
 
 
+_ANY_DEFAULT_DECL_RE = re.compile(
+    rb"xmlns\s*=\s*(?P<q>[\"'])(?P<uri>[^\"']*)(?P=q)")
+_XML_TAG_RE = re.compile(rb"<[^>]*>", re.S)
+
+
+def _prefix_decl_re(prefix: bytes):
+    return re.compile(rb"xmlns:" + re.escape(prefix)
+                      + rb"\s*=\s*(?P<q>[\"'])(?P<uri>[^\"']*)(?P=q)")
+
+
+def _qualify_default_word_ns(payload: bytes) -> bytes:
+    """Prefix every element that resolves to the Word DEFAULT namespace.
+
+    Every unprefixed element in a Word-default scope is WordprocessingML, so it
+    must be qualified for the byte transforms to see it. The default namespace
+    is SCOPED: a nested `<m:oMath xmlns="urn:math">` switches it for that
+    subtree only, so a global substitution would corrupt the part -- and the old
+    "another default declaration: not resolvable" bail-out leaked `delText` and
+    `author=` into the judge view (F20). Track the default per element instead.
+    """
+    out, pos, stack, w_scope = [], 0, [], False
+    for m in _XML_TAG_RE.finditer(payload):
+        tag = m.group(0)
+        new = tag
+        if tag.startswith(b"</"):
+            if stack:
+                cur, _w = stack.pop()
+                w_scope = stack[-1][1] if stack else False
+                if cur == _WORD_NS and re.match(rb"</[A-Za-z_][\w.-]*(?=[\s>])", tag):
+                    new = b"</w:" + tag[2:]
+        elif not tag.startswith((b"<?", b"<!")):
+            dm = _ANY_DEFAULT_DECL_RE.search(tag)
+            cur = dm.group("uri") if dm else (stack[-1][0] if stack else None)
+            own_w = bool(re.search(rb"xmlns:w\s*=", tag))
+            if cur == _WORD_NS and re.match(rb"<[A-Za-z_][\w.-]*(?=[\s/>])", tag):
+                new = b"<w:" + tag[1:]
+                if not (w_scope or own_w):
+                    nm = re.match(rb"<w:[A-Za-z_][\w.-]*", new)
+                    new = (new[:nm.end()] + b' xmlns:w="' + _WORD_NS + b'"'
+                           + new[nm.end():])
+                    own_w = True
+            if not re.search(rb"/\s*>$", tag):
+                stack.append((cur, w_scope or own_w))
+                w_scope = w_scope or own_w
+        if new != tag:
+            out.append(payload[pos:m.start()])
+            out.append(new)
+            pos = m.end()
+    if not out:
+        return payload
+    out.append(payload[pos:])
+    # Unqualified attributes (`author="..."` in a default-namespace part) are
+    # the same provenance fields; qualify them so the sanitizer rewrites them.
+    return re.sub(rb"(\s)(author|initials|date)=", rb"\1w:\2=", b"".join(out))
+
+
 def _normalize_word_prefix(payload: bytes) -> bytes:
-    """Rename a legal non-`w` Word namespace declaration to `w`.
+    """Bind the Word namespace to `w` however the part legally declares it.
 
     OOXML binds the Word namespace to a PREFIX, and `a:del`/`a:t` is exactly as
     valid as `w:del`/`w:t`. The sanitizer is byte-regex based, so normalizing
     the prefix before the transforms makes namespace identity, not spelling,
     the contract (F21).
 
-    XML allows either quote style and whitespace around `=`, and the Word
-    namespace may be the DEFAULT namespace (`<document xmlns="...">`). A
-    declaration the old double-quote-only pattern could not see left `a:del`,
-    `a:author` and `delText` in the judge view (R02).
+    XML allows either quote style/whitespace and the Word namespace may be the
+    DEFAULT namespace (`<document xmlns="...">`). A part may also bind the same
+    namespace to SEVERAL prefixes (`xmlns:w` and `xmlns:wp`); normalizing only
+    the first declaration left `wp:del`/`wp:delText` and `wp:author` in the
+    judge view (F20).
     """
-    m = _WORD_NS_DECL_RE.search(payload)
-    if not m:
+    decls = list(_WORD_NS_DECL_RE.finditer(payload))
+    if not decls:
         return payload
-    prefix = m.group("prefix")
-    if prefix == b"w":
-        return payload
-    if prefix is not None:
-        out = re.sub(rb"(?<=[<\s/])" + re.escape(prefix) + rb":", b"w:", payload)
-        return _WORD_NS_DECL_RE.sub(
-            lambda mm: b"xmlns:w=" + mm.group("q") + _WORD_NS + mm.group("q"),
-            out, count=1)
-    # Default namespace: every unprefixed element in the part is WordprocessingML.
-    # Declare `w:` explicitly and qualify the element names (and the tracked
-    # attributes the sanitizer rewrites), or the byte transforms see nothing.
-    if re.search(rb"xmlns\s*=", _WORD_NS_DECL_RE.sub(b"", payload, count=1)):
-        return payload            # another default declaration: not resolvable here
-    out = _WORD_NS_DECL_RE.sub(
-        lambda mm: b"xmlns:w=" + mm.group("q") + _WORD_NS + mm.group("q"),
-        payload, count=1)
-    out = re.sub(rb"<(?P<close>/?)(?P<name>[A-Za-z_][\w.-]*)(?=[\s/>])",
-                 lambda mm: b"<" + mm.group("close") + b"w:" + mm.group("name"), out)
-    # Unqualified attributes (`author="..."` in a default-namespace part) are
-    # the same provenance fields; qualify them so the sanitizer rewrites them.
-    return re.sub(rb"(\s)(author|initials|date)=", rb"\1w:\2=", out)
+    out = payload
+    # Rewrite every prefixed Word declaration to `xmlns:w` (in reverse so the
+    # earlier offsets stay valid), then rename that prefix's usages to `w:`.
+    renames = []
+    for m in reversed(decls):
+        prefix = m.group("prefix")
+        if prefix is None or prefix == b"w":
+            continue
+        # A prefix rebound to another namespace elsewhere cannot be renamed
+        # globally without corrupting that scope; leave it alone.
+        if any(d.group("uri") != _WORD_NS
+               for d in _prefix_decl_re(prefix).finditer(payload)):
+            continue
+        ts = out.rfind(b"<", 0, m.start())
+        te = out.find(b">", m.end())
+        tag = out[ts:te + 1] if ts >= 0 and te >= 0 else b""
+        repl = (b"" if re.search(rb"xmlns:w\s*=", tag)
+                else b"xmlns:w=" + m.group("q") + _WORD_NS + m.group("q"))
+        out = out[:m.start()] + repl + out[m.end():]
+        renames.append(prefix)
+    for prefix in renames:
+        out = re.sub(rb"(?<=[<\s/])" + re.escape(prefix) + rb":", b"w:", out)
+    return _qualify_default_word_ns(out)
 
 
 def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> bytes:
@@ -2654,8 +2750,9 @@ def _prune_dropped_part_references(payload: bytes, name: str, dropped: set,
         return payload
     if low == "[content_types].xml":
         def _override(m):
-            pm = re.search(rb'PartName="([^"]*)"', m.group(0))
-            part = pm.group(1).decode("utf-8", "replace").lstrip("/") if pm else ""
+            pm = re.search(rb'PartName\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', m.group(0))
+            raw = (pm.group(1) if pm.group(1) is not None else pm.group(2)) if pm else b""
+            part = raw.decode("utf-8", "replace").lstrip("/")
             if part and part.lower() in dropped:
                 notes.append(f"dropped the [Content_Types].xml Override for {part}")
                 return b""
@@ -2736,7 +2833,23 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 return data, [f"not stripped: package expands to {total} bytes, over the "
                               f"OOXML total size budget ({MAX_DOCX_TOTAL_BYTES}); "
                               f"metadata left as is"]
-            items = [(i.filename, zin.read(i.filename)) for i in infos]
+            # `file_size` is attacker-controlled central-directory metadata:
+            # inflate through a bounded stream and count the REAL bytes, so a
+            # part that declares small and expands large is refused instead of
+            # materialized whole (F04).
+            items = []
+            actual_total = 0
+            for info in infos:
+                with zin.open(info) as fh:
+                    payload = fh.read(MAX_DOCX_PART_BYTES + 1)
+                if len(payload) > MAX_DOCX_PART_BYTES:
+                    return data, [f"not stripped: part {info.filename!r} expands over the "
+                                  f"OOXML size budget; metadata left as is"]
+                actual_total += len(payload)
+                if actual_total > MAX_DOCX_TOTAL_BYTES:
+                    return data, [f"not stripped: package expands to over "
+                                  f"{MAX_DOCX_TOTAL_BYTES} bytes; metadata left as is"]
+                items.append((info.filename, payload))
     except (zipfile.BadZipFile, OSError, KeyError, RuntimeError,
             NotImplementedError) as e:                            # noqa: BLE001
         return data, [f"not a readable OOXML zip ({e}); metadata left as is"]
@@ -2747,7 +2860,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
     def _accept_changes(payload: bytes) -> bytes:
         """Drop revision marks / edit ids; return the accepted document XML."""
         nonlocal accepted
-        new = re.sub(rb"<w:rsids\b[^>]*>.*?</w:rsids>", b"", payload, flags=re.S)
+        new = re.sub(rb"<w:rsids\b[^>]*>.*?</w:rsids\s*>", b"", payload, flags=re.S)
         new = re.sub(rb"<w:rsids\b[^>]*/>", b"", new)
         new = re.sub(rb"\s(?:[\w]+:)?(?:rsid\w*|paraId|textId|durableId)=([\"'])[^\"']*\1",
                      b"", new)
@@ -2755,7 +2868,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         new = re.sub(rb"<w:lastRenderedPageBreak\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:proofState\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:attachedTemplate\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:docVars\b[^>]*>.*?</w:docVars>", b"", new, flags=re.S)
+        new = re.sub(rb"<w:docVars\b[^>]*>.*?</w:docVars\s*>", b"", new, flags=re.S)
         new = re.sub(rb"<w:trackChanges\b[^>]*/>", b"", new)
         def _drop_nested(tag: bytes) -> None:
             """Remove a nested revision wrapper innermost-first.
@@ -2772,7 +2885,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
             pat = re.compile(
                 rb"<w:" + tag + rb"\b[^>]*/>"
                 rb"|<w:" + tag + rb"\b[^>]*>(?:(?!<w:" + tag
-                + rb"\b(?![^>]*/>)).)*?</w:" + tag + rb">", re.S)
+                + rb"\b(?![^>]*/>)).)*?</w:" + tag + rb"\s*>", re.S)
             for _ in range(64):
                 stripped = pat.sub(b"", new)
                 if stripped == new:
@@ -2783,21 +2896,22 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         # `<w:del>` wrapper around its cells. Stripping only the marker kept
         # every cell's text, resurrecting the row as accepted content (F19).
         new = re.sub(
-            rb"<w:tr\b[^>]*>(?:(?!</w:tr>).)*?<w:trPr\b[^>]*>"
-            rb"(?:(?!</w:trPr>).)*?<w:del\b[^>]*/>"
-            rb"(?:(?!</w:trPr>).)*?</w:trPr>(?:(?!</w:tr>).)*?</w:tr>",
+            rb"<w:tr\b[^>]*>(?:(?!</w:tr\s*>).)*?<w:trPr\b[^>]*>"
+            rb"(?:(?!</w:trPr\s*>).)*?<w:del\b[^>]*/>"
+            rb"(?:(?!</w:trPr\s*>).)*?</w:trPr\s*>(?:(?!</w:tr\s*>).)*?</w:tr\s*>",
             b"", new, flags=re.S)
         _drop_nested(b"del")
         _drop_nested(b"cellDel")
         _drop_nested(b"moveFrom")
         new = re.sub(rb"<w:del\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:delText\b[^>]*>.*?</w:delText>", b"", new, flags=re.S)
+        new = re.sub(rb"<w:delText\b[^>]*>.*?</w:delText\s*>", b"", new, flags=re.S)
         new = re.sub(rb"<w:(rPrChange|pPrChange|tblPrChange|trPrChange|tcPrChange|"
-                     rb"sectPrChange|numberingChange)\b[^>]*>.*?</w:\1>", b"", new, flags=re.S)
-        new = re.sub(rb"<w:(cellIns|cellDel|cellMerge|moveFrom)\b[^>]*>.*?</w:\1>", b"",
-                     new, flags=re.S)
+                     rb"sectPrChange|numberingChange)\b[^>]*>.*?</w:\1\s*>", b"", new,
+                     flags=re.S)
+        new = re.sub(rb"<w:(cellIns|cellDel|cellMerge|moveFrom)\b[^>]*>.*?</w:\1\s*>",
+                     b"", new, flags=re.S)
         new = re.sub(rb"<w:(?:cellIns|cellDel|cellMerge|moveFrom)\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:moveTo\b[^>]*>(.*?)</w:moveTo>", rb"\1", new, flags=re.S)
+        new = re.sub(rb"<w:moveTo\b[^>]*>(.*?)</w:moveTo\s*>", rb"\1", new, flags=re.S)
         # Word nests `w:ins` inside `w:ins` (a later insertion inside an
         # earlier one). One non-greedy pass pairs the OUTER open tag with the
         # INNER close tag, so it unwraps the outer mark and leaves the inner
@@ -2805,7 +2919,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         # (and the judge's read) promises. Re-apply until no `w:ins` survives;
         # each pass removes at least one mark, so this terminates.
         for _ in range(64):
-            unwrapped = re.sub(rb"<w:ins\b[^>]*>(.*?)</w:ins>", rb"\1", new, flags=re.S)
+            unwrapped = re.sub(rb"<w:ins\b[^>]*>(.*?)</w:ins\s*>", rb"\1", new, flags=re.S)
             if unwrapped == new:
                 break
             new = unwrapped
@@ -2827,7 +2941,19 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 stripped += 1
                 continue                              # a stale rendered page + Word setting
             payload = _prune_dropped_part_references(payload, name, dropped, notes)
+            if "/embeddings/" in low and payload[:2] == b"PK":
+                # An embedded workbook/document is a nested OOXML package; the
+                # outer loop only rewrites top-level XML, so it was copied
+                # byte-for-byte with its own docProps author (F001).
+                nested, nested_notes = _sanitize_ooxml_bytes(payload)
+                if nested != payload:
+                    stripped += 1
+                notes.extend(f"embedded object {name}: {n}" for n in nested_notes)
+                payload = nested
             if low == "docprops/core.xml":
+                # A legal UTF-16 core part is invisible to the byte regexes; the
+                # word/xl/ppt branch normalized it, this branch did not (F004).
+                payload = _ooxml_xml_utf8(payload)
                 payload = _blank_xml_elements(payload, (b"dc:creator", b"cp:lastModifiedBy"),
                                               b"author")
                 payload = _blank_xml_elements(payload, (b"dc:title", b"dc:subject",
@@ -2839,6 +2965,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 payload = _blank_xml_elements(payload, (b"cp:revision",), b"1")
                 stripped += 1
             elif low == "docprops/app.xml":
+                payload = _ooxml_xml_utf8(payload)
                 payload = _blank_xml_elements(payload, (b"Company", b"Manager", b"Application",
                                                         b"AppVersion", b"Template",
                                                         b"HyperlinkBase", b"TitlesOfParts"))
@@ -2889,6 +3016,15 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                     payload = _blank_xml_elements(
                         payload, (b"author", b"personDisplayName"), b"author")
                     stripped += 1
+                if low.startswith("word/comments") and low.endswith(".xml"):
+                    # `w:author` was neutralized, but the comment BODY (its
+                    # w:t text) can name a person or lab; a comment is not part
+                    # of the accepted document (F024).
+                    new_c = re.sub(rb"(<w:t\b[^>]*>)(.*?)(</w:t\s*>)", rb"\1\3",
+                                   payload, flags=re.S)
+                    if new_c != payload:
+                        stripped += 1
+                    payload = new_c
                 # the pipeline's own hand-off marker prefix must not identify a
                 # package as "revised by the pipeline"; the payload stays.
                 payload = payload.replace(PLACEHOLDER_TOKEN.encode(), b"[TO BE COMPLETED")
@@ -2942,10 +3078,96 @@ def _blank_pdf_value(value: bytes) -> bytes:
 
 def _blank_xmp_fields(stream: bytes) -> bytes:
     for tag in (b"rdf:li", b"xmp:CreateDate", b"xmp:ModifyDate", b"xmp:MetadataDate",
-                b"xmp:CreatorTool", b"pdf:Producer", b"dc:title", b"dc:description"):
-        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb">)", re.S)
+                b"xmp:CreatorTool", b"pdf:Producer", b"dc:title", b"dc:description",
+                b"xmpMM:DocumentID", b"xmpMM:InstanceID", b"xmpMM:OriginalDocumentID",
+                b"xmpMM:DerivedFrom", b"pdf:Keywords", b"dc:subject"):
+        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb"\s*>)", re.S)
         stream = pat.sub(lambda m: m.group(1) + b" " * len(m.group(2)) + m.group(3), stream)
+    # The same properties are also written as rdf:Description ATTRIBUTES; the
+    # element loop cannot see those, so the document id/derived-from filename
+    # survived a blinded PDF (F029).
+    for attr in (b"xmpMM:DocumentID", b"xmpMM:InstanceID", b"xmpMM:OriginalDocumentID",
+                 b"pdf:Keywords"):
+        apat = re.compile(rb"(\b" + attr + rb"\s*=\s*)([\"'])(.*?)\2", re.S)
+        stream = apat.sub(
+            lambda m: m.group(1) + m.group(2) + b" " * len(m.group(3)) + m.group(2),
+            stream)
     return stream
+
+
+_PDF_INFO_KEYS = (b"Author", b"Creator", b"Producer", b"Title", b"Subject", b"Keywords",
+                  b"CreationDate", b"ModDate", b"Trapped", b"GTS_PDFXVersion")
+
+_PDF_INFO_KEY_RE = re.compile(
+    rb"/(?P<key>" + b"|".join(_PDF_INFO_KEYS) + rb")\b[ \t\r\n]*")
+
+
+def _pdf_literal_end(buf: bytes, start: int) -> int:
+    """Index just past the balanced `)` of the literal starting at `start`.
+
+    A PDF literal string may contain BALANCED nested parentheses and `\\)`
+    escapes; the old regex could not span them, so `< /Author (Jane (J.)
+    Author) >` survived the blanking with no note (F78). -1 = not closed.
+    """
+    depth, i, n = 0, start, len(buf)
+    while i < n:
+        ch = buf[i:i + 1]
+        if ch == b"\\":
+            i += 2
+            continue
+        if ch == b"(":
+            depth += 1
+        elif ch == b")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def _pdf_blank_object_value(data: bytes, num: bytes) -> tuple:
+    """(bytes, changed): blank the string value(s) of an indirect `num 0 obj`.
+
+    `/Author 3 0 R` is a legal PDF Info value, so blanking only the reference
+    token left the author in object 3 (F10). Resolve the reference and blank
+    the string/hex values of that object IN PLACE (equal length, offsets hold).
+    """
+    m = re.search(rb"(?<![\w.])" + re.escape(num) + rb"\s+0\s+obj\b", data)
+    if not m:
+        return data, False
+    end = data.find(b"endobj", m.end())
+    if end < 0:
+        return data, False
+    body = data[m.end():end]
+    out, i, changed = [], 0, False
+    while i < len(body):
+        ch = body[i:i + 1]
+        if ch == b"\\":
+            out.append(body[i:i + 2])
+            i += 2
+            continue
+        if ch == b"(":
+            close = _pdf_literal_end(body, i)
+            if close < 0:
+                return data, False
+            out.append(_blank_pdf_value(body[i:close]))
+            i = close
+            changed = True
+            continue
+        if ch == b"<" and body[i:i + 2] != b"<<":
+            close = body.find(b">", i)
+            if close < 0:
+                return data, False
+            out.append(_blank_pdf_value(body[i:close + 1]))
+            i = close + 1
+            changed = True
+            continue
+        out.append(ch)
+        i += 1
+    new_body = b"".join(out)
+    if new_body == body:
+        return data, True              # resolved, and already blank
+    return data[:m.end()] + new_body + data[end:], True
 
 
 def _sanitize_pdf_bytes(data: bytes) -> tuple:
@@ -2968,13 +3190,58 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
                 continue
             obj = om.group(0)
             new_obj = obj
-            for key in (b"Author", b"Creator", b"Producer", b"Title", b"Subject", b"Keywords",
-                        b"CreationDate", b"ModDate", b"Trapped", b"GTS_PDFXVersion"):
-                pat = re.compile(rb"(/" + key + rb"\s*)(\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>)")
-                new_obj = pat.sub(lambda mm: mm.group(1) + _blank_pdf_value(mm.group(2)), new_obj)
+            indirect = []
+            pos = 0
+            # Skip to the END of each value so a key name quoted inside another
+            # value cannot be mistaken for a dictionary key.
+            while True:
+                km = _PDF_INFO_KEY_RE.search(new_obj, pos)
+                if km is None:
+                    break
+                start = km.end()
+                key = km.group("key")
+                pos = start + 1
+                if new_obj[start:start + 1] == b"(":
+                    close = _pdf_literal_end(new_obj, start)
+                    if close < 0:
+                        notes.append(f"PDF /{key.decode()} value is not a delimited "
+                                     f"literal string; that metadata was left as is")
+                        continue
+                    new_obj = (new_obj[:start] + _blank_pdf_value(new_obj[start:close])
+                               + new_obj[close:])
+                    pos = close
+                elif new_obj[start:start + 1] == b"<" and new_obj[start:start + 2] != b"<<":
+                    close = new_obj.find(b">", start)
+                    if close < 0 or not re.fullmatch(
+                            rb"[0-9A-Fa-f\s]*", new_obj[start + 1:close]):
+                        continue
+                    new_obj = (new_obj[:start] + _blank_pdf_value(new_obj[start:close + 1])
+                               + new_obj[close + 1:])
+                    pos = close + 1
+                elif new_obj[start:start + 1] == b"/":
+                    nm = re.match(rb"/[^\s/<>\[\]()%]*", new_obj[start:])
+                    if nm and nm.end() > 1:       # a name value carries identity too
+                        new_obj = (new_obj[:start + 1] + b" " * (nm.end() - 1)
+                                   + new_obj[start + nm.end():])
+                        pos = start + nm.end()
+                else:
+                    rm = re.match(rb"(\d+)\s+(\d+)\s+R\b", new_obj[start:])
+                    if rm:
+                        indirect.append((rm.group(1), key))
+                        pos = start + rm.end()
             if new_obj != obj:
                 data = data[:om.start()] + new_obj + data[om.end():]
                 changed += 1
+            for num, key in indirect:
+                new_data, ok = _pdf_blank_object_value(data, num)
+                if not ok:
+                    notes.append(f"PDF /{key.decode()} is the indirect reference "
+                                 f"{num.decode()} 0 R, which could not be resolved; "
+                                 f"that metadata was left as is")
+                    continue
+                if new_data != data:
+                    data = new_data
+                    changed += 1
     else:
         notes.append("no uncompressed PDF /Info dictionary found; metadata was left as is")
     # /ID is in the trailer/xref at the END of the file, but a LINEARIZED PDF
@@ -3018,7 +3285,7 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
 
 
 _RTF_IDENTITY_RE = re.compile(
-    rb"\{\\(?:author|company|title|operator|manager|subject|keywords|doccomm|"
+    rb"\{\\(?:\*\\)?(?:author|company|title|operator|manager|subject|keywords|doccomm|"
     rb"category|hlinkbase)(?=[^A-Za-z])")
 
 
@@ -3061,11 +3328,29 @@ def _sanitize_rtf_bytes(data: bytes) -> tuple:
     return data, []
 
 
-_SVG_METADATA_RE = re.compile(rb"(?is)<metadata\b[^>]*>.*?</metadata>")
+_SVG_METADATA_RE = re.compile(rb"(?is)<metadata\b[^>]*>.*?</metadata\s*>")
 _SVG_COMMENT_RE = re.compile(rb"(?s)<!--.*?-->")
 _SVG_TOOL_ATTR_RE = re.compile(
     rb"(?i)\s+(?:inkscape|sodipodi|adobe|dc|cc|rdf|i):[\w:-]+\s*=\s*"
     rb"(?:\"[^\"]*\"|'[^']*')")
+
+_SVG_DC_NS = b"http://purl.org/dc/elements/1.1/"
+_SVG_RDF_NS = b"http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+_SVG_DC_LOCALS = (b"contributor", b"coverage", b"creator", b"date", b"description",
+                  b"format", b"identifier", b"language", b"publisher", b"relation",
+                  b"rights", b"source", b"subject", b"title", b"type")
+
+
+def _svg_bound_prefixes(raw: bytes, uri: bytes) -> list:
+    """Every prefix bound to `uri` (b"" for the DEFAULT namespace)."""
+    out = []
+    pat = re.compile(rb"xmlns(?::([A-Za-z_][\w.-]*))?\s*=\s*(?P<q>[\"'])"
+                     + re.escape(uri) + rb"(?P=q)")
+    for m in pat.finditer(raw):
+        prefix = m.group(1) or b""
+        if prefix not in out:
+            out.append(prefix)
+    return out
 
 
 def _sanitize_svg_bytes(raw: bytes) -> tuple:
@@ -3073,13 +3358,57 @@ def _sanitize_svg_bytes(raw: bytes) -> tuple:
 
     An SVG is XML and can carry dc:creator/date, RDF metadata and
     inkscape/sodipodi tool attributes into a judge view byte-for-byte (F164).
+
+    XML binds Dublin Core to a PREFIX, so `<d:creator>` under
+    `xmlns:d="http://purl.org/dc/elements/1.1/"` is the same metadata as
+    `<dc:creator>`; matching the literal `dc:` spelling leaked the author from
+    a legal figure with no note (F84). Resolve the prefixes bound to the DC/RDF
+    URIs and strip by namespace.
     """
     if b"</svg" not in raw.lower():
         return raw, ["not a readable SVG document; metadata left as is"]
+    dc_prefixes = _svg_bound_prefixes(raw, _SVG_DC_NS)
+    rdf_prefixes = _svg_bound_prefixes(raw, _SVG_RDF_NS)
     out = _SVG_METADATA_RE.sub(b"", raw)
     out = _SVG_COMMENT_RE.sub(b"", out)
     out = _SVG_TOOL_ATTR_RE.sub(b"", out)
-    return out, []
+    # RDF is not the only carrier: a direct `<dc:creator>` child, an
+    # `<rdf:RDF>` block outside `<metadata>`, and `<title>`/`<desc>` text all
+    # reach the judge view byte-for-byte (F027).
+    out = re.sub(rb"(?is)<dc:[A-Za-z_][\w.-]*\b[^>]*>.*?</dc:[A-Za-z_][\w.-]*\s*>",
+                 b"", out)
+    for prefix in dc_prefixes:
+        if prefix:
+            q = re.escape(prefix)
+            out = re.sub(rb"(?is)<" + q + rb":[A-Za-z_][\w.-]*\b[^>]*>.*?</" + q
+                         + rb":[A-Za-z_][\w.-]*\s*>", b"", out)
+            out = re.sub(rb"(?is)<" + q + rb":[A-Za-z_][\w.-]*\b[^>]*/>", b"", out)
+        else:
+            names = b"|".join(_SVG_DC_LOCALS)
+            out = re.sub(rb"(?is)<(" + names + rb")\b[^>]*>.*?</\1\s*>", b"", out)
+            out = re.sub(rb"(?is)<(?:" + names + rb")\b[^>]*/>", b"", out)
+    out = re.sub(rb"(?is)<rdf:RDF\b[^>]*>.*?</rdf:RDF\s*>", b"", out)
+    for prefix in rdf_prefixes:
+        if prefix:
+            q = re.escape(prefix)
+            out = re.sub(rb"(?is)<" + q + rb":RDF\b[^>]*>.*?</" + q
+                         + rb":RDF\s*>", b"", out)
+    out = re.sub(rb"(?is)<(title|desc)\b[^>]*>.*?</\1\s*>", b"", out)
+    # A metadata ATTRIBUTE in the same namespace (`d:creator="Alice"`) is not
+    # an element and survives the element pass.
+    for prefix in dc_prefixes + rdf_prefixes:
+        if prefix:
+            out = re.sub(rb"(?i)\s+" + re.escape(prefix)
+                         + rb":[\w:-]+\s*=\s*(?:\"[^\"]*\"|'[^']*')", b"", out)
+    notes = []
+    residual = bool(re.search(rb"(?is)<metadata\b|<dc:[A-Za-z_]", out))
+    for prefix in dc_prefixes + rdf_prefixes:
+        if prefix and re.search(rb"(?is)<" + re.escape(prefix) + rb":[A-Za-z_]", out):
+            residual = True
+    if residual:
+        notes.append("an SVG metadata element could not be stripped; inspect the "
+                     "judge view for author metadata")
+    return out, notes
 
 
 def _transform_view_file(old_rel: str, src: Path, file_map: dict):
@@ -3087,6 +3416,18 @@ def _transform_view_file(old_rel: str, src: Path, file_map: dict):
     ext = src.suffix.lower()
 
     def _read() -> tuple:
+        try:
+            st = src.stat()
+        except OSError as e:
+            return None, [f"unreadable source ({e}); the file is omitted from the view"]
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_PAYLOAD_BYTES:
+            # A multi-gigabyte agent-written payload must fail cheaply: stat the
+            # source and omit an over-budget/irregular one instead of calling
+            # read_bytes() on it (F46). The "unreadable source" wording routes
+            # the omission through the caller's named-gap path.
+            return None, [f"unreadable source (not a regular file within the "
+                          f"{MAX_PAYLOAD_BYTES // (1024 * 1024)} MiB payload budget); "
+                          f"the file is omitted from the view"]
         try:
             return src.read_bytes(), []
         except OSError as e:
@@ -3596,7 +3937,11 @@ def failed_sandbox_dir(ctx: Ctx, rec: dict, attempt: int = None) -> Path:
     if not _safe_state_segment(rid):
         die(f"refusing a failed-sandbox path for unsafe run id {rid!r} (it must be one "
             f"path component); repair state.json")
-    n = int(attempt or 0) or (len(list(ctx.runs_dir.glob(f"{rid}_try*_failed"))) + 1)
+    # The run id is a filename component from state.json: escape glob
+    # metacharacters or a tampered id (`*`) makes this count other runs'
+    # archives (F060).
+    n = int(attempt or 0) or (len(list(ctx.runs_dir.glob(
+        f"{glob.escape(rid)}_try*_failed"))) + 1)
     return ctx.runs_dir / (rid + FAILED_SUFFIX_FMT.format(n=n))
 
 
@@ -3664,6 +4009,13 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
         "prompt": PROMPT_FILE,
         # Which CLI session produced this attempt (used by the CONTINUATION).
         "agent_session_id": rec.get("agent_session_id"),
+        # The turn cap THIS attempt ran under, and whether it was enforceable
+        # and hit. `rec` keeps only the current attempt's values, so a history
+        # entry without them lost a cap-hit verdict as soon as the run was
+        # retried; the per-attempt record is where the operator reads it.
+        "max_turns": rec.get("max_turns"),
+        "turn_cap_hit": rec.get("turn_cap_hit"),
+        "turn_cap_enforced": rec.get("turn_cap_enforced"),
         "checked_at": (rec.get("postcheck") or {}).get("checked_at"),
         # Filled in when the failed sandbox is actually kept (moved): the attempt
         # record must not claim a path that does not exist yet (`sandbox_attempts`
@@ -3680,6 +4032,23 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
     if len(history) > ATTEMPTS_LOG_LIMIT:
         del history[:-ATTEMPTS_LOG_LIMIT]
     return entry
+
+
+def _inputs_generation(rec: dict):
+    """One digest of the inputs a run was materialized from, or None.
+
+    Used to tie an archived failed trial to the input generation it was built
+    from: after `revalidate_round_inputs` replaces the upstream bytes, an old
+    archive must not be promoted as the current attempt's result (F98).
+    """
+    man = rec.get("inputs_manifest") if isinstance(rec, dict) else None
+    if not isinstance(man, dict) or not man:
+        return None
+    try:
+        blob = json.dumps(man, sort_keys=True, default=str).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(blob).hexdigest()
 
 
 def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
@@ -3708,6 +4077,7 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
     record.update({"run_id": rec.get("id"), "kind": rec.get("kind"), "round": rec.get("round"),
                    "sandbox": str(sb.relative_to(root)) if sb.is_dir() else None,
                    "attempts_in_sandbox": inside,
+                   "inputs_generation": _inputs_generation(rec),
                    "moved_at": utcnow(), "moved_to": str(dest.resolve().relative_to(root))})
     if not sb.is_dir():
         dest.mkdir(parents=True, exist_ok=True)
@@ -3723,7 +4093,10 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
         try:
             sb.rename(dest)
         except OSError:
-            shutil.copytree(sb, dest)
+            # Copy the TREE, not the files its links point at: the default
+            # symlinks=False materialized every link (legitimate evidence areas
+            # and agent-planted links alike) as its target (F065).
+            shutil.copytree(sb, dest, symlinks=True)
             rmtree_force(sb, ignore_errors=True)
         write_json_atomic(dest / "record.json", record)
     if entry is not None:
@@ -3741,6 +4114,308 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
           f"sandbox (attempt(s) {', '.join(str(a) for a in inside)}) is kept at "
           f"{dest.resolve().relative_to(root)}/ -- deliverables, transcript and record.json")
     return dest
+
+
+def _trial_output_dirs(kind: str) -> tuple:
+    """The stage's own output area(s), from the shared signal-directory map."""
+    return tuple(SIGNAL_ALT_DIRS.get(str(kind or ""), ()))
+
+
+# The materializer seeds the stage's output directory with its inputs and
+# scratch (the revise package's base copies, `work/`, the corpus/evidence
+# areas, ...). Those are not deliverables the agent produced. `artifacts/` is
+# NOT excluded: the review's M-sweep artifacts are required output, and every
+# trial starts with the same seeded templates, so counting the agent's disposed
+# files there is a completeness signal. A trial is usable only when it reached
+# the stage's completion signal.
+_TRIAL_SEEDED_DIRS = set(ATTEMPT_ARCHIVE_SKIP_DIRS) | {
+    "work", "selfcheck", "paper_docx_format_parts", "raw_data",
+    HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR, BYTECODE_DIRNAME, SUPERSEDED_DIRNAME,
+}
+
+
+def _trial_marker_names_this_run(data, rec: dict) -> bool:
+    """Does a trial's completion marker belong to THIS run and stage?
+
+    A marker copied from another stage/run is not this trial's completion
+    signal: `relocate_stray_signal` already validates the same fields, but the
+    trial-selection path accepted any regular file with the marker name (F97).
+    An EMPTY object is not a completion signal either: a failed trial whose
+    only output was `{}` counted as one usable deliverable (F18). The historical
+    `kind` spelling some fixture markers use is tolerated; the prompted field is
+    `stage`, and a marker that states it must match this run's kind.
+    """
+    if not isinstance(data, dict) or not data:
+        return False
+    named_stage = data.get("stage")
+    if named_stage is not None:
+        # The prompted contract carries BOTH fields, so a marker that names a
+        # stage is held to the run identity too.
+        if named_stage != rec.get("kind"):
+            return False
+        return data.get("run_id") in (None, rec.get("id"))
+    # A legacy/older-schema marker that names no stage is still a completion
+    # signal when it is non-empty, but a run_id it DOES name must be this run's:
+    # a copied marker from another run is not this trial's signal.
+    return data.get("run_id") in (None, rec.get("id"))
+
+
+def _trial_signal_paths(sandbox: Path, kind: str, rec: dict = None) -> set:
+    """The completion-signal files this trial wrote (empty when it did not).
+
+    `rec` (when given) validates a marker against this run/stage; without it the
+    helper only enumerates signal-shaped files.
+    """
+    found = set()
+    try:
+        dirs = signal_search_dirs(sandbox, kind)
+        names = signal_names_of(kind)
+    except Exception:                                # noqa: BLE001
+        dirs, names = [sandbox], (MARKER_FILE,)
+    for d in dirs:
+        for name in names:
+            p = d / name
+            try:
+                if not (p.is_file() and not p.is_symlink()):
+                    continue
+                if rec is not None and name == MARKER_FILE:
+                    if not _trial_marker_names_this_run(
+                            read_json(p, revive=False, lenient=True), rec):
+                        continue
+                found.add(p.resolve())
+            except (OSError, RuntimeError):
+                continue
+    return found
+
+
+def _trial_signal_present(sandbox: Path, kind: str) -> bool:
+    return bool(_trial_signal_paths(sandbox, kind))
+
+
+def _trial_output_count(sandbox: Path, kind: str, rec: dict = None) -> int:
+    """How many required output files this trial produced, 0 when unusable.
+
+    A trial is usable only if it wrote the stage's completion signal (the
+    marker, or the judge's scores file): an attempt that stopped before the
+    signal is not a candidate, even when the materializer had already seeded its
+    output directory. The count then covers the stage's primary output package,
+    excluding the seeded input/template subdirectories, bytecode caches and the
+    attempt's record. It is the completeness proxy the operator asked for.
+    """
+    signals = _trial_signal_paths(sandbox, kind, rec)
+    if not signals:
+        return 0
+    total = 0
+    for dirname in _trial_output_dirs(kind):
+        root = sandbox / dirname
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*"):
+            try:
+                if not p.is_file() or p.is_symlink():
+                    continue
+                if p.resolve() in signals:
+                    # The completion signal is counted once below, wherever the
+                    # stage placed it; counting it in the package loop too would
+                    # prefer identical output merely because its marker sits in
+                    # the stage directory instead of the sandbox root.
+                    continue
+            except (OSError, RuntimeError):
+                continue
+            rel = p.relative_to(root)
+            if rel.parts and rel.parts[0] in _TRIAL_SEEDED_DIRS:
+                continue
+            if BYTECODE_DIRNAME in p.parts or p.suffix.lower() in BYTECODE_SUFFIXES:
+                continue
+            if p.name == "record.json":
+                continue
+            total += 1
+    if total <= 0:
+        # The signal alone is not a deliverable: a trial whose only output is a
+        # (valid) completion marker produced no required output file and is not
+        # usable (F18). The judge's scores sheet IS its deliverable and is
+        # counted as the signal, so that stage keeps the one output.
+        return 1 if str(kind or "") == "judge" else 0
+    return total + 1                                  # the completion signal itself
+
+
+def best_failed_trial(ctx: Ctx, rec: dict):
+    """The most complete failed trial of `rec`, or None.
+
+    Trials are the kept `runs/<run>_try<N>_failed/` sandboxes plus the run's
+    current (last) sandbox. The score is (required output files produced, fewest
+    FAIL messages, latest failure ordinal); a trial that produced no required
+    output is not usable.
+    """
+    rid = str(rec.get("id") or "")
+    kind = rec.get("kind")
+    current_generation = _inputs_generation(rec)
+    candidates = []
+    try:
+        # A collision-suffixed archive (`..._try3_failed-2`, produced by
+        # unique_path when the destination already exists) is still this run's
+        # trial; the old suffix-free glob and ordinal regex missed it (F108).
+        # Same escape as prune: the id comes from state.json (F060).
+        kept = sorted(ctx.runs_dir.glob(f"{glob.escape(rid)}_try*_failed*"))
+    except OSError:
+        kept = []
+    for p in kept:
+        if not p.is_dir():
+            continue
+        m = re.search(r"_try(\d+)_failed(?:-\d+)?$", p.name)
+        ordinal = int(m.group(1)) if m else 0
+        record = read_json(p / "record.json")
+        # A trial built from a superseded input generation must not be
+        # promoted after the round's inputs were revalidated (F98). A legacy
+        # archive without a generation cannot be compared; it stays eligible.
+        archived_generation = (record or {}).get("inputs_generation") \
+            if isinstance(record, dict) else None
+        if (current_generation and archived_generation
+                and archived_generation != current_generation):
+            continue
+        candidates.append((p, record, ordinal))
+    active = ctx.sandbox_of(rec)
+    if active.is_dir():
+        history = rec.get("attempts_log") or []
+        last = history[-1] if history else {}
+        candidates.append((active, last, 10 ** 9))
+    scored = []
+    for sandbox, record, ordinal in candidates:
+        outputs = _trial_output_count(sandbox, kind, rec)
+        if outputs <= 0:
+            continue
+        # A known record must carry the diagnostics `record_attempt()` writes.
+        # A truncated record.json that still parses (`{"attempt": 1}`) has no
+        # `errors` key: reading that as an empty list gave it 0 FAIL messages,
+        # so it beat a real attempt with errors on the tie-break (F021).
+        known_record = (isinstance(record, dict) and bool(record)
+                        and isinstance(record.get("errors"), list))
+        errors = (record.get("errors") if known_record else []) or []
+        # A missing/corrupt record.json is UNKNOWN, never "zero FAIL messages":
+        # scoring it as 0 made an interrupted archive win the tie-break over a
+        # real attempt with errors (F107).
+        error_score = -len(errors) if known_record else float("-inf")
+        scored.append((outputs, error_score, ordinal, sandbox, record))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: (x[0], x[1], x[2]))
+    outputs, error_score, ordinal, sandbox, record = scored[-1]
+    fail_messages = -error_score if error_score != float("-inf") else 0
+    return {"sandbox": sandbox, "record": record, "outputs": outputs,
+            "fail_messages": int(fail_messages), "ordinal": ordinal,
+            "record_known": error_score != float("-inf")}
+
+
+def use_best_failed_trial(ctx: Ctx, rec: dict) -> bool:
+    """Use an exhausted run's best failed trial; True when it was promoted.
+
+    Only `--tolerate-fail` runs reach here. The chosen trial is moved into the
+    run's active sandbox and the run is marked `done` with a `tolerated_fail`
+    record (its postcheck errors are kept as evidence), so the stages that
+    depend on it continue on the most complete attempt instead of the whole
+    invocation terminating. The result is PROVISIONAL and is never certified.
+    With the policy off, or no usable trial, nothing changes and the caller
+    takes the strict FAIL path.
+    """
+    if not tolerate_fail_of(ctx):
+        return False
+    if rec.get("status") == "done" and rec.get("tolerated_fail"):
+        return True
+    if rec.get("status") != "done" and rec.get("tolerated_fail"):
+        # A marker is only meaningful on a run that is still using the promoted
+        # trial. A stale marker from an earlier tolerated result must not make a
+        # fresh hard failure look tolerated; the new decision is made from this
+        # invocation's trials below.
+        rec.pop("tolerated_fail", None)
+        _post = dict(rec.get("postcheck") or {})
+        _post.pop("tolerated", None)
+        rec["postcheck"] = _post
+    best = best_failed_trial(ctx, rec)
+    if best is None:
+        return False
+    active = ctx.sandbox_of(rec)
+    chosen = Path(best["sandbox"])
+    trial_name = chosen.name
+    try:
+        same = chosen.resolve() == active.resolve()
+    except (OSError, RuntimeError):
+        same = False
+    if not same:
+        # Keep the last attempt as evidence, then put the chosen trial in the
+        # active path. If the evidence move fails, do not lose either copy:
+        # leave the run strict for the caller to report.
+        if active.is_dir():
+            try:
+                move_failed_sandbox(ctx, rec)
+            except (OSError, ValueError):
+                return False
+        try:
+            if active.exists() or active.is_symlink():
+                rmtree_force(active)
+            chosen.rename(active)
+        except OSError:
+            return False
+        # The chosen archive was RENAMED into the run's active path; its own
+        # record.json (and the attempts_log entry) still named the archive that
+        # no longer exists, so prior_failure_block/sandbox_attempts pointed at a
+        # dead path (F111). Record the path the trial actually occupies now.
+        try:
+            active_rel = active.resolve().relative_to(ctx.root.resolve())
+        except (OSError, ValueError):
+            active_rel = active
+        promoted = dict(best.get("record") or {})
+        promoted["moved_to"] = str(active_rel)
+        promoted["promoted"] = True
+        try:
+            write_json_atomic(active / "record.json", promoted)
+        except OSError:
+            pass
+        for entry in (rec.get("attempts_log") or []):
+            # move_failed_sandbox stores these as ROOT-RELATIVE paths
+            # ("runs/<name>"), not basenames. Comparing them to trial_name never
+            # matched, so the promoted entry kept naming the archive that had
+            # just been renamed into the active path (F111).
+            if isinstance(entry, dict) and any(
+                    Path(str(entry.get(key) or "")).name == trial_name
+                    for key in ("archive", "sandbox_moved_to")):
+                entry["archive"] = str(active_rel)
+                entry["sandbox_moved_to"] = str(active_rel)
+                entry["promoted"] = True
+    digest = None
+    if rec.get("kind") in ("rewrite", "revise", "integrate"):
+        # A tolerated candidate must still be pinnable: record the digest of the
+        # package the trial actually left on disk. Without it the round close
+        # refuses to pin the version (and the collection run loses the row).
+        vid = freshness_vid(rec)
+        if not vid:
+            return False
+        try:
+            digest = recompute_corpus_digest(ctx, rec["round"], vid)
+        except Exception:                            # noqa: BLE001
+            return False
+        if not digest:
+            return False
+    rec["tolerated_fail"] = {
+        "mode": "on",
+        "trial": trial_name,
+        "outputs": int(best["outputs"]),
+        "fail_messages": int(best["fail_messages"]),
+        "recorded": utcnow(),
+        "note": ("every retry failed; the best failed trial (most required output files, "
+                 "then fewest FAIL messages) is used as the stage result -- PROVISIONAL, "
+                 "never certified"),
+    }
+    rec["status"] = "done"
+    if digest:
+        rec["corpus_digest"] = digest
+    post = dict(rec.get("postcheck") or {})
+    post["tolerated"] = True
+    rec["postcheck"] = post
+    ctx.save_state()
+    print(f"  [{TOLERATED_FAIL_STATUS}] {rec['id']}: retries exhausted; using the best "
+          f"failed trial {trial_name} ({best['outputs']} output file(s), "
+          f"{best['fail_messages']} FAIL message(s)) -- PROVISIONAL, never certified")
+    return True
 
 
 def keep_failed_sandboxes(ctx: Ctx, manual: bool = False) -> list:
@@ -3989,7 +4664,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
         if (fb / "feedback").is_dir():
             ensure_copy(fb / "feedback", sb / "feedback")
             extra_inputs["feedback"] = hash_manifest(sb / "feedback", follow_dir_links=True)
-    (sb / REWRITTEN_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / REWRITTEN_DIR)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
@@ -4173,7 +4848,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                       if a_rec is not None else None)
         if a_findings is not None and a_findings.is_file():
             review_a_findings = sha256_file(a_findings)
-    (sb / GUIDED_REVIEW_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / GUIDED_REVIEW_DIR)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     # Seed the M20 formatting sweep: the code-side OOXML scan IS the enumeration
@@ -4293,7 +4968,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
             ensure_copy(ctx.sandbox_of(rev_rec) / "concerns", sb / "concerns")
         if (ctx.sandbox_of(rev_rec) / "feedback").is_dir():
             ensure_copy(ctx.sandbox_of(rev_rec) / "feedback", sb / "feedback")
-    (sb / "audit").mkdir(exist_ok=True)
+    safe_mkdir(sb / "audit")
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "audit")
@@ -4602,7 +5277,7 @@ def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    (sb / COLD_START_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / COLD_START_DIR)
     # The cold-start prompt tells the session to check the structure the venue's
     # own recorded rule set requires, and the prompt appends `venue_norm_for(ctx)`
     # like every other role. Both are actionable only when the venue template is
@@ -4825,15 +5500,80 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
     return errs, warns, findings
 
 
+def _verifier_jail_command(sb: Path, script: str):
+    """The argv that re-runs `script` inside a read-only bubblewrap jail, or None.
+
+    A verifier is agent-authored code, so it is never executed with the
+    orchestrator's filesystem, environment or network (F76: a verifier escaped
+    with `Path('../ESCAPED.txt')` and could read `~/.ssh` or benchmark ground
+    truth). The jail gives it:
+
+      * private user/PID/network/IPC/UTS/cgroup namespaces and a cleared
+        environment (no secrets, no network);
+      * the interpreter, its system libraries and /etc read-only;
+      * the sandbox READ-ONLY at `/sandbox` (the script's cwd) and a writable
+        tmpfs at `/tmp` only -- `$HOME` and every other host path stay unmounted.
+
+    None means this host cannot build the jail (no bubblewrap, not Linux, or
+    bwrap unable to create a namespace). The caller then REFUSES to run the
+    script: an optional verifier is better omitted than run with host access.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        return None
+    # Bind the TOP-LEVEL paths (not their realpaths): /bin, /lib and /lib64
+    # are usually symlinks into /usr, and the kernel looks for the ELF
+    # interpreter at the literal /lib64/... path, so the symlink NAME must
+    # exist in the jail too. A nested path such as /usr/bin is NOT bound on
+    # top of /usr -- that recursive over-mount made the tree unreachable.
+    roots = []
+    for rel in ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc"):
+        if Path(rel).exists() and rel not in roots:
+            roots.append(rel)
+    # A virtualenv/conda interpreter lives outside the system roots; expose
+    # ONLY that prefix (never the rest of $HOME) so `sys.executable` resolves.
+    covered = {os.path.realpath(r) for r in roots}
+    for prefix in (sys.prefix, sys.base_prefix):
+        try:
+            real = str(Path(prefix).resolve())
+        except OSError:
+            continue
+        if real in ("", "/") or any(real == r or real.startswith(r + "/") for r in covered):
+            continue
+        if str(prefix) not in roots:
+            roots.append(str(prefix))
+            covered.add(real)
+    exe = os.path.abspath(sys.executable)
+    argv = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
+            "--clearenv",
+            "--setenv", "PATH", f"{os.path.dirname(exe)}:/usr/bin:/bin",
+            "--setenv", "HOME", "/tmp",
+            "--setenv", "TMPDIR", "/tmp",
+            "--setenv", "PYTHONUTF8", "1",
+            "--setenv", "PYTHONIOENCODING", "utf-8",
+            "--setenv", "PYTHONDONTWRITEBYTECODE", "1"]
+    for root in roots:
+        argv += ["--ro-bind", root, root]
+    # The sandbox is bound at /sandbox AFTER the system roots and BEFORE the
+    # /tmp tmpfs, so a sandbox that itself lives under /tmp is not shadowed.
+    argv += ["--ro-bind", str(sb), "/sandbox", "--tmpfs", "/tmp",
+             "--proc", "/proc", "--dev", "/dev", "--chdir", "/sandbox",
+             exe, "/sandbox/" + script.lstrip("/")]
+    return argv
+
+
 def cold_start_reproduction(sb: Path, findings: list) -> dict:
     """Re-run every DECLARED verifier and record what it printed.
 
     A finding's `verifier` is {script, computed, shows}: the script's last
     non-empty stdout line must equal `computed`. The orchestrator runs it itself
-    (offline, bounded, cwd = the sandbox root); a mismatch, a missing script, a
-    non-zero exit, an empty output or a timeout is an error the caller turns into
-    a failed attempt -- a computation the cold-start review cannot reproduce is a
-    correctness blocker, not a finding. Findings WITHOUT a verifier are
+    inside a read-only jail (see `_verifier_jail_command`) with cwd = the
+    sandbox root; a mismatch, a missing script, a non-zero exit, an empty
+    output, a timeout or an unavailable jail is an error the caller turns into
+    a failed attempt -- a computation the cold-start review cannot reproduce is
+    a correctness blocker, not a finding. Findings WITHOUT a verifier are
     evidence/quotation rows: they are not re-run (their evidence is the quoted
     text or file:line reference), and they carry status `no-verifier` in the
     record.
@@ -4880,6 +5620,16 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
             entry.update(status="missing")
             results.append(entry)
             continue
+        # The verifier is agent code: execute it only inside the jail. A host
+        # that cannot build one fails the verifier instead of running it with
+        # the orchestrator's filesystem/network/environment (F76).
+        jail = _verifier_jail_command(sb, script)
+        if jail is None:
+            entry.update(status="no-jail",
+                         detail="no verifier jail available (install bubblewrap; agent code "
+                                "is never run with host access)")
+            results.append(entry)
+            continue
         # Enforce the AGGREGATE budget on this run too: checking elapsed only
         # BEFORE each verifier let one started just under the total run its
         # full per-script timeout, so the enforced wall clock exceeded
@@ -4892,8 +5642,13 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
             # float-equal the claim passed. Output goes to files and is capped:
             # a verifier that floods stdout is an over-budget failure, never
             # unbounded memory in the orchestrator (F61).
-            rc, out, _err = run_bounded(
-                [sys.executable, str(target)], timeout, cwd=str(sb))
+            rc, out, err = run_bounded(jail, timeout, cwd=str(sb))
+            if rc != 0 and (err or b"").startswith(b"bwrap:"):
+                entry.update(status="no-jail",
+                             detail=("bubblewrap could not build the jail: "
+                                     + (err or b"").decode("utf-8", "replace").strip())[:200])
+                results.append(entry)
+                continue
             text = (out or b"").decode("utf-8", "replace")
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             produced = lines[-1] if lines else ""
@@ -4917,12 +5672,14 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
     # it is NOT a verified computation (the old code counted it while its status
     # was absent from `broken`, so an unexecuted declared computation passed).
     verified = [r for r in results if r["status"] not in ("no-verifier",
-                                                          "skipped-over-budget")]
+                                                          "skipped-over-budget",
+                                                          "no-jail")]
     skipped = [r["row"] for r in results if r["status"] == "skipped-over-budget"]
+    no_jail = [r["row"] for r in results if r["status"] == "no-jail"]
     mismatches = [r["row"] for r in verified if r["status"] == "mismatch"]
     broken = [r["row"] for r in verified
               if r["status"] in ("missing", "timeout", "failed", "empty")]
-    broken += skipped
+    broken += skipped + no_jail
     return {"rows": len(results), "verified": len(verified),
             "reproduced": sum(1 for r in verified if r["status"] == "reproduced"),
             "skipped": skipped,
@@ -5001,9 +5758,16 @@ def postcheck_cold_start_review(ctx: Ctx, rec: dict):
                         f"{r['produced']!r} where the finding declares {r['declared']!r} -- the "
                         f"declared computation does not reproduce (a correctness blocker: fix "
                         f"the script or the declared value)")
-        elif r["status"] in ("missing", "timeout", "failed", "empty"):
+        elif r["status"] in ("missing", "timeout", "failed", "empty", "no-jail"):
+            if r["status"] == "missing":
+                _what = "is missing"
+            elif r["status"] == "no-jail":
+                _what = ("was NOT re-run because no verifier jail is available on this host "
+                         "(agent-written code is never run with host access)")
+            else:
+                _what = r["status"]
             errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
-                        f"{'is missing' if r['status'] == 'missing' else r['status']}"
+                        f"{_what}"
                         + (f" ({r['detail']})" if r["detail"] else "")
                         + " -- a declared verifier must be a re-runnable script that prints its "
                           "`computed` value as the last stdout line (omit the verifier when no "
@@ -5393,7 +6157,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                 "the reviser consumes the AUDITED finding list (--audit on)")
         ensure_copy(ctx.sandbox_of(aud_rec) / "audit", sb / "audit")
         aud_manifest = hash_manifest(sb / "audit")
-    (sb / REVISED_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / REVISED_DIR)
     # Seed the ledger and the language-pass coverage table EMPTY-BUT-SHAPED (a
     # head start, not a pass: the empty cells are still postcheck errors; the
     # completion marker is not seeded, so a stopped stage stays unfinished).
@@ -5508,11 +6272,22 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     # read as if it were a member of this round).
     others_dir = sb / "others"
     if others_dir.is_dir():
-        for stale in [p for p in others_dir.iterdir()
-                      if p.is_dir() and p.name not in other_ids]:
-            rmtree_force(stale, ignore_errors=True)
+        # EVERY entry that is not a current donor is removed, not only
+        # directories: a leftover regular file/symlink survived, entered the
+        # inputs manifest and was visible to the integrator (F071).
+        for stale in list(others_dir.iterdir()):
+            if stale.name in other_ids:
+                continue
+            try:
+                if stale.is_symlink() or not stale.is_dir():
+                    stale.unlink()
+                else:
+                    rmtree_force(stale, ignore_errors=True)
+            except OSError as e:
+                print(f"[run] WARNING: could not remove stale donor entry {stale}: {e}",
+                      file=sys.stderr)
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    (sb / INTEGRATED_DIR).mkdir(exist_ok=True)
+    safe_mkdir(sb / INTEGRATED_DIR)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
@@ -5810,6 +6585,10 @@ def build_field(ctx: Ctx, r: int) -> tuple:
         e["fingerprint"] = fp
         if fp in seen:
             dropped.append({"id": e["id"],
+                            # The representative lets a caller resolve a
+                            # deduplicated CANDIDATE to the field member whose
+                            # panel row judges the same content (F005).
+                            "representative": seen[fp],
                             "reason": f"content-identical (same documents, ignoring file names "
                                       f"and bookkeeping text) to '{seen[fp]}' -- deduplicated"})
             continue
@@ -6240,7 +7019,10 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
     elif kind == "response":
         tgt_rel = str(rec.get("target_dir") or "").strip()
         if tgt_rel:
-            tgt = ctx.root / tgt_rel
+            # A recorded path is DATA: an absolute value would discard the root
+            # and `../` would escape it, so the revalidation hashed outside
+            # content (F064).
+            tgt = contained_under(ctx.root, tgt_rel)
             if tgt.is_dir() and (sb / "target").is_dir():
                 # The sandbox target/ is copied with exclude_top=("work",) and
                 # skip_aux=True; comparing it with the FULL source manifest made

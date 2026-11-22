@@ -65,6 +65,10 @@ from pathlib import Path
 # The pipeline twin (paper_pipeline.MAX_PAYLOAD_BYTES) refuses a payload file
 # larger than this: hashing a multi-gigabyte data file whole is unbounded (F10).
 MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+# Keep in step with paper_pipeline.MAX_TREE_DEPTH: the pipeline twin records a
+# gap and stops at this depth, so an uncapped walk here assigned a real token to
+# a package the twin tokenised as '' (F123).
+MAX_TREE_DEPTH = 200
 
 REPORTS = {"changelog.md", "manual_steps.md", "manual_todo.csv", "revision_report.md",
            "revision_report.json", "diff_ledger.md", "rewrite_report.md",
@@ -185,7 +189,17 @@ def tree_files(root: Path, gaps: list = None) -> list:
         return (target.is_dir() and target.name == p.name
                 and target.parent.name == "non_revised")
 
-    def walk(d: Path, ancestors: frozenset) -> None:
+    def walk(d: Path, ancestors: frozenset, depth: int = 0) -> None:
+        if depth > MAX_TREE_DEPTH:
+            if gaps is not None:
+                try:
+                    gaps.append(d.relative_to(root).as_posix())
+                except ValueError:
+                    gaps.append(str(d))
+            print(f"warning: directory tree under {d} exceeds the "
+                  f"{MAX_TREE_DEPTH}-level depth cap; its deeper files are not in the "
+                  f"token", file=sys.stderr)
+            return
         try:
             entries = sorted(d.iterdir())
         except OSError as e:
@@ -207,12 +221,12 @@ def tree_files(root: Path, gaps: list = None) -> list:
                 key = dir_key(p)
                 if key is None or key in ancestors:
                     continue
-                walk(p, ancestors | {key})
+                walk(p, ancestors | {key}, depth + 1)
             elif p.is_dir():
                 key = dir_key(p)
                 if key is None or key in ancestors:
                     continue
-                walk(p, ancestors | {key})
+                walk(p, ancestors | {key}, depth + 1)
             elif p.is_file() and not p.is_symlink():
                 # A FILE symlink is not package content (the pipeline twin's
                 # _iter_tree_files refuses it for the same reason): hashing its

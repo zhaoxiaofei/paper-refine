@@ -30,6 +30,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "${HERE}/.." && pwd)"
 ENV_NAME="${PAPER_REFINE_TEST_ENV:-paper-refine-test}"
+# ENV_NAME is joined to --out below: a `../` (or an absolute value) escaped the
+# output directory (F135).
+if [[ -z "${ENV_NAME}" || "${ENV_NAME}" == "." || "${ENV_NAME}" == ".." || "${ENV_NAME}" == */* ]]; then
+  echo "error: PAPER_REFINE_TEST_ENV must be one filename component: ${ENV_NAME}" >&2
+  exit 2
+fi
 ENV_PREFIX="${PAPER_REFINE_TEST_PREFIX:-}"
 OUT="${WS}/env"
 CONDA="${CONDA_EXE:-$(command -v conda || true)}"
@@ -72,11 +78,63 @@ mkdir -p "${OUT}"
 STEM="${OUT}/${ENV_NAME}"
 echo "exporting ${ENV_LABEL} -> ${OUT}"
 
+# Write stdin to $1 atomically, and NEVER through a symlink. A plain `> "$dest"`
+# follows a symlink committed under env/ (or a .tmp sibling) and turns a routine
+# export into an arbitrary-file overwrite outside the checkout (F022). The bytes
+# go to a unique sibling created with O_EXCL|O_NOFOLLOW, then rename(2) replaces
+# the destination itself -- it never follows the old inode.
+safe_write() {
+  local dest=$1 dir base tmp
+  dir="$(dirname -- "$dest")"
+  base="$(basename -- "$dest")"
+  if [[ -L "$dest" ]]; then
+    echo "error: refusing to write through symlinked ${dest}" >&2
+    return 1
+  fi
+  if [[ -e "$dest" && ! -f "$dest" ]]; then
+    echo "error: refusing to replace non-regular ${dest}" >&2
+    return 1
+  fi
+  mkdir -p -- "$dir"
+  tmp="$(mktemp -- "${dir}/.${base}.tmp.XXXXXXXXXX")" || {
+    echo "error: could not create a temporary beside ${dest}" >&2
+    return 1
+  }
+  if ! cat > "$tmp"; then
+    rm -f -- "$tmp"
+    echo "error: could not write ${dest}" >&2
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    echo "error: could not replace ${dest}" >&2
+    return 1
+  fi
+}
+
+# Same no-follow rule for a caller-managed unique temp (`mktemp`): rename it
+# into place only after refusing a symlinked/non-regular destination.
+safe_replace() {
+  local tmp=$1 dest=$2
+  if [[ -L "$dest" ]]; then
+    rm -f -- "$tmp"
+    echo "error: refusing to write through symlinked ${dest}" >&2
+    return 1
+  fi
+  if [[ -e "$dest" && ! -f "$dest" ]]; then
+    rm -f -- "$tmp"
+    echo "error: refusing to replace non-regular ${dest}" >&2
+    return 1
+  fi
+  mv -f -- "$tmp" "$dest"
+}
+
 # --- conda side ------------------------------------------------------------
-"${CONDA}" env export "${ENV_SELECT[@]}" > "${STEM}.freeze.env_export.yml"
-"${CONDA}" env export "${ENV_SELECT[@]}" --no-builds > "${STEM}.freeze.env_export.no_builds.yml"
+"${CONDA}" env export "${ENV_SELECT[@]}" | safe_write "${STEM}.freeze.env_export.yml"
+"${CONDA}" env export "${ENV_SELECT[@]}" --no-builds \
+  | safe_write "${STEM}.freeze.env_export.no_builds.yml"
 "${CONDA}" env export "${ENV_SELECT[@]}" --from-history \
-  > "${STEM}.freeze.env_export.from_history.yml"
+  | safe_write "${STEM}.freeze.env_export.from_history.yml"
 
 # `conda env export` writes a `prefix:` line naming THIS machine; re-creating
 # from a file that hard-codes someone else's home directory is a foot-gun, so
@@ -85,7 +143,7 @@ echo "exporting ${ENV_LABEL} -> ${OUT}"
 for f in "${STEM}.freeze.env_export.yml" \
          "${STEM}.freeze.env_export.no_builds.yml" \
          "${STEM}.freeze.env_export.from_history.yml"; do
-  grep -v '^prefix:' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  grep -v '^prefix:' "$f" | safe_write "$f"
 done
 
 # The no-channels variant: the full export with the whole `channels:` block
@@ -95,14 +153,14 @@ awk '
   skip && /^[[:space:]]*-/ {next}
   {skip=0}
   {print}
-' "${STEM}.freeze.env_export.yml" > "${STEM}.freeze.env_export.no_channels.yml"
+' "${STEM}.freeze.env_export.yml" | safe_write "${STEM}.freeze.env_export.no_channels.yml"
 
 # --- pip side --------------------------------------------------------------
 # Every wheel the environment's pip knows about (the full record). Write to a
 # temporary file first: `|| true` here used to swallow a broken pip and export
 # a 0-byte `requirements.list_e.txt` while the README below promised the exact
 # wheel record, and the script still exited 0.
-freeze_tmp="${STEM}.requirements.list_e.txt.tmp"
+freeze_tmp="$(mktemp -- "${STEM}.requirements.list_e.txt.tmp.XXXXXXXXXX")"
 if ! "${CONDA}" run "${ENV_SELECT[@]}" python -m pip freeze --all 2>/dev/null \
     > "${freeze_tmp}"; then
   rm -f -- "${freeze_tmp}"
@@ -114,21 +172,38 @@ if [[ ! -s "${freeze_tmp}" ]]; then
   echo "error: pip freeze --all produced no output in ${ENV_LABEL}; refusing to write an empty pip record" >&2
   exit 1
 fi
-mv -- "${freeze_tmp}" "${STEM}.requirements.list_e.txt"
+safe_replace "${freeze_tmp}" "${STEM}.requirements.list_e.txt"
 
 # A conda-installed distribution is marked `pypi_0` in `conda list --export`;
 # everything else came from pip, so the pip-only list keeps the `pypi_0` entries
 # and drops the conda-managed lines.
 "${CONDA}" list "${ENV_SELECT[@]}" --export 2>/dev/null \
   | awk -F= '$3 != "pypi_0" {print tolower($1)}' | tr '_' '-' | sort -u \
-  > "${STEM}.conda.packages.txt"
+  | safe_write "${STEM}.conda.packages.txt"
 if [[ -s "${STEM}.conda.packages.txt" ]]; then
+  _no_pypi_tmp="$(mktemp -- "${STEM}.requirements.list_e_no_pypi.txt.tmp.XXXXXXXXXX")"
+  # `set -e`/pipefail used to abort on grep's legitimate exit 1 BEFORE the
+  # PIPESTATUS branch could handle it, so the documented 0/1 test was dead
+  # (F102). Run the pipeline with errexit off and read the statuses.
+  set +e
   awk 'BEGIN{FS="=="} {n=tolower($1); gsub(/_/,"-",n); print n"\t"$0}' \
       "${STEM}.requirements.list_e.txt" \
     | grep -v -F -f <(sed 's/$/\t/' "${STEM}.conda.packages.txt") \
-    | cut -f2- > "${STEM}.requirements.list_e_no_pypi.txt" || true
+    | cut -f2- > "${_no_pypi_tmp}"
+  # grep exits 1 for "no line matched" (a valid empty list); every other
+  # non-zero stage is a failure, and `|| true` used to install partial output
+  # while exiting 0 (F037).
+  _ps=("${PIPESTATUS[@]}")
+  set -e
+  if [[ "${_ps[0]}" -ne 0 || "${_ps[1]}" -gt 1 || "${_ps[2]}" -ne 0 ]]; then
+    echo "error: could not derive the pip-only package list" >&2
+    rm -f -- "${_no_pypi_tmp}"
+    exit 1
+  fi
+  safe_replace "${_no_pypi_tmp}" "${STEM}.requirements.list_e_no_pypi.txt"
 else
-  cp "${STEM}.requirements.list_e.txt" "${STEM}.requirements.list_e_no_pypi.txt"
+  safe_write "${STEM}.requirements.list_e_no_pypi.txt" \
+    < "${STEM}.requirements.list_e.txt"
 fi
 rm -f "${STEM}.conda.packages.txt"
 
@@ -144,11 +219,13 @@ for f in "${STEM}.requirements.list_e.txt" "${STEM}.requirements.list_e_no_pypi.
   # `grep` followed by `rc=$?` exits the shell at the grep, making the 0/1
   # branch below unreachable (R02).
   rc=0
-  grep -v -E '^pip @ file://|^[A-Za-z0-9_.\-]+ @ file:///home/' "$f" > "$f.tmp" || rc=$?
+  _sanitize_tmp="$(mktemp -- "${f}.tmp.XXXXXXXXXX")"
+  grep -v -E '^pip @ file://|^[A-Za-z0-9_.\-]+ @ file:///home/' "$f" \
+    > "${_sanitize_tmp}" || rc=$?
   if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
-    mv "$f.tmp" "$f"
+    safe_replace "${_sanitize_tmp}" "$f"
   else
-    rm -f "$f.tmp"
+    rm -f "${_sanitize_tmp}"
     echo "error: could not sanitise $f (grep exit $rc); record left unchanged" >&2
     exit 1
   fi
@@ -164,7 +241,7 @@ done
   "${STEM}.requirements.test.txt"
 
 # --- README ----------------------------------------------------------------
-cat > "${OUT}/README.md" <<EOF
+safe_write "${OUT}/README.md" <<EOF
 # \`env/\` — the exported test environment
 
 Generated by \`bash scripts/export-test-env.sh\` from the conda environment

@@ -65,8 +65,16 @@ INTERNAL_ARTIFACT_RES = (
                 r"|\b(?:F|X|AU)-\d{2,4}\b")),
     ("a stage note that narrates HOW this package was produced",
      re.compile(r"(?i)\bthe pipeline'?s own (?:ledger|report|bookkeeping|hand-?off)\b"
-                r"|\b(?:review|judge|audit|integration|revise|rewrite) session\b"
-                r"|\bthis run'?s\b|\bthe decision, with its evidence\b"
+                # A bare "this run's" / "a review session" is ordinary Methods
+                # prose ("this run's temperature was 37 C", "a review session was
+                # held"). Require the pipeline-specific collocation the real
+                # stage notes use (F037).
+                r"|\bthis run'?s (?:ledger|report|bookkeeping|hand-?off|findings?|"
+                r"round record|stage record|sessions?)\b"
+                r"|\b(?:review|judge|audit|integration|revise|rewrite) "
+                r"(?:session|pass|wave) (?:filed|recorded|wrote|written|produced|"
+                r"reported|generated|ran|run|found|created|closed|says|notes?|listed)\b"
+                r"|\bthe decision, with its evidence\b"
                 r"|\bwhat the author must do\b")),
 )
 PACKAGE_TEXT_EXTS = (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".json", ".csv",
@@ -383,32 +391,35 @@ def _extglob_to_regex(pat: str):
     """A bash extglob (`*`, `?`, `[a-f]`, `@(docx|pdf)`) as a regex, or None.
 
     `*` never crosses a `/` (the patterns name files, and a directory-crossing
-    wildcard would silently widen the submitted set).
+    wildcard would silently widen the submitted set). Each `@(...)` alternative
+    is translated by the SAME rules, recursively: `re.escape`-ing it turned the
+    wildcard in `@(ms-*.docx|ms-*.pdf)` into a literal star, so a legal bash
+    declaration matched no file and was discarded (F90).
     """
-    out, i, n = [], 0, len(str(pat or ""))
-    try:
+    def _translate(text: str) -> str:
+        out, i, n = [], 0, len(text)
         while i < n:
-            c = pat[i]
+            c = text[i]
             if c == "*":
                 out.append("[^/]*")
             elif c == "?":
                 out.append("[^/]")
-            elif pat.startswith("@(", i):
-                j = pat.index(")", i)
-                alts = [a for a in pat[i + 2:j].split("|") if a]
+            elif text.startswith("@(", i):
+                j = text.index(")", i)
+                alts = [a for a in text[i + 2:j].split("|") if a]
                 if not alts:
-                    return None
-                out.append("(?:" + "|".join(re.escape(a) for a in alts) + ")")
+                    raise ValueError("empty extglob")
+                out.append("(?:" + "|".join(_translate(a) for a in alts) + ")")
                 i = j
             elif c == "[":
-                j = pat.index("]", i)
-                cls = pat[i:j + 1]
+                j = text.index("]", i)
+                cls = text[i:j + 1]
                 if not re.fullmatch(r"\[[^\]\\]{1,40}\]", cls):
-                    return None
+                    raise ValueError("malformed class")
                 if cls[1] in ("!", "^"):
                     body = cls[2:-1]
                     if not body:
-                        return None
+                        raise ValueError("empty negated class")
                     out.append("[^" + body + "]")
                 else:
                     out.append(cls)
@@ -416,14 +427,13 @@ def _extglob_to_regex(pat: str):
             else:
                 out.append(re.escape(c))
             i += 1
-    except (ValueError, IndexError):
-        return None
+        return "".join(out)
     try:
         # A class the shape test accepts can still be invalid regex (`[z-a]`):
         # the compile must be inside the guard, or declaring it crashed every
         # scan that reads the submission declaration.
-        return re.compile("^" + "".join(out) + "$")
-    except re.error:
+        return re.compile("^" + _translate(str(pat or "")) + "$")
+    except (ValueError, IndexError, re.error):
         return None
 
 
@@ -777,15 +787,23 @@ def duplicate_submission_role_rows(root: Path, limit: int = 20) -> list:
         key = _duplicate_role_key(p.name)
         if not key:
             continue
-        groups.setdefault((Path(rel).parent.as_posix(), key, p.suffix.lower()), []).append(rel)
-    for (parent, key, ext), files in sorted(groups.items()):
+        # Group by ROLE and extension across the WHOLE submitted set: the old
+        # key included the parent directory, so a stale copy of one role in
+        # another directory was never compared (F085). Different extensions
+        # stay separate on purpose -- a PDF render beside its editable source is
+        # a normal pair, not a duplicate role.
+        groups.setdefault((key, p.suffix.lower()), []).append(rel)
+    for (key, ext), files in sorted(groups.items()):
         if len(files) < 2:
             continue
+        parents = sorted({Path(f).parent.as_posix() for f in files})
+        where = (f"in {parents[0]!r}" if len(parents) == 1
+                 else "across " + ", ".join(repr(p) for p in parents))
         rows.append({
             "rule": "PKG-26", "severity": "high", "fix": "manual",
             "file": files[0], "reference": ", ".join(files[1:]),
             "detail": (f"the submitted set carries {len(files)} {ext} files for one "
-                       f"document role ({key!r}) in {parent!r}: {', '.join(files)}. One is a stale "
+                       f"document role ({key!r}) {where}: {', '.join(files)}. One is a stale "
                        f"pre-revision/source copy; the reader cannot tell which is current, "
                        f"and a journal upload carries both. Keep the current version and "
                        f"remove or rename the stale copy out of the submitted set.")})
@@ -843,6 +861,19 @@ def _placeholder_globs_from_ctx(ctx=None) -> list:
     return [str(x).strip() for x in raw if str(x).strip()]
 
 
+def _strip_declared_token(tok: str) -> str:
+    """One declared placeholder path without a balanced quote pair.
+
+    The README may write the declaration as ``"data/x.tsv"`` or ``'x.tsv'`` as
+    well as with backticks; the old fallback kept the quote characters, so
+    fnmatch never matched the real path (F092).
+    """
+    tok = str(tok or "").strip()
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+        tok = tok[1:-1].strip()
+    return tok
+
+
 def declared_placeholder_paths(root: Path, extra=()) -> dict:
     """The placeholders a package DECLARES: {patterns, files, readme, reasons}.
 
@@ -877,8 +908,9 @@ def declared_placeholder_paths(root: Path, extra=()) -> dict:
             toks = BACKTICK_TOKEN_RE.findall(m.group(1)) or [
                 t.strip() for t in re.split(r"[,;]", m.group(1))]
             for tok in toks:
-                if tok.strip():
-                    patterns.append(tok.strip())
+                tok = _strip_declared_token(tok)
+                if tok:
+                    patterns.append(tok)
                     found = True
         for m in PLACEHOLDER_BULLET_RE.finditer(text):
             line = m.group(1)
@@ -897,7 +929,10 @@ def declared_placeholder_paths(root: Path, extra=()) -> dict:
             seen.add(key)
             uniq.append(key)
     out["patterns"] = uniq
-    for p in sorted(_iter_tree_files(root)):
+    # The canonical `raw_data/` (and feedback) area is a SYMLINK in the normal
+    # sandbox layout: without following it the declared placeholder globs are
+    # invisible and every role is told there are none (F086).
+    for p in sorted(_iter_tree_files(root, follow_dir_links=True)):
         if not p.is_file():
             continue
         rel = p.relative_to(root).as_posix()
@@ -944,7 +979,9 @@ def detect_placeholder_copies(root: Path, area_names=None,
     # size collides with another file's are worth hashing. A corpus with a few
     # hundred distinct evidence files pays almost no hashing cost.
     by_size = {}
-    for p in _iter_tree_files(root):
+    # Follow the canonical evidence-area symlink: identical-byte placeholder
+    # copies under raw_data/ are otherwise invisible (F086).
+    for p in _iter_tree_files(root, follow_dir_links=True):
         if not p.is_file():
             continue
         try:
@@ -1366,11 +1403,33 @@ def _cached_sha256(p: Path) -> str:
         st = p.stat()
     except OSError:
         raise
+    # A referenced figure is agent-writable package content: hash it in bounded
+    # chunks, and refuse one over the per-part media budget (the same 32 MiB cap
+    # `embedded_media_digests` applies) instead of loading a multi-gigabyte
+    # payload into memory (F47). The caller treats ValueError as "cannot prove
+    # the file is embedded" and keeps the reference.
+    if st.st_size > MEDIA_PART_MAX_BYTES:
+        raise ValueError(f"{p} is over the {MEDIA_PART_MAX_BYTES // (1024 * 1024)} "
+                         f"MiB per-file digest budget")
     key = (str(p), st.st_mtime_ns, st.st_size)
     hit = _FILE_DIGEST_CACHE.get(key)
     if hit is not None:
         return hit
-    digest = hashlib.sha256(p.read_bytes()).hexdigest()
+    h = hashlib.sha256()
+    remaining = MEDIA_PART_MAX_BYTES + 1
+    with p.open("rb") as fh:
+        while remaining > 0:
+            chunk = fh.read(min(1 << 20, remaining))
+            if not chunk:
+                break
+            h.update(chunk)
+            remaining -= len(chunk)
+    if remaining <= 0:
+        # The file GREW past the budget between stat() and the read: never hash
+        # an over-budget payload.
+        raise ValueError(f"{p} is over the {MEDIA_PART_MAX_BYTES // (1024 * 1024)} "
+                         f"MiB per-file digest budget")
+    digest = h.hexdigest()
     if len(_FILE_DIGEST_CACHE) > 512:
         _FILE_DIGEST_CACHE.clear()
     _FILE_DIGEST_CACHE[key] = digest
@@ -1487,6 +1546,32 @@ def _norm_header(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
 
 
+def _one_edit_apart(a: str, b: str) -> bool:
+    """True when two normalized names differ by at most one character.
+
+    The documented PKG-11 rule is "case or ONE character"; SequenceMatcher's
+    ratio put a one-substitution typo in a 6-9 character name below 0.90, so the
+    rule could not see the very defect it documents (F091). Insert/delete and
+    substitution are both one edit.
+    """
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) <= 1
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    i = j = diff = 0
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1
+            j += 1
+            continue
+        diff += 1
+        if diff > 1:
+            return False
+        j += 1
+    return True
+
+
 def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
     """PKG-11: sibling tables whose header names differ only by case/one char."""
     root = Path(root)
@@ -1529,9 +1614,9 @@ def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
             for b in names[i + 1:]:
                 if a == b:
                     continue
-                norm_ratio = difflib.SequenceMatcher(
-                    None, _norm_header(a), _norm_header(b)).ratio()
-                if norm_ratio < NEAR_MISS_RATIO:
+                na, nb = _norm_header(a), _norm_header(b)
+                norm_ratio = difflib.SequenceMatcher(None, na, nb).ratio()
+                if norm_ratio < NEAR_MISS_RATIO and not _one_edit_apart(na, nb):
                     continue
                 if by_name[a] == by_name[b]:
                     continue
@@ -1564,23 +1649,40 @@ def _parse_ci(cell: str):
 
 def _parse_p(cell: str):
     t = re.sub(r"\\textbf\{|\\emph\{|\}", "", str(cell or "")).strip()
-    t = re.sub(r"^\$?(?:p|P)?\$?\s*(?:=|<=|>=|<|>|≤|≥)?\s*", "", t)
+    # The prefix may spell the label out (`p-value`, `P value`); stripping only
+    # a bare p/P left the remainder unparsed, so the whole PKG-12 check skipped
+    # every table that used the standard p-value spelling (F12).
+    t = re.sub(r"^\$?(?:p|P)?\$?(?:[- ]?[Vv]alue)?\s*"
+               r"(?:=|<=|>=|<|>|≤|≥)?\s*", "", t)
     # the VALUE is the leading number; a qualifier after it is not part of it
     m = re.match(NUMBER_CELL_RE, t)
     return float(m.group(0)) if m else None
 
 
-def _p_reports_significant(cell: str, parsed=None) -> bool:
-    """Whether a p-value CELL states significance (star or inequality aware)."""
+def _p_reports_significant(cell: str, parsed=None, strict: bool = False) -> bool:
+    """Whether a p-value CELL states significance (star or inequality aware).
+
+    `strict` mirrors the table caption's own rule: under a caption that states
+    `p < 0.05`, a cell reporting exactly 0.05 is NOT significant (F120).
+    """
     text = re.sub(r"\\textbf\{|\\emph\{|\}", "", str(cell or "")).strip()
     if re.search(r"\*+\s*\$?\s*$", text):
         return True
-    if re.search(r"(?:<|≤|<=)\s*\$?\s*\d", text):
-        return True
-    if re.search(r"(?:>|≥|>=)\s*\$?\s*\d", text):
+    # Compare the STATED bound to the rule's alpha. The old test returned True
+    # for any inequality before a digit, so `p < 0.10` was classified as
+    # significant under the caption's 0.05 rule (F096).
+    m = re.search(r"(?:<=|≤|<)\s*\$?\s*(\d*\.\d+|\d+)", text)
+    if m:
+        try:
+            return float(m.group(1)) <= 0.05
+        except ValueError:
+            return False
+    if re.search(r"(?:>=|≥|>)\s*\$?\s*\d", text):
         return False
     value = _parse_p(text) if parsed is None else parsed
-    return value is not None and value <= 0.05
+    if value is None:
+        return False
+    return value < 0.05 if strict else value <= 0.05
 
 
 def _latex_command_bodies(text: str, command: str) -> list:
@@ -1661,17 +1763,34 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
         if text is None:
             gaps.append(rel)
             continue
-        if "mcb" not in p.name.lower() and "MCB" not in text[:4000]:
-            continue
+        # Do not pre-filter on a literal `mcb` filename/token: the scan is a
+        # general p-vs-interval consistency check, and the caption rule below is
+        # the real selector (F053).
+
         caption = " ".join(_latex_command_bodies(text, "captionof")
                            + _latex_command_bodies(text, "caption"))
         if not caption or not (MCB_P_SMALL_RULE_RE.search(caption)
                                and MCB_CI_RULE_RE.search(caption)):
             continue
+        # The caption's own boundary decides the equality case: `p < 0.05`
+        # makes a cell reporting exactly 0.05 non-significant, while `p ≤ 0.05`
+        # does not (F120).
+        caption_strict = bool(re.search(
+            r"(?i)\bp\s*<\s*(?!=)\s*\$?\s*(?:0?\.\d+|\d+)", caption))
         for line_no, line in enumerate(text.splitlines(), 1):
             if "&" not in line or line.lstrip().startswith("%"):
                 continue
             cells = [c.strip() for c in re.sub(r"\\\\.*$", "", line).split("&")]
+            # A legal LaTeX row may begin or end with an empty cell (`a & b & c
+            # & d & e &` splits to 6); the exact-length test skipped such a row
+            # with no gap, so a contradictory row in a table with an empty edge
+            # column was silently unchecked (F79). The edge cells are not
+            # columns: drop them, but keep a supported row exactly as it is.
+            if len(cells) not in (5, 10):
+                while len(cells) > 1 and not cells[-1]:
+                    cells.pop()
+                while len(cells) > 1 and not cells[0]:
+                    cells.pop(0)
             if len(cells) == 10:
                 blocks = [(cells[2], cells[3], cells[5]), (cells[6], cells[7], cells[9])]
                 label = cells[1]
@@ -1686,7 +1805,7 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
                 pval, ci = _parse_p(p_cell), _parse_ci(ci_cell)
                 if pval is None or ci is None:
                     continue
-                inferior_by_p = _p_reports_significant(p_cell, pval)
+                inferior_by_p = _p_reports_significant(p_cell, pval, strict=caption_strict)
                 inferior_by_ci = ci[0] > 0 or ci[1] < 0
                 if inferior_by_p == inferior_by_ci:
                     continue
@@ -1753,7 +1872,10 @@ def _pooled_units_by_method(path: Path, gaps: list = None) -> dict:
         if len(r) <= max(mi, vi):
             continue
         try:
-            val = float(str(r[vi]).strip())
+            # An exported table may spell a negative mean with the typographic
+            # minus; float() raises on it, and the bare `continue` dropped the
+            # whole row with no gap (F13).
+            val = float(str(r[vi]).strip().replace("\u2212", "-"))
         except ValueError:
             continue
         groups.setdefault(str(r[mi]).strip(), []).append(val)
@@ -1781,18 +1903,34 @@ FORM_STOP_TOKENS = {
     "extension", "benchmark", "software",
     "compute", "environment", "intel", "xeon", "gold", "cpu", "ghz",
     "recorded", "seven", "eight", "nine", "ten", "four", "five", "six",
+    # Inventory lead-ins are not tools (F074): "The following tools were used"
+    # used to contribute the bogus token "following".
+    "following", "tools", "tool", "programs", "program", "packages", "package",
+    "libraries", "library", "we", "applied", "employed", "listed",
 }
 
 
 def _tool_tokens(text: str) -> set:
     """Tool-like tokens of a software paragraph: the first token of each entry
-    (comma-, semicolon- or sentence-delimited), connectives removed."""
+    (comma-, semicolon-, colon-, `and`/`&`- or sentence-delimited), with the
+    inventory lead-in removed and a trailing version separated from the name."""
     out = set()
+    body = str(text or "")
     # A sentence boundary ends an entry list too: "STAR 2.7.5c. The extension
     # benchmark additionally used bedtools (bamtobed)" carries TWO tools, and
     # splitting on commas alone kept only STAR.
-    body = re.sub(r"(?<=[.!?])\s+", ";", str(text or ""))
-    for chunk in re.split(r"[,;]", body):
+    body = re.sub(r"(?<=[.!?])\s+", ";", body)
+    # The lead-in names the LIST, not a tool: "The following tools were used:
+    # bedtools, samtools and STAR" used to yield "following" (bogus) while the
+    # colon kept bedtools and STAR inside the same chunk (F074). Remove the
+    # lead-in, then split on the colon as an entry delimiter.
+    body = re.sub(
+        r"(?i)^\s*(?:we\s+)?(?:the\s+)?(?:following\s+)?"
+        r"(?:tools?|software|programs?|packages?|libraries)\s+"
+        r"(?:were|was|are|is|have\s+been|has\s+been)?\s*"
+        r"(?:used|applied|employed|listed)?\s*[:\-]?\s*",
+        "", body)
+    for chunk in re.split(r"[,;:]|\band\b|&", body):
         c = chunk.strip()
         c = re.sub(r"^(?:and|the|with|used|using|additionally|including|also|has|have|"
                    r"were|was|of|in|on|at|by|as|or)\s+", "", c, flags=re.I)
@@ -1800,8 +1938,16 @@ def _tool_tokens(text: str) -> set:
                    flags=re.I)
         c = re.sub(r"^(?:used|using|with)\s+", "", c, flags=re.I)
         m = re.match(r"([A-Za-z][A-Za-z0-9_+.\-]{2,30})", c)
-        if m and m.group(1).lower() not in FORM_STOP_TOKENS:
-            out.add(m.group(1))
+        if not m:
+            continue
+        name = m.group(1).rstrip(".-")
+        # STAR2.7.5c -> STAR, FastQC0.11.9 -> FastQC: a glued version is not
+        # part of the tool name, or the form's "STAR (2.7.5c)" never matches.
+        vm = re.match(r"^([A-Za-z][A-Za-z0-9_+\-]*?[A-Za-z])(\d+(?:\.\d+)+\w*)$", name)
+        if vm and len(vm.group(1)) >= 2:
+            name = vm.group(1)
+        if name.lower() not in FORM_STOP_TOKENS:
+            out.add(name)
     return out
 
 
@@ -1969,6 +2115,11 @@ def _package_document_texts(root: Path, texts=None) -> list:
     # PDFs, table sources), not a prose surface: parsing its PDFs added seconds
     # per scan and produced no claim.
     areas = {str(a).lower() for a in EVIDENCE_DIRNAMES} | {"supplementary_source_files"}
+    # `code/` is revision content but NEVER a submitted prose surface (F078):
+    # its notes/README must not be read as a manuscript. The package's OWN
+    # submitted-set declaration is the other authority -- a file the README
+    # says is not submitted must not be scanned as prose either.
+    _decl, is_submitted = declared_submission_filter(root)
     for p in sorted(_iter_tree_files(root)):
         if not p.is_file():
             continue
@@ -1979,7 +2130,13 @@ def _package_document_texts(root: Path, texts=None) -> list:
             rel = p.relative_to(root).as_posix()
         except ValueError:
             continue
-        if rel.split("/", 1)[0].lower() in areas:
+        if rel.split("/", 1)[0].lower() in areas or is_code_rel(rel):
+            continue
+        # The stage's own `work/` scratch is not package prose: a scratch
+        # snapshot was read as a manuscript surface (F107).
+        if excluded_corpus_component(rel, ("work",)):
+            continue
+        if not is_submitted(rel):
             continue
         if is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
             continue
@@ -2030,6 +2187,18 @@ METHOD_SELECTION_RE = re.compile(
     r"raised|adjusted|set)[^.]{0,120}"
     r"(?:empirically|to match|because the default|on the cell-line|on the [^.]{0,40}"
     r"datasets|from the [^.]{0,30}datasets)")
+# Selecting a parameter on the TRAINING data is the compliant case the form's
+# no-overlap claim describes (F079). Only a selection on evaluation/test data
+# (or an unqualified/empirical selection) contradicts it.
+_SELECTED_ON_TRAIN_RE = re.compile(
+    r"(?i)\b(?:selected|chosen|tuned|optimized|optimised|calibrated|relaxed|lowered|"
+    r"raised|adjusted|set)\b[^.]{0,120}?\b(?:on|using|from)\s+(?:the\s+)?"
+    r"(?:[a-z0-9\-]+\s+){0,3}?training\s+(?:data|datasets?|set|sets)\b")
+_SELECTED_ON_EVAL_RE = re.compile(
+    r"(?i)\b(?:selected|chosen|tuned|optimized|optimised|calibrated|relaxed|lowered|"
+    r"raised|adjusted|set)\b[^.]{0,120}?\b(?:on|using|from)\s+(?:the\s+)?"
+    r"(?:[a-z0-9\-]+\s+){0,3}?(?:evaluation|test|held-?out|validation)\s+"
+    r"(?:data|datasets?|set|sets)\b")
 
 
 def scan_form_method_conflicts(root: Path, texts=None, limit: int = 8) -> list:
@@ -2056,6 +2225,11 @@ def scan_form_method_conflicts(root: Path, texts=None, limit: int = 8) -> list:
                     continue
                 if not re.search(r"(?i)\b(?:threshold|parameter|cutoff|cut-off|"
                                  r"configuration|setting)s?\b", s):
+                    continue
+                if _SELECTED_ON_TRAIN_RE.search(s) and not _SELECTED_ON_EVAL_RE.search(s):
+                    # "parameters were selected on the training datasets" is the
+                    # protocol the form's claim requires, not a contradiction
+                    # (F079). A selection on evaluation/test data still flags.
                     continue
                 rows.append({
                     "rule": "PKG-17", "severity": "high", "fix": "manual",
@@ -2093,7 +2267,9 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
     grids = []
     gaps = []
     for p in sorted(_iter_tree_files(root)):
-        if not p.is_file() or p.suffix.lower() != ".tsv" or "grid" not in p.name.lower():
+        if not p.is_file() or p.suffix.lower() != ".tsv":
+            # Select grids by their HEADER, not by the literal word "grid" in
+            # the filename (F054).
             continue
         header, body = _read_delimited_table(p, gaps=gaps)
         if not header:
@@ -2153,8 +2329,19 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
                         best_metric, best_score = met, score
                 if best_metric is None or best_score < 2:
                     continue
-                means = {meth: sum(vals.values()) / len(vals)
-                         for meth, vals in by_metric[best_metric].items() if vals}
+                # Compare every method over the SAME dataset set: a method
+                # measured on one easy dataset used to outrank one measured on
+                # ten and flip a correct "highest average" claim (F080). The
+                # common intersection is the only honest grid; with no shared
+                # dataset there is nothing to compare.
+                per_method = by_metric[best_metric]
+                common = (set.intersection(*(set(v) for v in per_method.values()))
+                          if per_method else set())
+                if not common:
+                    continue
+                means = {meth: sum(vals[d] for d in common) / len(common)
+                         for meth, vals in per_method.items()
+                         if common <= set(vals)}
                 if len(means) < 2:
                     continue
                 claimed_key = re.sub(r"[^a-z0-9]+", "", claimed)
@@ -2181,7 +2368,8 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
                     "detail": (f"the text says {m.group(1).strip()!r} gave the highest average "
                                f"{m.group(2).strip()[:60]!r}, but the shipped grid {grel} ranks "
                                f"{top_method!r} above it on that metric ({top_mean:.3f} vs "
-                               f"{claimed_mean:.3f})."
+                               f"{claimed_mean:.3f}) over the {len(common)} dataset(s) every "
+                               f"listed method reports."
                                + (" The sentence cites a figure whose numbers are not shipped, "
                                   "so the claim cannot be checked against the package -- name "
                                   "the surface and ship its numbers."
@@ -2350,11 +2538,16 @@ def scan_definition_overreach(root: Path, texts=None, limit: int = 8) -> list:
 NEGATED_NOTE_RE = re.compile(
     # Only an INTERPRETATION denial counts ("should not be read as", "not
     # evidence", "does not demonstrate"). A bare limitation ("we cannot test
-    # this") is not a contradiction of the citing sentence.
-    r"(?i)(?:should\s+(?:therefore\s+)?not|not\s+be\s+interpreted|"
+    # this") is not a contradiction of the citing sentence. The contracted
+    # spellings are the same denial, and Word's autocorrect writes U+2019: a
+    # sentence using "doesn't" was a silent clean PKG-22 (F80).
+    r"(?i)(?:should\s+(?:therefore\s+)?not|shouldn['\u2019]t|"
+    r"not\s+be\s+interpreted|"
     r"cannot\s+be\s+interpreted|not\s+evidence|no\s+evidence|"
-    r"does\s+not\s+demonstrat\w*|does\s+not\s+show|not\s+an?\s+intrinsic|"
-    r"not\s+the\s+same\s+as)")
+    r"does\s+not\s+demonstrat\w*|doesn['\u2019]t\s+demonstrat\w*|"
+    r"does\s+not\s+show|doesn['\u2019]t\s+show|"
+    r"isn['\u2019]t\s+an?\s+intrinsic|not\s+an?\s+intrinsic|"
+    r"isn['\u2019]t\s+the\s+same\s+as|not\s+the\s+same\s+as)")
 ASSERTIVE_MAIN_RE = re.compile(
     r"(?i)(?:\bexposed\b|\bdemonstrat\w*|\bshows? that\b|\breveals?\b|\bindicates?\b|"
     r"\bconfirms?\b|\bproves?\b|\bperformed\s+(?:near-?)?randomly\b|"
@@ -2458,16 +2651,32 @@ def scan_cited_note_negations(root: Path, texts=None, limit: int = 8) -> list:
 
 
 REF_ENTRY_NUM_RE = re.compile(r"^\s*(\d{1,3})\.\s*$")
+# A software/version token is not a numeric citation: MACS2, Seurat4 and
+# ggplot2 were parsed as citations of references 2, 4 and 2 (F97). The
+# lookahead is case-insensitive, so the stems are lower-case;
+# `(?<![A-Za-z])` stops the engine from retrying at the second letter of the
+# same token.
+CITATION_SOFTWARE_STEMS = (
+    "grch", "chm", "python", "hg", "mm", "macs", "seurat", "ggplot", "deseq",
+    "imagej", "fiji", "cellranger", "scanpy", "anndata", "samtools",
+    "bedtools", "star", "bowtie", "hisat", "spades", "canu", "flye", "kraken",
+    "salmon", "kallisto", "htseq", "featurecounts", "limma", "edger",
+)
 INLINE_CITATION_RE = re.compile(
     # The word must END in a letter: a hyphen is a word separator here, not part
     # of the citation stem, so "COVID-19" is not a citation of reference 19
     # (`[A-Za-z\-]{2,}` used to absorb the trailing hyphen and bind the 19).
-    r"(?<![A-Za-z])((?!(?:grch|chm|python|hg|mm)\d)[A-Za-z][A-Za-z\-]{1,}[A-Za-z])"
+    r"(?<![A-Za-z])((?!(?:" + "|".join(CITATION_SOFTWARE_STEMS) + r")\d)"
+    r"[A-Za-z][A-Za-z\-]{1,}[A-Za-z])"
     # A citation glued to the sentence period ("omics43.") is the usual form;
     # reject only a digit or a decimal continuation, not the full stop.
     r"(\d{1,4})(?!\d|\.\d)",
     re.I,
 )
+# A bracket citation is the normal in-text form in a manuscript whose
+# superscripts were flattened: "single-cell omics [43]". The glued-word regex
+# above cannot see it, so PKG-23 silently inspected no citation at all (F97).
+BRACKET_CITATION_RE = re.compile(r"\[(\d{1,4})\]")
 SINGLE_CELL_RE = re.compile(r"(?i)\bsingle[- ]cell\b")
 ASSEMBLY_TITLE_RE = re.compile(
     r"(?i)\b(?:complete sequence|genome assembly|reference genome|"
@@ -2531,14 +2740,22 @@ def _numbered_reference_titles(paras: list) -> dict:
             # A two-line entry OUTSIDE a section is the heading-less Zotero
             # form only; when the document HAS a references heading, a body
             # "1." + following sentence must not become entry 1.
-            if in_refs or (ref_start is None and (
-                    _ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest))):
+            accepted = in_refs or (ref_start is None and (
+                    _ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest)))
+            if accepted:
                 out.setdefault(num, rest)
-            current = None
+            # Inside a references section a multi-paragraph entry continues
+            # until the next entry marker; outside one, the next paragraph is
+            # body text and must not be swallowed (F077).
+            current = num if (accepted and in_refs) else None
             continue
-        bare = re.match(r"^\s*(\d{1,4})\.\s*$", text)
+        bare = re.match(r"^\s*(?:\[(\d{1,4})\]|(\d{1,4})[.)]?)\s*$", text)
         if bare:
-            current = int(bare.group(1)) if in_refs else None
+            # A marker line may be "1.", "1)" or a bare "1" (a Word numbered
+            # list). Only the period form was read, so a "1)" marker line made
+            # the whole reference list parse as {} and the citation check
+            # silently inspect nothing (F075).
+            current = int(bare.group(1) or bare.group(2)) if in_refs else None
             if current is not None:
                 out.setdefault(current, "")
             continue
@@ -2547,14 +2764,23 @@ def _numbered_reference_titles(paras: list) -> dict:
         if one:
             num = int(one.group(1) or one.group(2))
             rest = one.group(3).strip()
-            if in_refs and (_ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest)
-                            or re.match(r"^[A-Z][A-Za-z'’.-]+,?\s", rest)):
+            accepted = bool(in_refs and (
+                _ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest)
+                or re.match(r"^[A-Z][A-Za-z'’.-]+,?\s", rest)))
+            if accepted:
                 out.setdefault(num, rest)
-            current = None
+            # A one-line entry may also continue over paragraphs ("1. Nurk, S.
+            # et al. The complete sequence" / "of a human genome. ..."): keep
+            # `current` for an accepted entry so its continuation is appended,
+            # exactly like the bare-marker and two-line forms (F077).
+            current = num if accepted else None
             continue
         if current is not None and text.strip():
+            # Keep `current` set: a reference entry may run over several
+            # paragraphs, and only the next entry marker/heading ends it. The
+            # old code cleared it after ONE continuation, so everything after
+            # that was lost from the entry text the citation check reads (F077).
             out[current] = (out[current] + " " + text.strip()).strip()
-            current = None
     return out
 
 
@@ -2576,14 +2802,35 @@ def scan_single_cell_citation_mismatch(root: Path, texts=None, limit: int = 8) -
             continue
         refs = _numbered_reference_titles(paras)
         if not refs:
+            # A references heading whose entries could not be parsed (an
+            # author-year list, or an unsupported marker shape) leaves the whole
+            # numbered-citation class UNCHECKED. `continue` used to hide that
+            # (F075); record the gap so the run does not read as clean.
+            if any(REF_HEADING_RE.match(p or "") for p in paras):
+                rows.append({
+                    "rule": "PKG-23", "severity": "low", "fix": "manual",
+                    "advisory": True, "coverage_gap": True,
+                    "file": rel, "line": 1, "reference": "reference list",
+                    "detail": ("a references heading is present but no numbered "
+                               "reference entry could be parsed, so the "
+                               "citation-numbering class was NOT checked in this "
+                               "document; verify the numbering by hand or record the "
+                               "list in a supported numbered form")})
+                if len(rows) >= limit:
+                    return rows
             continue
         for s in _sentences("\n".join(paras)):
             if not SINGLE_CELL_RE.search(s):
                 continue
+            cited = []
             for m in INLINE_CITATION_RE.finditer(s):
                 if m.group(1).lower() in CITATION_LABEL_WORDS:
                     continue
-                num = int(m.group(2))
+                cited.append(int(m.group(2)))
+            # A bracket citation is a real one whether or not the document also
+            # glues numbers to words; keep both forms, each number once (F97).
+            cited.extend(int(m.group(1)) for m in BRACKET_CITATION_RE.finditer(s))
+            for num in dict.fromkeys(cited):
                 title = refs.get(num, "")
                 if not title or SINGLE_CELL_RE.search(title):
                     continue
@@ -2884,8 +3131,11 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
             if method not in units:
                 continue
             try:
-                n_table = int(float(str(r[ni]).strip()))
-                mean_table = float(str(r[avi]).strip())
+                # Typographic minus (U+2212) is a legal minus in an exported
+                # table: normalising it keeps the row comparable instead of
+                # dropping it silently (F13).
+                n_table = int(float(str(r[ni]).strip().replace("\u2212", "-")))
+                mean_table = float(str(r[avi]).strip().replace("\u2212", "-"))
             except ValueError:
                 continue
             n_units, mean_units = units[method]
@@ -3407,9 +3657,9 @@ def _pkg2_area_patterns(names: list) -> list:
         joined = "|".join(re.escape(n) for n in names)
         patterns.append(re.compile(
             r"(?<![\w./\\&?#-])(?:" + joined
-            + r")[/\\](?![^\s.,;:)\]}\u201d\u2019\"'])", re.I))
+            + r")[/\\](?![^\s.,;:)\]}\u201d\u2019\"`'])", re.I))
         patterns.append(re.compile(
-            r"(?<![\w./\\&?#-])(?:" + joined + r")[/\\]?\s+(?:director(?:y|ies)|"
+            r"(?<![\w./\\&?#-])(?:" + joined + r")(?:[/\\]|`)?\s+(?:director(?:y|ies)|"
             r"folder|dir)\b", re.I))
     return patterns
 
@@ -3635,17 +3885,49 @@ def _spelled_number_is_count(text: str) -> bool:
     return False
 
 
+# A sentence can carry a substantive claim with NO number at all ("The
+# treatment improved survival, as described in raw_data/survival.tsv."). The
+# packaging repair may delete only a pointer-only sentence, so a reporting/
+# result verb or a comparative claim adjective is the evidence that content is
+# stated. File-action and pointer verbs (ran/used/produced/described/showed as
+# "as shown"/listed/printed...) are deliberately absent: "We ran code/x.py for
+# Figure S3." is framing for the reference and the removal contract keeps
+# deleting it (F073). The list is conservative on purpose -- holding a
+# pointer-only sentence is a missed mechanical repair, while deleting a claim
+# loses content (rule 2).
+_PKG2_CLAIM_RE = re.compile(
+    r"(?i)\b(?:improv(?:e|ed|es|ing)|increas(?:e|ed|es|ing)|"
+    r"decreas(?:e|ed|es|ing)|reduc(?:e|ed|es|ing)|lower(?:ed|s|ing)?|"
+    r"rais(?:e|ed|es|ing)|higher|greater|smaller|larger|longer|shorter|"
+    r"faster|slower|better|worse|similar|different|significan(?:t|tly)|"
+    r"demonstrat(?:e|ed|es|ing)|show(?:ed|s|ing)|found|observ(?:e|ed|es|ing)|"
+    r"associat(?:e|ed|es|ing)|correlat(?:e|ed|es|ing)|suggest(?:ed|s|ing)?|"
+    r"indicat(?:e|ed|es|ing)|support(?:ed|s|ing)?|confirm(?:ed|s|ing)?|"
+    r"requir(?:e|ed|es|ing)|enabl(?:e|ed|es|ing)|caus(?:e|ed|es|ing)|"
+    r"led|result(?:ed|s|ing)?|remain(?:ed|s|ing)?|became|becom(?:e|es|ing)|"
+    r"differ(?:ed|s|ing)?|outperform(?:ed|s|ing)?|exceed(?:ed|s|ing)?|"
+    r"declin(?:e|ed|es|ing)|rose|risen|fell|fallen|inhibit(?:ed|s|ing)?|"
+    r"promot(?:e|ed|es|ing)|express(?:ed|s|ing)?|mutat(?:e|ed|es|ing)?|"
+    r"predict(?:ed|s|ing)?|explain(?:ed|s|ing)?|reflect(?:ed|s|ing)?|"
+    r"represent(?:ed|s|ing)?|reveal(?:ed|s|ing)?|identif(?:y|ied|ies|ying)|"
+    r"detect(?:ed|s|ing)?|measur(?:e|ed|es|ing)|achiev(?:e|ed|es|ing))\b")
+
+
 def sentence_carries_scientific_fact(text: str) -> bool:
-    """True when a sentence carries a number outside a figure/table/section label.
+    """True when a sentence carries a number or another substantive claim.
 
     The PKG-2 mechanical removal is a packaging repair, not a finding
-    resolution: a sentence that carries a measured value, count, p-value or
-    other numeric fact must be rewritten by the revision, not silently deleted.
-    A bare label (`Figure S3`, `Table 2`, `Data S1`) is not a fact.
+    resolution: a sentence that carries a measured value, count, p-value, a
+    result claim or another numeric fact must be rewritten by the revision, not
+    silently deleted. A bare label (`Figure S3`, `Table 2`, `Data S1`) is not a
+    fact, and neither is a pointer-only sentence (`See figures/fig1.png for the
+    effect.`).
     """
     stripped = _FACT_LABEL_RE.sub(" ", str(text or ""))
     stripped = _FACT_DATA_LABEL_RE.sub(" ", stripped)
-    return bool(re.search(r"\d", stripped) or _spelled_number_is_count(stripped))
+    if re.search(r"\d", stripped) or _spelled_number_is_count(stripped):
+        return True
+    return bool(_PKG2_CLAIM_RE.search(stripped))
 
 
 def _pkg2_tex_argument_context(text: str, pos: int) -> bool:
@@ -3713,9 +3995,10 @@ def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
     `drop_sentences` with two text-document rules: a heading line the reference
     does not touch is never swallowed (a heading is not part of the sentence
     under it), so `Methods\\nWe ran code/analysis.py ...` loses only its second
-    line; and a sentence carrying a numeric fact is KEPT (returned in `held`)
-    so the caller can report it for a prose rewrite instead of deleting the
-    fact. A reference that is a document INCLUDE rather than prose
+    line; and a sentence carrying a numeric fact OR another substantive claim is
+    KEPT (returned in `held`) so the caller can report it for a prose rewrite
+    instead of deleting the fact. A reference that is a document INCLUDE rather
+    than prose
     (`\\includegraphics{...}`, a Markdown link target) is left alone entirely:
     it comes back in `structural` so the caller reports it
     (`is_structural_reference_line`). Everything else is the shared sentence
@@ -4048,9 +4331,9 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
                                     "the author")
                         for ref in held:
                             entry["skipped"].append(
-                                f"{ref!r} carries a numeric fact and a dangling reference: "
-                                f"the fact was KEPT and the pointer must be rewritten in "
-                                f"prose")
+                                f"{ref!r} carries a numeric fact or another substantive claim "
+                                f"and a dangling reference: the content was KEPT and the pointer "
+                                f"must be rewritten in prose")
                         for ref in structural:
                             entry["skipped"].append(
                                 f"{ref!r} is a document INCLUDE (a command argument or a "
@@ -4221,6 +4504,17 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
             continue
         try:
             if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+                # A file too large to scan is a COVERAGE GAP, never a clean
+                # result: the bare `continue` let a 2.4 MB notes file carry the
+                # pipeline's own ledger through the blocking PKG-1 gate unseen
+                # (F11). The PKG-2 scan records its own gap the same way.
+                rows.append({
+                    "rule": "PKG-1", "severity": "low", "fix": "none", "file": rel,
+                    "line": 0, "gap": True, "advisory": True,
+                    "detail": (f"{rel}: the file is too large to scan "
+                               f"({p.stat().st_size} bytes > {PACKAGE_TEXT_BYTES_LIMIT}), so "
+                               f"its internal working material was NOT checked; inspect it by "
+                               f"hand")})
                 continue
             text = p.read_text("utf-8", "replace")
         except OSError:
@@ -4816,7 +5110,11 @@ def affinity_definition_rows(root: Path, limit: int = 8) -> list:
             for cell in rowtext.split("|"):
                 for tm in AFFINITY_TOOL_RE.finditer(cell):
                     cand = tm.group(1).strip()
-                    if cand[:1].isupper() and re.search(re.escape(cand), prose):
+                    if cand[:1].isupper():
+                        # Record the claim even when the prose NEVER names the
+                        # tool: that is the strongest form of PKG-9, and the
+                        # old prose pre-filter skipped exactly it (F091). The
+                        # sentence-support loop below decides support.
                         claimed.setdefault(cand, rowtext)
         # SUPPORT means one SENTENCE that names the tool and the quantity
         # together -- the shipped control is "NetMHCpan-predicted half-maximal
@@ -4891,7 +5189,7 @@ PKG4_FIGURE_CITE_RE = re.compile(
     # refuses a digit continuation or a thousands grouping ("Figure 2 and 3,000
     # cells" must not yield labels 3 and 000).
     r"(?P<labels>(?:S?\d+(?!(?:st|nd|rd|th)\b)(?!\d)(?!,\d{3}(?!\d))[a-z]?)"
-    r"(?:\s*(?:,|and|&|;|\u2013|-)\s*S?\d+(?!(?:st|nd|rd|th)\b)(?!\d)"
+    r"(?:\s*(?:,|and|&|;|\u2013|\u2014|-|to)\s*S?\d+(?!(?:st|nd|rd|th)\b)(?!\d)"
     r"(?!,\d{3}(?!\d))[a-z]?)*)")
 
 
@@ -4900,7 +5198,10 @@ def _pkg4_cited_labels(expr: str, plural: bool = True) -> list:
 
     Comma/and lists yield each token; a same-prefix numeric range expands
     ("Figures 2-4" cites 2, 3 and 4), capped so a typo cannot enumerate a
-    thousand labels. A comma-separated token is a LIST item only when the
+    thousand labels. A hyphen, an en dash, an em dash (Word's autocorrect)
+    and a spelled-out "to" all delimit the range: an em-dash row cited only
+    its endpoints, so the interior figure was never checked (F81). A
+    comma-separated token is a LIST item only when the
     keyword is plural or another separator follows it: "Fig. 2, 3 clusters"
     is a citation of Figure 2 followed by the count 3, not a two-item list.
     """
@@ -4916,7 +5217,7 @@ def _pkg4_cited_labels(expr: str, plural: bool = True) -> list:
         if sep == "," and not plural and not next_sep:
             continue
         m = re.fullmatch(
-            r"(?i)(S?)(\d+)[a-z]?\s*[\u2013-]\s*(S?)(\d+)[a-z]?", token)
+            r"(?i)(S?)(\d+)[a-z]?(?:\s*[\u2013\u2014-]\s*|\s+to\s+)(S?)(\d+)[a-z]?", token)
         if m and m.group(1).lower() == m.group(3).lower():
             lo, hi = int(m.group(2)), int(m.group(4))
             if lo <= hi and hi - lo <= 50:
@@ -4971,7 +5272,7 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
             # out: for a reader of the submission it is as unreachable as an area
             # file, so the row names it too.
             absent_labels.setdefault(label, []).append(rel)
-    if not carried_labels:
+    if not carried_labels and not absent_labels:
         # No figure FILE carries a label: this package embeds its artwork in the
         # documents themselves (the CopyNumBench main text carries five images
         # and no `Figure*.png`), so a name-based check has nothing to compare
@@ -5607,11 +5908,16 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     })
     _fmt_z = _format_module()
     zot_before = {}
+    # A DOCX the Zotero scan could not read is a COVERAGE GAP, not "no live
+    # fields": readiness must name it under a flatten request instead of
+    # reporting the document clean (F081).
+    zotero_scan_gaps = {}
     if _fmt_z is not None and hasattr(_fmt_z, "zotero_report_for_docx"):
         for q in _docx_files_under(tmp):
             try:
                 _zrep = _fmt_z.zotero_report_for_docx(q)
-            except Exception:                                      # noqa: BLE001
+            except Exception as e:                                 # noqa: BLE001
+                zotero_scan_gaps[q.name] = f"{type(e).__name__}: {e}"
                 continue
             zot_before[q.name] = int((_zrep.get("counts") or {}).get("zotero", 0))
     format_fix = {
@@ -5630,13 +5936,16 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         for q in _docx_files_under(tmp):
             try:
                 _zrep = _fmt_z.zotero_report_for_docx(q)
-            except Exception:                                      # noqa: BLE001
+            except Exception as e:                                 # noqa: BLE001
+                zotero_scan_gaps.setdefault(q.name, f"{type(e).__name__}: {e}")
                 continue
             _n = (_zrep.get("counts") or {}).get("zotero", 0)
             if _n:
                 hygiene["zotero_live_fields"].append({"file": q.name, "fields": int(_n)})
             elif zot_before.get(q.name):
                 hygiene["zotero_unlinked"]["documents"].append(q.name)
+    hygiene["zotero_scan_gaps"] = [
+        {"file": name, "error": err} for name, err in sorted(zotero_scan_gaps.items())]
     # Package hygiene: the by-product names are stripped above; what REMAINS is
     # scanned for internal material (PKG-1) and every shipped PDF for an
     # unfilled/blank artifact (FMT-PDF1..3). These are reported, never silently
@@ -5998,6 +6307,18 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"own model (the corpus minus the evidence areas, `code/` and the author's "
                  f"READMEs)")
     internal = hygiene.get("internal_artifacts") or []
+    # A too-large file's PKG-1 row is a coverage gap, not a finding: printing it
+    # under "must remove or rewrite" accused the package of material nobody read
+    # (F11). The gap is reported in its own paragraph.
+    _internal_gaps = [r for r in internal if r.get("gap") or r.get("coverage_gap")]
+    internal = [r for r in internal if not (r.get("gap") or r.get("coverage_gap"))]
+    if _internal_gaps:
+        L.append("")
+        L.append(f"**{len(_internal_gaps)} file(s) could NOT be scanned for internal "
+                 f"material (PKG-1 coverage gap) -- whether they carry the pipeline's own "
+                 f"ledger/report text is UNKNOWN; inspect them by hand:**")
+        for r in _internal_gaps[:12]:
+            L.append(f"  - `{r.get('file')}`: {str(r.get('detail'))[:240]}")
     if internal:
         L.append("")
         L.append(f"**{len(internal)} internal-artifact finding(s) in the published package "
@@ -6694,6 +7015,17 @@ def package_readiness(final_clean: dict, residuals: dict = None,
     """
     hyg = (final_clean or {}).get("hygiene") or {}
     findings = []
+    # No published package means there is nothing to be ready. The hygiene map
+    # of a `{"skipped": ...}` record is empty, so this function used to produce
+    # no findings and return submission_ready=True while the sibling readme
+    # said the package was NOT published (F025). That contradiction could even
+    # satisfy `--require-ready`.
+    _skip_reason = (final_clean or {}).get("skipped")
+    if _skip_reason:
+        findings.append({
+            "rule": "PUB-1", "document": "",
+            "detail": (f"no final_clean_version package was published ({_skip_reason}); "
+                       f"there is no package to assess for submission readiness")})
     _atc = _atc_mode(author_to_complete)
     for it in ((residuals or {}).get("items") or []):
         it = str(it)
@@ -6777,7 +7109,11 @@ def package_readiness(final_clean: dict, residuals: dict = None,
             "detail": f"hand-off marker coverage is UNVERIFIED in this file: {_detail}"})
     for r in hyg.get("internal_artifacts") or []:
         findings.append({"rule": r.get("rule") or "PKG-1",
-                         "document": r.get("file"), "detail": r.get("detail")})
+                         "document": r.get("file"), "detail": r.get("detail"),
+                         # A file the scan could not read is a gap, not an
+                         # accusation: reported, never gated (F11).
+                         "advisory": bool(r.get("advisory") or r.get("gap")
+                                          or r.get("coverage_gap"))})
     for rel in hyg.get("present_non_shippable") or []:
         findings.append({
             "rule": "PKG-1", "document": rel,
@@ -6921,10 +7257,17 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                 "single_cell_citation_mismatch", "caption_definition_gaps",
                 "form_failure_claims", "document_read_gaps"):
         for r in pc.get(key) or []:
+            # A coverage-gap row names its document in `document` and carries
+            # file="" (F121), has no line (F198), and is a report of what the
+            # scan could not inspect -- never a defect the package is accused of.
+            _gap = bool(r.get("gap") or r.get("coverage_gap"))
+            _line = r.get("line")
             findings.append({"rule": r.get("rule") or "PKG-11",
-                             "document": r.get("file"),
-                             "advisory": bool(r.get("advisory")),
-                             "detail": f"line {r.get('line')}: {r.get('detail')}"})
+                             "document": r.get("document") or r.get("file"),
+                             "advisory": bool(r.get("advisory") or _gap),
+                             "detail": (str(r.get("detail") or "")
+                                        if _gap or not _line else
+                                        f"line {_line}: {r.get('detail')}")})
     for r in hyg.get("front_matter_gaps") or []:
         findings.append({"rule": r.get("rule") or "FMT-TP1", "document": r.get("file"),
                          "advisory": True, "detail": r.get("detail")})
@@ -6943,6 +7286,16 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                            f"format_fix=off), so they were left live rather than frozen with "
                            f"unverified numbering; refresh it in Word/Zotero and re-run, or "
                            f"flatten it manually and re-verify")})
+        for r in hyg.get("zotero_scan_gaps") or []:
+            # The scan never saw these bytes, so it cannot say they carry no live
+            # fields. Reporting them as clean is the silent-coverage defect (F081).
+            findings.append({
+                "rule": "FMT-Z7", "document": r.get("file"),
+                "detail": (f"the Zotero live-field scan could not read this document "
+                           f"({r.get('error')}), so the flatten gate never inspected it: "
+                           f"whether live citation fields remain is UNKNOWN. Open it in "
+                           f"Word/Zotero, refresh/flatten and re-verify, or fix the read "
+                           f"failure and re-run")})
     # REV-1/REV-2: the champion's OWN open items. A package whose revision stage
     # handed the author work is not "ready" merely because the mechanical gates
     # are clean -- the 2026-10-15 audit of the two clean packages was exactly
@@ -7149,6 +7502,60 @@ def scores_per_version_label(agg: dict) -> str:
     count = (agg or {}).get("scores_per_version")
     return ("per-version (see `scores_per_version_by_version`)"
             if count is None else str(count))
+
+
+_REVISION_REPAIR_FIELDS = ("status", "rows", "rolled_back", "rollback_unsafe",
+                           "rollback_error", "error", "ledger")
+
+
+def revision_repair_summary(stored) -> dict:
+    """The bounded-repair outcome carried by a round record, or {}.
+
+    `p08` records `rec["revision_repair"]` on the run record; the decision used
+    to read it nowhere, so an arm whose own revision audit confirmed defects
+    that its repair did NOT apply reached a certified champion with no mention
+    in decision.json or DECISION_REPORT.md (F014). Only the reportable fields
+    are copied (the repair ledger can be large).
+    """
+    rec = stored if isinstance(stored, dict) else {}
+    rep = rec.get("revision_repair")
+    if not isinstance(rep, dict) or not rep:
+        return {}
+    return {k: rep.get(k) for k in _REVISION_REPAIR_FIELDS if k in rep}
+
+
+def revision_repair_record(ctx, rd) -> dict:
+    """The bounded-repair outcome of a decided round's CHAMPION-producing run.
+
+    `p08` records `revision_repair` on the RUN record, not on the round record;
+    the round record is what `rounds_data` carries. Resolve the producing run
+    from the round's own pin (`produced_by_run`), as
+    `champion_producing_run()` does for the hand-off list. A round record that
+    carries the outcome directly is also accepted (older fixtures/tests).
+    """
+    rd = rd if isinstance(rd, dict) else {}
+    direct = revision_repair_summary(rd.get("stored") or {})
+    if direct:
+        return direct
+    if ctx is None:
+        return {}
+    pin = rd.get("pin") or {}
+    if not isinstance(pin, dict) or not pin:
+        stored = rd.get("stored") or {}
+        pin = find_pin(ctx, stored.get("pin_id")) or {}
+    rid = pin.get("produced_by_run") if isinstance(pin, dict) else None
+    run = (ctx.state.get("runs") or {}).get(rid) if rid else None
+    return revision_repair_summary(run or {})
+
+
+def revision_repair_failures(rounds_data, ctx=None) -> list:
+    """[{round, status, ...}] for every decided round whose bounded repair failed."""
+    out = []
+    for rd in rounds_data or ():
+        summary = revision_repair_record(ctx, rd)
+        if summary.get("status") == "failed":
+            out.append({"round": rd.get("round"), **summary})
+    return out
 
 
 def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
@@ -7371,6 +7778,21 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                      f"started from.")
         L.append(f"- winner directory: `{stored.get('winner_dir') or '(not published)'}/` "
                  f"(same content as the pin)")
+        _repair = revision_repair_record(ctx, rd)
+        if _repair.get("status") == "failed":
+            L.append(
+                "- bounded repair: **FAILED** — "
+                + str(_repair.get("error") or "the repair did not complete the plan")
+                + f" ({_repair.get('rows', '?')} planned row(s); "
+                + ("the audited pre-repair package was restored"
+                   if _repair.get("rolled_back") else
+                   "the rejected edits could NOT be rolled back")
+                + "). The confirmed repair-plan rows were NOT applied to this package; "
+                  "the unresolved defects remain visible in the arm's revision audit.")
+        elif _repair.get("status") == "done":
+            _ledger = _repair.get("ledger") or {}
+            L.append(f"- bounded repair: done ({_repair.get('rows', '?')} planned row(s)"
+                     + (f"; ledger {_ledger}" if _ledger else "") + ")")
         if stored.get("field_dropped"):
             L.append("- field deduplication (by content digest, first occurrence wins):")
             for d in stored["field_dropped"]:
@@ -7407,7 +7829,8 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                          f"{s['vs_base']:g}" if s.get("vs_base") is not None else "-",
                          _count_cell(ti.get("critical_remaining")),
                          _count_cell(writing),
-                         {True: "yes", False: "NO", None: "-"}[s.get("anti_regression_ok")],
+                         ("exempt (base)" if s.get("is_base") else
+                          {True: "yes", False: "NO", None: "-"}[s.get("anti_regression_ok")]),
                          f"{s['judges_seen']}/{s['judges_expected']}",
                          f"{s.get('author_placeholders') or 0}",
                          "CHAMPION" if vid == champ_rep else ""])
@@ -7691,7 +8114,7 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              "minor, tier priority order, peer before own -- until the cleanest version reaches "
              "the configured floor or every cell is used; fewer defects first), then `-median`, "
              "`-mean`, `IQR`, the CONTENT DIGEST (provenance-free: a "
-             "perfect tie must never be decided by the arm's name) and only after that the id. "
+             "perfect tie must never be decided by the arm's name). "
              "An exact (median, mean, IQR) tie is applied as retention BEFORE the prefix "
              "and digest. `critical_remaining`/`writing_remaining` are reported and "
              "cross-checked (self-reported marker values, +inf when absent) but are NOT ranking "
@@ -7802,12 +8225,13 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     L.append("")
     L.append("## 4. Run audit")
     L.append("")
-    rows = [[r["id"], r["kind"], r["round"], r["status"], r.get("attempts", 0),
+    rows = [[r["id"], r["kind"], r["round"], r["status"], attempt_split_cell(r),
              fmt_dur(r.get("last_duration")),
              "ok" if (r.get("postcheck") or {}).get("ok") else "ERR",
              (r.get("last_error") or "; ".join((r.get("postcheck") or {}).get("warnings", [])))[:60]]
             for r in ctx.runs()]
-    L.append(_tbl(rows, ["run", "kind", "round", "status", "att", "dur", "post", "note"]))
+    L.append(_tbl(rows, ["run", "kind", "round", "status", "att (full+aux)", "dur", "post",
+                         "note"]))
     L.append("")
     history = attempt_history_lines(ctx, indent="", limit=10)
     if history:
@@ -7947,13 +8371,23 @@ def cmd_sync_code(args) -> None:
             copy_asset_dirs(src, root, names=(name,))
             changed.append(name + "/")
         # The skills pack and the venue profiles are frozen and manifest-recorded
-        # too. A trimmed checkout may legitimately omit either (module_manifest
-        # records None), so a missing maintained directory is not a partial
-        # bundle; a root that lacks one when the maintained tree has it is
-        # brought up to date.
+        # too. A trimmed checkout may legitimately omit either, so a missing
+        # maintained directory is not a partial bundle; a root that lacks one
+        # when the maintained tree has it is brought up to date.
+        #
+        # A directory the maintained tree no longer carries while the ROOT does
+        # is UNMANAGED, never "brought up to date": the old code skipped it and
+        # then recorded the maintained manifest's None, so the root silently
+        # kept stale profiles that no drift check could see (a falsy recorded
+        # hash is skipped) and the note below claimed a copy that never ran
+        # (F127). Keep the root's directory, record the ROOT's own digest so
+        # state.json describes what the root actually has, and name it.
+        unmanaged_assets = []
         for name in PIPELINE_SKILL_ASSET_DIRS + PIPELINE_VENUE_ASSET_DIRS:
             s = src / name
             if not s.is_dir():
+                if (root / name).is_dir():
+                    unmanaged_assets.append(name)
                 continue
             try:
                 same = asset_dir_digest(src, name) == asset_dir_digest(root, name)
@@ -7965,6 +8399,10 @@ def cmd_sync_code(args) -> None:
             copy_asset_dirs(src, root, names=(name,))
             changed.append(name + "/")
         ident = pipeline_identity()
+        for name in unmanaged_assets:
+            ident["modules"][name] = asset_dir_digest(root, name)
+        if unmanaged_assets:
+            ident["unmanaged_assets"] = list(unmanaged_assets)
         ident["synced_at"] = utcnow()
         ctx.state["pipeline"] = ident
         ctx.save_state()
@@ -7975,7 +8413,14 @@ def cmd_sync_code(args) -> None:
         print(f"[sync-code] already current: {', '.join(unchanged)}")
     print(f"[sync-code] recorded module manifest: "
           f"{', '.join(f'{k}={str(v)[:12]}' for k, v in ident['modules'].items())}")
-    if (root / VENUE_PROFILES_DIRNAME).is_dir():
+    for name in unmanaged_assets:
+        print(f"[sync-code] WARNING: {root / name} exists in this root but NOT in the "
+              f"maintained tree, so it was left UNMANAGED (recorded with its root digest, "
+              f"not as absent); its content may be stale. Reconcile or remove it before the "
+              f"next run.")
+    if (src / VENUE_PROFILES_DIRNAME).is_dir():
+        # The note is true only when the maintained tree actually carries the
+        # directory: with it trimmed away nothing was copied (F127).
         print(f"[sync-code] note: {root / VENUE_PROFILES_DIRNAME} is part of the frozen "
               f"asset manifest and was brought up to date with the maintained tree above. "
               f"A root-specific profile installed with `{Path(__file__).name} "
@@ -8103,8 +8548,8 @@ def cmd_status(args) -> None:
         print(_tbl(rows, ["ROUND", "STATUS", "FIELD", "SCORES/VER", "CHAMPION", "MEDIAN",
                           "MEAN", "PIN", "WINNER DIR", "HAND-OFF"]))
         print()
-    hdr = (f"{'RUN ID':<24}{'KIND':<10}{'RND':<5}{'STATUS':<9}{'ATT':<4}{'DUR':<9}{'POST':<7}"
-           f"NOTE")
+    hdr = (f"{'RUN ID':<24}{'KIND':<10}{'RND':<5}{'STATUS':<9}{'FULL+AUX':<9}{'DUR':<9}"
+           f"{'POST':<7}NOTE")
     print(hdr)
     print("-" * len(hdr))
     for rec in ctx.runs():
@@ -8116,8 +8561,10 @@ def cmd_status(args) -> None:
         if rec["kind"] == "judge" and rec.get("target_id"):
             note = f"target={rec['target_id']} " + note
         print(f"{rec['id']:<24}{rec['kind']:<10}{rec.get('round', '-'):<5}"
-              f"{rec['status']:<9}{rec.get('attempts', 0):<4}"
+              f"{rec['status']:<9}{attempt_split_cell(rec):<9}"
               f"{fmt_dur(rec.get('last_duration')):<9}{post:<7}{note[:60]}")
+    print("  FULL+AUX = full stage launches + scoped-repair/continuation/re-verify sessions "
+          "(lifetime; the retry budget is reported per invocation on the console).")
     print()
     history = attempt_history_lines(ctx)
     if history:
@@ -8230,6 +8677,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     evid_changed, evid_missing = evidence_integrity(ctx)
     advisories = decide_advisories(ctx)
     rounds_data, problems = [], []
+    # A cross-judge conflict audit that could not run is a COVERAGE GAP, not a
+    # console warning: the round's manual-check list did not happen, so the
+    # decision must carry `judge_conflicts.ok=false` and may not be certified
+    # (F026).
+    judge_conflict_failures = []
     problems.extend(f"evidence: {e}" for e in evid_changed)
     if not pok:
         problems.append(f"integrity: the pristine original CHANGED ({pdetail}); every judge's "
@@ -8258,16 +8710,39 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             mode = _plan_mode or str(rrec.get("champion_select") or "revise")
             target = auto_champion_vid(ctx, r, mode)
             stored_champ = str(rrec.get("champion") or target)
-            agg, sel = auto_round_payload(ctx, r, stored_champ, mode)
+            # A tolerated stage is a DECLARED provisional result: an exhausted
+            # run's best failed trial was used (or, for a root written by the
+            # older base-fallback feature, the round closed with its base). It
+            # is not a corrupted record, so it is re-derived as provisional
+            # instead of becoming an integrity problem.
+            _tf = rrec.get("tolerated_fail") or rrec.get("almost_fail") or {}
+            _tf_fallback = bool(
+                isinstance(_tf, dict) and _tf.get("fallback")
+                and stored_champ == A1_ID and stored_champ != target
+            )
+            agg, sel = auto_round_payload(ctx, r, stored_champ, mode,
+                                          fallback=_tf_fallback)
             mismatch = None
-            if stored_champ != target:
-                mismatch = (f"auto-promoted champion {stored_champ!r} != the version its plan "
-                            f"names ({target!r})")
-                problems.append(f"round {r}: {mismatch}; the round record is inconsistent")
+            if _tf_fallback:
+                sel["tolerated_fail"] = _tf
+                sel["tolerated_fail_fallback"] = True
+                sel["promised_champion"] = str(_tf.get("promised_champion") or target)
+                print(f"[decide] round {r}: {stored_champ} is the recorded TOLERATED_FAIL "
+                      f"fallback (the promised {target} never finished); the round is "
+                      f"PROVISIONAL (not a scored/certified decision)")
+            else:
+                if stored_champ != target:
+                    mismatch = (f"auto-promoted champion {stored_champ!r} != the version its "
+                                f"plan names ({target!r})")
+                    problems.append(f"round {r}: {mismatch}; the round record is inconsistent")
+                print(f"[decide] round {r}: {stored_champ} was auto-promoted by "
+                      f"--champion-select {mode}; no judge panel exists, so the round is "
+                      f"PROVISIONAL (not a scored/certified decision)")
+            if _tf and not _tf_fallback:
+                sel["tolerated_fail"] = _tf
+                print(f"[decide] round {r}: a TOLERATED_FAIL stage's best failed trial was "
+                      f"used; the round is PROVISIONAL (not a scored/certified decision)")
             auto_rounds.append(r)
-            print(f"[decide] round {r}: {stored_champ} was auto-promoted by "
-                  f"--champion-select {mode}; no judge panel exists, so the round is "
-                  f"PROVISIONAL (not a scored/certified decision)")
             rounds_data.append({"round": r, "agg": agg, "sel": sel,
                                 "pin": find_pin(ctx, rrec.get("pin_id")) or {},
                                 "winner": find_winner(ctx, r), "stored": rrec,
@@ -8277,11 +8752,14 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         # Re-derive the round with the ranking key it was DECIDED with. These
         # two values are mutable configuration (`set-dedup-mode`,
         # `set-tiebreak-defect-floor`); reading today's config re-ranked a past
-        # decision after an operator change (F18/F19). Old roots that predate
-        # the record fall back to the current config.
+        # decision after an operator change (F18/F19). A legacy round that
+        # predates the record was decided with the historical default (`off`);
+        # passing None made `aggregate_round` read the LIVE config, so changing
+        # today's mode re-aggregated a past round under it (F035).
         _recorded_rule = rrec.get("anti_regression_rule") or next(
             (s.get("anti_regression_rule") for s in (rrec.get("stats") or {}).values()), None)
-        agg = aggregate_round(ctx, r, field, dedup=rrec.get("dedup_mode"), rule=_recorded_rule)
+        agg = aggregate_round(ctx, r, field, dedup=rrec.get("dedup_mode") or "off",
+                              rule=_recorded_rule)
         # Keep every decided round's own raw-score file present and current, even
         # for roots whose round predates it (the same file `run` writes at
         # aggregation time).
@@ -8346,6 +8824,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                   f"({_cfc.get('total', 0)} conflict(s): {_cfc.get('blocker', 0)} blocker, "
                   f"{_cfc.get('major', 0)} major, {_cfc.get('minor', 0)} minor)")
         except Exception as e:                                       # noqa: BLE001
+            _jcf = f"round {r}: the cross-judge conflict audit FAILED ({type(e).__name__}: {e})"
+            judge_conflict_failures.append(_jcf)
             print(f"[decide] round {r} WARNING: judge-conflict audit failed: {e}")
         # The same guard `run` applies before deciding a round: a shrunk panel must
         # never be certified. `run` refuses to decide; `decide` must refuse to sign.
@@ -8378,6 +8858,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                 with contextlib.suppress(OSError):
                     _stale_gaps.unlink()
         sel = select_champion(ctx, r, agg, floor=rrec.get("tiebreak_defect_floor"))
+        # `select_champion` derives the winner from the field and cannot know a
+        # tolerated stage; `finalize_round` recorded it on the round. Re-derive
+        # it into the decision's selection, exactly as the auto branch does, or
+        # decision.json loses the tolerated run names (F112).
+        sel = selection_with_tolerated(sel, rrec)
         mismatch = None
         if sel["champion"] != rrec.get("champion"):
             mismatch = (f"recomputed champion {sel['champion']!r} != stored champion "
@@ -8441,13 +8926,51 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             print(f"[decide] WARNING: could not write the status readme: {e}")
         sys.exit(2)
     final = rounds_data[-1]
+    # A bounded repair that failed leaves its confirmed repair-plan rows
+    # unapplied (the audited pre-repair package is what was judged). Rule 10
+    # requires the unrepaired record to travel with the decision; before F014 it
+    # was visible only on the console.
+    _repair_failures = revision_repair_failures(rounds_data, ctx)
+    for _rf in _repair_failures:
+        problems.append(
+            f"round {_rf.get('round')}: the bounded repair FAILED "
+            f"({str(_rf.get('error') or 'no error recorded')[:240]}) -- "
+            + ("the audited pre-repair package was restored and judged"
+               if _rf.get("rolled_back") else
+               "the rejected edits could not be rolled back, so this arm is not publishable")
+            + f"; {_rf.get('rows', '?')} confirmed repair-plan row(s) were NOT applied")
+    # A round that used a TOLERATED_FAIL trial is PROVISIONAL: its exhausted
+    # stage never passed its postcheck, so the decision may not be certified
+    # even when a panel is complete (rule 10: output is not certification).
+    _decided_rounds = {rd["round"] for rd in rounds_data}
+    # A tolerated judge or response run is not in `round_run_plan`, so read the
+    # run records too -- but only the runs of the rounds this decision covers.
+    # A tolerated run in a later, incomplete round cannot block (or be hidden
+    # by) this decision; that round is a separate decision.
+    _tolerated_rounds = sorted(
+        {rd["round"] for rd in rounds_data
+         if (rd.get("stored") or {}).get("tolerated_fail")
+         or (rd.get("sel") or {}).get("tolerated_fail")}
+        | {int(rec["round"]) for rec in ctx.runs()
+           if rec.get("tolerated_fail") and rec.get("status") == "done"
+           and rec.get("round") is not None
+           and int(rec["round"]) in _decided_rounds}
+    )
+    _tol_note = ""
+    if _tolerated_rounds:
+        _tol_note = ("round(s) " + ", ".join(str(r) for r in _tolerated_rounds)
+                     + " used TOLERATED_FAIL stage(s): a stage exhausted its retries and "
+                       "its best failed trial was used; the decision is PROVISIONAL and "
+                       "not certified")
+        print(f"[decide] {_tol_note}")
     # The anti-regression gate exempts the round's own base (select_champion: the
     # base is the incumbent the no-progress fallback crowns), so the FINAL champion
     # can be a row the panel judged worse than the pristine original -- in round 2+
     # that is the inherited champion re-judged by a stricter panel. The selection
     # rule is left alone; decide simply must not sign that winner as certified,
     # exactly like an incomplete panel.
-    final_champ_row = stats_row_for(final["agg"], final["stored"].get("champion"))
+    final_champ_row = stats_row_for(final["agg"], final["stored"].get("champion_rep")
+                                      or final["stored"].get("champion"))
     final_regression = None
     if final_champ_row and final_champ_row.get("anti_regression_ok") is False:
         final_regression = (f"the final champion {final['stored'].get('champion')!r} is judged "
@@ -8469,7 +8992,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         and int(_stopped_raw.get("planned_rounds") or -1) == int(R)
     _stopped = _stopped_raw if _stop_applies else {}
     partial_run = final["round"] < R and not _stop_applies
-    provisional = partial_run or bool(auto_rounds)
+    provisional = partial_run or bool(auto_rounds) or bool(_tolerated_rounds)
     win_dir = (contained_under(ctx.root, final["stored"]["winner_dir"])
                if final["stored"].get("winner_dir") else None)
     _win_ok = bool(final["stored"].get("winner_dir") and win_dir and win_dir.is_dir())
@@ -8549,6 +9072,15 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # champion exists there is nothing to publish, and the readme records the
     # skip reason.
     gate_problems = []
+    # A failed cross-judge conflict audit means the required manual-check list
+    # was never produced for that round. `decide` used to print a WARNING and
+    # carry on to a certified decision (F026); it now blocks certification.
+    for _jcf in judge_conflict_failures:
+        gate_problems.append(
+            f"{_jcf}; the required cross-judge manual checks were NOT produced, so "
+            f"the decision cannot be certified")
+    if _tol_note:
+        gate_problems.append(_tol_note)
     if getattr(args, "format_gate", False) and format_problems:
         gate_problems.append(f"{len(format_problems)} HIGH-severity formatting finding(s) in the "
                              f"final winner (--format-gate)")
@@ -8657,11 +9189,31 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             "are a named gap, not a clean result"]
     certification["submission_ready"] = readiness["submission_ready"]
     certification["package_findings"] = readiness["findings"]
+    if _repair_failures:
+        # An explicit note, not a blocker: the judged bytes are the audited
+        # pre-repair package, but the operator MUST see that the confirmed plan
+        # was not applied (F014, rule 10).
+        certification["revision_repair"] = _repair_failures
+        _repair_rounds = ", ".join(str(x.get("round")) for x in _repair_failures)
+        certification["notes"] = list(certification.get("notes") or []) + [
+            f"round(s) {_repair_rounds}: a bounded repair FAILED, so its confirmed "
+            f"repair-plan row(s) were not applied to the judged package; the audited "
+            f"pre-repair bytes were kept and the unrepaired defects stay on record"]
     record_anonymity_gaps(ctx, certification); cert_blockers = certification["blockers"]  # F-002
     cert_notes = certification["notes"]
     # The status document is a SIBLING of the directory and is written on every
     # `decide` (certified, provisional or refused), so the package is never
     # mistaken for a signed answer.
+    def _champ_row(agg, stored) -> dict:
+        """The statistics row of the round's JUDGED candidate.
+
+        `stats_row_for` is keyed on the candidate id, but a deduplicated fresh
+        champion is stored as the representative id (`champion_rep`); looking up
+        only `champion` lost the panel statistics (F086).
+        """
+        return stats_row_for(
+            agg, stored.get("champion_rep") or stored.get("champion")) or {}
+
     readme_path = write_final_clean_readme(ctx, certification, final, final_clean)
     decision = {
         "generated": utcnow(),
@@ -8674,6 +9226,10 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         "config": ctx.cfg,
         "integrity": integrity,
         "problems": problems,
+        # The cross-judge conflict audit is a required manual check; `ok: false`
+        # records that it did not run for at least one round (F026).
+        "judge_conflicts": {"ok": not judge_conflict_failures,
+                            "failures": list(judge_conflict_failures)},
         "certification": certification,
         "judge_provider": ctx.state.get("judge_provider") or {},
         "stopped_early": _stopped or None,
@@ -8683,38 +9239,49 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         "residual_gate": bool(getattr(args, "residual_gate", DEFAULT_RESIDUAL_GATE)),
         "residuals": residuals,
         "readiness": readiness,
-        "score_model": score_model_doc(ctx),
+        # The score model must document the ranking THIS decision re-derived:
+        # a re-derived past round ranks under its RECORDED floor/dedup mode, so
+        # reading today's config here contradicted the decision it describes
+        # (F029).
+        "score_model": score_model_doc(
+            ctx,
+            floor=(final["stored"] or {}).get("tiebreak_defect_floor"),
+            dedup=(final["stored"] or {}).get("dedup_mode") or "off",
+            rule=(final["stored"] or {}).get("anti_regression_rule")),
         "rounds": [{"round": rd["round"],
                     "field": rd["agg"]["field"],
                     "field_size": rd["agg"]["field_size"],
                     "scores_per_version": rd["agg"]["scores_per_version"],
                     "stats": rd["agg"]["stats"],
                     "diagnostics": rd["agg"]["diagnostics"],
-                    # The reported issue census (issues per version/tier/severity,
-                    # from the judges' own ledger rows). REPORTED ONLY -- it never
-                    # feeds the ranking; it is the number a chain of runs compares
-                    # across rounds. The same data is in
+                    # The issue census (issues per version/tier/severity, from
+                    # the judges' own ledger rows). It is the selection's
+                    # LEADING ranking input: champion_sort_key reads the adaptive
+                    # severity_tier_category prefix of this census first, before
+                    # the panel median/mean/IQR/digest. The same data is in
                     # reports/round<r>_issue_census.csv.
                     "issue_census": rd["agg"].get("issue_census") or {},
                     "selection": rd["sel"],
                     "champion_pin": rd["pin"],
                     "stored_champion": rd["stored"].get("champion"),
+                    # The arm's own bounded-repair outcome. A `failed` entry
+                    # means its confirmed repair-plan rows were not applied to
+                    # the judged bytes (F014).
+                    "revision_repair": revision_repair_record(ctx, rd) or None,
                     # The incumbent margin the human reads: median + sign counts of
                     # the (champion, base) directed scores. REPORTED ONLY -- the
                     # ranking key stays field-wide (a 2*judges pair is one outlier
                     # session away from flipping).
                     "champion_vs_base": {
-                        "median": (stats_row_for(rd["agg"],
-                                                 rd["stored"].get("champion")) or {}
-                                   ).get("vs_base"),
-                        "n": len(((stats_row_for(rd["agg"], rd["stored"].get("champion")) or {}
-                                  ).get("vs_base_vals") or [])),
-                        "wins": sum(1 for x in ((stats_row_for(
-                            rd["agg"], rd["stored"].get("champion")) or {}
-                        ).get("vs_base_vals") or []) if x > 0),
-                        "losses": sum(1 for x in ((stats_row_for(
-                            rd["agg"], rd["stored"].get("champion")) or {}
-                        ).get("vs_base_vals") or []) if x < 0),
+                        "median": _champ_row(rd["agg"], rd["stored"]).get("vs_base"),
+                        "n": len(_champ_row(rd["agg"], rd["stored"]).get("vs_base_vals")
+                                 or []),
+                        "wins": sum(1 for x in (
+                            _champ_row(rd["agg"], rd["stored"]).get("vs_base_vals")
+                            or []) if x > 0),
+                        "losses": sum(1 for x in (
+                            _champ_row(rd["agg"], rd["stored"]).get("vs_base_vals")
+                            or []) if x < 0),
                         "reported_only": True,
                     },
                     "captions": {vid: {"gate_ok": s.get("caption_gate_ok"),
@@ -8748,6 +9315,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                   "residuals": residuals,
                   "final_clean_version": final_clean_json,
                   "revision_token": win_token,
+                  "revision_repair": revision_repair_record(ctx, final) or None,
                   "final_round_complete": final["round"] == R},
     }
     write_json_atomic(ctx.reports_dir / "decision.json", decision)
@@ -8842,7 +9410,9 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     for rd in rounds_data:
         st = rd["agg"]["stats"]
         champ = rd["stored"].get("champion")
-        crow = stats_row_for(rd["agg"], champ)
+        # The console statistic is the representative row (F086); the printed
+        # id stays the champion the decision records.
+        crow = _champ_row(rd["agg"], rd["stored"])
         med = crow.get("median")
         mean = crow.get("mean")
         print(f"[decide] round {rd['round']}: field={rd['agg']['field_size']} "
@@ -8884,6 +9454,10 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
               f"the directory is kept")
     _hyg = final_clean.get("hygiene") or {}
     for r in (_hyg.get("internal_artifacts") or [])[:5]:
+        if r.get("gap") or r.get("coverage_gap"):
+            print(f"[decide] PACKAGE HYGIENE (PKG-1 COVERAGE GAP, NOT a package defect): "
+                  f"{r.get('file')} -- {r.get('detail')}")
+            continue
         print(f"[decide] PACKAGE HYGIENE (PKG-1, author action required): "
               f"{r.get('file')} line {r.get('line')} -- {r.get('evidence')}")
     for r in (_hyg.get("pdf_artifacts") or [])[:5]:

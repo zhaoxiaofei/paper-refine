@@ -99,6 +99,7 @@ _NO_REDIRECT_OPENER = urllib.request.build_opener(rt._NoRedirectHandler)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import paper_dsh_runtime
+    import paper_agent_runtime_patch  # noqa: F401  (F024/F025, parent-tracked)
 finally:
     sys.path.pop(0)
 
@@ -141,17 +142,59 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _permanent_transport_error(err) -> bool:
+    """True for a transport error a retry cannot fix (redirect, auth, DNS/TLS)."""
+    text = str(err or "").lower()
+    return any(marker in text for marker in (
+        "redirect refused", "certificate verify failed",
+        "name or service not known", "nodename nor servname",
+        "unknown url type",
+        "unauthorized", "forbidden"))
+
+
 def _normalize_harness(value: str) -> str:
     """Accept the pipeline's harness spellings; only the three are valid."""
     text = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
     return {"gpt-codex": "codex", "claude-code": "claude"}.get(text, text)
 
 
+def _validate_base_url(url: str) -> str:
+    """Reject a malformed endpoint ONCE, as a clean ConfigError.
+
+    `urlsplit` raises ValueError for a bracketed host such as `http://[::1`
+    (which `config()` used to accept), and that raw traceback escaped every
+    request/probe path including the Dots key preflight (F15/F49). Validating
+    here also gives the dsh patch generator a usable URL (F48).
+    """
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+    except ValueError as e:
+        raise rt.ConfigError(f"invalid --base-url: {e}")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise rt.ConfigError(
+            f"--base-url must be an http(s) URL with a host: {url!r}")
+    return url
+
+
+def _effort_for(family: str, explicit: str) -> str:
+    """The shared effort table as a clean ConfigError (F66)."""
+    try:
+        return rt.normalize_reasoning_effort(family, explicit)
+    except rt.ConfigError as e:
+        raise rt.ConfigError(f"invalid reasoning effort: {e}")
+
+
 def config(args=None) -> dict:
     """Resolve the effective endpoint/harness configuration (args > env)."""
     args = args or argparse.Namespace()
-    base = (getattr(args, "base_url", None)
-            or _env("PAPER_DOTS_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+    # A URL may carry a credential in its userinfo/query; the base URL reaches
+    # argv, the child environment and --probe output, so split it off and pass
+    # it through the API-key channel.
+    raw_base = (getattr(args, "base_url", None)
+                or _env("PAPER_DOTS_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+    base, url_secret = rt.split_endpoint_credentials(raw_base)
+    base = base.rstrip("/")
+    _validate_base_url(base)
     # ``args > env`` also for an explicitly supplied EMPTY key: a caller that
     # passes ``api_key=""`` is asking for a keyless endpoint (the local
     # OpenAI-compatible case), and the ambient DOTS_API_KEY must not silently
@@ -159,6 +202,8 @@ def config(args=None) -> dict:
     supplied_key = getattr(args, "api_key", None)
     key = (supplied_key if supplied_key is not None
            else (_env("PAPER_DOTS_API_KEY") or _env("DOTS_API_KEY")))
+    if supplied_key is None and not key and url_secret:
+        key = url_secret
     compaction_key = (
         _env("DOTS_API_KEY_1474")
         or _env("DOTS_AI_API_KEY_1474")
@@ -176,7 +221,7 @@ def config(args=None) -> dict:
         # An explicit --reasoning-effort/flag wins, then the shared
         # PAPER_AGENT_REASONING_EFFORT override, then the adapter's family
         # variable; the shared table validates the level.
-        "effort": rt.normalize_reasoning_effort(
+        "effort": _effort_for(
             "dots3-note-preview",
             getattr(args, "reasoning_effort", None)
             or _env("PAPER_AGENT_REASONING_EFFORT", DEFAULT_EFFORT),
@@ -209,6 +254,18 @@ def _selection(cfg: dict):
     return selection
 
 
+def _request_url(base: str, suffix: str) -> str:
+    """`base` with `suffix` added to its PATH, keeping any query/fragment.
+
+    String-concatenating `base + '/chat/completions'` put the new path inside a
+    `?model=...` query value, so the request URL was malformed (F039).
+    """
+    parsed = urllib.parse.urlsplit(str(base))
+    path = parsed.path.rstrip("/") + suffix
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+
+
 def _request(method: str, url: str, payload: dict = None, api_key: str = "",
              timeout: float = 10.0) -> tuple:
     """(status, parsed-body-or-text, error) for one JSON request."""
@@ -221,7 +278,12 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
         headers["Authorization"] = f"Bearer {api_key}"
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    except ValueError as e:
+        # A malformed base URL must be a clean adapter error, not a raw
+        # urllib ValueError traceback (F050).
+        return 0, None, f"invalid endpoint URL: {e}"
     try:
         with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -237,7 +299,11 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
             return 0, None, (f"HTTP {e.code} redirect refused: the endpoint tried "
                              f"to forward the request (and its credentials) to "
                              f"another URL")
-        raw = e.read().decode("utf-8", "replace")
+        try:
+            raw = e.read().decode("utf-8", "replace")
+        except (http.client.HTTPException, OSError) as read_exc:
+            return 0, None, (f"could not read the HTTP {e.code} response body: "
+                             f"{type(read_exc).__name__}: {read_exc}")
         try:
             body = json.loads(raw)
         except ValueError:
@@ -280,7 +346,8 @@ def _request_with_retry(
         status, body, err = _request(
             method, url, payload=payload, api_key=api_key, timeout=timeout
         )
-        retryable = bool(err) or schedule.status_is_retryable(status)
+        retryable = ((bool(err) and not _permanent_transport_error(err))
+                     or schedule.status_is_retryable(status))
         if not retryable or attempt >= schedule.max_retries:
             return status, body, err
         attempt += 1
@@ -293,7 +360,7 @@ def _request_with_retry(
 
 def probe_endpoint(cfg: dict, timeout: float = 10.0) -> tuple:
     """(ok, model_ids, error) from GET {base}/models."""
-    status, body, err = _request("GET", f"{cfg['base_url']}/models",
+    status, body, err = _request("GET", _request_url(cfg["base_url"], "/models"),
                                  api_key=cfg["api_key"], timeout=timeout)
     if err or status != 200 or not isinstance(body, dict):
         return False, [], err or f"HTTP {status}: {str(body)[:160]}"
@@ -312,7 +379,7 @@ def check_tools(cfg: dict, timeout: float = 60.0) -> tuple:
             "parameters": {"type": "object", "properties": {}}}}],
         "tool_choice": "auto",
     }
-    status, body, err = _request("POST", f"{cfg['base_url']}/chat/completions",
+    status, body, err = _request("POST", _request_url(cfg["base_url"], "/chat/completions"),
                                  payload=payload, api_key=cfg["api_key"],
                                  timeout=timeout)
     if err:
@@ -463,7 +530,7 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
                # above covers the thinking trace plus the answer.
                "chat_template_kwargs": {"enable_thinking": True}}
     status, body, err = _request_with_retry(
-        "POST", f"{cfg['base_url']}/chat/completions",
+        "POST", _request_url(cfg["base_url"], "/chat/completions"),
         payload=payload, api_key=cfg["api_key"], timeout=600.0)
     if err or status != 200 or not isinstance(body, dict):
         return "", err or f"HTTP {status}: {str(body)[:400]}"
@@ -574,7 +641,11 @@ def main(argv=None) -> int:
     p.add_argument("--chat", action="store_true",
                    help="read a prompt from stdin and print one chat completion")
     args = p.parse_args(argv)
-    cfg = config(args)
+    try:
+        cfg = config(args)
+    except rt.ConfigError as e:
+        print(f"dots: {e}", file=sys.stderr)
+        return 2
     atexit.register(_cleanup)
     if cfg["harness"] not in ("codex", "dsh", "claude", "chat"):
         print(f"dots: unknown harness {cfg['harness']!r}; use codex, dsh, claude or chat",

@@ -412,7 +412,14 @@ def pipeline_identity() -> dict:
 
 
 def asset_dir_digest(base_dir: Path, name: str):
-    """One digest for a frozen asset directory (None when it is absent).
+    """One digest for a frozen asset directory.
+
+    None means ABSENT; the distinct `<unreadable>` sentinel means the directory
+    exists but could not be hashed. Conflating the two recorded an unreadable
+    frozen bundle exactly like a trimmed checkout, and the drift readers skip
+    falsy recorded hashes, so a root that could not verify its own code ran
+    anyway (F136). The sentinel is a truthy string that never equals a sha256,
+    so `root_pipeline_staleness`/`refuse_foreign_pipeline` report the drift.
 
     Every shipped file is hashed, not just `*.py`: the skills pack's prompts and
     reference tables change a stage's behaviour as much as a script does. Only
@@ -424,6 +431,15 @@ def asset_dir_digest(base_dir: Path, name: str):
     dirp = Path(base_dir) / name
     if not dirp.is_dir():
         return None
+    # `Path.rglob` SWALLOWS a PermissionError while listing a subtree, so an
+    # unreadable subdirectory produced a complete-looking digest over the rest
+    # of the tree (N-g8-2/F136). Probe completeness with os.walk, whose onerror
+    # runs; a readable tree is unchanged, so recorded digests stay identical.
+    _walk_errors: list = []
+    for _root, _dirs, _files in os.walk(dirp, onerror=_walk_errors.append):
+        pass
+    if _walk_errors:
+        return "<unreadable>"
     try:
         paths = sorted(p for p in dirp.rglob("*")
                        if p.is_file()
@@ -437,7 +453,7 @@ def asset_dir_digest(base_dir: Path, name: str):
             digest.update(sha256_file(p).encode("ascii"))
         return digest.hexdigest()
     except OSError:
-        return None
+        return "<unreadable>"
 
 
 def module_manifest(base_dir: Path) -> dict:
@@ -1122,11 +1138,16 @@ def _open_regular_no_follow(p: Path):
 
 
 def read_regular_file(p: Path, max_bytes: int = None) -> bytes:
-    """Read one regular file under the `_open_regular_no_follow` guard."""
+    """Read one regular file under the no-follow guard; `max_bytes` is a hard cap."""
+    # O_NOFOLLOW on the final component is not enough: a symlinked PARENT
+    # directory is followed. Every sibling reader already applies this guard,
+    # and callers pass agent-writable paths (F006).
+    _refuse_symlinked_read_parent(Path(p))
     with _open_regular_no_follow(p) as f:
-        if max_bytes is not None and os.fstat(f.fileno()).st_size > max_bytes:
+        data = f.read() if max_bytes is None else f.read(max_bytes + 1)
+        if max_bytes is not None and len(data) > max_bytes:
             raise OSError(f"file over the read budget: {p}")
-        return f.read()
+        return data
 
 
 def sha256_file(p: Path) -> str:
@@ -1178,6 +1199,11 @@ def sha256_files(paths, on_error=None) -> list:
     if len(paths) <= 1 or HASH_WORKERS <= 1:
         return [one(p) for p in paths]
     return list(_hash_pool().map(one, paths))
+
+
+# A hostile/degenerate package can nest directories far beyond any real
+# corpus; the walk records the cap as a gap instead of exhausting the stack.
+MAX_TREE_DEPTH = 200
 
 
 def _iter_tree_files(root: Path, follow_dir_links: bool = False,
@@ -1253,7 +1279,21 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
         return (target.is_dir() and target.name == p.name
                 and target.parent.name == PRISTINE_DIR)
 
-    def walk(d: Path, ancestors: frozenset) -> None:
+    def walk(d: Path, ancestors: frozenset, depth: int = 0) -> None:
+        # A depth cap turns the hostile nesting case into a RECORDED gap. The
+        # old uncapped recursion raised RecursionError from hash_manifest /
+        # corpus_tree_manifest on a ~1,200-deep agent package and aborted
+        # run/decide (F54). The cap is well below Python's frame limit, so a
+        # legitimate corpus is never affected.
+        if depth > MAX_TREE_DEPTH:
+            if gaps is not None:
+                try:
+                    gaps.append(d.relative_to(root).as_posix())
+                except ValueError:
+                    gaps.append(str(d))
+            print(f"warning: directory tree under {d} exceeds the {MAX_TREE_DEPTH}-level "
+                  f"depth cap; its deeper files are not in the manifest", file=sys.stderr)
+            return
         try:
             entries = sorted(d.iterdir())
         except OSError as e:
@@ -1287,7 +1327,7 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
                     key = dir_key(p)
                     if key is None or key in ancestors:
                         continue
-                    walk(p, ancestors | {key})
+                    walk(p, ancestors | {key}, depth + 1)
                 elif p.is_file():
                     # A file symlink is not package content (see the paragraph
                     # below), but a caller that must account for EVERY submitted
@@ -1301,7 +1341,7 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False,
                 key = dir_key(p)
                 if key is None or key in ancestors:
                     continue
-                walk(p, ancestors | {key})
+                walk(p, ancestors | {key}, depth + 1)
             elif p.is_file():
                 # A FILE symlink is not package content: copy_into() refuses it,
                 # so hashing its target here made the input manifest/digest claim
@@ -1411,6 +1451,13 @@ def corpus_tree_manifest(dirp: Path) -> dict:
     """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
+    if Path(dirp).is_symlink():
+        # A corpus directory that is ITSELF a link is not the corpus the caller
+        # named: hashing the link target's files made an outside tree this
+        # version's identity, which could then be pinned and published (F142).
+        # The sibling `hash_manifest` refuses the same root; an empty manifest
+        # is the refusal (a manifest has no error channel).
+        return {"files": {}, "count": 0}
     gaps = []
     paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True, gaps=gaps)
              if not _is_aux_doc(p.name)]
@@ -1474,6 +1521,11 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
     pin's bytes and reports any legacy residue.
     """
     if not dirp.is_dir():
+        return {"files": {}, "count": 0}
+    if Path(dirp).is_symlink():
+        # A materialized corpus that is ITSELF a link is not a materialized
+        # corpus: the walk would record the target tree's files as this pin's
+        # identity (F142). Refuse it exactly like `hash_manifest` does.
         return {"files": {}, "count": 0}
 
     def keep(p: Path) -> bool:
@@ -1642,6 +1694,20 @@ def _write_anchor_for(parent: Path):
     return anchor
 
 
+def _unfolded_parent(path: Path) -> Path:
+    """`path`'s parent with its ORIGINAL components (and `..`) preserved.
+
+    `os.path.abspath` collapses `..` TEXTUALLY, but the kernel resolves a
+    symlink BEFORE the `..` that follows it: for `root/sb/link/../x` (link ->
+    outside) abspath names `root/sb`, so an ancestor walk built on it checks
+    `root/sb` and never sees `link`, while the write lands in the link target's
+    parent. Walking this unfolded form sees every traversed component (F128).
+    A relative path is anchored at the CWD without normalizing it.
+    """
+    path = Path(path)
+    return (path if path.is_absolute() else Path.cwd() / path).parent
+
+
 def _refuse_symlinked_parent(path: Path) -> Path:
     """Refuse a write that traverses a symlinked directory.
 
@@ -1664,11 +1730,27 @@ def _refuse_symlinked_parent(path: Path) -> Path:
     path = Path(path)
     parent = Path(os.path.abspath(str(path))).parent
     anchor = _write_anchor_for(parent)
-    probe = parent
+    probe = _unfolded_parent(path)
     while True:
-        if probe != anchor and probe.is_symlink():
+        probe_abs = Path(os.path.abspath(str(probe)))
+        # Every exit below compares the COLLAPSED path. `abspath` folds `..`
+        # textually while the kernel resolves a symlink BEFORE the `..` that
+        # follows it, so `root/sb/link/../..` abspath-names the anchor on the
+        # FIRST iteration and the old walk broke there without ever inspecting
+        # `root/sb/link` -- a write landed two levels above the run root (F17).
+        # An un-normalized probe therefore keeps walking its LITERAL components
+        # (which reaches `link`); a normalized one uses the original exits.
+        if probe == probe_abs:
+            if anchor is not None:
+                if probe_abs == anchor:
+                    break               # the anchor itself is operator plumbing
+                try:
+                    probe_abs.relative_to(anchor)
+                except ValueError:
+                    break               # above the registered root: ditto
+        if probe.is_symlink():
             raise OSError(f"refusing to write through symlinked directory {probe}")
-        if probe == anchor or probe.parent == probe:
+        if probe.parent == probe:
             break
         probe = probe.parent
     return path
@@ -1714,9 +1796,25 @@ def _refuse_symlinked_read_parent(path: Path) -> Path:
     parent = Path(os.path.abspath(str(path))).parent
     anchor = _write_anchor_for(parent)
     root = anchor if anchor is not None else _enclosing_run_root(parent)
-    probe = parent
+    probe = _unfolded_parent(path)          # keep `..` AFTER a link visible (F128)
     while True:
-        if probe != anchor and probe.is_symlink():
+        probe_abs = Path(os.path.abspath(str(probe)))
+        # Same literal-component rule as the write guard: a `..` after a link
+        # collapses to the boundary in abspath, and breaking there skipped the
+        # link itself (`root/sb/link/../..` read out of the run root, F17).
+        if probe == probe_abs:
+            if probe_abs == anchor:
+                break               # the anchor itself is operator plumbing
+            if probe.parent == probe:
+                break
+            if root is not None:
+                if probe_abs == root:
+                    break
+                try:
+                    probe_abs.relative_to(root)
+                except ValueError:
+                    break           # above the run root: operator plumbing
+        if probe.is_symlink():
             if not is_evidence_rel(probe.name):
                 allowed = False
             elif root is None:
@@ -1728,7 +1826,7 @@ def _refuse_symlinked_read_parent(path: Path) -> Path:
                 allowed = is_canonical_evidence_link(probe, root)
             if not allowed:
                 raise OSError(f"refusing to read through symlinked directory {probe}")
-        if probe == root or probe.parent == probe:
+        if probe.parent == probe:
             break
         probe = probe.parent
     return path
@@ -1800,7 +1898,7 @@ def _open_reserved_tmp(tmp: Path, mode: str = "wb", encoding: str = "utf-8",
     trailing bytes and then be renamed over the destination (F060). The writer
     gets this file object only, so no reopen-by-path can undo the check.
     """
-    flags = (os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    flags = (os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
              | getattr(os, "O_CLOEXEC", 0))
     fd = os.open(tmp, flags)
     try:
@@ -1813,6 +1911,12 @@ def _open_reserved_tmp(tmp: Path, mode: str = "wb", encoding: str = "utf-8",
                 f"refusing to write through a REPLACED temporary: {tmp} "
                 f"(reserved inode {expected[0]}:{expected[1]}, "
                 f"opened inode {st.st_dev}:{st.st_ino})")
+        # Truncate only AFTER the inode/nlink proof. `O_TRUNC` in the open flags
+        # truncated a temp that had been swapped for a HARDLINK to the
+        # destination to zero bytes before the guard fired, so the destination's
+        # content was lost although the write was refused (F23). The open fd is
+        # the inode just verified, so the write is still the WHOLE file (F060).
+        os.ftruncate(fd, 0)
     except BaseException:
         os.close(fd)
         raise
@@ -1869,10 +1973,12 @@ def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
     try:
         with _open_reserved_tmp(tmp, "wb" if binary else "w",
                                 encoding=encoding, newline=newline) as f:
-            write(f)
-            f.flush()
+            # Apply the final mode BEFORE writing: the temp is created
+            # 0o666-minus-umask, so a secret-bearing registry was readable (F059).
             if mode is not None:
                 os.fchmod(f.fileno(), int(mode))
+            write(f)
+            f.flush()
             if fsync:
                 try:
                     os.fsync(f.fileno())
@@ -1895,16 +2001,33 @@ def _atomic_write_bytes(tmp: Path, dst: Path, write, binary: bool = False,
         raise
 
 
-def write_json_atomic(path: Path, obj) -> None:
-    """Write strict JSON atomically: unique .tmp, fsync, then os.replace."""
+def write_json_atomic(path: Path, obj, mode: int = None) -> None:
+    """Write strict JSON atomically: unique .tmp, fsync, then os.replace.
+
+    `mode` lets a secret-bearing registry (state.json carries `judge_salt`) be
+    created 0600: a NEW file otherwise gets 0o666 & ~umask, so any local user
+    could read the salt and de-anonymize the panel (F67).
+    """
     _refuse_symlinked_parent(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tmp_path_for(path)
 
     def do(f) -> None:
-        json.dump(_json_safe(obj), f, indent=2, ensure_ascii=False)
+        safe = _json_safe(obj)
+        text = json.dumps(safe, indent=2, ensure_ascii=False)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            # A file NAME Python decoded with surrogateescape (an agent created
+            # an invalid-UTF-8 name) cannot be encoded as raw UTF-8. Re-serialise
+            # with ASCII escapes: `\udcff` is a valid JSON escape and json.loads
+            # returns the same surrogate string, so the manifest/state is
+            # recorded instead of aborting the save (F130). A normal object
+            # keeps the previous byte-for-byte output.
+            text = json.dumps(safe, indent=2, ensure_ascii=True)
+        f.write(text)
 
-    _atomic_write_bytes(tmp, path, do)
+    _atomic_write_bytes(tmp, path, do, mode=mode)
 
 
 def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
@@ -2029,163 +2152,11 @@ def write_csv_atomic(path, fields, rows) -> Path:
     def do(f) -> None:
         w = csv.DictWriter(f, fieldnames=list(fields))
         w.writeheader()
-        w.writerows(rows)
+        w.writerows({k: _csv_safe_cell(v) for k, v in row.items()} for row in rows)
 
     _atomic_write_bytes(tmp, path, do, newline="")
     return path
 
-
-JSON_MAX_NESTING = 1000
-
-
-def _json_from_text(text: str, lenient: bool):
-    """Parse `text` as JSON, optionally recovering JSON embedded in prose.
-
-    `lenient` is for AGENT-written files only. Models very often wrap the
-    document they were told to write in a markdown fence (```json ... ```) or
-    introduce it ("Here is the marker:"), which is not a content error -- the
-    JSON is complete and unambiguous. Trying `raw_decode` at each `{`/`[` start
-    token recovers exactly that document and nothing else: a TRUNCATED payload
-    still fails to parse (the decoder demands the closing brace), and a document
-    whose JSON is followed by lots of prose around it is not accepted unless the
-    parsed value spans the text (`min_end` guard), so this cannot turn a
-    half-written file into a pass.
-    """
-    text = text.lstrip("\ufeff")
-    if not lenient:
-        try:
-            return json.loads(text)
-        except (ValueError, RecursionError):
-            # A deeply nested but valid JSON document raises RecursionError,
-            # not ValueError: it is malformed AGENT OUTPUT for this pipeline's
-            # purposes and must take the retry path, not crash the postcheck.
-            return None
-    decoder = json.JSONDecoder()
-    total = len(text)
-    # Only BALANCED values are document candidates. Trying every `{`/`[` made
-    # a truncated payload quadratic. Top-level values are preferred; a value
-    # that closes while an EARLIER, still-unmatched prose opener is on the
-    # stack is kept as a fallback, so one literal "{" in the prose cannot hide
-    # a complete JSON document that follows it (F13). The lists are separate
-    # and bounded: counting nested values against one cap made a large ordinary
-    # JSON document exceed the cap before its own closing brace.
-    top_starts, nested_starts = [], []      # (start, end) / (start, end, outer_start)
-    stack = []                              # (expected closer, start), innermost last
-    in_string = False
-    escaped = False
-    for i, ch in enumerate(text):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch in "{[":
-            stack.append(("}" if ch == "{" else "]", i))
-            if len(stack) > JSON_MAX_NESTING:
-                # The input byte cap bounds the FILE, not this scanner's
-                # auxiliary stack: one tuple per unmatched opener made a 64 MiB
-                # brace file allocate several GB during a lenient parse (F056).
-                # Nothing this pipeline can parse nests this deep -- json.loads
-                # itself raises RecursionError around the interpreter limit --
-                # so a deeper stack is malformed agent input, not a document.
-                return None
-        elif ch in "}]":
-            if stack and stack[-1][0] == ch:
-                _closer, start = stack.pop()
-                if not stack:
-                    if len(top_starts) < 64:
-                        top_starts.append((start, i + 1))
-                elif len(nested_starts) < 64:
-                    # `stack[0]` is the OUTERMOST still-open bracket: the opener
-                    # this value is nested inside.
-                    nested_starts.append((start, i + 1, stack[0][1]))
-            elif stack:
-                # Mismatched prose brackets: no value can start here.
-                stack.clear()
-    # Try BOTH candidate lists, in document order: an earlier `{}` in prose is
-    # a complete top-level value, and it must not hide a later complete
-    # document that closes while that prose opener is still unmatched.
-    top_start_at = {s for s, _e in top_starts}
-    starts = list(top_starts)
-    for s, _end, outer in nested_starts:
-        # A nested value is a FALLBACK for a stray prose opener, never a
-        # replacement for the document itself (F86): an opener that is a
-        # complete top-level value (the malformed `[{"a":1},]`) or that opens
-        # the text -- bare or right after a markdown fence (the truncated
-        # `[{"a":1}`, "```json\n[{"a":1}") -- is the document's own bracket,
-        # so a complete child of it is a fragment, not the payload.
-        prefix = text[:outer].strip()
-        if (outer in top_start_at or not prefix
-                or re.fullmatch(r"[`~]{3,}[^\n]*", prefix)):
-            continue
-        starts.append((s, _end))
-    starts = sorted(set(starts))
-    found = []                       # (start, end, value)
-    for i, _end in starts:
-        try:
-            obj, end = decoder.raw_decode(text, i)
-        except (ValueError, RecursionError):
-            continue
-        found.append((i, end, obj))
-    if not found:
-        return None
-
-    def outside_prose(i: int, end: int) -> int:
-        """Text outside [i, end) that is not another candidate's own JSON.
-
-        Counting an earlier candidate as prose is what let a trailing in-prose
-        EXAMPLE outscore the payload that preceded it.
-        """
-        other = 0
-        for s, e, _o in found:
-            if (s, e) == (i, end):
-                continue
-            other += max(0, min(e, i) - s) + max(0, e - max(s, end))
-        return max(0, total - (end - i) - other)
-
-    # The document is the candidate that SPANS the text -- the LARGEST parsed
-    # value, not merely the first `{` ("The schema is {"example": true}. And the
-    # data is: {…}" returned the in-prose EXAMPLE) and not merely the last one
-    # (a file ending in an example -- "… Note the schema example is {"example":
-    # true}" -- returned the example). A value whose surrounding prose dwarfs it
-    # is a fragment: "A"*1000 + '{...}' + "B"*1000 names an example, not a
-    # document, and is still refused. A value that runs to the end of the text
-    # is the document whatever precedes it (a fenced or introduced file); the
-    # prose counted here is the text outside this value that is not another
-    # candidate's own JSON, so a document carrying a nested object or a second
-    # value is not penalized for either.
-    best, best_key = None, None
-    best_end = None
-    rejected = []                    # (start, end) refused only by the prose test
-    for i, end, obj in found:
-        json_len = end - i
-        tail = text[end:].strip()
-        fenced = not tail or set(tail) <= set("`~")
-        prose = outside_prose(i, end)
-        if not fenced and prose > 2 * json_len:
-            rejected.append((i, end))
-            continue
-        # A value that runs to the end of the text is the document even when an
-        # earlier top-level value is the same length: prefer it on a tie.
-        key = (json_len, 1 if fenced else 0)
-        if best_key is None or key > best_key:
-            best, best_key, best_end = obj, key, end
-    if best is not None and not text[best_end:].strip():
-        # The winner runs to the end, so its `fenced` admission is what let it
-        # through. When a LARGER complete candidate before it was rejected only
-        # by the prose test, the tail is an in-prose EXAMPLE that must not be
-        # returned as the document ("… Here is why. One row looks like
-        # {"foo": 1}") -- report the ambiguity as malformed instead (F105).
-        best_len = best_key[0] if best_key else 0
-        best_start = best_end - best_len
-        if any(s < best_start and (e - s) > best_len for s, e in rejected):
-            return None
-    return best
 
 
 def read_json(path: Path, revive: bool = True, lenient: bool = False):
@@ -2419,13 +2390,34 @@ def count_manual_steps(path: Path):
     # table loop below tell a bullet that happens to contain pipes from a table
     # row (the old code counted such a bullet twice).
     bullet = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+\S")
-    n = sum(1 for line in lines if bullet.match(line))
     # One header row PER TABLE, not one for the whole file: subtracting a single
     # header from every table row at once over-counts by one per extra table.
     separator = re.compile(r"^\s*\|?[\s:\-|]+\|?\s*$")
+    fence = re.compile(r"^\s*(?:```|~~~)")
+    n = 0
     in_table = False
-    for line in lines:
+    in_fence = False
+    # An UNTERMINATED fence (a truncated file, a stray ``` in the prose) used to
+    # hide every item after it, so a three-step hand-off list was reported as
+    # two (F146). The last fence of an ODD count is the one that never closes:
+    # its trailing region is scanned as prose instead of being dropped.
+    fence_lines = [i for i, line in enumerate(lines) if fence.match(line)]
+    unterminated_at = fence_lines[-1] if len(fence_lines) % 2 else None
+    for i, line in enumerate(lines):
+        if fence.match(line):
+            # A fenced example/diff block is not a list of manual items; its
+            # bullets and table rows used to be counted (F102).
+            if i == unterminated_at:
+                in_fence = False        # never opened: the region is prose
+                in_table = False
+                continue
+            in_fence = not in_fence
+            in_table = False
+            continue
+        if in_fence:
+            continue
         if bullet.match(line):
+            n += 1
             in_table = False
             continue
         if separator.match(line):
@@ -2436,12 +2428,19 @@ def count_manual_steps(path: Path):
             # header (not counted) and the rows below are data.
             in_table = "|" in line
             continue
-        if line.count("|") >= 2:
+        if line.strip().startswith("|") and line.count("|") >= 2:
+            # Only a GFM row OPENS a table (a leading pipe, or the separator
+            # above). Ordinary prose with pipes (`a|b|c` followed by
+            # `See item | two.`) used to open a pseudo-table whose "header" was
+            # uncounted and whose next line was counted as a phantom item
+            # (F163).
             if in_table:
                 n += 1                  # a data row
             in_table = True             # the first row of a block is its header
         elif in_table and line.count("|") == 1:
             n += 1                      # a data row of a no-outer-pipe table
+        elif in_table and line.count("|") >= 2:
+            n += 1                      # a multi-column row without outer pipes
         else:
             in_table = False
     return n
@@ -2926,7 +2925,7 @@ LENGTH_COVER_CLOSING_RE = re.compile(
     # "Best regards are due to ...", cutting the persuading body at that line.
     # A comma/period after the phrase still closes ("Sincerely, The Authors").
     r"^\s*(?:sincerely|yours (?:sincerely|faithfully|truly)|best regards|kind regards|regards|"
-    r"with (?:best|kind) regards)\s*[,.;!]?\s*$|"
+    r"with (?:best|kind) regards)\s*[,.;!]?(?:\s+(?:the\s+)?authors?)?\s*$|"
     # A BARE courtesy line closes the letter; "Thank you for considering our
     # manuscript ..." is a body OPENER. The old bare `|thank you)\b` alternative
     # matched that opener and reported 0 persuading words (see count_words.py,
@@ -2984,8 +2983,8 @@ def _tex_brace_delta(text: str) -> int:
 # `\begin`/`\end` tokens were stripped but the BODY was counted as the authors'
 # prose, drifting a .tex count upward against the venue cap.
 TEX_MATH_ENV_RE = re.compile(
-    r"\\begin\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
-    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\{\1\}", re.M)
+    r"\\begin\s*\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
+    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\s*\{\1\}", re.M)
 
 
 def blank_math_environments(text: str) -> str:
@@ -3088,8 +3087,8 @@ def _tex_length_scan(text: str):
         line = strip_tex_comment(raw).strip()
         env_at_start = env_kind
         env_kind = _tex_float_env_after(line, env_kind)
-        begins = re.search(r"\\begin\{abstract\}", line)
-        ends = re.search(r"\\end\{abstract\}", line)
+        begins = re.search(r"\\begin\s*\{abstract\}", line)
+        ends = re.search(r"\\end\s*\{abstract\}", line)
         if begins or ends:
             # Both environment tokens may sit ANYWHERE on the line: a one-line
             # abstract is `\begin{abstract} ... \end{abstract}`, and the usual
@@ -3127,7 +3126,7 @@ def _tex_length_scan(text: str):
         m = re.match(r"\\(?:sub)*section\*?(?:\[[^\]]*\])?\{([^{}]*)\}", line)
         if m:
             out.append(m.group(1).strip())
-            continue
+            if not (line := line[m.end():].strip()): continue
         if TEX_CAPTION_TOKEN_RE.search(line):
             # Parse EVERY caption group on the line: `\caption{...}\caption{...}`
             # is legal, and consuming only the first left the second legend's
@@ -3368,163 +3367,6 @@ def _cover_letter_row(lines: list, doc: str, limits: dict = None, profile=None) 
                         f"{total_max}-word cap" if total_max is not None else ""))}
 
 
-def scan_lengths_in_sources(sources: list, profile=None) -> dict:
-    """Abstract/main-text word counts over [(dir, prefix, excluded_top)] sources.
-
-    A code-side PROXY for the agents' M19 sweep: it reports what it can measure
-    and says "not verified"/"skipped" where it cannot. It never gates candidate
-    ranking, but an over-cap FINAL published package is reported by readiness.
-    The caps and their provenance come from the venue profile: a profile without
-    caps (the shipped `generic` one) yields counts with `cap: null` and
-    `over_limit: false`, which is what the note and the decision report print.
-    """
-    prof = _as_profile(profile)
-    limits = prof.length_limits()
-    source = prof.length_limits_source
-    # A document named for the run's OWN article type is that type's
-    # manuscript: its opening salutation (a Letter to the Editor) must not
-    # divert the count to the cover-letter preference.
-    manuscript_names = _normalized_article_type_names(prof)
-    # Which display captions this venue leaves out: figure legends always for
-    # "figure-legends", table captions only when "table-captions" is named.
-    # Passing the selected kinds (rather than one global caption list) keeps a
-    # profile that excludes only one of them from subtracting the other.
-    _excludes = set(prof.main_text_excludes())
-    caption_kinds = tuple(
-        kind for kind, section in (("figure", "figure-legends"),
-                                   ("table", "table-captions"))
-        if section in _excludes)
-    overrides = corpus_source_overrides(sources)
-    rows, unparsed, skipped, rendered, docs = [], [], [], [], set()
-    unreadable = []
-    for i, (src, prefix, excluded) in enumerate(sources):
-        if not src.is_dir():
-            continue
-        # Multi-file LaTeX: a master .tex carries only \input/\include lines and
-        # its children carry the prose. Cache every source and remember which
-        # files are INCLUDED by another, so the master counts the expanded text
-        # and a child is not counted a second time on its own (F36).
-        tex_cache, tex_included = {}, set()
-        src_gaps = []
-        for q in _iter_tree_files(src, gaps=src_gaps):
-            if q.suffix.lower() not in LENGTH_TEX_EXTS:
-                continue
-            qtext = read_text_bounded(q)
-            if qtext is None:
-                continue
-            tex_cache[q.resolve()] = qtext
-            for inc in TEX_INCLUDE_RE.finditer(strip_tex_comment(qtext)):
-                child = _tex_include_path(q.parent, inc.group(1))
-                if child is not None and child != q.resolve():
-                    tex_included.add(child)
-        for p in _iter_tree_files(src, gaps=src_gaps):
-            # `_iter_tree_files` is the corpus walker: a file symlink is not
-            # package content (copy_into refuses it), so a scan that followed
-            # one verified a corpus the materializer never produced.
-            if _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
-                    or is_non_submitted_readme_name(p.name):
-                continue
-            rel = p.relative_to(src).as_posix()
-            if excluded and excluded_corpus_component(rel, excluded):
-                continue
-            if is_code_rel(prefix + rel):
-                # `code/` is not manuscript prose (see scan_captions_in_sources).
-                continue
-            if (prefix + rel) in overrides[i]:
-                continue                      # a later source provides this path
-            if is_non_manuscript_rel(rel):
-                # Evidence areas and feedback/response documents are never
-                # counted against the article's word limits (M19 measures the
-                # submission's abstract, body and cover letter only).
-                continue
-            doc = prefix + rel
-            ext = p.suffix.lower()
-            if docx_document_role(p.name, manuscript_names) == "supp":
-                skipped.append(doc)         # supplementary text is not under the article caps
-                continue
-            lines, caption_spans, abstract_end = None, [], None
-            if ext in LENGTH_DOCX_EXTS:
-                # Frontiers' counting source excludes the CONTENTS of tables and
-                # boxes; a profile that says so must not count cell paragraphs
-                # as main text (F08).
-                paras = _docx_paragraphs(p, include_tables="table-contents" not in _excludes)
-                if paras is None:
-                    unparsed.append(doc)
-                    continue
-                lines = paras
-                # A wrapped DOCX legend is usually split over several
-                # paragraphs. `_caption_units` sees one paragraph at a time, so
-                # only its first line was excluded and the continuation was
-                # charged to the article cap (F04). The line-oriented reader
-                # merges continuations with the SAME rules the text extractor
-                # uses.
-                caption_spans = [(a, b) for _, _, a, b
-                                 in _caption_units_from_lines(paras, with_spans=True,
-                                                              kinds=caption_kinds)]
-            elif ext in LENGTH_TEX_EXTS:
-                if p.resolve() in tex_included:
-                    skipped.append(doc)     # counted in the master that includes it
-                    continue
-                text = tex_cache.get(p.resolve())
-                if text is None:
-                    # The cache loop skips a .tex whose read_text_bounded()
-                    # returned None; the old "" default then counted that
-                    # unreadable manuscript as an EMPTY source within every
-                    # cap. An unreadable source is a NAMED gap, exactly like
-                    # the .md/.txt branch below (F103).
-                    unparsed.append(doc)
-                    continue
-                expanded = _tex_expand_includes(text, p.parent, source=p)
-                for inc in TEX_INCLUDE_RE.finditer(expanded):
-                    unparsed.append(f"{doc}: unresolved include {inc.group(1)}")
-                lines, caption_spans, abstract_end = _tex_length_scan(expanded)
-            elif ext in LENGTH_TEXT_EXTS:
-                text = read_text_bounded(p)
-                if text is None:
-                    # An unreadable manuscript source is a NAMED gap, not an
-                    # empty rendering (F65).
-                    unparsed.append(doc)
-                    continue
-                lines = text.splitlines()
-                caption_spans = [(a, b) for _, _, a, b
-                                 in _caption_units_from_lines(lines, with_spans=True,
-                                                              kinds=caption_kinds)]
-            elif ext in LENGTH_UNPARSED_EXTS:
-                unparsed.append(doc)
-                continue
-            elif ext in LENGTH_RENDERED_EXTS:
-                skipped.append(doc)         # a rendering, not an editable source
-                rendered.append(doc)
-                continue
-            else:
-                continue
-            if _is_cover_letter_lines(lines, p.name, manuscript_names):
-                docs.add(doc)
-                rows.append(_cover_letter_row(lines, doc, limits=limits, profile=prof))
-                continue
-            found = _length_rows_for_lines(lines, doc, caption_spans=caption_spans,
-                                           abstract_end=abstract_end, limits=limits,
-                                           counting=prof.counting,
-                                           whole_doc_as_main=bool(
-                                               _name_is_article_type_manuscript(
-                                                   p.name, manuscript_names)))
-            if not found:
-                skipped.append(doc)
-                continue
-            docs.add(doc)
-            rows.extend(found)
-        # An unreadable subdirectory hides its documents from the walk; name it
-        # so the note can tell "no manuscript" from "nothing readable" (F049).
-        unreadable.extend(prefix + g for g in src_gaps)
-    over = [r for r in rows if r["over_limit"]]
-    return {"limits": limits, "counting": prof.counting, "source": source,
-            "venue": prof.id,
-            "rows": rows, "count": len(rows), "over_limit": over,
-            "unparsed": sorted(set(unparsed)), "skipped": sorted(set(skipped)),
-            "rendered": sorted(set(rendered)),
-            "needs_manual": sorted(set(rendered)) if not rows else [],
-            "documents": sorted(docs), "checked": bool(rows),
-            "unreadable_dirs": sorted(set(unreadable))}
 
 
 def length_note(info) -> str:
@@ -4090,7 +3932,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                     raw = _docx_xml_part(z, "word/document.xml")
                 if raw is None:
                     continue
-                dxml = raw.decode("utf-8", "replace")
+                dxml = _decode_text_source(raw, "replace")
                 claim_docs.append((prefix + rel, "\n".join(
                     mod.text_of(pp[2]) for pp in mod.paragraphs(dxml))))
             except (KeyError, zipfile.BadZipFile, OSError, RuntimeError,
@@ -4118,6 +3960,8 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue        # `code/` is revision content, not submission prose
             if is_non_manuscript_rel(rel):
                 continue        # evidence area, not submission prose (see above)
+            if is_code_rel(prefix + rel):
+                continue        # code/ is revision content, not prose (F066)
             if "work" in rel.split("/")[:-1]:
                 continue
             raw = read_text_bounded(p)
@@ -4236,8 +4080,13 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                                      "evidence": r["evidence"], "detail": r["detail"],
                                      "fix": "editorial", "protected": False,
                                      "tier": r.get("tier") or mod.tier_of(r["rule"])})
-                except Exception:                                     # noqa: BLE001
-                    pass
+                except Exception as e:                                # noqa: BLE001
+                    rows.append({
+                        "rule": "FMT-PDF0", "severity": "low",
+                        "document": prefix + rel, "location": "PDF text scan",
+                        "evidence": f"{_fn} failed on {prefix + rel}: {type(e).__name__}: {str(e)[:200]}",
+                        "detail": f"the {_fn} class was NOT examined for this PDF",
+                        "fix": "manual", "protected": False, "tier": "advisory"})
             if hasattr(mod, "availability_claim_rows"):
                 for r in mod.availability_claim_rows(pdf_paras, prefix + rel):
                     r["document"] = prefix + rel
@@ -4277,6 +4126,12 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                     continue
                 rel = q.relative_to(src).as_posix()
                 if not is_submitted(rel) or is_evidence_rel(rel):
+                    continue
+                if is_code_rel(prefix + rel):
+                    # `code/` is revision content, never a submitted figure:
+                    # the DOCX/text/PDF loops of this same sweep skip it, and
+                    # FMT-IM4/FMT-IM6 rows against an analysis-code raster are
+                    # not submission defects (F074).
                     continue
                 if (prefix + rel) in overrides[i]:
                     continue                  # a later source provides this path
@@ -4333,7 +4188,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                                 raw = _docx_xml_part(z, "word/document.xml")
                             if raw is None:
                                 continue
-                            dxml = raw.decode("utf-8", "replace")
+                            dxml = _decode_text_source(raw, "replace")
                             texts.append("\n".join(mod.text_of(pp[2])
                                                     for pp in mod.paragraphs(dxml)))
                         except (KeyError, zipfile.BadZipFile, OSError, RuntimeError,
@@ -4395,8 +4250,13 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                         for r in mod.image_resolution_rows(q, width, policy):
                             r["document"] = prefix + r["document"]
                             rows.append(r)
-                    except Exception:                             # noqa: BLE001
-                        continue
+                    except Exception as e:                        # noqa: BLE001
+                        rows.append({
+                            "rule": "FMT-IM4", "severity": "low",
+                            "document": prefix + q.name, "location": "artwork",
+                            "evidence": f"image resolution was NOT measured for {q.name}: {type(e).__name__}: {str(e)[:200]}",
+                            "detail": "re-read the image or inspect its resolution by hand",
+                            "fix": "manual", "protected": False, "tier": "advisory"})
     # CROSS-SURFACE CLAIMS (J6/FMT-AV4): compare the submitted surfaces once,
     # after every DOCX/text/PDF paragraph has been collected. A per-file scan
     # cannot see the supplement saying "shipped" while the main text says "not
@@ -4646,7 +4506,7 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
     Called by `setup` (the pristine copy), by every package-producing stage's
     postcheck (before the corpus fingerprint/pin, so the version that is judged
     and pinned is the repaired one) and by `publish_final_clean`. The artifact
-    (`FORMAT_FIX.json`, plus before/after scans) lands in `artifacts_dir` (the
+    (`FORMAT_FIX_<label>.json`, plus before/after scans) lands in `artifacts_dir` (the
     run sandbox), never inside the package: `work/` scratch is stripped from the
     corpus but a top-level JSON would become submission content.
 
@@ -4751,157 +4611,6 @@ def _docx_field_key(rel: str) -> str:
     name = (DOC_TOKEN_RE.sub("", stem) + dot + ext) if dot else DOC_TOKEN_RE.sub("", p.name)
     parent = "" if p.parent.as_posix() == "." else p.parent.as_posix() + "/"
     return (parent + name).lower()
-
-
-def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
-                                  errs: list, warns: list) -> dict:
-    """Every Zotero field of `base_dir` must survive into the version in `out_dir`.
-
-    The stage gate for every agent that produces a DOCX. A version may ADD a
-    field, EDIT a field (same citationID, changed item data/result) and DELETE
-    a field together with its visible citation text; it may never delete every
-    live field at once, leave a field malformed (an unterminated begin, a
-    stray field char, unparseable citation JSON, a missing/duplicate
-    citationID), or replace a field by its plain-text result. A failure is an
-    attempt error, so the retry policy hands the session another go with the
-    exact fields it has to restore.
-
-    Documents are paired by their version-token-free basename, so
-    `...-mainText-181c700.docx` matches `...-mainText-<newtoken>.docx`. A
-    document the agent did not deliver at all is left to the document-set /
-    backfill layer, which restores the base bytes itself.
-    """
-    mod = _format_module()
-    rep = {"label": label, "checked": 0, "documents": [], "errors": 0, "warnings": 0,
-           "fields_before": 0, "fields_after": 0, "deleted": [], "plain_text": []}
-    if mod is None or not hasattr(mod, "zotero_report_for_docx"):
-        rep["skipped"] = f"{DOCX_FORMAT_MODULE} carries no field inventory"
-        return rep
-    if not (base_dir.is_dir() and out_dir.is_dir()):
-        rep["skipped"] = "the base or the output directory is missing"
-        return rep
-    if errs is None:
-        errs = []
-    def doc_map(root: Path, gaps: list) -> tuple:
-        """({pairing key: path}, collisions) for one side of the comparison.
-
-        The version-token-free key pairs `manuscript-4f3a9c1.docx` with
-        `manuscript.docx`, but two DIFFERENT documents can strip to one key
-        (`appendix-a.docx` / `appendix-b.docx`): the dict comprehension kept
-        only the last, so one document was never field-checked at all. The
-        collision is reported instead of being silent.
-        """
-        out, seen = {}, {}
-        for p in _fmt_corpus_files(root, gaps):
-            key = _docx_field_key(p.relative_to(root).as_posix())
-            seen.setdefault(key, []).append(p)
-            out[key] = p
-        clashes = {k: v for k, v in seen.items() if len(v) > 1}
-        return out, clashes
-
-    base_gaps, out_gaps = [], []
-    base_docs, base_clash = doc_map(base_dir, base_gaps)
-    out_docs, out_clash = doc_map(out_dir, out_gaps)
-    rep["unreadable_dirs"] = {"base": sorted(set(base_gaps)),
-                              "output": sorted(set(out_gaps))}
-    if base_gaps or out_gaps:
-        # A DOCX under an unreadable directory is invisible to the walk. The
-        # continuity report must name it: otherwise it claims every document was
-        # field-checked while one was never opened (F107).
-        for _side, _gaps in (("base", base_gaps), ("output", out_gaps)):
-            for _gap in sorted(set(_gaps)):
-                _msg = (f"ZOTERO FIELD CONTINUITY: the {_side} directory {_gap!r} "
-                        f"could not be read; its DOCX documents were NOT "
-                        f"field-checked")
-                warns.append(_msg)
-                rep["warnings"] += 1
-                # A skipped subsection is NOT a clean check: this gate fails only
-                # on rep["errors"], so a warning alone let an unreadable base
-                # directory pass the hard field gate with 0 errors (F063).
-                errs.append(_msg)
-                rep["errors"] += 1
-    for side, clashes in (("base", base_clash), ("output", out_clash)):
-        for key, paths in sorted(clashes.items()):
-            warns.append(f"ZOTERO FIELD CONTINUITY: two {side} documents pair to one key "
-                         f"({key!r}): {', '.join(p.name for p in paths)}; only "
-                         f"{max(paths).name} is compared -- "
-                         f"rename them so their names differ by more than a version token")
-            rep["warnings"] += 1
-    if not base_docs:
-        if base_gaps:
-            # Do not report "carries no DOCX" for a tree whose DOCX documents
-            # were merely unreadable: that misstates the cause (F063).
-            rep["skipped"] = ("the base's DOCX documents could not be read: "
-                              + ", ".join(sorted(set(base_gaps))))
-        else:
-            rep["skipped"] = "the base carries no DOCX"
-        return rep
-    pairs = [(base_docs[k], out_docs[k]) for k in sorted(set(base_docs) & set(out_docs))]
-    # A pairing-key collision (`appendix-a.docx` / `appendix-b.docx`) leaves one
-    # of the documents out of the comparison entirely (the key maps to a single
-    # path). Pair every colliding document whose counterpart carries the same
-    # name, so a field deleted or garbled in the shadowed file is still caught;
-    # the collision warning above still names the group.
-    paired = {(b.resolve(), o.resolve()) for b, o in pairs}
-    for key in sorted(set(base_clash) & set(out_clash)):
-        for base in sorted(base_clash[key]):
-            cand = [o for o in out_clash[key]
-                    if o.name.lower() == base.name.lower()
-                    and not any(p[0] == base.resolve() for p in paired)
-                    and not any(p[1] == o.resolve() for p in paired)]
-            if len(cand) == 1:
-                pairs.append((base, cand[0]))
-                paired.add((base.resolve(), cand[0].resolve()))
-    rest_base = [base_docs[k] for k in sorted(base_docs) if k not in out_docs]
-    rest_out = [out_docs[k] for k in sorted(out_docs) if k not in base_docs]
-    # A stage may rename a document (a template stage hands back the template's
-    # own file name). Exact name wins, then a unique document role, then the
-    # sole remainder; a document the stage did not deliver at all is left to
-    # the document-set/backfill layer, which restores the base bytes itself.
-    for base in list(rest_base):
-        exact = [o for o in rest_out if o.name.lower() == base.name.lower()]
-        role = docx_document_role(base.name)
-        # `docx_document_role` returns "main" for EVERY unrecognized name, so a
-        # role of "main" cannot tell an explicit main manuscript from a deleted
-        # `appendix.docx`. Pairing on it made a deletion look like a rename and
-        # compared the wrong documents (F115); "main" renames are handled by
-        # the sole-remainder fallback below.
-        cands = exact or ([o for o in rest_out
-                           if role and role != "main"
-                           and docx_document_role(o.name) == role] if role else [])
-        if len(cands) == 1:
-            pairs.append((base, cands[0]))
-            rest_out.remove(cands[0])
-            rest_base.remove(base)
-    if len(rest_base) == 1 and len(rest_out) == 1:
-        pairs.append((rest_base[0], rest_out[0]))
-    for base, out in pairs:
-        before = mod.zotero_report_for_docx(base)
-        after = mod.zotero_report_for_docx(out)
-        cont = mod.zotero_field_continuity_problems(before, after)
-        rel = out.relative_to(out_dir).as_posix()
-        entry = {"file": rel, "baseline": base.relative_to(base_dir).as_posix(),
-                 "fields_before": cont["baseline_fields"], "fields_after": cont["output_fields"],
-                 "errors": cont["errors"], "warnings": cont["warnings"],
-                 "deleted": cont["deleted"], "added": cont["added"], "edited": cont["edited"],
-                 "plain_text": cont["plain_text"]}
-        rep["checked"] += 1
-        rep["fields_before"] += cont["baseline_fields"]
-        rep["fields_after"] += cont["output_fields"]
-        for msg in cont["errors"]:
-            if not cont["plain_text"]:
-                msg += (" -- restore the whole complex field (begin -> instrText -> separate -> "
-                        "result -> end) from the base version, or delete the citation text with "
-                        "it; see the $zotero-use DOCX reference")
-            errs.append(f"ZOTERO FIELD CONTINUITY: {rel}: {msg}")
-            rep["errors"] += 1
-        rep["plain_text"].extend(cont["plain_text"])
-        for msg in cont["warnings"]:
-            warns.append(f"ZOTERO FIELD CONTINUITY: {rel}: {msg}")
-            rep["warnings"] += 1
-        rep["deleted"].extend(cont["deleted"])
-        rep["documents"].append(entry)
-    return rep
 
 
 VALIDATE_TEX_TIMEOUT = 600
@@ -5288,16 +4997,30 @@ WRITE (only inside out/):
 
 
 def _docx_paragraph_texts(path: Path) -> list:
-    """The non-empty paragraph texts of one DOCX, whitespace-normalized."""
+    """The non-empty paragraph texts of one DOCX, whitespace-normalized.
+
+    The FOOTNOTE/ENDNOTE parts are read too: the paragraph-parity multiset of
+    `template_rewrite_postcheck` is built from this helper, so a rewrite could
+    DROP a footnoted observation and still pass parity -- the note's prose was
+    never in the multiset (F93). The same reader the e-mail gate already uses
+    for contact facts covers body + notes.
+    """
     mod = _format_module()
     if mod is None:
         return []
     try:
         with zipfile.ZipFile(path) as z:
             data = _docx_xml_part(z, "word/document.xml")
-        if data is None:
-            return []
-        xml = data.decode("utf-8", "replace")
+            if data is None:
+                return []
+            # A legal OOXML part may be UTF-16; decoding it as UTF-8 left
+            # NUL-interleaved text and every paragraph scan saw nothing (F66).
+            bodies = [_decode_text_source(data, "replace")]
+            for note_name in ("word/footnotes.xml", "word/endnotes.xml"):
+                note = _docx_xml_part(z, note_name)
+                if note is not None:
+                    bodies.append(_decode_text_source(note, "replace"))
+        xml = "\n".join(bodies)
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return []
     out = []
@@ -5350,6 +5073,19 @@ EMAIL_FULL_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?\.[A-Za-z]{2,}")
 _EMAIL_RESERVED_DOMAINS = ("example.com", "example.edu", "example.org",
                            "example.net", "example.info", "example.biz")
+# A retinized asset name is NOT a contact address. `figures/plot@2x.png` has the
+# address shape (local part `plot`, "domain" `2x.png`) and was filed as an
+# invented e-mail address, hard-failing a legitimate figure reference (F51).
+# The final label of a real address is a country/generic TLD here; these labels
+# are file-format extensions that no plausible contact address ends in (unlike
+# `.md`, `.py`, `.sh`, `.pl`, `.rs` or `.ps`, which ARE country codes and are
+# deliberately absent from this list).
+_EMAIL_ASSET_EXTENSIONS = frozenset((
+    "png", "jpg", "jpeg", "gif", "svg", "bmp", "tif", "tiff", "webp", "ico",
+    "pdf", "emf", "wmf", "eps", "doc", "docx", "odt", "rtf", "zip", "gz",
+    "tar", "xlsx", "xls", "pptx", "ppt", "csv", "tsv", "json", "xml", "html",
+    "htm", "css", "tex", "bib", "ipynb", "tif", "jfif", "heic", "avif", "mp4",
+    "mov", "avi", "wav", "mp3", "log", "bak", "tmp"))
 
 
 def _clean_email_address(raw: str) -> str:
@@ -5359,6 +5095,11 @@ def _clean_email_address(raw: str) -> str:
 
 def _email_domain(addr: str) -> str:
     return str(addr or "").rsplit("@", 1)[-1].strip().strip(".").lower()
+
+
+def _email_is_asset_filename(addr: str) -> bool:
+    """True when an address-shaped token is really a file name (`plot@2x.png`)."""
+    return _email_domain(addr).rsplit(".", 1)[-1] in _EMAIL_ASSET_EXTENSIONS
 
 
 def _is_placeholder_email(addr: str) -> bool:
@@ -5392,29 +5133,15 @@ def _email_texts_in_file(path: Path) -> tuple:
                     data = _docx_xml_part(z, n)
                     if data is None:
                         return [], f"unreadable DOCX ({n} is over the size/entity budget)"
-                    parts.append((n, data.decode("utf-8", "replace")))
+                    # Honour a UTF-16 part's BOM/pattern instead of decoding it
+                    # as UTF-8 and losing every address/identifier in it (F66).
+                    parts.append((n, _decode_text_source(data, "replace")))
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError,
                 NotImplementedError) as e:
             return [], f"unreadable DOCX ({type(e).__name__}: {e})"
-        mod = _format_module()
-
-        def part_texts(xml: str) -> list:
-            if mod is not None:
-                try:
-                    return [mod.text_of(frag) for _a, _b, frag in mod.paragraphs(xml)]
-                except Exception:                                  # noqa: BLE001
-                    pass
-            try:
-                root = ET.fromstring(xml)
-            except ET.ParseError:
-                return [re.sub(r"<[^>]+>", " ", xml)]
-            return ["\n".join(node.itertext()) for node in root.iter()
-                    if isinstance(node.tag, str)
-                    and node.tag.rsplit("}", 1)[-1] == "p"]
-
         texts = []
         for _name, xml in parts:
-            texts.extend(part_texts(xml))
+            texts.extend(_visible_docx_part_texts(xml))
         return texts, ""
     text = read_text_bounded(path)
     if text is None:
@@ -5496,7 +5223,7 @@ def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
             for text in texts:
                 for m in EMAIL_ADDRESS_RE.finditer(text or ""):
                     addr = _clean_email_address(m.group(1))
-                    if addr:
+                    if addr and not _email_is_asset_filename(addr):
                         found.setdefault(addr.casefold(), addr)
         # `--revision-mode` also accepts a legacy `.doc`, and LibreOffice/Word
         # can open an `.odt`; neither has a text reader here. The coverage gap
@@ -5600,12 +5327,19 @@ def _email_verification_rows(pkg: Path) -> tuple:
                 bad.append("`source_url` uses a reserved/example host, not a real page")
         if len(query) < 3:
             bad.append("`query` is missing (the search string)")
-        try:
-            # A real calendar date, exactly like the identifier gate: the old
-            # shape-only match accepted 2026-99-99 (F160).
-            time.strptime(checked_at, "%Y-%m-%d")
-        except (TypeError, ValueError):
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", checked_at):
+            # `strptime` alone does not enforce the WIDTH of the fields:
+            # `2026-1-1` parsed happily although every reader documents the
+            # exact record shape YYYY-MM-DD (F151). The shape is checked first,
+            # then the calendar date.
             bad.append("`checked_at` must be a real YYYY-MM-DD calendar date")
+        else:
+            try:
+                # A real calendar date, exactly like the identifier gate: the old
+                # shape-only match accepted 2026-99-99 (F160).
+                time.strptime(checked_at, "%Y-%m-%d")
+            except (TypeError, ValueError):
+                bad.append("`checked_at` must be a real YYYY-MM-DD calendar date")
         if len(evidence) < 10 or (after and after.casefold() not in evidence.casefold()):
             bad.append("`evidence` must be a verbatim quote that contains the corrected "
                        "address")
@@ -5622,6 +5356,41 @@ def _email_verification_rows(pkg: Path) -> tuple:
             "checked_at": checked_at, "evidence": evidence,
         })
     return records, problems
+
+
+def _edit_distance_at_most(left: str, right: str, limit: int = 2) -> bool:
+    """Whether two short strings differ by at most `limit` edits (banded).
+
+    Used for a one-or-two-character correction of an e-mail DOMAIN, where the
+    local part is identical: `uni-leipzig.dde` vs `uni-leipzig.de` is one insertion.
+    """
+    a, b = str(left or ""), str(right or "")
+    if abs(len(a) - len(b)) > limit:
+        return False
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > limit:
+            return False
+        prev = cur
+    return prev[-1] <= limit
+
+
+def _email_is_near_correction(removed: str, delivered: str) -> bool:
+    """Whether `delivered` is a small correction of `removed`, not another person.
+
+    The same local part and a domain within two edits. A corrected address
+    (`user@uni-leipzig.dde` replaced by the in-corpus `user@uni-leipzig.de`) used to be
+    reported as a REMOVED contact fact -- "never remove it to resolve a finding"
+    -- although the revision had done exactly the right thing.
+    """
+    r_local, _, r_dom = str(removed or "").casefold().partition("@")
+    d_local, _, d_dom = str(delivered or "").casefold().partition("@")
+    if not r_dom or not d_dom or not r_local or r_local != d_local:
+        return False
+    return _edit_distance_at_most(r_dom, d_dom, 2)
 
 
 def email_address_change_problems(before_sources, after_sources, pkg: Path,
@@ -5664,6 +5433,12 @@ def email_address_change_problems(before_sources, after_sources, pkg: Path,
         addr = before[key]
         if _is_placeholder_email(addr) or key in verified_before:
             continue
+        if any(_email_is_near_correction(addr, other) for other in after.values()):
+            # A one-or-two-character correction of the same address is a
+            # CORRECTION, not a deletion: `user@uni-leipzig.dde` ->
+            # `user@uni-leipzig.de` is the repair of a typo. The "deletion
+            # surface" warning is for an address that vanished.
+            continue
         warns.append(
             f"{label}: the delivered package no longer carries e-mail address {addr!r}. An "
             f"address is a contact fact and is not a deletion surface: restore it, or record "
@@ -5699,7 +5474,7 @@ def _docx_hf_signature(path: Path) -> dict:
                 # document without furniture: returning {} made _hf_gap treat
                 # the template as requiring nothing and pass vacuously (F122).
                 return unreadable
-            doc = raw_doc.decode("utf-8", "replace")
+            doc = _decode_text_source(raw_doc, "replace")
             hf = {}
             for n in names:
                 if not re.search(r"word/(header|footer)\w*\.xml$", n):
@@ -5712,7 +5487,7 @@ def _docx_hf_signature(path: Path) -> dict:
                     # (F92). Mark it so the gap is reported as unverified.
                     return {"roles": [], "parts": [], "logo": False, "page": False,
                             "unreadable": True}
-                hf[n] = raw_hf.decode("utf-8", "replace")
+                hf[n] = _decode_text_source(raw_hf, "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         # A corrupt/encrypted/oversize template is UNREADABLE, never "a
         # template with no headers/footers" (F122).
@@ -5722,7 +5497,7 @@ def _docx_hf_signature(path: Path) -> dict:
     # the first section was read as a later one and the page-1 furniture check
     # compared against the wrong section. `_SECT_RE` was never defined in this
     # module, so the fallback was the only path.
-    sects = re.findall(r"<w:sectPr(?=[\s/>])[^>]*/>|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>", doc)
+    sects = re.findall(r"<w:sectPr(?=[\s/>])[^>]*/>|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr\s*>", doc)
     roles, seen = [], set()
     # OOXML attribute ORDER is not significant: Word writes `r:id` before
     # `w:type` in some files, and the old positional regex then read no roles at
@@ -5731,10 +5506,11 @@ def _docx_hf_signature(path: Path) -> dict:
     for m in re.finditer(r"<w:(header|footer)Reference(?=[\s/>])[^>]*/?>",
                          sects[0] if sects else ""):
         tag = m.group(0)
-        typ = re.search(r'\bw:type="([^"]*)"', tag)
+        typ = re.search(r"\bw:type\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag)
         if not typ:
             continue
-        key = (m.group(1), typ.group(1))
+        typ_val = typ.group(1) if typ.group(1) is not None else typ.group(2)
+        key = (m.group(1), typ_val)
         if key not in seen:
             seen.add(key)
             roles.append(key)
@@ -5775,10 +5551,10 @@ def _style_usage(docx: Path) -> set:
             raw = _docx_xml_part(z, "word/document.xml")
         if raw is None:
             return set()
-        xml = raw.decode("utf-8", "replace")
+        xml = _decode_text_source(raw, "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
-    return {sid for sid in re.findall(r'<w:pStyle w:val="([^"]+)"', xml) if sid}
+    return {m.group(2) for m in re.finditer(r"""<w:pStyle\b[^>]*\bw:val\s*=\s*(["'])(.*?)\1""", xml) if m.group(2)}
 
 
 def _manuscript_front_matter_styles(template: Path) -> set:
@@ -5798,16 +5574,19 @@ def _manuscript_front_matter_styles(template: Path) -> set:
     return {str(sid) for sid in (roles.get("title"), roles.get("author")) if sid}
 
 
+_STYLE_ID_RE = re.compile(r"""\bw:styleId\s*=\s*(["'])(.*?)\1""")
+
+
 def _defined_styles(docx: Path) -> set:
     try:
         with zipfile.ZipFile(docx) as z:
             raw = _docx_xml_part(z, "word/styles.xml")
         if raw is None:
             return set()
-        styles = raw.decode("utf-8", "replace")
+        styles = _decode_text_source(raw, "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
-    return set(re.findall(r'w:styleId="([^"]+)"', styles))
+    return {m.group(2) for m in _STYLE_ID_RE.finditer(styles) if m.group(2)}
 
 
 def _zip_part_too_big(z, name: str) -> bool:
@@ -5824,30 +5603,66 @@ def _zip_part_too_big(z, name: str) -> bool:
         return True
 
 
-def _protected_template_parts(tpl: Path) -> dict:
-    """{part name: sha256} of the template parts a template-DERIVED copy must keep.
+def _bounded_part_bytes(z, name: str):
+    """Bytes of ONE ZIP part, or None when its ACTUAL size exceeds the budget.
 
-    The theme, font table, numbering, and every header/footer part (the logo
-    drawing, the journal's colored/numbered footers) are furniture, not content:
-    an agent that copies the template and edits its text keeps them byte-for-byte.
-    A rebuilt package loses them, which is exactly the failure this catches.
+    `ZipInfo.file_size` is attacker-controlled central-directory metadata, and
+    `ZipFile.read(name)` inflated the WHOLE entry before the CRC check even when
+    the declared size was a lie (F04). The part is inflated through `z.open`
+    and read at most MAX_DOCX_PART_BYTES + 1 bytes, so the allocation is bounded
+    by the budget rather than by the declared number. A part that cannot be
+    decompressed (BadZipFile: forged size/CRC, unsupported method, encryption)
+    is unverifiable, which is also None.
     """
-    out = {}
+    try:
+        info = z.getinfo(name)
+        if int(info.file_size) > MAX_DOCX_PART_BYTES:
+            return None                 # declared over budget: never inflate it
+        with z.open(info) as fh:
+            data = fh.read(MAX_DOCX_PART_BYTES + 1)
+    except (KeyError, OSError, RuntimeError, NotImplementedError,
+            zipfile.BadZipFile):
+        return None
+    if len(data) > MAX_DOCX_PART_BYTES:
+        return None                     # grew past the budget: unverifiable
+    return data
+
+
+def _protected_template_parts_report(tpl: Path) -> tuple:
+    """({part name: sha256}, [unreadable part names]) for a template package.
+
+    The parts are the theme, font table, numbering, and every header/footer part
+    (the logo drawing, the journal's colored/numbered footers): furniture, not
+    content. An agent that copies the template and edits its text keeps them
+    byte-for-byte; a rebuilt package loses them, which is exactly the failure
+    this catches.
+
+    A part that cannot be READ is returned as `unreadable` instead of silently
+    shrinking the required set: the old blanket `except: return {}` made the
+    caller's "missing parts" test pass vacuously whenever ONE protected part was
+    over budget/unsupported (F77), so a rebuilt package could look derived.
+    """
+    out, unreadable = {}, []
     try:
         with zipfile.ZipFile(tpl) as z:
             for name in z.namelist():
                 low = name.lower()
-                if _zip_part_too_big(z, name):
-                    # Never decompress an over-budget furniture part: skip it
-                    # rather than allocate gigabytes (F062).
+                protected = (low.startswith("word/theme/")
+                             or low in ("word/fonttable.xml", "word/numbering.xml")
+                             or re.match(r"word/(header|footer)\w*\.xml$", low))
+                if not protected:
                     continue
-                if low.startswith("word/theme/") or low in ("word/fonttable.xml",
-                                                            "word/numbering.xml"):
-                    out[name] = hashlib.sha256(z.read(name)).hexdigest()
+                if _zip_part_too_big(z, name):
+                    # Never even open an over-budget furniture part (F062).
+                    unreadable.append(name)
+                    continue
+                payload = _bounded_part_bytes(z, name)
+                if payload is None:
+                    unreadable.append(name)
                     continue
                 if re.match(r"word/(header|footer)\w*\.xml$", low):
-                    body = z.read(name).decode("utf-8", "replace")
-                    text = " ".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body))
+                    body = _decode_text_source(payload, "replace")
+                    text = " ".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", body))
                     # A part that carries the template's own PROSE (its typesetting
                     # note) or a VML/DrawingML TEXT BOX may be intentionally replaced
                     # by a plain page-number footer; the logo header, the empty
@@ -5859,13 +5674,23 @@ def _protected_template_parts(tpl: Path) -> dict:
                         # container of the LOGO too, so it excluded the very
                         # logo part this set must protect (F123).
                         continue
-                    out[name] = hashlib.sha256(z.read(name)).hexdigest()
+                out[name] = hashlib.sha256(payload).hexdigest()
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         # RuntimeError is an ENCRYPTED entry and NotImplementedError an
         # unsupported compression method: both make the same untrusted DOCX
         # unreadable, exactly as _out_part_hashes already treats them (F121).
-        return {}
-    return out
+        return out, unreadable + ["<package unreadable>"]
+    return out, unreadable
+
+
+def _protected_template_parts(tpl: Path) -> dict:
+    """{part name: sha256} of the template parts a template-DERIVED copy must keep.
+
+    Compatibility wrapper for callers that only need the hashes; a caller that
+    must not treat an unreadable template as "requires nothing" uses
+    `_protected_template_parts_report` (F77).
+    """
+    return _protected_template_parts_report(tpl)[0]
 
 
 def _out_part_hashes(docx: Path) -> set:
@@ -5874,19 +5699,21 @@ def _out_part_hashes(docx: Path) -> set:
         with zipfile.ZipFile(docx) as z:
             for name in z.namelist():
                 if name.endswith((".xml", ".rels", ".jpeg", ".jpg", ".png", ".emf", ".wmf")):
-                    if _zip_part_too_big(z, name):
-                        # An agent-delivered part declaring more than the budget
-                        # is unverifiable, never decompressed (F062).
+                    # The declared size is attacker-controlled: inflate through
+                    # a bounded stream and treat an overrun as unverifiable
+                    # instead of trusting the central directory (F032/F04).
+                    payload = _bounded_part_bytes(z, name)
+                    if payload is None:
                         continue
-                    hashes.add(hashlib.sha256(z.read(name)).hexdigest())
+                    hashes.add(hashlib.sha256(payload).hexdigest())
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
     return hashes
 
 
-_SUP_RUN_RE = re.compile(r"<w:r\b[^>]*>([\s\S]*?)</w:r>")
-_SUP_ALIGN_RE = re.compile(r'<w:vertAlign\b[^>]*w:val="superscript"')
-_SUP_TEXT_RE = re.compile(r"<w:t\b[^>]*>([\s\S]*?)</w:t>")
+_SUP_RUN_RE = re.compile(r"<w:r\b[^>]*>([\s\S]*?)</w:r\s*>")
+_SUP_ALIGN_RE = re.compile(r'<w:vertAlign\b[^>]*w:val\s*=\s*["\']superscript["\']')
+_SUP_TEXT_RE = re.compile(r"<w:t\b[^>]*>([\s\S]*?)</w:t\s*>")
 
 
 def _superscript_run_count(frag: str) -> int:
@@ -5920,7 +5747,7 @@ def _superscripts_by_paragraph(path: Path) -> dict:
             raw = _docx_xml_part(z, "word/document.xml")
         if raw is None:
             return out
-        xml = raw.decode("utf-8", "replace")
+        xml = _decode_text_source(raw, "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return out
     for _p0, _p1, frag in mod.paragraphs(xml):
@@ -5977,7 +5804,11 @@ def _template_ledger_exceptions(ledger: Path) -> tuple:
     out, problems = [], []
     # Only ```json blocks are the machine-readable accounting; a fenced example
     # of anything else must never make the stage fail as "unparsable ledger".
-    blocks = re.findall(r"```([A-Za-z0-9_+-]*)\s*([\s\S]*?)```", text)
+    # CommonMark allows optional spaces/tabs BEFORE the info string: "``` json"
+    # declares the language json exactly like "```json", and the old pattern
+    # captured an empty tag, skipped the block and silently dropped every
+    # declared rewrap/addition/drop (F83).
+    blocks = re.findall(r"```[ \t]*([A-Za-z0-9_+-]*)\s*([\s\S]*?)```", text)
     for tag, raw in blocks:
         if tag.strip().lower() != "json":
             continue
@@ -6404,7 +6235,13 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
                 raw = _docx_xml_part(z, "word/styles.xml")
             if raw is None:
                 raise ValueError("styles.xml is over the size/entity budget")
-            have = set(re.findall(r'w:styleId="([^"]+)"', raw.decode("utf-8", "replace")))
+            # A legal XML spelling may use SINGLE quotes (`w:styleId='X'`);
+            # the double-quote-only pattern read a single-quoted template as
+            # "no styles required", so a rebuilt package passed, and a legal
+            # single-quoted output as "all styles missing" (F87). Read the
+            # attribute exactly like `_defined_styles`/`_style_usage` already do.
+            have = {m.group(2) for m in _STYLE_ID_RE.finditer(
+                _decode_text_source(raw, "replace")) if m.group(2)}
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError,
                 ValueError):
             style_gap.append({"file": doc.name, "error": "no readable word/styles.xml"})
@@ -6420,8 +6257,8 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
                 raw = _docx_xml_part(z, "word/styles.xml")
                 if raw is None:
                     continue
-                want = set(re.findall(r'w:styleId="([^"]+)"',
-                                      raw.decode("utf-8", "replace")))
+                want = {m.group(2) for m in _STYLE_ID_RE.finditer(
+                    _decode_text_source(raw, "replace")) if m.group(2)}
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
             continue
         gone = sorted(want - have)
@@ -6472,15 +6309,20 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
         tpl = template_for_package_file(doc, templates or {}, manuscript_names)
         if not tpl:
             continue
-        want = _protected_template_parts(Path(tpl))
+        want, unreadable = _protected_template_parts_report(Path(tpl))
         have = _out_part_hashes(doc)
         gone = sorted(name for name, h in want.items() if h not in have)
-        if gone:
+        if gone or unreadable:
+            # An unreadable protected part is UNVERIFIED, never "requires
+            # nothing": the old {} fallback made this whole gate pass
+            # vacuously for a rebuilt package (F77).
             derived_gap.append({"file": doc.name, "template": Path(tpl).name,
-                                "missing_template_parts": gone[:8]})
+                                "missing_template_parts": gone[:8],
+                                "unverified_template_parts": unreadable[:8]})
     if derived_gap:
         errs.append("the outputs are not derived from the templates: furniture parts of the "
-                    "template are gone (theme/fonts/numbering/headers/footers) -- COPY the "
+                    "template are gone (theme/fonts/numbering/headers/footers) or could not "
+                    "be READ in the template, so derivation is unverified -- COPY the "
                     "template and edit it, never rebuild the package: "
                     + json.dumps(derived_gap)[:300])
     # SUPERSCRIPTS (affiliation markers, footnotes) are content-level formatting:
@@ -6755,7 +6597,10 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
                         "error": f"{dest} is not empty and carries no .docx package document; "
                                  f"refusing to delete it (--force only replaces a built "
                                  f"submission package)"}
-            rmtree_force(dest)
+            if not rmtree_force(dest):
+                return {"ok": False,
+                        "error": f"{dest} survives deletion; refusing to rebuild the "
+                                 f"package into the stale tree"}
         else:
             return {"ok": False, "error": f"{dest} exists and is not empty (use --force)"}
     dest.mkdir(parents=True, exist_ok=True)
@@ -7629,6 +7474,9 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
                 # submission prose: placeholder and number-provenance scans read
                 # the submission documents only.
                 continue
+            if is_code_rel(prefix + rel):
+                # `code/` is revision content, never manuscript prose (F066).
+                continue
             if "work" in rel.split("/")[:-1]:
                 continue
             try:
@@ -7639,7 +7487,7 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
                     raw = _docx_xml_part(z, "word/document.xml")
                 if raw is None:
                     continue
-                xml = raw.decode("utf-8", "replace")
+                xml = _decode_text_source(raw, "replace")
             except (zipfile.BadZipFile, KeyError, OSError, RuntimeError,
                     NotImplementedError):
                 continue
@@ -7661,6 +7509,13 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
                 continue
             if is_non_manuscript_rel(rel):
                 continue        # evidence area, not submission prose (see above)
+            if is_code_rel(prefix + rel):
+                # `code/` is revision content, never manuscript prose: the
+                # `.txt`/`.md` branch used to omit the guard the DOCX branch
+                # above already applies, so a code-source note entered the
+                # number/term/outline/placeholder ledgers as submission prose
+                # (F108).
+                continue
             if "work" in rel.split("/")[:-1]:
                 continue
             if raw_text:
@@ -7864,10 +7719,18 @@ def _lookup_cache(ctx: Ctx) -> dict:
 
 
 def _lookup_cache_store(ctx: Ctx, cache: dict) -> None:
+    """Best-effort cache write: the lookup batch's contract is "never fatal".
+
+    `except OSError` alone let a companion module's non-JSON value (a set, a
+    bytes payload) or a non-UTF-8 string raise TypeError/UnicodeEncodeError out
+    of `_lookup_batch` and abort the stage's materialization (F138). The cache
+    is an optimisation, so every writer failure is swallowed here.
+    """
     try:
         (ctx.root / "reports").mkdir(parents=True, exist_ok=True)
         write_json_atomic(ctx.root / LOOKUP_CACHE_REL, cache)
-    except OSError:
+    except (OSError, TypeError, ValueError):
+        # UnicodeError is a ValueError; the cache is never worth a stage.
         pass
 
 
@@ -7879,8 +7742,8 @@ def _lookup_cache_fresh(entry: dict) -> bool:
         return False
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
-    age = (datetime.now(timezone.utc) - when).days
-    return 0 <= age <= LOOKUP_CACHE_TTL_DAYS
+    return timedelta(0) <= datetime.now(timezone.utc) - when \
+        <= timedelta(days=LOOKUP_CACHE_TTL_DAYS)
 
 
 # The order matters twice: each class first takes its reserved share, then the
@@ -9467,12 +9330,22 @@ def judge_token_for(ctx: "Ctx", r: int, vid: str) -> str:
 
 
 def iqr_of(vals: list) -> float:
+    """The panel's inter-quartile range; UNCOMPUTABLE is the WORST value.
+
+    The champion key compares IQR lower-better, so the old blanket `return 0.0`
+    on any exception handed a malformed panel (NaN/Infinity/non-numeric score)
+    the best attainable value and outranked a valid candidate, with no gap
+    recorded (F137). A non-finite result (a NaN score does not always raise) is
+    unusable in the same way. Both return +inf, which every order key ranks
+    after a real IQR (and after the `None` 99.0 fallback).
+    """
     if len(vals) >= 2:
         try:
             q = statistics.quantiles(vals, n=4, method="inclusive")
-            return float(q[2] - q[0])
-        except Exception:
-            pass
+            value = float(q[2] - q[0])
+        except Exception:                                        # noqa: BLE001
+            return float("inf")
+        return value if math.isfinite(value) else float("inf")
     return 0.0
 
 
@@ -9526,18 +9399,6 @@ def contained_under(root, rel) -> Path:
 
 def _aux_ignore(_dir, names):
     return [n for n in names if _is_aux_doc(n)]
-
-
-def _corpus_ignore(skip_aux: bool, strip_bookkeeping: bool):
-    """shutil.copytree ignore-callback for a VERSION CORPUS copy."""
-    def _ignore(_dir, names):
-        out = []
-        if skip_aux:
-            out += [n for n in names if _is_aux_doc(n)]
-        if strip_bookkeeping:
-            out += [n for n in names if is_bookkeeping_name(n)]
-        return out
-    return _ignore
 
 
 # ---- permissions: the raw-data directory is READ-ONLY by contract -----------
@@ -9790,9 +9651,13 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
     too (bottom-up): an empty directory is still a directory the next round
     would carry, and leaving it contradicts this sweep's own contract (F082).
 
-    Returns `{"removed": [rel, ...], "kept_in_evidence": [rel, ...]}`.
+    Returns `{"removed": [rel, ...], "kept_in_evidence": [rel, ...],
+    "failed": [{path, error}, ...]}`. A non-empty `failed` list RAISES after
+    the sweep: a junk file still in the tree must never be reported as gone,
+    because the caller then records the corpus digest and a clean sweep while
+    the file ships (F145).
     """
-    out = {"removed": [], "kept_in_evidence": []}
+    out = {"removed": [], "kept_in_evidence": [], "failed": []}
     dirp = Path(dirp)
     if dirp.is_symlink():
         # `rglob` would descend through a root link and `unlink()` the target's
@@ -9811,7 +9676,12 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
             continue
         try:
             q.unlink()
-        except OSError:
+        except FileNotFoundError:
+            pass                          # already gone: nothing left to ship
+        except OSError as e:
+            # Never `continue` silently: the path would be in neither list, and
+            # the stage would certify a sweep that left the junk in place.
+            out["failed"].append({"path": rel, "error": f"{type(e).__name__}: {e}"})
             continue
         out["removed"].append(rel)
     # A __pycache__ directory this sweep emptied is residue with no content:
@@ -9830,6 +9700,15 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
                 cache.rmdir()
         except OSError:
             continue
+    if out["failed"]:
+        err = OSError(
+            "the non-shippable-file sweep could not remove "
+            + ", ".join(f"{f['path']} ({f['error']})" for f in out["failed"])
+            + "; the package still carries file(s) no submission may ship")
+        # Carry the removals that DID happen: the caller's failure record must
+        # not report an empty `removed` list (F100).
+        err.partial = out
+        raise err
     return out
 
 
@@ -9844,18 +9723,40 @@ def strip_stage_non_shippable(sb: Path, pkg_dir: Path) -> dict:
     (the delivery report's existing consumer) and adds the code area separately.
     """
     sb, pkg_dir = Path(sb), Path(pkg_dir)
-    out = {"removed": [], "kept_in_evidence": [], "package": {},
+    out = {"removed": [], "kept_in_evidence": [], "failed": [], "package": {},
            "code": {}}
+
+    def _sweep_half(path: Path, prefix: str) -> dict:
+        """Sweep one corpus half; a failed unlink is collected, then raised.
+
+        The helper raises AFTER attempting every removal and names the paths in
+        its message; the half is still reported here so the other half runs and
+        the caller sees one complete failure record instead of a partial sweep.
+        """
+        try:
+            return strip_non_shippable_files_in_dir(path)
+        except OSError as e:
+            out["failed"].append({"path": prefix.rstrip("/") or ".", "error": str(e)})
+            partial = getattr(e, "partial", None) or {}
+            return {"error": str(e),
+                    "removed": list(partial.get("removed") or []),
+                    "kept_in_evidence": list(partial.get("kept_in_evidence") or [])}
+
     if pkg_dir.is_dir():
-        out["package"] = strip_non_shippable_files_in_dir(pkg_dir)
+        out["package"] = _sweep_half(pkg_dir, "")
         out["removed"].extend(out["package"].get("removed") or [])
         out["kept_in_evidence"].extend(out["package"].get("kept_in_evidence") or [])
     code = sb / CODE_DIR
     if code.is_dir():
-        out["code"] = strip_non_shippable_files_in_dir(code)
+        out["code"] = _sweep_half(code, CODE_DIR + "/")
         out["removed"].extend(f"{CODE_DIR}/{rel}" for rel in (out["code"].get("removed") or []))
         out["kept_in_evidence"].extend(
             f"{CODE_DIR}/{rel}" for rel in (out["code"].get("kept_in_evidence") or []))
+    if out["failed"]:
+        raise OSError(
+            "the stage's non-shippable-file sweep could not remove "
+            + ", ".join(f"{f['path']} ({f['error']})" for f in out["failed"])
+            + "; the package still carries file(s) no submission may ship")
     return out
 
 

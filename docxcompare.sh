@@ -88,14 +88,6 @@ case "${OUTPUT,,}" in
         ;;
 esac
 
-# Resolve a relative output against the CALLER's directory, as docx2pdf.sh
-# already does: `wslpath -w` returns a relative path unchanged, so Word
-# resolved the temp name against ITS OWN working directory while the
-# WSL-side checks and the final `mv` looked only at the caller's cwd -- the
-# comparison then failed (or wrote outside the requested destination) for
-# every relative output argument.
-if [[ "$OUTPUT" != /* ]]; then OUTPUT="$PWD/$OUTPUT"; fi
-
 if ! command -v powershell.exe >/dev/null 2>&1; then
     echo "Error: powershell.exe not found. Run from WSL or Git Bash on Windows." >&2
     exit 1
@@ -143,9 +135,8 @@ ORIG_WIN_PS="$(ps_escape "$ORIG_WIN")"
 REVISED_WIN_PS="$(ps_escape "$REVISED_WIN")"
 OUTPUT_WIN_PS="$(ps_escape "$OUTPUT_WIN")"
 
-# Do NOT remove an existing OUTPUT up front: the unique temp is renamed into
-# place only on success, so a failed render must leave the previous file intact
-# (F049).
+# Remove any stale output so a previous run cannot masquerade as success.
+rm -f -- "$OUTPUT"
 # Write to a UNIQUE temp beside the destination, verify THAT file, then rename
 # atomically into place: a shared final path let two runs delete/overwrite each
 # other's in-flight output while both announced success (F02), and a PowerShell
@@ -166,7 +157,7 @@ PIDFILE_WIN_PS="$(ps_escape "$PIDFILE_WIN")"
 _cleanup_partial() {
     local rc=$?
     if [[ $rc -ne 0 ]]; then
-        rm -f -- "$OUTPUT_TMP"
+        rm -f -- "$OUTPUT" "$OUTPUT_TMP"
     fi
 }
 trap _cleanup_partial EXIT
@@ -237,48 +228,7 @@ EOF
 )
 
 ENCODED="$(printf '%s' "$PS_SCRIPT" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)"
-# Word is a single-instance COM automation server, so a poisoned instance (left
-# behind by a killed run) or a modal dialog can make this call block forever.
-# The script therefore bounds its own call -- but it must NEVER bound it below
-# the caller's budget, because the CALLER owns the kill policy: the docx-compare
-# MCP server caps this same comparison at 900 s and escalates to taskkill on the
-# recorded Windows pids (F133), the only kill that reaches a Windows
-# powershell.exe/WINWORD from WSL, and the redline chain bounds it at 900 s as
-# well (mcp_compare_docx(timeout=900)).  A 180 s cap here failed a slow-but-valid
-# comparison minutes before that budget and silently downgraded the redline to a
-# lower-fidelity backend -- the very defect the MCP layer already fixed once
-# (C10) -- so the default is that same 900 s budget, and DOCXCOMPARE_TIMEOUT
-# overrides it (0 disables the cap for a caller that carries a larger budget).
-# `-k` makes the bound real: a child that ignores SIGTERM must not keep the
-# wrapper waiting, so SIGKILL follows the grace period and that exit (137) also
-# reads as a timeout.  `timeout` is optional (it is absent on some Git Bash
-# setups); without it the behaviour is the historical unbounded call.
-timeout_s="${DOCXCOMPARE_TIMEOUT:-900}"
-case "$timeout_s" in
-    '' | *[!0-9]*)
-        echo "Error: DOCXCOMPARE_TIMEOUT must be a whole number of seconds (0 disables the cap): $timeout_s" >&2
-        exit 2
-        ;;
-esac
-# `10#` so a leading zero is read as decimal, not as octal arithmetic.
-timeout_s=$((10#$timeout_s))
-TIMEOUT_BIN="$(command -v timeout || true)"
-if (( timeout_s > 0 )) && [[ -z "$TIMEOUT_BIN" && -n "${DOCXCOMPARE_TIMEOUT:-}" ]]; then
-    echo "Warning: DOCXCOMPARE_TIMEOUT is set but 'timeout' is not installed; running unbounded" >&2
-fi
-rc=0
-if (( timeout_s > 0 )) && [[ -n "$TIMEOUT_BIN" ]]; then
-    "$TIMEOUT_BIN" -k 30 "$timeout_s" \
-        powershell.exe -NoProfile -NonInteractive -EncodedCommand "$ENCODED" || rc=$?
-else
-    powershell.exe -NoProfile -NonInteractive -EncodedCommand "$ENCODED" || rc=$?
-fi
-if [[ $rc -eq 124 || $rc -eq 137 ]]; then
-    echo "Error: Word comparison timed out after ${timeout_s}s: $OUTPUT" >&2
-    exit 124
-elif [[ $rc -ne 0 ]]; then
-    exit "$rc"
-fi
+powershell.exe -NoProfile -NonInteractive -EncodedCommand "$ENCODED"
 
 if [[ ! -s "$OUTPUT_TMP" ]]; then
     echo "Error: no comparison document was written: $OUTPUT" >&2
@@ -291,7 +241,7 @@ fi
 # corrupt comparison document.
 if ! command -v python3 >/dev/null 2>&1; then
     echo "Error: python3 is required to verify the comparison document; install Python 3 and re-run" >&2
-    rm -f -- "$OUTPUT_TMP"
+    rm -f -- "$OUTPUT"
     exit 1
 fi
 if ! python3 -c 'import sys, zipfile, xml.etree.ElementTree as ET

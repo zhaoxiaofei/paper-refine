@@ -223,8 +223,8 @@ Everything lives under the root you passed to `setup`:
 The selection rule is one incumbent guard plus one ordered default key. Retention
 is applied first: if the key's leader is not the incumbent and ties it exactly on
 (median, mean, IQR), the incumbent is kept. Otherwise the default key decides:
-**defect prefix** (fewer defects wins) → **median** → **mean** → **IQR** → content
-**digest**. The prefix comes from the
+**ordered defect census** (fewer defects, and a worse severity earlier, wins) →
+**median** → **mean** → **IQR** → content **digest**. The prefix comes from the
 blind panel's own issue ledger; the panel statistics sit below it. See *How a
 round is decided* below for the rationale and the gates.
 
@@ -270,7 +270,7 @@ counted and named as a gap) and every OS by-product (`:Zone.Identifier`,
 `.DS_Store`, a Word owner file — never documents, stripped from the delivered
 copy). Two shipped surfaces that attribute one display item to different tools
 are `PKG-5` (a resources-table row against the item's own legend — the pipeline
-reports it and picks NO side), and three classes of statement a package makes
+reports it and picks NO side), and four classes of statement a package makes
 about ITSELF are `PKG-6/7/8/9` (2026-10-15): one text that both denies
 generative-AI use and describes the AI workflow it used (PKG-6, with scoped
 denials — "no AI tools were used for the statistical analysis" — deliberately
@@ -584,7 +584,10 @@ submission:
   decision report follow it.
 
 The **cover letter** has two separate reported budgets (neither gates): its
-*persuading part* against the operator's 300–500-word preference, and its
+*persuading part* against the venue profile's own `cover_letter` bound — a
+range, or a one-sided `at most N words` / `at least N words` when the profile
+states only one side; the built-in 300–500-word preference applies only when the
+profile configures no cover-letter block — and its
 **TOTAL content** — salutation, body, disclosures and signature — against a
 profile's `cover_letter.total_max` when one is configured. The shipped profiles
 record no total cap (Nature Biotechnology's own guidance states none), so the
@@ -1619,7 +1622,7 @@ producer, and a claim resting only on one is `unable -- placeholder input`. The
 real partner of a DECLARED placeholder stays evidence (declaring the ACT copy
 must not silence the HG008 original).
 
-### Package self-consistency: PKG-11 to PKG-26
+### Package self-consistency: PKG-11, PKG-12, PKG-14 to PKG-26
 
 Every scan below runs on each produced package and on every published copy, and
 its rows are seeded in the guided-review/audit/revision evidence pack. The table-
@@ -3112,7 +3115,7 @@ The artifact *process* is shared as well; the differences are deliberate:
 | `scores.json` (signed comparison items with class + severity) | judge | only the panel scores |
 
 **How a round is decided (one ranking key, every arm on the same terms):**
-the **cumulative defect count over the adaptive
+the **ordered per-cell defect census over the adaptive
 severity_tier_category prefix** (the canonical cell order is
 `fatal_correctness_peer, fatal_correctness_own, …,
 minor_formatting_own`: fatal, critical, major and minor -- the SAME four severity
@@ -3121,10 +3124,10 @@ the cells accumulating
 every ranked version's reported defect counts, and STOP
 at the first prefix where the version with the FEWEST defects reaches the
 configured floor -- default 10, `setup --tiebreak-defect-floor N` /
-`set-tiebreak-defect-floor N` -- or when every cell is used; the cumulative
-count at that prefix LEADS the ranking -- the number of defects the panel
-attributed to a version is the most direct improvement signal, while the flat
-median is coarse on a -4..+4 integer scale), then `-median`, then `-mean`, `IQR`,
+`set-tiebreak-defect-floor N` -- or when every cell is used; the ORDERED CENSUS
+at that prefix LEADS the ranking, compared cell by cell in canonical order, so a
+fatal defect does not tie with several minor ones -- the cumulative total chooses
+the prefix but is not the comparator), then `-median`, then `-mean`, `IQR`,
 the provenance-free content digest; the run id is only a deterministic sort
 fallback, never a champion input. Retention is applied first: if the key's leader
 is not the incumbent and that leader ties the incumbent exactly on (median, mean,
@@ -3726,7 +3729,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 268 suites (a few
+any failure. They are independent, so run them in parallel — 292 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

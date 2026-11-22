@@ -96,6 +96,7 @@ _NO_REDIRECT_OPENER = urllib.request.build_opener(rt._NoRedirectHandler)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import paper_dsh_runtime
+    import paper_agent_runtime_patch  # noqa: F401  (F024/F025, parent-tracked)
 finally:
     sys.path.pop(0)
 
@@ -136,29 +137,84 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _permanent_transport_error(err) -> bool:
+    """True for a transport error a retry cannot fix (redirect, auth, DNS/TLS)."""
+    text = str(err or "").lower()
+    return any(marker in text for marker in (
+        "redirect refused", "certificate verify failed",
+        "name or service not known", "nodename nor servname",
+        "unknown url type",
+        "unauthorized", "forbidden"))
+
+
 def _normalize_harness(value: str) -> str:
     """Accept both the public harness names and the adapter spellings."""
     name = str(value).strip().lower().replace("_", "-").replace(" ", "-")
     return {"gpt-codex": "codex", "claude-code": "claude"}.get(name, name)
 
 
+def _qwen_api_key(args, url_secret: str) -> str:
+    """CLI/env key, then a key split out of the URL, then the local default."""
+    explicit = getattr(args, "api_key", None)
+    if explicit is not None:
+        # An explicit empty value (`--api-key ''`) is the documented way to
+        # force a keyless local endpoint; `if explicit:` silently fell through
+        # to the ambient/default key instead (F026).
+        return explicit
+    env = _env("PAPER_QWEN_API_KEY", "")
+    if env:
+        return env
+    return url_secret or DEFAULT_API_KEY
+
+
+def _validate_base_url(url: str) -> str:
+    """Reject a malformed endpoint ONCE, as a clean ConfigError.
+
+    `urlsplit` raises ValueError for a bracketed host such as `http://[::1`
+    (which `config()` used to accept), and that raw traceback escaped every
+    request/probe path including the Dots key preflight (F15/F49). Validating
+    here also gives the dsh patch generator a usable URL (F48).
+    """
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+    except ValueError as e:
+        raise rt.ConfigError(f"invalid --base-url: {e}")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise rt.ConfigError(
+            f"--base-url must be an http(s) URL with a host: {url!r}")
+    return url
+
+
+def _effort_for(family: str, explicit: str) -> str:
+    """The shared effort table as a clean ConfigError (F66)."""
+    try:
+        return rt.normalize_reasoning_effort(family, explicit)
+    except rt.ConfigError as e:
+        raise rt.ConfigError(f"invalid reasoning effort: {e}")
+
+
 def config(args=None) -> dict:
     """Resolve the effective endpoint/harness configuration (args > env)."""
     args = args or argparse.Namespace()
-    base = (getattr(args, "base_url", None) or _env("PAPER_QWEN_BASE_URL",
-                                                   DEFAULT_BASE_URL)).rstrip("/")
+    # A URL may carry a credential in its userinfo/query. The base URL is
+    # written into codex's argv, the child environment and --probe output, so
+    # split the credential off and pass it through the API-key channel.
+    raw_base = (getattr(args, "base_url", None)
+                or _env("PAPER_QWEN_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+    base, url_secret = rt.split_endpoint_credentials(raw_base)
+    base = base.rstrip("/")
+    _validate_base_url(base)
     return {
         "base_url": base,
         "model": getattr(args, "model", None) or _env("PAPER_QWEN_MODEL", DEFAULT_MODEL),
-        "api_key": getattr(args, "api_key", None) or _env("PAPER_QWEN_API_KEY",
-                                                          DEFAULT_API_KEY),
+        "api_key": _qwen_api_key(args, url_secret),
         "harness": _normalize_harness(getattr(args, "harness", None)
                                        or _env("PAPER_QWEN_HARNESS", DEFAULT_HARNESS)),
         # An explicit --reasoning-effort/flag wins, then the shared
         # PAPER_AGENT_REASONING_EFFORT override, then the adapter's family
         # variable; the shared table maps a level qwen's wire lacks (high/max
         # -> its highest, xhigh).
-        "effort": rt.normalize_reasoning_effort(
+        "effort": _effort_for(
             "qwen38-27b",
             getattr(args, "reasoning_effort", None)
             or _env("PAPER_AGENT_REASONING_EFFORT", DEFAULT_EFFORT),
@@ -200,6 +256,18 @@ def _selection(cfg: dict):
     return selection
 
 
+def _request_url(base: str, suffix: str) -> str:
+    """`base` with `suffix` added to its PATH, keeping any query/fragment.
+
+    String-concatenating `base + '/chat/completions'` put the new path inside a
+    `?model=...` query value, so the request URL was malformed (F039).
+    """
+    parsed = urllib.parse.urlsplit(str(base))
+    path = parsed.path.rstrip("/") + suffix
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+
+
 def _request(method: str, url: str, payload: dict = None, api_key: str = "",
              timeout: float = 10.0) -> tuple:
     """(status, parsed-body-or-text, error) for one JSON request."""
@@ -209,7 +277,12 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
         headers["Authorization"] = f"Bearer {api_key}"
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    except ValueError as e:
+        # A malformed base URL must be a clean adapter error, not a raw
+        # urllib ValueError traceback (F050).
+        return 0, None, f"invalid endpoint URL: {e}"
     try:
         with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -225,7 +298,11 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
             return 0, None, (f"HTTP {e.code} redirect refused: the endpoint tried "
                              f"to forward the request (and its credentials) to "
                              f"another URL")
-        raw = e.read().decode("utf-8", "replace")
+        try:
+            raw = e.read().decode("utf-8", "replace")
+        except (http.client.HTTPException, OSError) as read_exc:
+            return 0, None, (f"could not read the HTTP {e.code} response body: "
+                             f"{type(read_exc).__name__}: {read_exc}")
         try:
             body = json.loads(raw)
         except ValueError:
@@ -253,7 +330,8 @@ def _request_with_retry(
         status, body, err = _request(
             method, url, payload=payload, api_key=api_key, timeout=timeout
         )
-        retryable = bool(err) or status in schedule.retryable_statuses
+        retryable = ((bool(err) and not _permanent_transport_error(err))
+                     or status in schedule.retryable_statuses)
         if not retryable or attempt >= schedule.max_retries:
             return status, body, err
         attempt += 1
@@ -270,7 +348,7 @@ def _request_with_retry(
 
 def probe_endpoint(cfg: dict, timeout: float = 4.0) -> tuple:
     """(ok, model_ids, error) from GET {base}/models."""
-    status, body, err = _request("GET", f"{cfg['base_url']}/models",
+    status, body, err = _request("GET", _request_url(cfg["base_url"], "/models"),
                                  api_key=cfg["api_key"], timeout=timeout)
     if err or status != 200 or not isinstance(body, dict):
         return False, [], err or f"HTTP {status}: {str(body)[:160]}"
@@ -295,7 +373,10 @@ def _stop_tunnel() -> None:
         except (OSError, subprocess.SubprocessError):
             try:
                 _TUNNEL.kill()
-            except OSError:
+                # Reap the killed child: clearing the Popen object without a
+                # wait left a zombie until an unrelated Popen operation (F093).
+                _TUNNEL.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
                 pass
         _TUNNEL = None
     if _TUNNEL_STDERR is not None:
@@ -310,8 +391,12 @@ def _local_tunnel_url(cfg: dict) -> str:
     """The URL the local end of the ssh forward actually listens on."""
     parsed = urllib.parse.urlsplit(str(cfg["base_url"]))
     path = parsed.path.rstrip("/")
+    # Keep the endpoint's query/fragment: `_request_url` preserves them, so
+    # dropping them here made tunneled requests lose the same model/query
+    # parameters the direct path sent (F177).
     return urllib.parse.urlunsplit(
-        (parsed.scheme or "http", "127.0.0.1:%s" % cfg["local_port"], path, "", "")
+        (parsed.scheme or "http", "127.0.0.1:%s" % cfg["local_port"], path,
+         parsed.query, parsed.fragment)
     )
 
 
@@ -411,7 +496,7 @@ def check_tools(cfg: dict, timeout: float = 30.0) -> tuple:
             "parameters": {"type": "object", "properties": {}}}}],
         "tool_choice": "auto",
     }
-    status, body, err = _request("POST", f"{cfg['base_url']}/chat/completions",
+    status, body, err = _request("POST", _request_url(cfg["base_url"], "/chat/completions"),
                                  payload=payload, api_key=cfg["api_key"],
                                  timeout=timeout)
     if err:
@@ -555,7 +640,7 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
                # above covers the thinking trace plus the answer.
                "chat_template_kwargs": {"enable_thinking": True}}
     status, body, err = _request_with_retry(
-        "POST", f"{cfg['base_url']}/chat/completions",
+        "POST", _request_url(cfg["base_url"], "/chat/completions"),
         payload=payload, api_key=cfg["api_key"], timeout=600.0)
     if err or status != 200 or not isinstance(body, dict):
         return "", err or f"HTTP {status}: {str(body)[:400]}"
@@ -636,7 +721,11 @@ def main(argv=None) -> int:
     p.add_argument("--chat", action="store_true",
                    help="read a prompt from stdin and print one chat completion")
     args = p.parse_args(argv)
-    cfg = config(args)
+    try:
+        cfg = config(args)
+    except rt.ConfigError as e:
+        print(f"qwen: {e}", file=sys.stderr)
+        return 2
     atexit.register(_cleanup)
     if cfg["harness"] not in ("codex", "dsh", "claude", "chat"):
         print(f"qwen: unknown harness {cfg['harness']!r}; use codex, dsh, claude or chat",

@@ -623,11 +623,18 @@ if [ "$codex_enabled" = 1 ]; then
         stamp="$(date +%Y%m%d%H%M%S)"
         target="$backup_dir/config.toml.$stamp"
         suffix=0
-        while [ -e "$target" ]; do
+        # A dangling link is not `-e`, and `cp -p` follows an existing link:
+        # O_EXCL via noclobber creates the backup without ever following one
+        # (F64).
+        while [ -e "$target" ] || [ -L "$target" ]; do
             suffix=$((suffix + 1))
             target="$backup_dir/config.toml.$stamp.$suffix"
         done
-        cp -p -- "$codex_home/config.toml" "$target"
+        if ! ( set -o noclobber; cat -- "$codex_home/config.toml" > "$target" ); then
+            echo "error: could not create the backup $target" >&2
+            return 1
+        fi
+        chmod --reference="$codex_home/config.toml" "$target" 2>/dev/null || true
         echo "backed up: $codex_home/config.toml -> $target"
     }
 
@@ -788,11 +795,15 @@ if [ "$claude_enabled" = 1 ]; then
             stamp="$(date +%Y%m%d%H%M%S)"
             target="$claude_backup_dir/claude.json.$stamp"
             suffix=0
-            while [ -e "$target" ]; do
+            while [ -e "$target" ] || [ -L "$target" ]; do
                 suffix=$((suffix + 1))
                 target="$claude_backup_dir/claude.json.$stamp.$suffix"
             done
-            cp -p -- "$cfg" "$target"
+            if ! ( set -o noclobber; cat -- "$cfg" > "$target" ); then
+                echo "error: could not create the backup $target" >&2
+                return 1
+            fi
+            chmod --reference="$cfg" "$target" 2>/dev/null || true
             echo "backed up: $cfg -> $target"
         }
         for i in "${!mcp_row_names[@]}"; do

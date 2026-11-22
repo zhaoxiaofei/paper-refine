@@ -320,7 +320,10 @@ SECTION_PATTERNS = [
     ("references", re.compile(r"^(?:references?|bibliography|reference list|literature cited)\s*$", re.I)),
     ("supplementary", re.compile(r"^(?:supplementary|extended data|appendix)\b", re.I)),
     ("figure legend", re.compile(r"^(?:figure legends?|legends?)\b", re.I)),
-    ("table", re.compile(r"^(?:tables?|table legends?)\b", re.I)),
+    # A heading or the bare word only: "Table 1 shows ..." is a body sentence,
+    # not a context switch (F191). Real captions are matched earlier by
+    # TABLE_CAPTION_RE, which requires the separator after the number.
+    ("table", re.compile(r"^(?:tables?|table legends?)\s*$", re.I)),
     # synthetic corpus markers written by convert_corpus.py
     ("table", re.compile(r"^sheet\b", re.I)),
     ("header", re.compile(r"^header\b", re.I)),

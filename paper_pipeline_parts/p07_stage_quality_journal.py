@@ -282,6 +282,17 @@ def display_rule_errors(info: dict, label: str) -> list:
 INTEGRATION_LEDGER_COLUMNS = ("donor", "artifact", "size", "finding effect", "verdict",
                               "revalidated")
 
+# The DIFF_LEDGER prompt's fixed vocabularies (F65). `verdict` classifies a
+# difference as an edit (port/synthesize) or a deliberate non-edit; a token
+# outside this set is unclassified, so the Rule 1B port gate cannot see it.
+INTEGRATION_LEDGER_VERDICTS = ("port", "keep-self", "synthesize", "ignore-cosmetic")
+# A legacy NON-EDIT spelling an already-shipped integration fixture uses
+# (`drop`). It names the same disposition as keep-self -- do not adopt the donor
+# item -- so it is not an unclassified row; it is NOT part of the documented
+# vocabulary above (the prompt still asks for keep-self).
+INTEGRATION_LEDGER_LEGACY_VERDICTS = ("drop",)
+INTEGRATION_LEDGER_SIZES = ("small", "large")
+
 
 def _ledger_header_key(cell) -> str:
     """A ledger header without its prompt's parenthetical explanation."""
@@ -327,13 +338,19 @@ def integration_ledger_rows(path: Path) -> list:
             for row in _ledger_block_rows(b)]
 
 
+def _ledger_verdict_token(verdict_key: str, vocabulary=INTEGRATION_LEDGER_VERDICTS) -> str:
+    """The documented token a normalized `verdict` cell starts with ('' if none)."""
+    return next((tok for tok in vocabulary
+                 if re.match(r"^" + re.escape(tok) + r"\b", verdict_key)), "")
+
+
 def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool) -> dict:
     """Parse integrated/DIFF_LEDGER.md: size classes, artifacts, finding effects,
     and the Rule 1B re-verification verdict."""
     rows = integration_ledger_rows(out / "DIFF_LEDGER.md")
     sizes, missing_artifact, missing_finding, undoes, seen_donors = Counter(), [], [], [], set()
     missing_revalidated, invalid_ports, invalid_revalidated = [], [], []
-    missing_verdict = []
+    missing_verdict, invalid_verdict, invalid_size = [], [], []
     edit_rows = 0
     # The presence test and the value reader must use ONE vocabulary: the value
     # is read from `revalidated` OR the prompt's `re_validation` spelling, so a
@@ -341,11 +358,21 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
     has_revalidated_column = any("revalidated" in r or "re_validation" in r for r in rows)
     has_verdict_column = any("verdict" in r for r in rows)
     for r in rows:
-        size = str(r.get("size") or "").strip().lower()
+        size = " ".join(str(r.get("size") or "").split()).strip().lower()
         sizes[size] += 1
         donor = str(r.get("donor") or "").strip()
         if donor:
             seen_donors.add(donor)
+        # F65: the prompt FIXES the two vocabularies (`verdict (port / keep-self
+        # / synthesize / ignore-cosmetic)`, `size (small / large)`). The reader
+        # only tested "starts with port/synth" and counted any size token, so
+        # `delete`/`maybe` passed as a non-edit (bypassing the port gate) and
+        # `huge` collapsed the size-class requirement. A cell that starts with a
+        # documented token is that token (the prompt shows `port (from w2)`);
+        # anything else is unclassified and reported, never silently kept.
+        if size and not any(re.match(r"^" + re.escape(tok) + r"\b", size)
+                            for tok in INTEGRATION_LEDGER_SIZES):
+            invalid_size.append(f"{donor or '?'}: size={size}")
         if not str(r.get("artifact") or "").strip():
             missing_artifact.append(donor or "?")
         fe_raw = str(r.get("finding effect") or r.get("finding_effect") or "").strip()
@@ -357,8 +384,13 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
             # warning goes to a human and to the change log.
             undoes.append(f"{donor or '?'}: {fe_raw}")
         reval = str(r.get("revalidated") or r.get("re_validation") or "").strip().lower()
-        verdict = str(r.get("verdict") or "").strip().lower()
-        edits = verdict.startswith("port") or verdict.startswith("synth")
+        verdict_raw = str(r.get("verdict") or "").strip()
+        verdict = " ".join(verdict_raw.split()).lower()
+        verdict_key = re.sub(r"[\s_]+", "-", verdict)
+        verdict_token = _ledger_verdict_token(verdict_key)
+        legacy_token = (not verdict_token) and _ledger_verdict_token(
+            verdict_key, INTEGRATION_LEDGER_LEGACY_VERDICTS)
+        edits = verdict_token in ("port", "synthesize")
         if edits:
             edit_rows += 1
         # The edit CLASS is derived from the verdict cell, so a ledger that
@@ -368,6 +400,8 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
         # verdict nor the revalidated column is the tolerated legacy shape.
         if not verdict and (has_verdict_column or has_revalidated_column):
             missing_verdict.append(donor or "?")
+        elif verdict and not (verdict_token or legacy_token):
+            invalid_verdict.append(f"{donor or '?'}: verdict={verdict_raw}")
         if not edits and not reval:
             missing_revalidated.append(donor or "?")
         # The prompt: `revalidated` is mandatory on EVERY row and records the
@@ -387,6 +421,8 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
             "missing_revalidated": missing_revalidated, "invalid_ports": invalid_ports,
             "invalid_revalidated": invalid_revalidated,
             "missing_verdict": missing_verdict,
+            "invalid_verdict": invalid_verdict,
+            "invalid_size": invalid_size,
             "legacy_no_revalidated": legacy,
             # A legacy (no `revalidated` column) table is tolerated only when it
             # carries no edit row; a `port`/`synthesize` row there is an outright
@@ -459,151 +495,6 @@ def add_stage_quality_checks(ctx: Ctx, rec: dict, before_sources: list, after_so
     todo_errs, todo_warns = manual_todo_gate(pkg, mode=author_to_complete_mode_of(ctx))
     errs.extend(todo_errs)
     warns.extend(todo_warns)
-AUDIT_VERDICTS = ("confirm", "drop")
-AUDIT_SEVERITIES = ("critical", "major", "minor", "fatal")
-# The audit prompt's own coverage contract: every adopted check (M1-M36 and
-# J1-J5) gets a coverage row. The list is the same one the review prompt and
-# the sweep documents name (README, p03_prompts.py).
-AUDIT_COVERAGE_CHECKS = tuple([f"M{i}" for i in range(1, 37)]
-                              + [f"J{i}" for i in range(1, 6)])
-# A coverage disposition must be a REAL disposal, not one word of filler. The
-# review side's documented vocabulary is accepted verbatim; an audit row may
-# also state the re-derivation it performed ("stub: the sweep was re-derived;
-# clean"), which is what several stages' self-reports use. Bare `x`/`done` (or
-# a bare `clean`) records no re-derivation and is refused (F30).
-#
-# A NEGATED re-derivation ("never verified at all", "the sweep was not
-# re-derived", "could not be checked") is the absence of the check, so it stays
-# refused. The FIRST version of that guard was a whole-string negation search
-# (`(?!.*\b(?:not|never|cannot|unable to)\b)`), which rejected any true row
-# whose EVIDENCE happened to contain one of those words: the 2026-11-01 audit
-# lost an entire 39-minute attempt on
-#   "F-002, ... confirmed (...); X-910 confirmed (CI does not contain point estimate)"
-# and on "F-030 confirmed (...); X-949 dropped (... not a defect)". The negation
-# is only disqualifying when it GOVERNS THE VERB, so `_AUDIT_NEGATED_VERB_RE`
-# matches a negation, at most two words, and then the re-derivation verb; the
-# gate rejects a cell only when that phrase occurs. A negation elsewhere in the
-# sentence is evidence, not a missing check.
-#
-# The verdict may be preceded by a qualifier: "No cover letter in submission;
-# no findings" and "No rendered artwork files in corpus; unable to check
-# artwork/text parity" were refused by the anchored match although both are
-# real dispositions. Every shape is therefore searched anywhere in the cell,
-# while bare filler ("x", "done", "not checked") still matches nothing.
-#
-# `No findings ...` is the same verdict as `0 findings` and `unable to check X`
-# the same verdict as `unable -- <reason>`; both spellings are accepted, and the
-# reason-bearing ones still pass the shared filler gate in `_audit_disposition_ok`.
-_AUDIT_REDERIVATION_VERB = r"(?:re-?derived|confirmed|checked|verified)"
-_AUDIT_NEGATED_VERB_RE = (
-    r"\b(?:not|never|cannot|can\s+not|could\s+not|unable\s+to|no\s+longer)\b"
-    r"(?:\s+\w+){0,2}\s+" + _AUDIT_REDERIVATION_VERB + r"\b")
-_AUDIT_COUNT_RE = re.compile(r"(?i)(?:\b\d+\s+finding|\bno\s+finding)")
-_AUDIT_CANONICAL_TAIL_RE = re.compile(
-    r"(?i)(?:clean\s*(?:--|—|–)\s*basis\s*:\s*"
-    r"|unable\s*(?:--|—|–)\s*"
-    r"|out\s+of\s+scope\s*(?:--|—|–)\s*)(.*)$")
-_AUDIT_VERB_RE = re.compile(r"(?i)\b" + _AUDIT_REDERIVATION_VERB + r"\b")
-_AUDIT_NEGATED_VERB_COMPILED = re.compile(_AUDIT_NEGATED_VERB_RE, re.I)
-_AUDIT_PROSE_UNABLE_RE = re.compile(r"(?i)\bunable\s+to\s+(.*)$")
-# A re-derivation sentence must NAME what was re-derived or on what basis; a
-# one-word verb (`checked`, `confirmed`) records no object and is filler (F128).
-# A check id, a finding id or a named artifact satisfies that bar on its own.
-_AUDIT_NAMED_BASIS_RE = re.compile(
-    r"(?i)\b(?:[MJ]\d{1,2}|(?:F|X|AU)-\d+)\b"
-    r"|\b[\w-]+\.(?:md|markdown|json|txt|tex|docx|csv|pdf)\b")
-AUDIT_COVERAGE_DISPOSITION_RE = re.compile(
-    # A verdict shape anywhere in the cell (the leading `.*?` lets a qualifier
-    # precede it).
-    r"(?i)^(?:.*?(?:\b\d+\s+finding"
-    r"|\bno\s+finding"
-    r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
-    r"|unable\s*(?:--|—|–)\s*\S"
-    r"|out\s+of\s+scope\s*(?:--|—|–)\s*\S"
-    # A prose inability that names an object ("unable to check artwork/text
-    # parity"): the `unable --` dash form is preferred, but the same recorded
-    # fact in a sentence is still a disposition, not filler.
-    r"|unable\s+to\s+\w+\s+\S)"
-    # ... or a re-derivation verb that no negation governs.
-    r"|(?!.*?" + _AUDIT_NEGATED_VERB_RE + r")"
-    r".*?\b" + _AUDIT_REDERIVATION_VERB + r"\b.*$)")
-
-
-def _audit_negated_verb(text: str) -> bool:
-    """Whether a negation governs the re-derivation verb in `text`.
-
-    `_AUDIT_NEGATED_VERB_RE` listed only `not/never/cannot/can not/could
-    not/unable to/no longer`, so a true refusal written with a contraction
-    ("wasn't re-derived") or with punctuation between the negation and the verb
-    ("was not, in fact, re-derived") was read as a POSITIVE re-derivation and
-    accepted by the coverage gate (F06). Normalise contractions to their
-    two-word form and the punctuation that separates the negation from the verb
-    to spaces, then apply the same bounded-window match.
-    """
-    probe = re.sub(r"n['\u2019]t\b", " not", str(text or ""), flags=re.I)
-    probe = re.sub(r"[,;:\u2014\u2013]", " ", probe)
-    return bool(_AUDIT_NEGATED_VERB_COMPILED.search(probe))
-
-
-def _audit_rederivation_named(text: str) -> bool:
-    """Whether a re-derivation sentence names an object/basis (not a bare verb).
-
-    `checked`, `confirmed`, `verified the` and `re-derived` are one- or two-word
-    labels: they state that a verb was said, not what was re-derived or on what
-    basis, so they are the filler shape the coverage gate must refuse. Three
-    words ("checked all rows") or any check/finding id or named artifact file
-    clears the bar.
-    """
-    stripped = str(text or "").strip()
-    return len(stripped.split()) >= 3 or bool(_AUDIT_NAMED_BASIS_RE.search(stripped))
-
-
-def _audit_disposition_ok(value) -> bool:
-    """A real audit coverage disposition (negation- and filler-proof).
-
-    The regex alone accepts `unable -- no`, `clean -- basis: x` and a bare
-    `out of scope`; those are the review gate's documented FILLER shapes, so
-    route every reason-bearing form through the shared reason check
-    (`_coverage_reason_named` knows the difference between a named
-    artifact/reason and a one-letter or filler token). The prose equivalents get
-    the same treatment: `unable to <verb> <object>` must name an object, not
-    just the verb.
-
-    THE SHAPES ARE TESTED IN ORDER, STRONGEST FIRST, and each shape accepts on
-    its OWN evidence. Testing the prose-`unable` heuristic first let an inability
-    clause in an EVIDENCE sentence veto a perfectly good count:
-    `3 findings; unable to see` and `3 findings confirmed (the reviewer was
-    unable to tell)` were refused because the tail after "unable to" was short.
-    A finding count is a complete verdict, so it is answered first.
-    """
-    text = str(value or "").strip()
-    if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
-        return False
-    if _AUDIT_COUNT_RE.search(text):
-        return True          # "3 findings" / "no findings": a complete verdict
-    m = _AUDIT_CANONICAL_TAIL_RE.search(text)
-    if m is not None:
-        return _coverage_reason_named(m.group(1))
-    if _AUDIT_VERB_RE.search(text) and not _audit_negated_verb(text):
-        # a re-derivation sentence, e.g. "the sweep was re-derived". A BARE
-        # verb ("checked", "confirmed", "verified the") records no object and
-        # no basis, so it is the filler shape this gate exists to refuse (F128):
-        # a real disposition names what was re-derived, on what basis, or a
-        # finding/check id (the same bar the other shapes meet).
-        return _audit_rederivation_named(text)
-    m = _AUDIT_PROSE_UNABLE_RE.search(text)
-    if m is not None:
-        # "unable to check artwork/text parity" names what could not be
-        # checked; "unable to check" alone is the filler shape.
-        return len(re.findall(r"[A-Za-z0-9]", m.group(1))) >= 6
-    if _AUDIT_VERB_RE.search(text) and _audit_negated_verb(text):
-        # The coverage regex's negative lookahead only knows the literal
-        # negation spellings; a contraction/punctuated negation reaches here and
-        # must still be REFUSED (F06).
-        return False
-    return True              # the gate regex matched some other accepted shape
-
-
 def audit_coverage_problems(audit) -> list:
     """Problems with the auditor's own coverage table.
 
@@ -837,7 +728,12 @@ def _probe_audit_verdict(row) -> str:
                 and "reviewer" not in str(k or "").strip().lower()]
     for k in keys:
         cell = " ".join(str(row.get(k) or "").split())
-        low = cell.lower()
+        # The prompt documents the verdict as a backticked `stands`, so a
+        # session copying that spelling wrote a leading backtick and the row
+        # was reported as "carries no verdict" (F144). Compare the cell without
+        # its markdown emphasis decoration; the returned verdict keeps the
+        # cell's own text.
+        low = cell.strip("`*_~ ").lower()
         if low.startswith(("stands", "needs-evidence", "needs evidence")):
             return cell
     return ""
@@ -1179,164 +1075,6 @@ def _m30_seed_reference_state(sb: Path) -> tuple:
     return [], False, str(pin)
 
 
-def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
-    """(errs, warns) for the M30 source-hierarchy reconciliation record.
-
-    The evidence is the stage's own seeded ledger: every row disposed means the
-    revision looked at the written value AND its producer, so an empty
-    disposition cell means the comparison the finding rests on was never
-    recorded (rule E12).
-
-    WHERE THE ROWS LIVE was ambiguous and cost the 2026-11-01 revise arm its
-    second attempt. The seed is `work/<name>` in the SANDBOX (`decide` writes it
-    next to PROMPT.md), but the stage's deliverables are all under the package,
-    so one reviser disposed `revised/work/<name>` (53/53 rows answered) while
-    the postcheck read the untouched sandbox copy and failed it on "53 of 165
-    ... EMPTY". The check therefore reads BOTH copies and judges the disposed
-    one; a run that answered either copy did the work. The message names which
-    copy was read.
-
-    The old message also reported `len(block_problems)` as "N undisposed
-    row(s)" and then pasted 80 characters of the first problem into it,
-    truncated mid-word, producing
-      "still carries 1 undisposed row(s) (53 of 165 row(s) have an EMPTY
-       disposition cell (every seeded row must be dispos)"
-    -- a count of problems labelled as a count of rows, an unbalanced
-    parenthesis and a cut word, which is what reached the operator's log.
-    """
-    m30_ids = [str(f.get("id") or "").strip() for f in frozen_all
-               if str(f.get("check") or "").strip().upper() == "M30"]
-    errs, warns = [], []
-    if not m30_ids:
-        return errs, warns
-    candidates = []
-    if pkg:
-        package_copy = Path(sb) / pkg / M30_HIERARCHY_REL
-        if package_copy.is_file():
-            candidates.append((f"{pkg}/{M30_HIERARCHY_REL}", package_copy))
-    sandbox_copy = Path(sb) / M30_HIERARCHY_REL
-    if sandbox_copy.is_file():
-        candidates.append((M30_HIERARCHY_REL, sandbox_copy))
-    if not candidates:
-        looked_for = ([f"{pkg}/{M30_HIERARCHY_REL}"] if pkg else []) + [M30_HIERARCHY_REL]
-        warns.append(f"the frozen review carries {len(m30_ids)} M30 source-hierarchy "
-                     f"finding(s) but no {' or '.join(looked_for)} exists: rule E12 requires the "
-                     f"written side to be aligned with the authoritative producer, with the "
-                     f"reconciling reason recorded")
-        return errs, warns
-    judged, judged_state, judged_score, states = None, None, None, {}
-    for label, path in candidates:
-        try:
-            state = _m30_ledger_state(path)
-        except Exception as e:                                      # noqa: BLE001
-            warns.append(f"{label}: could not be read ({type(e).__name__}: {e}); the M30 rows "
-                         f"there stay unverified")
-            continue
-        states[label] = state
-        # The DISPOSED copy is the reviser's answer: a stale seed left empty
-        # beside a filled package copy is not a defect (and the reverse is the
-        # case this check was written for). Ordering: a copy that still holds
-        # seeded candidate rows is evidence of the check; one with none (an
-        # empty or unparsed file) must never beat it just because it has nothing
-        # left to report. Among copies that hold such rows, the one with the
-        # fewest empty dispositions wins (a tie keeps the package copy, listed
-        # first).
-        score = (0 if state["actionable"] else 1, state["empty"])
-        if judged_score is None or score < judged_score:
-            judged, judged_state, judged_score = label, state, score
-    if judged_state is None:
-        return errs, warns
-    sandbox_state = states.get(M30_HIERARCHY_REL)
-    if (judged != M30_HIERARCHY_REL and sandbox_state
-            and sandbox_state["actionable"]
-            and sandbox_state["empty"] == sandbox_state["actionable"]):
-        # The reviser answered the package copy and left the seed in place. That
-        # is accepted (the work is done), but the record should say which copy
-        # was judged so nobody reads the untouched seed as the evidence.
-        warns.append(f"{judged} was judged; the sandbox seed {M30_HIERARCHY_REL} is still "
-                     f"undisposed ({sandbox_state['empty']} of "
-                     f"{sandbox_state['actionable']} row(s) EMPTY)")
-    if not judged_state["readable"]:
-        # A zero-byte, unreadable or table-less ledger is missing EVIDENCE, not
-        # a clean ledger: the old all-zero state returned no error and silently
-        # removed the gate (F02).
-        errs.append(
-            f"{judged} exists but carries no readable M30 table (zero-byte, over the byte "
-            f"budget, a symlink/non-regular file, or no markdown table): the source-hierarchy "
-            f"reconciliation is unverified. Restore the seeded table and dispose every row.")
-        return errs, warns
-    actionable, empty = judged_state["actionable"], judged_state["empty"]
-    # ROW IDENTITY: a candidate copy that drops seeded rows cannot pass on the
-    # strength of the one row it kept. The old score compared only
-    # (has actionable rows, empty count), so a one-row package copy with a
-    # filled disposition beat a full seed with three empty rows and the gate
-    # reported nothing (F01). The reference is the identity PIN the orchestrator
-    # wrote BESIDE the sandbox, not the live seed file -- that file is also the
-    # documented answer ("dispose every seeded row in place"), so a rewrite of it
-    # (or of both it and the ledger) used to pass the check it was supposed to
-    # fail (R04/F39). The live sandbox seed is the fallback only for a
-    # PROMPT-less unit fixture.
-    judged_keys = set(judged_state["rows"])
-    reference_rows, reference_available, reference_label = _m30_seed_reference_state(sb)
-    if not reference_available:
-        if (Path(sb) / "PROMPT.md").is_file():
-            # Every real session sandbox carries PROMPT.md, and the seed pin is
-            # written beside it. If the pin is gone/unreadable the identity
-            # check CANNOT run: report that instead of silently trusting the
-            # agent-writable live copy (F39).
-            errs.append(
-                f"{judged}: the M30 seed reference {reference_label} is missing, "
-                f"unreadable or carries no hierarchy rows, so the seeded row identities "
-                f"cannot be checked. Restore the evidence pin (or re-run the stage): "
-                f"the identity check is not skipped.")
-            reference_rows = []
-        else:
-            # A unit fixture / legacy sandbox without an evidence pin: fall back
-            # to the live sandbox seed (the pre-R04 behaviour).
-            reference_rows = (sandbox_state["rows"]
-                              if (judged != M30_HIERARCHY_REL and sandbox_state
-                                  and sandbox_state["readable"]) else [])
-            reference_label = M30_HIERARCHY_REL
-    dropped = [k for k in reference_rows if k not in judged_keys]
-    if dropped:
-        errs.append(
-            f"{judged} is missing {len(dropped)} of the {len(reference_rows)} seeded M30 "
-            f"row(s) recorded in {reference_label} that name a candidate producer: "
-            f"{len(dropped)} seeded row(s) were DROPPED instead of disposed. Copy every "
-            f"seeded row into the answer and dispose it in place (`OK -- ...` / "
-            f"`contradiction -- ...` / `unable -- ...`).")
-    if actionable and empty == actionable:
-        # None of the rows that actually need a comparison was disposed: the
-        # check was not run at all, not merely left one row short. Fail the
-        # attempt (the retry prompt carries this message) instead of accepting
-        # the warning the evaluation run ignored.
-        errs.append(
-            f"{judged} still carries {empty} of {actionable} seeded row(s) with a candidate "
-            f"producer whose disposition cell is EMPTY: an M30 finding's fix must record the "
-            f"producer it reconciled against (rule E12). Dispose every such row in place -- "
-            f"`OK -- <the reconciling reason>`, `contradiction -- <finding id>` or "
-            f"`unable -- <what is missing>` -- in the ledger you were given.")
-    else:
-        # EVERY block problem is now an ERROR, not a warning: an empty or
-        # boilerplate disposition recorded no comparison, and the gate exists to
-        # enforce exactly that (F03). The old code downgraded boilerplate to a
-        # warning and never looked at an arbitrary non-empty cell at all.
-        detail = "; ".join(str(p) for p in judged_state["block_problems"][:3])
-        if judged_state["block_problems"]:
-            more = len(judged_state["block_problems"]) - 3
-            errs.append(
-                f"{judged}: {len(judged_state['block_problems'])} disposition problem(s) -- "
-                f"{detail}" + (f" (and {more} more)" if more > 0 else "")
-                + ". Every seeded row needs its own disposition: `OK -- <the reconciling "
-                  "reason>`, `contradiction -- <finding id>` or `unable -- <what is missing>`.")
-        if judged_state["bad_dispositions"]:
-            quotes = "; ".join(repr(x[:80]) for x in judged_state["bad_dispositions"][:3])
-            errs.append(
-                f"{judged}: {len(judged_state['bad_dispositions'])} non-empty disposition "
-                f"cell(s) do not use the documented shape ({quotes}): an arbitrary value is "
-                f"not a recorded comparison. Use `OK -- ...`, `contradiction -- ...` or "
-                f"`unable -- ...`.")
-    return errs, warns
 
 
 def postcheck_revise(ctx: Ctx, rec: dict):
@@ -1445,7 +1183,11 @@ def postcheck_revise(ctx: Ctx, rec: dict):
         # status map by the run record would leave a sandbox-only id with no
         # status and read an honest `manual-required` row as a missing one.
         final_status=revision_ledger_final_status(rev),
-        exempt_removed=pipeline_removed_sentences(rec, with_document=True))
+        exempt_removed=pipeline_removed_sentences(rec, with_document=True),
+        # Under `author_to_complete: document` a required hand-off marker must
+        # survive, so the finding-side helper must not exempt its deletion
+        # either (F118).
+        allow_marker_delete=author_to_complete_mode_of(ctx) in ("readme", "off"))
     _removal_errs, _removal_warns = finding_removal_messages(_removals, f"{REVISED_DIR}/")
     errs.extend(_removal_errs)
     warns.extend(_removal_warns)
@@ -1924,6 +1666,15 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
                         f"`verdict` (port / keep-self / synthesize / ignore-cosmetic) -- the "
                         f"verdict is what classifies a row as an edit, so without it Rule 1B's "
                         f"`revalidated: confirmed` requirement cannot be enforced")
+        if led["invalid_verdict"]:
+            errs.append(f"integrate: {len(led['invalid_verdict'])} ledger row(s) carry a "
+                        f"`verdict` outside port / keep-self / synthesize / ignore-cosmetic -- "
+                        f"an unclassified row is not a disposed difference and the port gate "
+                        f"cannot see it: " + "; ".join(led["invalid_verdict"][:4]))
+        if led["invalid_size"]:
+            errs.append(f"integrate: {len(led['invalid_size'])} ledger row(s) carry a `size` "
+                        f"outside small / large -- the size-class requirement cannot be read: "
+                        + "; ".join(led["invalid_size"][:4]))
         if led["legacy_ports"]:
             errs.append("integrate: DIFF_LEDGER.md has no `revalidated` column but carries "
                         "port/synthesize row(s) -- Rule 1B forbids editing an unverified item, "
@@ -2282,7 +2033,28 @@ def dedup_location_of(evidence) -> tuple:
     line = int(m.group(1)) if m else None
     d = DEDUP_DOC_RE.search(text)
     doc = d.group(1).replace("\\", "/").lower() if d else None
-    return line, tuple(w.lower() for w in DEDUP_WORD_RE.findall(text)), doc
+    # Tokenize the EXCERPT, not the whole cell: the location prefix alone
+    # (a long path + line) met the minimum-word bar and merged distinct short
+    # excerpts at the same line. Strip through the line locator and any quote
+    # delimiters, then use the quoted text when the cell carries one.
+    excerpt = text[m.end():] if m else text
+    excerpt = re.sub(r"^\s*[:#\-\u2013\u2014|,.]+\s*", "", excerpt)
+    q = None
+    # Match each opening delimiter with ITS OWN closer. The old mixed class
+    # closed a double-quoted excerpt at an internal apostrophe ("the patient's
+    # dose"), leaving two words that could never meet DEDUP_MIN_WORDS (R03).
+    # The straight/curly single quote is also the possessive apostrophe, so it
+    # only delimits when it is not between word characters.
+    for opener, closer, guard in (('"', '"', False), ("\u201c", "\u201d", False),
+                                  ("\u2018", "\u2019", True), ("'", "'", True)):
+        pat = ((r"(?<![\w])" if guard else "") + re.escape(opener)
+               + r"(.+?)" + re.escape(closer) + (r"(?![\w])" if guard else ""))
+        q = re.search(pat, excerpt)
+        if q:
+            break
+    if q:
+        excerpt = q.group(1)
+    return line, tuple(w.lower() for w in DEDUP_WORD_RE.findall(excerpt)), doc
 
 
 def dedup_fuzzy_similarity(a_words, b_words) -> float:
@@ -2412,13 +2184,14 @@ def build_issue_census(observations, field_ids, sessions_expected=None,
     accepted = {}                   # (version, source) -> [(class, (line, words), session)]
     for sess, target, opp, comp in observations:
         if target in census:
-            # OPPORTUNITIES are opponent comparisons, not judge sessions: one
-            # session comparing a version with seven opponents gave the version
-            # one opportunity and a 7x-inflated own_rate (the 2026-10-28 audit's
-            # F29). `own_sessions`/`peer_sessions` stay the session counts.
-            census[target]["own_opps"].add(str(opp))
+            # OPPORTUNITIES are one per (session, opponent) COMPARISON, not per
+            # distinct opponent: with two judges and two opponents a version can
+            # carry four mentions over two opponent ids, and dividing by the ids
+            # alone reported own_rate 2.0 (F004). `own_sessions`/`peer_sessions`
+            # stay the session counts.
+            census[target]["own_opps"].add((str(sess), str(opp)))
         if opp in census:
-            census[opp]["peer_opps"].add(str(target))
+            census[opp]["peer_opps"].add((str(sess), str(target)))
         items = ledger_items(comp)
         if not items:
             continue
@@ -3913,7 +3686,15 @@ def _response_location_problem(cid: str, rel: str, location, before, after,
                 f"section (or a page/line locator in this file)")
     if _RESPONSE_LOCATION_SKIP_RE.match(loc):
         return None
-    anchor = re.split(r"[,;:—–]|\s+-\s+", loc, 1)[0].strip()
+    # F161: `Results (page 7)` is as legal a locator as `Results, page 7` and
+    # `Results p. 7`, but the parenthesised qualifier survived into the anchor
+    # and the section name then did not resolve. Drop it before the anchor is
+    # parsed (the comma inside `(page 7, line 3)` would truncate the anchor, so
+    # this must happen before the first-comma split).
+    _loc_no_pages = re.sub(
+        r"(?i)\s*\(\s*(?:see\s+)?(?:p|pp|page|line|paragraph|para)\.?\s*\d+[^)]*\)\s*$",
+        "", loc).strip()
+    anchor = re.split(r"[,;:—–]|\s+-\s+", _loc_no_pages, 1)[0].strip()
     anchor = re.sub(r"(?i)\s+(?:p|pp|page|line|paragraph|para)\.?\s*\d+.*$",
                     "", anchor).strip()
     if not anchor:
@@ -3996,6 +3777,21 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
                 continue
             f = str(c.get("file") or "").strip()
             if not f:
+                continue
+            # Enforce package containment BEFORE the file is opened: the
+            # postcheck that reports an absolute/`..` path runs later, so an
+            # agent-chosen value used to be read from anywhere on the machine.
+            if Path(f).is_absolute() or ".." in Path(f).parts:
+                problems.append(
+                    f"response row {cid!r}: change file {f!r} is not a "
+                    f"package-relative path (absolute and parent-relative paths "
+                    f"can leave the package)")
+                continue
+            if not is_within(target / f, target) \
+                    or (prev_available and not is_within(prev / f, prev)):
+                problems.append(
+                    f"response row {cid!r}: change file {f!r} resolves outside "
+                    f"the package (a symlink or parent-relative path)")
                 continue
             before, after = norm(c.get("before")), norm(c.get("after"))
             if not before and not after:
@@ -4129,7 +3925,10 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
         rec0 = ctx.run(rid) or {}
         tgt_rel = str(rec0.get("target_dir") or "").strip()
         if tgt_rel:
-            target = ctx.root / tgt_rel
+            # A recorded path is DATA: an absolute value would discard the root
+            # and `../` would escape it, and this tree is COPIED into the stage
+            # (F064).
+            target = contained_under(ctx.root, tgt_rel)
         elif journal_is_scoped(ctx):
             rev_rec = ctx.run(rid_for_fresh(r, revise_vid(1)))
             if rev_rec is None:
@@ -5439,6 +5238,13 @@ _DELETED_PARA_SKIP_RE = re.compile(
     r"-{3,}\s|<!--)\s*")
 _HEADING_BLOCK_SKIP_RE = re.compile(
     r"(?i)^(?:#{1,6}\s|\\(?:sub)*section\*?\s*\{|\\(?:sub)*paragraph\s*\{)")
+# A LaTeX heading COMMAND may share its line with prose: `\section{Methods} We
+# ran the assay.` is legal and the sentence is manuscript content. The marker
+# is only the command and its braced title; the remainder of the line survives
+# (F117).
+_TEX_HEADING_COMMAND_RE = re.compile(
+    r"^\\(?:sub)*section\*?\s*\{[^{}]*\}\s*|"
+    r"^\\(?:sub)*paragraph\s*\{[^{}]*\}\s*")
 
 
 def _deleted_para_norm(text) -> str:
@@ -5492,6 +5298,14 @@ def _strip_nonprose_block(raw: str) -> tuple:
                 dropped += close
             continue
         if _DELETED_PARA_SKIP_RE.match(line):
+            heading = _TEX_HEADING_COMMAND_RE.match(line)
+            if heading:
+                rest = line[heading.end():].strip()
+                if rest:
+                    # Keep the prose that follows the heading command; only the
+                    # command itself is non-prose (F117).
+                    lines[0] = rest
+                    break
             lines.pop(0)
             dropped += 1
             continue
@@ -5510,9 +5324,14 @@ def _deleted_para_candidate(text, min_chars: int = None) -> str:
     if min_chars is None:
         min_chars = _DELETED_PARA_MIN
     s = _deleted_para_norm(text)
-    if (len(s) < min_chars and not _short_text_carries_fact(s)) \
-            or _HEADING_BLOCK_SKIP_RE.match(s):
+    if len(s) < min_chars and not _short_text_carries_fact(s):
         return ""
+    if _HEADING_BLOCK_SKIP_RE.match(s):
+        # A heading is not prose, but a LaTeX heading COMMAND that shares its
+        # line with a sentence is: only the command is dropped (F117).
+        heading = _TEX_HEADING_COMMAND_RE.match(s)
+        if not heading or not s[heading.end():].strip():
+            return ""
     if _is_handoff_marker(s):
         # A hand-off placeholder is not prose: the policy may require its
         # REMOVAL, and auditing it as deleted content only seeds a row that
@@ -5668,26 +5487,45 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None,
     # second base occurrence (F130).
     revised_counts = {rel: Counter(parts)
                       for rel, parts in revised_paras.items()}
-    revised_join = {rel: " ".join(parts) for rel, parts in revised_paras.items()}
+    # The remainder of a paragraph after the pipeline's own sentence removal is
+    # compared as a STANDALONE paragraph, never as a raw substring of the joined
+    # document: unrelated text used to satisfy the substring test (F052).
+    revised_para_sets = {rel: set(parts) for rel, parts in revised_paras.items()}
     exempt = {}
-    for document, sentence in exempt_removed or ():
-        norm = _deleted_para_norm(sentence)
-        if norm:
-            exempt.setdefault(str(document), []).append(norm)
+    exempt_any = Counter()
+    for item in exempt_removed or ():
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            document, sentence = item[0], item[1]
+            norm = _deleted_para_norm(sentence)
+            if norm:
+                exempt.setdefault(str(document), Counter())[norm] += 1
+        else:
+            norm = _deleted_para_norm(item)
+            if norm:
+                exempt_any[norm] += 1
     rows, seen = [], set()
     for rel, line, text in deletion_audit_paragraphs(base, skipped=skipped):
         norm = _deleted_para_norm(text)
         low = norm
-        removed_here = exempt.get(rel, [])
-        if any(low == sentence for sentence in removed_here):
+        removed_here = exempt.get(rel, Counter())
+        # Consume ONE occurrence per recorded pipeline removal: replacing every
+        # occurrence made a second, session-deleted identical copy vanish too
+        # (F052).
+        if removed_here.get(low, 0) > 0:
+            removed_here[low] -= 1
+            continue
+        if exempt_any.get(low, 0) > 0:
+            exempt_any[low] -= 1
             continue
         if removed_here:
             remaining = low
-            for sentence in removed_here:
-                remaining = remaining.replace(sentence, " ")
+            for sentence, count in list(removed_here.items()):
+                for _ in range(count):
+                    remaining = remaining.replace(sentence, " ", 1)
             remaining = _deleted_para_norm(remaining)
             if remaining != low and (
-                    not remaining or remaining in revised_join.get(rel, "")):
+                    not remaining
+                    or remaining in revised_para_sets.get(rel, ())):
                 # The rest of the paragraph survives: the only deleted text was
                 # the pipeline's own dangling-reference sentence.
                 continue
@@ -5815,7 +5653,12 @@ def _short_text_carries_fact(text) -> bool:
     2+-digit number or an identifier) keeps the text in scope whatever its
     length.
     """
-    return bool(_fact_survival_tokens(text))
+    text = str(text or "")
+    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
+        if len(re.sub(r"\D", "", match.group(0))) >= _FACT_SURVIVAL_MIN_DIGITS \
+                or _fact_single_digit_is_fact(text, match):
+            return True
+    return bool(_FACT_SURVIVAL_IDENT_RE.search(text))
 _CONTENT_UNIT_MATCH = 0.55
 _CONTENT_MATCH_STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "were", "was", "are",
@@ -5953,7 +5796,12 @@ def _markdown_table_data_rows(raw: str, first_line: int) -> list:
 
 
 def _content_paragraph_rows(raw: str, first_line: int) -> list:
-    """[(line, text)] for one blank-line block, with its marker lines removed.
+    """[(line, text, is_row)] for one blank-line block, marker lines removed.
+
+    `is_row` is decided HERE, where the table structure is still visible: a real
+    Markdown table block or LaTeX tabular row is a row, while ordinary prose
+    that happens to contain a vertical bar (`The mean |t| was 2.1`) is not
+    (F187).
 
     A Markdown `# Methods` or LaTeX `\\section{Methods}` line and its prose are
     one blank-line block. Skipping the block because its FIRST line is a heading
@@ -5966,7 +5814,7 @@ def _content_paragraph_rows(raw: str, first_line: int) -> list:
     if _nonblank and all(ln.strip().startswith("|") for ln in _nonblank):
         rows = _markdown_table_data_rows(raw, first_line)
         if rows:
-            return rows
+            return [(ln, body, True) for ln, body in rows]
     if "\\begin{tabular}" in str(raw or ""):
         # A LaTeX tabular row is a content unit, exactly like a Markdown table
         # row. As one paragraph, deleting a row left a similar paragraph and
@@ -5986,21 +5834,21 @@ def _content_paragraph_rows(raw: str, first_line: int) -> list:
             if row:
                 rows.append((first_line + i, row))
         if rows:
-            return rows
+            return [(ln, body, True) for ln, body in rows]
     norm = _deleted_para_norm(raw)
     if len(norm) < _CONTENT_UNIT_MIN_CHARS and not _short_text_carries_fact(norm):
         return []
     if not _DELETED_PARA_SKIP_RE.match(norm):
-        return [(first_line, norm)]
+        return [(first_line, norm, False)]
     dropped, rest = _strip_nonprose_block(raw)
     if (len(rest) < _CONTENT_UNIT_MIN_CHARS and not _short_text_carries_fact(rest)) \
             or _DELETED_PARA_SKIP_RE.match(rest):
         return []
-    return [(first_line + dropped, rest)]
+    return [(first_line + dropped, rest, False)]
 
 
-def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
-    """[(document, line, paragraph)] for the strict policy's sentence scan.
+def _content_unit_paragraphs_meta(package: Path, skipped: list = None) -> list:
+    """[(document, line, paragraph, meta)] for the strict policy's sentence scan.
 
     The same submission-surface rule as `deletion_audit_paragraphs`, but every
     prose paragraph counts, not only the >=30-character ones the deletion audit
@@ -6008,6 +5856,10 @@ def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
     unit, and the policy must see it. Headings, reference entries, evidence
     areas, workflow scratch, bookkeeping files and files the package's own
     README declares not submitted stay out.
+
+    `meta` carries the structure the sentence splitter would lose: `is_row` for
+    a real Markdown/LaTeX/DOCX table row (F187) and `in_references` for a unit
+    that sits in the document's reference list (F149).
 
     `skipped` (when a list is passed) collects the submitted files the scan
     could NOT read (corrupt/oversized). Silently ignoring them made the policy
@@ -6045,20 +5897,29 @@ def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
                 if skipped is not None:
                     skipped.append(rel)
                 continue
+            in_references = False
             for index, (text, style) in enumerate(paras, 1):
+                para = _deleted_para_norm(text)
+                if para and _REFERENCE_HEADING_RE.search(para):
+                    in_references = True
+                elif re.match(r"(?i)^heading\s*\d*$", str(style or "").strip()):
+                    in_references = False
                 if re.match(r"(?i)^heading\s*\d*$", str(style or "").strip()):
                     continue
-                para = _deleted_para_norm(text)
-                if len(para) >= _CONTENT_UNIT_MIN_CHARS \
+                if (len(para) >= _CONTENT_UNIT_MIN_CHARS
+                        or _short_text_carries_fact(para)) \
                         and not _DELETED_PARA_SKIP_RE.match(para):
-                    rows.append((rel, index, para))
+                    rows.append((rel, index, para,
+                                 {"is_row": False, "in_references": in_references}))
             # The ROW is the content unit: individual cells are short fragments
-            # the >=8-char floor drops (F192).
+            # the >=8-char floor drops (F192). The row shape is known here, so
+            # a short row ("9 | 9") is kept as a row rather than dropped by the
+            # prose floor before `_content_unit_sentences` can see it (F056).
             for index, trow in enumerate(_docx_table_rows(p), len(paras) + 1):
                 para = _deleted_para_norm(trow)
-                if len(para) >= _CONTENT_UNIT_MIN_CHARS \
-                        and not _DELETED_PARA_SKIP_RE.match(para):
-                    rows.append((rel, index, para))
+                if para and not _DELETED_PARA_SKIP_RE.match(para):
+                    rows.append((rel, index, para,
+                                 {"is_row": True, "in_references": in_references}))
         elif ext in (".rtf", ".doc", ".odt"):
             # An editable format this scan cannot parse must not disappear
             # silently: record it so the caller fails closed (F198/F142).
@@ -6072,16 +5933,39 @@ def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
                 if skipped is not None:
                     skipped.append(rel)
                 continue
+            in_references = False
             for start, para in _text_paragraphs_with_lines(text):
                 line = text[:start].count("\n") + 1
-                rows.extend((rel, ln, body)
-                            for ln, body in _content_paragraph_rows(para, line))
+                _nonblank = [ln for ln in para.splitlines() if ln.strip()]
+                _first = _nonblank[0].strip() if _nonblank else ""
+                if _REFERENCE_HEADING_RE.search(_first):
+                    in_references = True
+                elif re.match(r"(?i)^(?:#{1,6}\s|\\(?:sub)*section)", _first):
+                    # A new section ends the reference list.
+                    in_references = False
+                rows.extend((rel, ln, body,
+                             {"is_row": bool(is_row),
+                              "in_references": in_references})
+                            for ln, body, is_row
+                            in _content_paragraph_rows(para, line))
     if skipped is not None:
         # Same accounting as the deletion audit: a submitted file symlink or an
         # unreadable directory is a scan gap, never "no content" (F197).
         skipped.extend(_gaps)
         skipped.extend(_links)
     return rows
+
+
+def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
+    """[(document, line, paragraph)] -- the historical three-field view.
+
+    `_content_unit_paragraphs_meta` carries the structure the sentence splitter
+    needs (`is_row`, `in_references`); callers that only read paragraph text
+    keep the established tuple shape.
+    """
+    return [(rel, line, text)
+            for rel, line, text, _meta
+            in _content_unit_paragraphs_meta(package, skipped=skipped)]
 
 
 def _content_unit_sentences(package: Path, skipped: list = None) -> list:
@@ -6095,7 +5979,7 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
     ("This is false.") while dropping bare fragments.
     """
     units = []
-    for rel, line, paragraph in _content_unit_paragraphs(package, skipped=skipped):
+    for rel, line, paragraph, meta in _content_unit_paragraphs_meta(package, skipped=skipped):
         if _is_handoff_marker(paragraph):
             # A hand-off marker can contain an internal sentence boundary
             # ("[AUTHOR TO COMPLETE: Add the grant number. It is printed on the
@@ -6104,13 +5988,16 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
             sentences = [paragraph]
         else:
             sentences = _content_sentence_parts(paragraph)
+        # The row shape comes from the paragraph reader, where the table
+        # structure still exists (F187): a prose sentence containing a vertical
+        # bar is NOT a table row.
+        is_row = bool(meta.get("is_row"))
         for sentence_index, sentence in enumerate(sentences):
             text = re.sub(r"\s+", " ", str(sentence or "")).strip()
             # A TABLE ROW is a structural content unit even when every cell is
             # short (`9 | 9`): the prose character/word floor dropped it, so a
             # fabricated data row could be added under --disable-insertions
             # (F241).
-            is_row = bool(re.fullmatch(r"[^|]+(?:\s*\|\s*[^|]+)+", text))
             if len(text) < _CONTENT_UNIT_MIN_CHARS \
                     and not (is_row or _short_text_carries_fact(text)):
                 continue
@@ -6119,7 +6006,8 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
                 continue
             unit = {"document": rel, "line": int(line or 0), "text": text,
                     "norm": text.lower().strip(), "sentence_index": sentence_index,
-                    "tokens": set(tokens)}
+                    "tokens": set(tokens),
+                    "in_references": bool(meta.get("in_references"))}
             if is_row:
                 unit["cells"] = tuple(c.strip() for c in text.split("|"))
             units.append(unit)
@@ -6228,8 +6116,8 @@ def _match_content_unit_pairs(base_units: list, cand_units: list) -> tuple:
     #    (F05); a multi-sentence paragraph shares one line, so the sentence
     #    ordinal is the anchor (F047). It is deliberately narrow: the slot is
     #    trusted only when the same paragraph already has a verbatim match (so
-    #    the paragraph is demonstrably aligned) or the two units share content;
-    #    an unrelated single same-line sentence still fails.
+    #    the paragraph is demonstrably aligned) AND the two units share real
+    #    content; an unrelated single same-line sentence still fails (F001).
     fuzzy_left = []
     _anchors_done = set()
     exact_paragraphs = {(base["document"], base["line"])
@@ -6256,7 +6144,7 @@ def _match_content_unit_pairs(base_units: list, cand_units: list) -> tuple:
         if similarity >= _CONTENT_UNIT_MATCH \
                 or (base_keys & cand_keys) \
                 or (len(shared) >= 2 and similarity >= 0.35) \
-                or paragraph_aligned \
+                or (paragraph_aligned and similarity >= 0.35) \
                 or (base_nums & cand_nums and similarity >= 0.40):
             unmatched.discard(same_pos[0])
             pairs.append((base, cand))
@@ -6327,8 +6215,12 @@ _AUTHOR_YEAR_PAREN_RE = re.compile(
     r"(?:\s+(?:et\s+al\.?|and\s+[A-Z][A-Za-z'\u2019.\-]+))?"
     r"\s*,\s*(?P<y>(?:19|20)\d{2})[a-z]?")
 _AUTHOR_YEAR_NARRATIVE_RE = re.compile(
-    r"\b(?P<a>[A-Z][A-Za-z'\u2019.\-]+)(?:\s+et\s+al\.?)?\s*"
-    r"\((?P<y>(?:19|20)\d{2})[a-z]?\)")
+    r"\b(?P<a>[A-Z][A-Za-z'\u2019.\-]+)"
+    # A bare `Word (YYYY)` is ordinary prose ("Baseline (2019) values ...",
+    # "However (2019) ..."), not a citation (F008). Require a real narrative
+    # citation cue: `et al.` or a second named author.
+    r"(?:\s+et\s+al\.?|\s+and\s+[A-Z][A-Za-z'\u2019.\-]+)"
+    r"\s*\((?P<y>(?:19|20)\d{2})[a-z]?\)")
 
 
 def _prose_citation_keys(text) -> set:
@@ -6382,7 +6274,8 @@ def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
                 or is_non_manuscript_rel(rel)):
             continue
         ext = p.suffix.lower()
-        if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".bib", ".bbl"):
+        if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".html",
+                   ".htm", ".bib", ".bbl"):
             text = read_text_bounded(p)
         elif ext == ".docx":
             text = "\n".join(_docx_paragraphs(p) or [])
@@ -6399,8 +6292,23 @@ def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
     return keys
 
 
+# A `thebibliography` list defines its keys in the manuscript's own .tex: the
+# documented in-place citation correction must find them there, not only in a
+# separate .bib/.bbl (F125).
+_TEX_BIBITEM_RE = re.compile(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}")
+# Prose/database surfaces that may DEFINE a bibliography key.
+_BIBLIOGRAPHY_SURFACES = (".bib", ".bbl", ".tex", ".ltx", ".md", ".markdown",
+                           ".txt", ".rst", ".html", ".htm")
+
+
 def _bibliography_keys(package: Path) -> set:
-    """Keys the package's submitted `.bib`/`.bbl` files DEFINE."""
+    """Keys the package's submitted bibliography DEFINES.
+
+    `.bib`/`.bbl` entries are read by their database syntax; a rendered
+    `thebibliography` list (`\bibitem{...}`) in a submitted .tex is read as
+    well. Without the latter, correcting a cited key whose only definition is
+    its `\bibitem` could never pass the insertion gate (F125).
+    """
     keys = set()
     package = Path(package)
     _decl, _is_submitted = declared_submission_filter(package)
@@ -6409,106 +6317,25 @@ def _bibliography_keys(package: Path) -> set:
             rel = p.relative_to(package).as_posix()
         except ValueError:
             continue
-        if not _is_submitted(rel) or p.suffix.lower() not in (".bib", ".bbl"):
-            continue
-        top = rel.split("/", 1)[0].lower()
-        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
-            continue
-        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
-                or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)
-                or is_non_manuscript_rel(rel)):
-            continue
-        text = read_text_bounded(p)
-        if text:
-            keys.update(_bib_keys_in_text(text))
-    return keys
-
-
-_REFERENCE_HEADING_RE = re.compile(
-    r"(?i)^\s*(?:#{1,6}\s*)?(?:references?|bibliography|works\s+cited|"
-    r"literature\s+cited)\s*$|\\begin\{thebibliography\}|"
-    r"\\(?:sub)?section\*?\s*\{\s*(?:references?|bibliography)\s*\}")
-_REFERENCE_ENTRY_LINE_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}[.)])\s+\S")
-
-
-def _reference_entry_keys(package: Path) -> set:
-    """Normalised reference-list ENTRIES the submitted package carries.
-
-    Reference entries were stripped before they became content units, so a
-    fabricated entry could be added (or a real one deleted) with no
-    missing/added unit and no fact loss (F005). The entries are compared as
-    text; `.bib`/`.bbl` entries are compared by key.
-    """
-    entries = set()
-    package = Path(package)
-    if not package.is_dir():
-        return entries
-    _decl, _is_submitted = declared_submission_filter(package)
-    for p in _iter_tree_files(package):
-        try:
-            rel = p.relative_to(package).as_posix()
-        except ValueError:
-            continue
-        if not _is_submitted(rel):
-            continue
-        top = rel.split("/", 1)[0].lower()
-        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
-            continue
-        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
-                or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)
-                or is_non_manuscript_rel(rel)):
-            continue
         ext = p.suffix.lower()
-        # Only a RENDERED reference-list entry is a content unit. A .bib/.bbl
-        # is a source database: adding an uncited key there does not insert a
-        # reference into the manuscript (F31), and a corrected key is covered
-        # by the citation-key gate (F02).
-        if ext not in (".md", ".markdown", ".txt", ".tex", ".ltx"):
+        if not _is_submitted(rel) or ext not in _BIBLIOGRAPHY_SURFACES:
+            continue
+        top = rel.split("/", 1)[0].lower()
+        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
+            continue
+        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
+                or is_non_submitted_readme_name(p.name)
+                or is_non_shippable_name(p.name)
+                or is_non_manuscript_rel(rel)):
             continue
         text = read_text_bounded(p)
         if not text:
             continue
-        in_refs = False
-        for line in text.splitlines():
-            stripped = line.strip()
-            if _REFERENCE_HEADING_RE.search(stripped):
-                in_refs = True
-                continue
-            if in_refs and re.match(r"(?i)^(?:#{1,6}\s|\\(?:sub)?section)", stripped):
-                in_refs = False
-                continue
-            if not in_refs:
-                continue
-            m = re.match(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}", stripped)
-            if m:
-                entries.add(f"key:{m.group(1).strip().lower()}")
-                continue
-            if stripped and (_REFERENCE_ENTRY_LINE_RE.match(stripped)
-                             or (re.search(r"\b(?:18|19|20)\d{2}\b", stripped)
-                                 and "," in stripped)):
-                entries.add(re.sub(r"\s+", " ", stripped).lower())
-    return entries
-
-
-def _reference_entry_changes(base_package: Path, candidate_package: Path) -> tuple:
-    """(added, removed) reference entries, treating near-identical text as a fix."""
-    base = _reference_entry_keys(base_package)
-    cand = _reference_entry_keys(candidate_package)
-    added, removed = sorted(cand - base), sorted(base - cand)
-    # A typo fix changes one entry's text; pair a removed entry with a very
-    # similar added one so an in-place correction is not reported as delete+add.
-    for old in list(removed):
-        best, score = None, 0.0
-        for new in added:
-            ratio = difflib.SequenceMatcher(None, old, new).ratio()
-            if ratio > score:
-                best, score = new, ratio
-        if best is not None and score >= 0.80:
-            removed.remove(old)
-            added.remove(best)
-    return added, removed
+        if ext in (".bib", ".bbl"):
+            keys.update(_bib_keys_in_text(text))
+        else:
+            keys.update(m.group(1).strip() for m in _TEX_BIBITEM_RE.finditer(text))
+    return keys
 
 
 def _citation_removed_keys(base_package: Path, candidate_package: Path) -> set:
@@ -6525,11 +6352,19 @@ def _citation_removed_keys(base_package: Path, candidate_package: Path) -> set:
             _content_unit_sentences(candidate_package))[2]
     except Exception:                                                 # noqa: BLE001
         return removed
+    # A key stays available when it is still cited ANYWHERE in the delivered
+    # prose. A legitimate sentence split moves the call-out into the second new
+    # unit, so the first matched pair looks like a loss although the citation
+    # survives; only a key gone from the whole package is a deletion (F124).
+    try:
+        package_keys = _citation_keys(candidate_package, include_bibliography=False)
+    except Exception:                                                 # noqa: BLE001
+        package_keys = set()
     for base, cand in pairs:
         gone = _prose_citation_keys(base["text"]) - _prose_citation_keys(cand["text"])
         new = _prose_citation_keys(cand["text"]) - _prose_citation_keys(base["text"])
         if gone and not new:
-            removed |= gone
+            removed |= (gone - package_keys)
     return removed
 
 
@@ -6673,15 +6508,18 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                 f"package director{'y is' if len(missing) == 1 else 'ies are'} missing: "
                 f"{', '.join(missing)}"]
     label = f"{stage}: " if stage else ""
-    exempt_text = set()
-    exempt_document = set()
+    # Exemptions are CONSUMED one-to-one, never treated as a set: a package
+    # that legitimately removed one of two identical sentences must not have
+    # the second, session-deleted copy whitelisted by the same record (F28).
+    exempt_text = Counter()
+    exempt_document = Counter()
     for s in (exempt_removed or ()):
         if isinstance(s, (tuple, list)) and len(s) == 2:
             doc, sentence = s
             if str(sentence or "").strip():
-                exempt_document.add((str(doc), _deleted_para_norm(sentence).lower()))
+                exempt_document[(str(doc), _deleted_para_norm(sentence).lower())] += 1
         elif str(s or "").strip():
-            exempt_text.add(_deleted_para_norm(s).lower())
+            exempt_text[_deleted_para_norm(s).lower()] += 1
     mode = author_to_complete_mode_of(ctx)
     allow_marker_insert = mode == "document"
     allow_marker_delete = mode in ("readme", "off")
@@ -6692,7 +6530,12 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                   if not (allow_marker_insert and _is_handoff_marker(u["text"]))]
     base_units = []
     for u in _content_unit_sentences(base_package, skipped=skipped):
-        if u["norm"] in exempt_text or (u["document"], u["norm"]) in exempt_document:
+        if exempt_text.get(u["norm"], 0) > 0:
+            exempt_text[u["norm"]] -= 1
+            continue
+        doc_key = (u["document"], u["norm"])
+        if exempt_document.get(doc_key, 0) > 0:
+            exempt_document[doc_key] -= 1
             continue
         if _is_handoff_marker(u["text"]):
             if allow_marker_delete:
@@ -6707,7 +6550,47 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                 cand_marker_norms.remove(u["norm"])
                 continue
         base_units.append(u)
+    # The exemption list is consumed ABOVE. Hand the soft-deletion helper only
+    # the leftovers: re-applying the raw list let it excuse the same removal a
+    # second time, so the second identical copy of a sentence could be deleted
+    # with no signal (F004).
+    remaining_exempt = [norm for norm, count in exempt_text.items()
+                        for _ in range(count)]
+    remaining_exempt += [(doc, norm)
+                         for (doc, norm), count in exempt_document.items()
+                         for _ in range(count)]
     missing, added = _match_content_units(base_units, cand_units)
+    # A reference-entry correction the entry comparator accepted (ratio >=
+    # 0.80) must not be re-reported as a missing+added prose unit: the two
+    # comparators disagreed, so a legitimate author/year fix failed both strict
+    # flags (F126). Only the paired entries are excluded; an unpaired
+    # fabrication/removal stays visible.
+    try:
+        ref_pairs, _ref_added, _ref_removed = _reference_entry_corrections(
+            base_package, candidate_package)
+    except Exception:                                                 # noqa: BLE001
+        ref_pairs = []
+
+    def _drop_corrected_units(units, entries):
+        if not ref_pairs or not entries:
+            return units
+        kept = []
+        for unit in units:
+            norm = _deleted_para_norm(unit.get("text")).lower()
+            # Only a unit that IS part of the reference list can be covered by
+            # a corrected entry: an ordinary prose sentence that happens to be
+            # a substring of some bibliography entry used to be dropped too
+            # (F149).
+            if (len(norm) >= _DELETED_PARA_MIN
+                    and unit.get("in_references")
+                    and any(norm in e for e in entries)):
+                continue
+            kept.append(unit)
+        return kept
+
+    if ref_pairs:
+        missing = _drop_corrected_units(missing, [old for old, _new in ref_pairs])
+        added = _drop_corrected_units(added, [new for _old, new in ref_pairs])
     problems = []
     # THE MIDDLE POLICY: a removal is allowed only for a documented removable
     # unit. The matcher consumes copies one-to-one, so a surviving duplicate is
@@ -6716,7 +6599,9 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
     policy_name = ("--disable-deletions" if scope == "none"
                    else "--enable-soft-deletions")
     if scope == "removable" and missing:
-        missing = soft_deletion_missing_units(missing, cand_units, exempt_removed)
+        missing = soft_deletion_missing_units(
+            missing, cand_units, remaining_exempt,
+            allow_marker_delete=allow_marker_delete)
     if skipped:
         names = ", ".join(sorted(set(skipped))[:6])
         problems.append(
@@ -6831,6 +6716,11 @@ _FACT_SURVIVAL_NUMBER_RE = re.compile(
 _FACT_SURVIVAL_IDENT_RE = re.compile(
     r"(?i)(?:https?://[^\s)>]+|doi:\s*10\.[^\s,;)]+|10\.\d{4,9}/[^\s,;)]+|"
     r"orcid[:\s]+\d[\dX-]+|"
+    # A contact e-mail is a fact: hiding it (w:vanish) leaves the visible
+    # sentence otherwise unchanged, so only this class can report its loss
+    # (F129). The address pattern is the one the e-mail gate itself uses.
+    r"[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?"
+    r"\.[A-Za-z]{2,}|"
     r"accession(?:\s+(?:number|no\.?|id))?\s*[:\s]\s*"
     r"(?P<accession>[A-Za-z0-9][A-Za-z0-9._\-]*))")
 # A measurement unit printed immediately after a value is part of the FACT: 55
@@ -6848,7 +6738,7 @@ _FACT_SURVIVAL_UNITS = frozenset("""
 % \u2030 \u00b0C \u00b0F
 m cm mm um \u00b5m nm km ft yd mi
 g mg ug \u00b5g ng pg kg
-L l mL ml uL \u00b5L cL dL nL
+L l mL ml uL \u00b5L \u00b5l \u03bcl cL dL nL
 M mM uM \u00b5M nM pM mol mmol umol \u00b5mol nmol pmol
 s ms us \u00b5s ns min h hr hrs d day days wk week weeks mo month months yr year years
 Pa kPa MPa GPa Hz kHz MHz GHz V mV kV W kW MW A mA uA \u00b5A J kJ MJ
@@ -6863,8 +6753,8 @@ Da kDa bp kb Mb Gb nt rpm
 _FACT_SURVIVAL_UNIT_ALIASES = {
     # Volume
     "ml": ("ml", "mL", "milliliter", "milliliters", "millilitre", "millilitres"),
-    "ul": ("ul", "uL", "\u00b5L", "\u03bcL", "microliter", "microliters",
-           "microlitre", "microlitres"),
+    "ul": ("ul", "uL", "\u00b5L", "\u03bcL", "\u00b5l", "\u03bcl",
+           "microliter", "microliters", "microlitre", "microlitres"),
     "l": ("l", "L", "liter", "liters", "litre", "litres"),
     "dl": ("dl", "dL", "deciliter", "deciliters", "decilitre", "decilitres"),
     "cl": ("cl", "cL", "centiliter", "centiliters", "centilitre", "centilitres"),
@@ -7220,7 +7110,8 @@ def _fact_number_units(units) -> dict:
         text = str(unit.get("text") or "")
         for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
             raw = match.group(0)
-            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
+                    and not _fact_single_digit_is_fact(text, match):
                 continue
             out.setdefault(_fact_survival_key(raw), set()).add(
                 _fact_survival_unit_after(text, match.end()))
@@ -7329,9 +7220,20 @@ def _fact_unit_change_examples(base_units, cand_units, pairs=None,
         # `55 mg` -> `55 ml` change in this one (F129).
         surviving = _fact_number_units([paired]) if paired is not None else {}
         seen = set()
+        # The base's own unit set for this number: a candidate that ADDS a
+        # second unit ("55 mg or 55 ml") is a new fact even when the base unit
+        # also survives.
+        base_units_by_num = {}
+        for _bm in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
+            if len(re.sub(r"\D", "", _bm.group(0))) < _FACT_SURVIVAL_MIN_DIGITS \
+                    and not _fact_single_digit_is_fact(text, _bm):
+                continue
+            base_units_by_num.setdefault(_fact_survival_key(_bm.group(0)), set()).add(
+                _fact_survival_unit_after(text, _bm.end()))
         for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
             raw = match.group(0)
-            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
+            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
+                    and not _fact_single_digit_is_fact(text, match):
                 continue
             printed_unit = _fact_survival_unit_after(text, match.end())
             num_key = _fact_survival_key(raw)
@@ -7343,6 +7245,11 @@ def _fact_unit_change_examples(base_units, cand_units, pairs=None,
                 continue
             if printed_unit:
                 if printed_unit in others:
+                    added_units = (others - (base_units_by_num.get(num_key) or set())) - {""}
+                    if not added_units:
+                        continue
+                    changed.append((unit, f"{raw} {printed_unit}",
+                                    sorted(u or "(unitless)" for u in others)))
                     continue
                 if _unit_change_is_correction(
                         text, paired.get("text") or "", raw, printed_unit,
@@ -7447,14 +7354,13 @@ def identity_typo_problems(candidate_package: Path, stage: str = "") -> list:
         return []
     handoff_texts = [text.lower() for _name, text in _manual_handoff_texts(package)]
     skipped: list = []
-    seen: dict = {}
+    seen = []
     for unit in _content_unit_sentences(package, skipped=skipped):
         for match in _EMAIL_TOKEN_RE.finditer(unit.get("text") or ""):
             address = match.group(0)
             local, _, domain = address.partition("@")
-            seen.setdefault(local.lower(), []).append(
-                (domain.lower(), address, unit.get("document") or "",
-                 int(unit.get("line") or 0)))
+            seen.append((local, domain.lower(), address,
+                         unit.get("document") or "", int(unit.get("line") or 0)))
     problems = []
     if skipped:
         # A corrupt/oversized submitted document makes this gate blind, not
@@ -7467,30 +7373,64 @@ def identity_typo_problems(candidate_package: Path, stage: str = "") -> list:
             + (" ..." if len(set(skipped)) > 6 else "")
             + ". The gate is UNENFORCED on those files; repair or remove them before "
               "retrying.")
-    for _local, rows in sorted(seen.items()):
-        domains = sorted({row[0] for row in rows})
-        if len(domains) < 2:
-            continue
-        for i in range(len(domains)):
-            for j in range(i + 1, len(domains)):
-                if _bounded_edit_distance(domains[i], domains[j], 2) > 2:
-                    continue
-                first = next(row for row in rows if row[0] == domains[i])
-                second = next(row for row in rows if row[0] == domains[j])
-                if any(first[1].lower() in text and second[1].lower() in text
-                       for text in handoff_texts):
-                    continue           # recorded for the author: a genuine pair
-                label = f"{stage}: " if stage else ""
-                problems.append(
-                    f"{label}the same address is printed with two domains: "
-                    f"{first[1]} ({first[2]}:{first[3]}) and {second[1]} "
-                    f"({second[2]}:{second[3]}). One spelling is a typo, and the package's "
-                    f"own authoritative identity statement decides which: correct the other "
-                    f"occurrence to that value (an identity typo is a decidable correction, "
-                    f"not an author query). If the pair is genuinely two people, record both "
-                    f"spellings in README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md as "
-                    f"manual-required with the evidence -- that record clears this gate.")
-                break
+    # Compare WHOLE addresses, not one local part's domains: the old key made a
+    # same-domain local-part variant (`j.smith@` vs `jsmith@`) and a wider
+    # domain typo invisible (F120). A near-identical local part on one domain,
+    # a near-identical domain under one local part, and a one/two-character
+    # edit of the full address are all two spellings of one identity.
+    def _norm_addr_local(value: str) -> str:
+        return re.sub(r"[._+-]", "", value.lower())
+
+    def _norm_addr_domain(value: str) -> str:
+        return re.sub(r"[._-]", "", value.lower().strip("."))
+
+    def _one_identity(first, second) -> bool:
+        local1, domain1, addr1 = first[0], first[1], first[2]
+        local2, domain2, addr2 = second[0], second[1], second[2]
+        if addr1.lower() == addr2.lower():
+            return False
+        nl1, nl2 = _norm_addr_local(local1), _norm_addr_local(local2)
+        nd1, nd2 = _norm_addr_domain(domain1), _norm_addr_domain(domain2)
+        if not nl1 or not nl2 or not nd1 or not nd2:
+            return False
+        if domain1 == domain2:
+            # `j.smith@` and `jsmith@` (or a one-character local spelling).
+            return (nl1 != nl2 and _bounded_edit_distance(nl1, nl2, 1) <= 1) \
+                or (nl1 == nl2 and local1 != local2)
+        if nl1 == nl2:
+            if _bounded_edit_distance(domain1, domain2, 2) <= 2:
+                return True
+            # A wider typo (`uni.edu` vs `uni-edu.org`) is one spelling that
+            # gained a label: compare the normalized whole addresses.
+            full1, full2 = f"{nl1}@{nd1}", f"{nl2}@{nd2}"
+            if full1.startswith(full2) or full2.startswith(full1):
+                return abs(len(full1) - len(full2)) <= 6
+        full1, full2 = f"{nl1}@{nd1}", f"{nl2}@{nd2}"
+        return _bounded_edit_distance(full1, full2, 2) <= 2
+
+    reported = set()
+    for i in range(len(seen)):
+        for j in range(i + 1, len(seen)):
+            if not _one_identity(seen[i], seen[j]):
+                continue
+            first, second = seen[i], seen[j]
+            key = tuple(sorted((first[2].lower(), second[2].lower())))
+            if key in reported:
+                continue
+            if any(first[2].lower() in text and second[2].lower() in text
+                   for text in handoff_texts):
+                continue           # recorded for the author: a genuine pair
+            reported.add(key)
+            label = f"{stage}: " if stage else ""
+            problems.append(
+                f"{label}one address is printed two ways: "
+                f"{first[2]} ({first[3]}:{first[4]}) and {second[2]} "
+                f"({second[3]}:{second[4]}). One spelling is a typo, and the package's "
+                f"own authoritative identity statement decides which: correct the other "
+                f"occurrence to that value (an identity typo is a decidable correction, "
+                f"not an author query). If the pair is genuinely two people, record both "
+                f"spellings in README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md as "
+                f"manual-required with the evidence -- that record clears this gate.")
     return problems[:3]
 
 
@@ -7526,6 +7466,14 @@ def _manual_handoff_texts(package: Path) -> list:
 _HANDOFF_TABLE_ID_RE = re.compile(r"(?i)\bT-\d+\b")
 
 
+# Dates/timestamps in a hand-off line are metadata: their components are not
+# the fact values the hand-off records (F121).
+_HANDOFF_DATE_RE = re.compile(
+    r"(?i)\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[T ]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?)?\b"
+    r"|\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b")
+_HANDOFF_TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
+
+
 def _manual_handoff_keys(package: Path) -> set:
     """Value keys the delivered package records in its author hand-off list.
 
@@ -7534,6 +7482,11 @@ def _manual_handoff_keys(package: Path) -> set:
     (T-002 -> 2.0), so every package with a hand-off table silently exempted
     the values 1, 2, ... from the fact gate (F195). A `T-###` occurrence
     anywhere on a line is dropped for the same reason.
+
+    A DATE or timestamp is metadata, not a recorded fact value: `2026-11-01`
+    used to emit the bare keys 1, 11 and 2026, so a line carrying only a date
+    exempted a real `11 mg` loss without naming that fact (F121). The date and
+    time spellings are removed before the token scan.
     """
     keys = set()
     for _name, text in _manual_handoff_texts(package):
@@ -7546,6 +7499,8 @@ def _manual_handoff_keys(package: Path) -> set:
                     # columns are where a manual value is recorded.
                     line = " | ".join(cells[1:])
             line = _HANDOFF_TABLE_ID_RE.sub(" ", line)
+            line = _HANDOFF_DATE_RE.sub(" ", line)
+            line = _HANDOFF_TIME_RE.sub(" ", line)
             for token in _fact_survival_tokens(line):
                 keys.add(_fact_survival_key(token))
     return keys
@@ -7654,14 +7609,20 @@ def _fact_loss_message(lost, label: str) -> str:
 
 
 def _fact_exempt_sets(exempt_removed):
-    exempt_text, exempt_document = set(), set()
+    """(text Counter, (document, text) Counter) of pipeline removals.
+
+    Counters, not sets: one recorded removal exempts ONE base occurrence. A set
+    exempted every identical copy, so deleting a second number-bearing copy took
+    the last value with no fact-loss report (F005).
+    """
+    exempt_text, exempt_document = Counter(), Counter()
     for s in (exempt_removed or ()):
         if isinstance(s, (tuple, list)) and len(s) == 2:
             doc, sentence = s
             if str(sentence or "").strip():
-                exempt_document.add((str(doc), _deleted_para_norm(sentence).lower()))
+                exempt_document[(str(doc), _deleted_para_norm(sentence).lower())] += 1
         elif str(s or "").strip():
-            exempt_text.add(_deleted_para_norm(s).lower())
+            exempt_text[_deleted_para_norm(s).lower()] += 1
     return exempt_text, exempt_document
 
 
@@ -7670,7 +7631,8 @@ def fact_preservation_problems(base_package: Path, candidate_package: Path,
     """Problems where a deleted base sentence took a value/identifier with it.
 
     `exempt_removed` honours the same exemptions the content-edit policy uses
-    (the pipeline's own packaging removals), so a required removal never trips
+    (the pipeline's own packaging removals), consumed one-to-one so one removal
+    does not exempt every identical copy; a required removal then never trips
     this check.
     """
     base_package, candidate_package = Path(base_package), Path(candidate_package)
@@ -7678,14 +7640,22 @@ def fact_preservation_problems(base_package: Path, candidate_package: Path,
         return []
     exempt_text, exempt_document = _fact_exempt_sets(exempt_removed)
     skipped = []
-    base_units = [u for u in _content_unit_sentences(base_package, skipped=skipped)
-                  if u["norm"] not in exempt_text
-                  and (u["document"], u["norm"]) not in exempt_document
-                  # An author hand-off placeholder is not a fact-bearing
-                  # sentence: in `readme`/`off` its removal is REQUIRED, and
-                  # treating that removal as a lost fact made the documented
-                  # placeholder rule unrepairable (F194).
-                  and not _is_handoff_marker(u["text"])]
+    base_units = []
+    for u in _content_unit_sentences(base_package, skipped=skipped):
+        if _is_handoff_marker(u["text"]):
+            # An author hand-off placeholder is not a fact-bearing sentence: in
+            # `readme`/`off` its removal is REQUIRED, and treating that removal
+            # as a lost fact made the documented placeholder rule unrepairable
+            # (F194).
+            continue
+        doc_key = (u["document"], u["norm"])
+        if exempt_text.get(u["norm"], 0) > 0:
+            exempt_text[u["norm"]] -= 1
+            continue
+        if exempt_document.get(doc_key, 0) > 0:
+            exempt_document[doc_key] -= 1
+            continue
+        base_units.append(u)
     cand_units = [u for u in _content_unit_sentences(candidate_package, skipped=skipped)
                   if not _is_handoff_marker(u["text"])]
     missing, _added = _match_content_units(base_units, cand_units)
@@ -8725,8 +8695,11 @@ def journal_final_target(ctx: Ctx) -> tuple:
         # `run` that re-assembles the submission package must read the winner.
         rrec = ctx.round_get(1) or {}
         win_rel = str(rrec.get("winner_dir") or "")
-        if win_rel and (ctx.root / win_rel).is_dir():
-            return ctx.root / win_rel, f"the {mode} revision"
+        # State data is untrusted path input: an absolute value discarded
+        # ctx.root and `../` escaped it. Resolve and require containment.
+        winner = contained_under_or_none(ctx.root, win_rel) if win_rel else None
+        if winner is not None and winner.is_dir():
+            return winner, f"the {mode} revision"
         sb = ctx.sandbox_of(rec)
         return sb / REVISED_DIR, f"the {mode} revision"
     pins = ctx.state.get("pinned") or []
@@ -9335,23 +9308,6 @@ def _zero_item_handoff_package(mode, marker) -> bool:
     return is_int(count) and count == 0
 
 
-def _usable_deliverable(p: Path) -> bool:
-    """Is this file worth ADOPTING into its canonical path?
-
-    Non-empty, and (for JSON) parseable: a truncated file moved into place would
-    only turn a "missing" failure into a "malformed" one, and the rescue exists
-    to preserve work, not to shuffle garbage.
-    """
-    try:
-        if not p.is_file() or p.stat().st_size == 0:
-            return False
-    except OSError:
-        return False
-    if p.suffix.lower() == ".json":
-        return read_json(p, revive=False, lenient=True) is not None
-    return True
-
-
 def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
     """Move a REQUIRED bookkeeping deliverable the session wrote one level up.
 
@@ -9465,6 +9421,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     """
     kind = str(kind or "")
     errs, warns = [], []
+    strict = _selfcheck_artifact_policy(sb) != "off"
     if kind not in SELFCHECK_STAGES:
         return False, [f"unknown stage {kind!r} (known: {', '.join(SELFCHECK_STAGES)})"], []
     # `round` stays None when the caller did not supply one: the marker's own
@@ -9474,6 +9431,21 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     rec = {"id": run_id, "kind": kind, "round": (int(r) if r else None)}
     if not sb.is_dir():
         return False, [f"the sandbox {sb} does not exist"], []
+    # The REVIEW prompt is read BEFORE the deliverables loop: it states the
+    # round's review scope and (for a split round) this session's half, and
+    # both decide whether the discovery phase's deliverables are owed at all.
+    # It used to be read inside the findings branch, so the pre-flight demanded
+    # the full package's discovery round -- including its `findings_extra.json`
+    # warning -- from a formatting-writing or split-A session whose own prompt
+    # forbids that phase.
+    _prompt, _scope, _split, _review_part_b = "", "full", "off", False
+    _no_discovery = False
+    if kind == "guided_review":
+        _prompt = (str(prompt_text) if prompt_text is not None
+                   else (read_text_bounded(sb / PROMPT_FILE) or ""))
+        _scope, _split, _review_part_b = review_prompt_scope(_prompt, sb)
+        _no_discovery = (_scope != "full"
+                         or (_split != "off" and not _review_part_b))
     # 1. the completion signal: it must be at the ROOT and it must name THIS run
     marker = marker_json(sb, kind)
     if kind == "judge" and not isinstance(marker, dict):
@@ -9526,6 +9498,14 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     _handoff_rel = handoff_target(_handoff_mode)
     for rel in table.get("expected", ()):
         expected = rel
+        # The discovery round's extra-findings file belongs to a review pass
+        # that OWES that phase. A formatting-writing round and a split-A
+        # session are told not to run D0-D5, so warning that its file is
+        # missing asks for work their own prompt forbids (the postcheck does
+        # not warn either).
+        if (kind == "guided_review" and _no_discovery
+                and Path(expected).name == "findings_extra.json"):
+            continue
         _is_manual_list = Path(rel).name == "MANUAL_STEPS.md"
         if _is_manual_list:
             expected = (Path(rel).parent / _handoff_rel).as_posix()
@@ -9541,28 +9521,12 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             errs.append(problem)
     # 4. the stage-specific contracts, each through the postcheck's own helper
     if kind == "guided_review":
-        # The session prompt is read BEFORE the findings branch: it states the
-        # round's review scope (and a split round's half), and BOTH the
-        # review-contract check and the discovery-contract check below gate on
-        # it. It used to be read inside the `else`, so a missing/broken
-        # findings.json (exactly the pre-flight state this selfcheck exists to
-        # diagnose, and the only state the prompt preview starts from) left it
-        # empty and the pre-flight demanded the full package's discovery round
-        # from a formatting-writing or split-A session whose own prompt forbids
-        # it.
-        _prompt = (str(prompt_text) if prompt_text is not None
-                   else (read_text_bounded(sb / PROMPT_FILE) or ""))
-        _scope = ("formatting-writing"
-                  if "FORMATTING AND WRITING ONLY" in _prompt else "full")
-        # A SPLIT round's two halves owe different artifacts. The postcheck
-        # reads the plan; the selfcheck usually runs in its own process with no
-        # ctx, so it reads the split mode its own prompt states and the half its
-        # own sandbox name states (`r<r>_guided_review_b`), and the two verdicts agree.
-        _split = "off"
-        if "SPLIT REVIEW" in _prompt:
-            _split = ("aspects"
-                      if ("PACKAGING/compliance" in _prompt
-                          or "CONTENT/scientific" in _prompt) else "phases")
+        # The scope/split were read with the prompt above, BEFORE the findings
+        # branch, so the state the preview starts from (no findings.json yet)
+        # still knows a formatting-writing round and a split-A session owe no
+        # discovery phase. `check_review_contract` verifies the corpus pointer,
+        # the coverage table and the M1b long-form gate; it needs no pipeline
+        # state, so the session gets the whole contract, not a summary of it.
         fj = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
         if not isinstance(fj, dict):
             errs.append(f"{FINDINGS_REL} is missing or does not parse as a JSON object "
@@ -9570,16 +9534,10 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
         elif not isinstance(fj.get("findings"), list):
             errs.append(f"{FINDINGS_REL} has no 'findings' list")
         else:
-            # `check_review_contract` needs no pipeline state (it verifies the
-            # corpus pointer, the coverage table and the M1b long-form gate), so
-            # the session gets the whole contract, not a summary of it.
             check_review_contract(None, sb, fj, errs, warns, scope=_scope, split=_split)
         # The discovery round's D0-D5 contract, unless THIS session's own prompt
         # says the phase is not its job (the formatting-writing scope, or the
         # mechanical half of a split review).
-        _no_discovery = ("FORMATTING AND WRITING ONLY" in _prompt
-                         or ("SPLIT REVIEW" in _prompt
-                             and "YOUR SCOPE (B)" not in _prompt))
         if not _no_discovery:
             _derrs, _dwarns = discovery_contract_problems(sb)
             errs.extend(f"discovery round: {d}" for d in _derrs)
@@ -9628,9 +9586,13 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                                 f"printed {r['produced']!r} where the finding declares "
                                 f"{r['declared']!r} -- the declared computation does not "
                                 f"reproduce")
-                elif r["status"] in ("missing", "timeout", "failed", "empty"):
+                elif r["status"] in ("missing", "timeout", "failed", "empty", "no-jail"):
+                    _what = ("is missing" if r["status"] == "missing"
+                             else "was NOT re-run because no verifier jail is available on this "
+                                  "host (agent-written code is never run with host access)"
+                             if r["status"] == "no-jail" else r["status"])
                     errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
-                                f"{'is missing' if r['status'] == 'missing' else r['status']}"
+                                f"{_what}"
                                 + (f" ({r['detail']})" if r["detail"] else ""))
                 elif r["status"] == "skipped-over-budget":
                     errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
@@ -9711,8 +9673,15 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             # revise sessions (their rows lived under a key the reader did not
             # know); it now runs BEFORE the marker too.
             frozen = findings_from_sandbox(sb, sandbox_audit_record(sb))
-            ids = [str(f.get("id")).strip() for f in frozen
-                   if isinstance(f.get("id"), str) and str(f.get("id")).strip()]
+            # Coerce every id exactly like frozen_finding_ids(): a numeric
+            # `{"id": 1}` used to be dropped here while the postcheck required
+            # "1", so the pre-flight certified a ledger the postcheck rejected
+            # (F075).
+            ids = []
+            for f in frozen:
+                fid = str(f.get("id") or "").strip()
+                if fid and fid not in ids:
+                    ids.append(fid)
             total = len(ids) if (sb / FINDINGS_REL).exists() else None
             lerrs, lwarns = revision_ledger_problems(d, ids, total,
                                                      "revised/revision_report.json")
@@ -9773,6 +9742,15 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                                 f"no `verdict` (port / keep-self / synthesize / "
                                 f"ignore-cosmetic) -- without it no row is classified as an "
                                 f"edit, so Rule 1B cannot be enforced")
+                if led["invalid_verdict"]:
+                    errs.append(f"integrate: {len(led['invalid_verdict'])} ledger row(s) carry a "
+                                f"`verdict` outside port / keep-self / synthesize / "
+                                f"ignore-cosmetic -- an unclassified row is not a disposed "
+                                f"difference: " + "; ".join(led["invalid_verdict"][:4]))
+                if led["invalid_size"]:
+                    errs.append(f"integrate: {len(led['invalid_size'])} ledger row(s) carry a "
+                                f"`size` outside small / large -- the size-class requirement "
+                                f"cannot be read: " + "; ".join(led["invalid_size"][:4]))
                 if led["legacy_ports"]:
                     errs.append("integrate: DIFF_LEDGER.md has no `revalidated` column but "
                                 "carries port/synthesize row(s) -- Rule 1B forbids editing an "
@@ -9832,16 +9810,21 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                                 f"round stages one structural and one sentence-level arm so the "
                                 f"pool has both kinds of difference")
         # W-12's language pass: one row per change plus one coverage row per step.
+        # The postcheck routes both families through `strict_dispositions(ctx)`
+        # (`check_language_pass`); the pre-flight has no Ctx, so it reads the
+        # same recorded policy from the enclosing run root (F113).
         lp = language_pass_report(d)
         if not lp["present"]:
-            errs.append(f"{kind}: no work/R6_language.md -- the L1-L11 language pass is a "
-                        f"required artifact of every package-producing stage: one row per change "
-                        f"plus one coverage row per step (including the steps that changed "
-                        f"nothing)")
+            (errs if strict else warns).append(
+                f"{kind}: no work/R6_language.md -- the L1-L11 language pass is a "
+                f"required artifact of every package-producing stage: one row per change "
+                f"plus one coverage row per step (including the steps that changed "
+                f"nothing)")
         elif lp["missing"]:
-            errs.append(f"{kind}: the language pass covers {11 - len(lp['missing'])}/11 steps; no "
-                        f"coverage row for {', '.join(lp['missing'])} (a step with no row is an "
-                        f"unaudited step)")
+            (errs if strict else warns).append(
+                f"{kind}: the language pass covers {11 - len(lp['missing'])}/11 steps; no "
+                f"coverage row for {', '.join(lp['missing'])} (a step with no row is an "
+                f"unaudited step)")
         visual = {REWRITTEN_DIR: VISUAL_ARTIFACT_REWRITTEN,
                   REVISED_DIR: VISUAL_ARTIFACT_REVISED,
                   INTEGRATED_DIR: VISUAL_ARTIFACT_INTEGRATED}.get(pkg)

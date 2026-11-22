@@ -5,6 +5,10 @@
 # the single-file source.
 from __future__ import annotations
 
+import signal
+import stat
+import threading
+
 _XML_INTER_ELEMENT = rf"(?:\s|{_XML_MISC})*"
 _PARAGRAPH_OPEN_RE = re.compile(rf"<w:p(?=[\s/>]){_XML_ATTRIBUTES}>")
 _PARAGRAPH_PROPERTIES_OPEN_RE = re.compile(rf"<w:pPr(?=[\s/>]){_XML_ATTRIBUTES}>")
@@ -13,6 +17,23 @@ _RUN_PROPERTIES_RE = re.compile(
 _PARAGRAPH_PROPERTIES_RE = re.compile(
     rf"<w:p(?=[\s/>]){_XML_ATTRIBUTES}(?<!/)>{_XML_INTER_ELEMENT}(?=<w:pPr(?=[\s/>]))")
 _PAGE_BREAK_DISABLED_RE = re.compile(r"""\sw:val\s*=\s*(?:"(?:0|false|off)"|'(?:0|false|off)')""")
+
+
+def _revision_scan_text(xml: str) -> str:
+    """`xml` with what a reader cannot see blanked, tracked DELETIONS kept.
+
+    `_mask_noncontent` also blanks `<w:del>`, but a tracked deletion IS a
+    revision mark the FMT-S4 counter must report. Only comments/PIs and the
+    unrendered `mc:Fallback` branch are removed here, so a retired
+    `<w:ins>`/`<w:proofErr>` inside `<!-- ... -->` no longer reads as live.
+    """
+    text = xml or ""
+    if "<!--" in text or "<?" in text:
+        text = _XML_MISC_SPAN_RE.sub(
+            lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+    if "<mc:AlternateContent" in text:
+        text = _blank_spans(text, _mc_hidden_spans(text))
+    return text
 
 
 def _break_only_paragraph(para: str) -> bool:
@@ -525,15 +546,20 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             and policy["title_page_header"] == "suppress":
         row("FMT-S3", "low", "document", "the running head is printed on the title page",
             "add w:titlePg to the section properties so page 1 carries no header")
-    n_ins = len(re.findall(r"<w:ins(?=[\s/>])", xml))
-    n_del = len(re.findall(r"<w:del(?=[\s/>])", xml))
-    n_other_rev = len(OTHER_REVISION_MARK_RE.findall(xml))
+    # A revision mark the reader cannot see (inside an XML comment, or in the
+    # unrendered mc:Fallback branch) is not a live tracked change; count the
+    # visible part. `w:del` itself stays visible to the counter (see
+    # `_revision_scan_text`).
+    revision_text = _revision_scan_text(xml)
+    n_ins = len(re.findall(r"<w:ins(?=[\s/>])", revision_text))
+    n_del = len(re.findall(r"<w:del(?=[\s/>])", revision_text))
+    n_other_rev = len(OTHER_REVISION_MARK_RE.findall(revision_text))
     if n_ins or n_del or n_other_rev:
         other = f" / {n_other_rev} other revision mark(s)" if n_other_rev else ""
         row("FMT-S4", "high", "document",
             f"tracked changes present: {n_ins} ins / {n_del} del{other}",
             "a final package must not carry revision marks; accept or reject them first")
-    n_proof = len(PROOFERR_RE.findall(xml))
+    n_proof = len(PROOFERR_RE.findall(revision_text))
     if n_proof:
         row("FMT-S5", "low", "document", f"{n_proof} proofing marker(s) (w:proofErr)",
             "the file was last saved with unaccepted spelling/grammar marks")
@@ -542,7 +568,10 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # stop -- counting it reported "1 literal tab character" on paragraphs that
     # carry no tab at all (the `<w:tab[^>]*/>` regex cannot tell them apart).
     n_tabs, _tab_depth = 0, 0
-    for _tok in re.finditer(r"<w:tabs(?=[\s/>])[^>]*>|</w:tabs>|<w:tab(?=[\s/>])[^>]*/>",
+    # The close tag is matched with optional whitespace: an exact `</w:tabs>`
+    # left `_tab_depth` stuck at 1 after a legal `</w:tabs >`, so every later
+    # run-level `<w:tab/>` was misread as a tab-stop DEFINITION.
+    for _tok in re.finditer(r"<w:tabs(?=[\s/>])[^>]*>|</w:tabs\s*>|<w:tab(?=[\s/>])[^>]*/>",
                             xml):
         _raw = _tok.group(0)
         if _raw.startswith("</"):
@@ -768,42 +797,105 @@ class ToolOutputOverBudget(OSError):
     """A child process printed more than MAX_TOOL_OUTPUT_BYTES on one stream."""
 
 
-def _run_text_tool(argv, timeout: int) -> tuple:
-    """Run a child with bounded FILE-backed output; return (rc, stdout, stderr).
+def _tool_popen_kwargs() -> dict:
+    """Put the tool in its OWN process group so a timeout can kill helpers."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
 
-    An over-budget stream raises `ToolOutputOverBudget` (an OSError, so every
-    existing `except (OSError, subprocess.SubprocessError)` call site degrades
-    with its normal warning/row instead of allocating the output). A timeout
-    raises `subprocess.TimeoutExpired`, as `subprocess.run(timeout=...)` does.
-    """
-    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
-        proc = subprocess.Popen([str(a) for a in argv], stdin=subprocess.DEVNULL,
-                                stdout=out_f, stderr=err_f)
-        timed_out = False
+
+def _kill_tool_group(proc) -> None:
+    """Kill the tool's whole process group, not only its direct child."""
+    if os.name == "nt":
         try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (AttributeError, OSError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _run_text_tool(argv, timeout: int, cwd=None) -> tuple:
+    """Run a child with output bounded in size AND lifetime.
+
+    The old version pointed stdout/stderr at unbounded TemporaryFiles and
+    checked their size only after the child exited, so a flooding tool filled
+    the disk for the whole timeout; and it killed only the direct child, so a
+    pdftotext/convert grandchild survived the timeout (F58/F73). Both streams
+    are now drained through capped reader threads, the process GROUP is killed
+    the moment the cap is crossed or the timeout expires, and an over-budget
+    stream raises `ToolOutputOverBudget` as before.
+    """
+    cap = MAX_TOOL_OUTPUT_BYTES
+    proc = subprocess.Popen([str(a) for a in argv], cwd=cwd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            **_tool_popen_kwargs())
+    over_budget = threading.Event()
+    buffers = {}
+
+    def _pump(pipe, key):
+        chunks, total = [], 0
+        try:
+            while True:
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                before = total
+                total += len(chunk)
+                if total <= cap:
+                    chunks.append(chunk)
+                else:
+                    keep = cap + 1 - before
+                    if keep > 0:
+                        chunks.append(chunk[:keep])
+                    over_budget.set()
+                    _kill_tool_group(proc)
+        except (OSError, ValueError):
+            pass
+        finally:
+            buffers[key] = b"".join(chunks)
             try:
-                proc.kill()
+                pipe.close()
             except OSError:
                 pass
+
+    readers = [threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)]
+    for thread in readers:
+        thread.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_tool_group(proc)
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+    for thread in readers:
+        thread.join(timeout=10)
+    for thread, pipe in zip(readers, (proc.stdout, proc.stderr)):
+        if thread.is_alive():
             try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
+                pipe.close()
+            except OSError:
                 pass
-        out_f.seek(0, os.SEEK_END)
-        out_size = out_f.tell()
-        err_f.seek(0, os.SEEK_END)
-        err_size = err_f.tell()
-        if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
-            raise ToolOutputOverBudget(
-                f"tool output over {MAX_TOOL_OUTPUT_BYTES} bytes "
-                f"(stdout={out_size}, stderr={err_size})")
-        out_f.seek(0)
-        err_f.seek(0)
-        out = out_f.read(MAX_TOOL_OUTPUT_BYTES + 1)
-        err = err_f.read(MAX_TOOL_OUTPUT_BYTES + 1)
+        thread.join(timeout=2)
+    out = buffers.get("out", b"")
+    err = buffers.get("err", b"")
+    if over_budget.is_set() or len(out) > cap or len(err) > cap:
+        raise ToolOutputOverBudget(
+            f"tool output over {cap} bytes "
+            f"(stdout={len(out)}, stderr={len(err)})")
     if timed_out:
         raise subprocess.TimeoutExpired(str(argv[0]), timeout)
     return (proc.returncode, out.decode("utf-8", "replace"),
@@ -827,6 +919,11 @@ def analyse_package(path: Path, policy: dict) -> dict:
     try:
         with zipfile.ZipFile(path) as pkg:
             problem = _docx_zip_problem(pkg)
+            if problem:
+                raise ValueError(problem)
+            # A repeated member name is an ambiguous package: the fixer refuses
+            # it as unreadable, so the scanner must not report it clean.
+            problem = _docx_duplicate_member_problem(pkg)
             if problem:
                 raise ValueError(problem)
             raw = pkg.read("word/document.xml")
@@ -936,7 +1033,8 @@ def analyse_package(path: Path, policy: dict) -> dict:
     # carry orphan numbered parts (footer2.xml) that Word never uses, and a row
     # against one of those is a false positive.
     # `attr_of` accepts single- or double-quoted attributes; OOXML permits both.
-    ref_ids = {attr_of(m.group(0), "r:id")
+    prefixes = _rel_prefixes(xml) or {"r"}
+    ref_ids = {_attached_template_rid(m.group(0), prefixes)
                for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>", xml)}
     ref_ids.discard(None)
     referenced = {part_targets[rid] for rid in ref_ids if rid in part_targets}
@@ -969,9 +1067,11 @@ def analyse_package(path: Path, policy: dict) -> dict:
                     _aux_rev_parts.append(
                         (_n, ooxml_part_text(_pkg.read(_n))))
     for name, ax in _aux_rev_parts:
-        _n_ins = len(re.findall(r"<w:ins(?=[\s/>])", ax))
-        _n_del = len(re.findall(r"<w:del(?=[\s/>])", ax))
-        _n_other = len(OTHER_REVISION_MARK_RE.findall(ax))
+        # Same live-content reading as the document counter above.
+        ax_scan = _revision_scan_text(ax)
+        _n_ins = len(re.findall(r"<w:ins(?=[\s/>])", ax_scan))
+        _n_del = len(re.findall(r"<w:del(?=[\s/>])", ax_scan))
+        _n_other = len(OTHER_REVISION_MARK_RE.findall(ax_scan))
         if _n_ins or _n_del or _n_other:
             _other = f" / {_n_other} other revision mark(s)" if _n_other else ""
             res["rows"].append({
@@ -982,7 +1082,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
                 "detail": ("a final package must not carry revision marks; accept "
                            "or reject them first"),
                 "fix": "manual", "protected": False, "tier": tier_of("FMT-S4")})
-        _n_proof = len(PROOFERR_RE.findall(ax))
+        _n_proof = len(PROOFERR_RE.findall(ax_scan))
         if _n_proof:
             res["rows"].append({
                 "rule": "FMT-S5", "severity": "low", "document": path.name,
@@ -1033,7 +1133,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
         _max = _pb.get("cover_letter_max_pages") if isinstance(_pb, dict) else None
         if pages and isinstance(_max, int) and pages > _max:
             res["rows"].append(cover_letter_page_row(path, pages, src, _max))
-        elif pages is None and _max is not None and pdf.is_file():
+        elif pages is None and _max is not None:
             # Neither the rendered PDF nor the cached page count could state the
             # length: record the unexamined class rather than let the budget look
             # enforced (a skipped check is reported as skipped).
@@ -1194,7 +1294,20 @@ def format_note(info) -> str:
 # --------------------------------------------------------------------------
 
 def apply_edits(xml: str, edits: list) -> str:
-    for start, end, new in sorted(edits, key=lambda e: -e[0]):
+    # Back-to-front splicing is correct only for NON-OVERLAPPING ranges. An
+    # overlapping/contained range used to be applied against coordinates the
+    # earlier splice had already shifted, silently deleting the bytes between
+    # the two edits (field unlink, fix_document and bibliography repair all use
+    # this shared writer). Keep the first-started range of each group -- of two
+    # sharing a start the WIDER one, so a containing range owns its contents --
+    # and drop the ranges it subsumes or partially overlaps, exactly as
+    # `rewrite_text_spans` resolves its overlapping edits.
+    accepted = []
+    for start, end, new in sorted(edits, key=lambda e: (e[0], -e[1])):
+        if accepted and start < accepted[-1][1]:
+            continue
+        accepted.append((start, end, new))
+    for start, end, new in reversed(accepted):
         xml = xml[:start] + new + xml[end:]
     return xml
 
@@ -1301,7 +1414,7 @@ def _unlink_fields(xml: str) -> tuple:
         # `w:fldSimple` carries no fldChar/instrText runs: remove only its
         # tags, so the result runs stay as plain text.
         for m in re.finditer(r"<w:fldSimple\b[^>]*/>|<w:fldSimple\b[^>]*>|"
-                             r"</w:fldSimple>", chunk):
+                             r"</w:fldSimple\s*>", chunk):
             field_edits.append((s + m.start(), s + m.end(), ""))
         if field_edits:
             edits.extend(field_edits)
@@ -1376,7 +1489,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
     # moves onto the next body paragraph, even when that paragraph only holds
     # a drawing with a text box.
     manual_breaks = set()
-    for _ in range(50):
+    # No fixed 50-iteration cap: every pass deletes one target (or marks a
+    # text-box break manual), so the loop ends when no break-only paragraph
+    # remains. The old `range(50)` silently left the rest unrepaired and filed
+    # no cap/gap row, so a document with 51+ break-only paragraphs shipped
+    # residual explicit page-break paragraphs.
+    while True:
         plist = paragraphs(xml, include_empty_hosts=True)
         table_paras = _table_paragraph_indices(xml, plist)
         text_box_paras = _text_box_paragraph_indices(xml, plist)
@@ -1627,7 +1745,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 head = body.rstrip()[:-2].rstrip() + ">"
                 xml = apply_edits(xml, [(s.start(), s.end(), head + "<w:titlePg/></w:sectPr>")])
             else:
-                at = s.start() + body.find("</w:sectPr>")
+                close = re.search(r"</w:sectPr\s*>", body)
+                if close is None:
+                    # No live close to splice before: refuse the edit rather
+                    # than insert at -1 (which corrupts the preceding element).
+                    return doc_xml
+                at = s.start() + close.start()
                 # CT_SectPr's ordered tail after titlePg: textDirection,
                 # bidi, rtlGutter, docGrid, printerSettings. Looking only for
                 # the last two put titlePg after textDirection/bidi/rtlGutter,
@@ -2137,6 +2260,13 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             problem = _docx_zip_problem(pkg)
             if problem:
                 raise ValueError(problem)
+            # A repeated member name is an AMBIGUOUS package: the dict below
+            # would silently keep the LAST copy and the fixer would rewrite one
+            # of them while reporting success (F029). Refuse it, exactly as the
+            # strip/refresh helpers already do.
+            problem = _docx_duplicate_member_problem(pkg)
+            if problem:
+                raise ValueError(problem)
             parts = {}
             for info in pkg.infolist():
                 data = pkg.read(info.filename)
@@ -2500,7 +2630,8 @@ def validate_docx_parts(path: Path) -> dict:
 # Official venue templates: restyle a package into the journal's own DOCX
 # --------------------------------------------------------------------------
 
-_STYLE_REF_RE = re.compile(r'<w:(pStyle|rStyle)\b[^>]*?w:val="([^"]+)"')
+_STYLE_REF_RE = re.compile(
+    r'<w:(?P<tag>pStyle|rStyle)\b[^>]*?w:val\s*=\s*(?P<q>["\'])(?P<val>[^"\']+)(?P=q)')
 # Direct properties the template's styles are supposed to own. Semantic run
 # formatting (b/i/u/color/vertAlign/...) is deliberately NOT stripped.
 _DIRECT_FORMAT_PATTERNS = (
@@ -2511,8 +2642,20 @@ _DIRECT_FORMAT_PATTERNS = (
     r"<w:sz(?=[\s/>])[^>]*/>",
     r"<w:szCs(?=[\s/>])[^>]*/>",
 )
-_SECT_RE = re.compile(r"<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>")
-_RELS_TAG_RE = re.compile(r"<Relationship\b[^>]*>")
+# A tracked property change records the value BEFORE the edit. Its nested
+# `w:pPr`/`w:rPr` is revision history, never live formatting, so the direct
+# properties inside it must survive every template restyle.
+_REVISION_RECORD_RE = re.compile(
+    r"<w:(?P<tag>pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|"
+    r"sectPrChange|numberingChange)(?=[\s/>])[^>]*/>"
+    r"|<w:(?P<open>pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|"
+    r"sectPrChange|numberingChange)(?=[\s>])[\s\S]*?</w:(?P=open)>")
+# The template side must read a section exactly like the manuscript side: a
+# legal self-closing `<w:sectPr .../>` is an empty section, and a lazy match
+# ended at the NESTED close of a `w:sectPrChange`, returning an unbalanced
+# prefix whose obsolete geometry was then adopted.
+_SECT_RE = SECT_READ_RE
+_RELS_TAG_RE = re.compile(r"<(?:[A-Za-z_][\w.\-]*:)?Relationship\b[^>]*>")
 
 
 def _rels_entries(xml: str) -> list:
@@ -2522,7 +2665,9 @@ def _rels_entries(xml: str) -> list:
     yield the same header/footer role map as the canonical order.
     """
     out = []
-    for m in _RELS_TAG_RE.finditer(xml or ""):
+    # A commented-out relationship is not live, and a namespace-prefixed
+    # `<pkg:Relationship>` is a legal OPC entry.
+    for m in _RELS_TAG_RE.finditer(_mask_noncontent(xml or "")):
         tag = m.group(0)
         rid, typ, target = attr_of(tag, "Id"), attr_of(tag, "Type"), attr_of(tag, "Target")
         if rid is None or target is None:
@@ -2610,12 +2755,29 @@ def _style_index(styles_xml: str) -> tuple:
 
 
 def _strip_direct_format(para: str) -> tuple:
-    """(fragment, removed_count): drop direct props that defeat a template style."""
+    """(fragment, removed_count): drop direct props that defeat a template style.
+
+    The `*PrChange` records are split out first: their nested property bag is
+    the value BEFORE the edit, so rewriting it destroyed the tracked change's
+    old-format record (and counted it as a live style fix). Only the live
+    segments between records are stripped.
+    """
     removed = 0
-    for pat in _DIRECT_FORMAT_PATTERNS:
-        para, n = re.subn(pat, "", para)
-        removed += n
-    return para, removed
+
+    def strip_live(text: str) -> str:
+        nonlocal removed
+        for pat in _DIRECT_FORMAT_PATTERNS:
+            text, n = re.subn(pat, "", text)
+            removed += n
+        return text
+
+    out, pos = [], 0
+    for m in _REVISION_RECORD_RE.finditer(para):
+        out.append(strip_live(para[pos:m.start()]))
+        out.append(m.group(0))              # history: left byte-identical
+        pos = m.end()
+    out.append(strip_live(para[pos:]))
+    return "".join(out), removed
 
 
 def _remap_style_refs(xml: str, mapping: dict) -> tuple:
@@ -2623,14 +2785,29 @@ def _remap_style_refs(xml: str, mapping: dict) -> tuple:
     count = [0]
 
     def sub(m):
-        new = mapping.get(m.group(2))
-        if not new or new == m.group(2):
+        old = m.group("val")
+        new = mapping.get(old)
+        if not new or new == old:
             return m.group(0)
         count[0] += 1
-        return m.group(0).replace(f'w:val="{m.group(2)}"',
-                                  f'w:val="{_xml_attr_value(new)}"')
+        return (m.group(0)[:m.start("val") - m.start(0)]
+                + _xml_attr_value(new)
+                + m.group(0)[m.end("val") - m.start(0):])
 
     return _STYLE_REF_RE.sub(sub, xml), count[0]
+
+
+def _live_sect_pr(sect: str) -> str:
+    """`sect` with every `w:sectPrChange` record blanked, length preserved.
+
+    The tracked-change record carries the section properties BEFORE the edit in
+    its own nested `<w:sectPr>`; that section is not attached to the document
+    any more. Reading geometry or header/footer references from it adopted the
+    old revision's values, and a spliced replacement rewrote the history while
+    the live section kept no geometry. Blanking (rather than deleting) keeps
+    every offset usable for the caller's splice.
+    """
+    return _SECT_CHANGE_RE.sub(lambda m: " " * len(m.group(0)), sect)
 
 
 def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
@@ -2658,7 +2835,7 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
              "pgSz", "pgMar", "paperSrc", "pgBorders", "lnNumType", "pgNumType", "cols",
              "formProt", "vAlign", "noEndnote", "titlePg", "textDirection", "bidi",
              "rtlGutter", "docGrid", "printerSettings", "sectPrChange")
-    tpl_sect = t_sects[-1].group(0)
+    tpl_sect = _live_sect_pr(t_sects[-1].group(0))
     geo = {tag: elem(tpl_sect, tag) for tag in ("pgSz", "pgMar", "cols", "docGrid")}
     geo = {k: v for k, v in geo.items() if v}
     if not geo:
@@ -2669,20 +2846,41 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
             # Expand the empty section first: the geometry children belong
             # INSIDE it, and a splice before the tag's `/>` would orphan them.
             body = body[:body.rfind("/>")].rstrip() + ">" + "</w:sectPr>"
+        # Every lookup/splice below is against the LIVE section only: the
+        # nested `w:sectPr` of a `w:sectPrChange` is revision history (F195).
+        masked = _mask_noncontent(_live_sect_pr(body))
         for tag in ("pgSz", "pgMar", "cols", "docGrid"):
-            el = elem(body, tag)
+            el = elem(masked, tag)
             new_el = geo.get(tag)
             if el and new_el:
-                body = body.replace(el, new_el, 1)
+                at = masked.find(el)
+                if at >= 0:
+                    body = body[:at] + new_el + body[at + len(el):]
+                    masked = masked[:at] + new_el + masked[at + len(el):]
             elif new_el:
-                pos = body.rfind("</w:sectPr>")
+                # The close may carry whitespace (`</w:sectPr >`, legal XML);
+                # an exact-tag rfind returned -1 and spliced the new child at
+                # the end of the section's bytes, corrupting the XML.
+                close = None
+                for close in re.finditer(r"</w:sectPr\s*>", masked):
+                    pass
+                if close is None:
+                    return body
+                pos = close.start()
+                # `w:sectPrChange` is the LAST child in schema order, so a
+                # missing geometry element must land BEFORE it, never after
+                # (the masked scan cannot see the record's own tag).
+                change = _SECT_CHANGE_RE.search(body)
+                if change is not None:
+                    pos = min(pos, change.start())
                 idx = order.index(tag)
-                for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", body):
+                for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", masked):
                     name = m.group(1)
                     if name in order and order.index(name) > idx:
                         pos = min(pos, m.start())
                         break
                 body = body[:pos] + new_el + body[pos:]
+                masked = masked[:pos] + new_el + masked[pos:]
         return body
 
     for m in reversed(m_sects):                     # backwards: offsets stay valid
@@ -2790,7 +2988,14 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     def target_of(kind: str, role: str) -> str:
         rid = refs[kind].get(role)
         k, target = rel_map.get(rid, ("", "")) if rid else ("", "")
-        return target if k == kind and target and f"word/{target}" in tnames else ""
+        if k != kind or not target:
+            return ""
+        # A Target may be package-absolute (`/word/header1.xml`). It is
+        # relative to `word/` here, so strip the leading slash (and a leading
+        # `word/`) before checking the template's parts.
+        norm = target.lstrip("/").replace("\\", "/")
+        rel = norm[len("word/"):] if norm.startswith("word/") else norm
+        return rel if f"word/{rel}" in tnames else ""
 
     by_target = {}
 
@@ -2825,12 +3030,23 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         if not target:
             return False
         xml = ooxml_part_text(tpkg.read(f"word/{target}"))
-        if not re.search(r'<w:instrText[^>]*>[^<]*\bPAGE\b'
-                         r'|<w:fldSimple[^>]*w:instr="[^"]*\bPAGE\b', xml, re.I):
+        has_page = bool(re.search(r"<w:instrText[^>]*>[^<]*\bPAGE\b", xml, re.I))
+        if not has_page:
+            # `w:instr` may be either quote character; a double-quote-only
+            # pattern read a legal single-quoted field as "no PAGE field".
+            for m in re.finditer(r"<w:fldSimple(?=[\s/>])[^>]*>", xml):
+                if re.search(r"\bPAGE\b", attr_of(m.group(0), "w:instr") or "", re.I):
+                    has_page = True
+                    break
+        if not has_page:
             return False
         if re.search(r"<w:txbxContent|<wps:wsp|<w:pict\b", xml):
             return False
-        visible = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", xml))
+        # `text_of` reads every legal `w:t` close (`</w:t >`, attributes in any
+        # order) and decodes entities. The private exact-close regex saw an
+        # empty string for a prose footer ending `</w:t >`, so the template's
+        # own "Typeset by ..." note was classified as plain pagination.
+        visible = text_of(xml)
         return not re.search(r"[A-Za-z]", visible)
 
     out = {"footer_replaced": []}
@@ -2888,7 +3104,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     # document relationships (fresh ids)
     rels, rels_encode = _ooxml_part_codec(
         parts.get("word/_rels/document.xml.rels", b""))
-    used = set(re.findall(r'Id="([^"]+)"', rels))
+    used = set(re.findall(r"\bId\s*=\s*[\"']([^\"']+)[\"']", rels))
     n = 2001
     for key, dest in (("header_default", out.get("header_default")),
                       ("header_first", out.get("header_first")),
@@ -2904,10 +3120,18 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         used.add(rid)
         n += 1
         kind = "header" if key.startswith("header") else "footer"
-        rels = rels.replace("</Relationships>",
-                            f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
-                            f'officeDocument/2006/relationships/{kind}" Target="{dest}"/>'
-                            f'</Relationships>')
+        # A legal `</Relationships >` must still be a splice point; the exact
+        # spelling produced no relationship while the r:id was still written
+        # (F012). Only record the id when the entry actually landed.
+        mclose = re.search(r"</Relationships\s*>", rels)
+        if mclose is None:
+            continue
+        rels = (rels[:mclose.start()]
+                + f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
+                  f'officeDocument/2006/relationships/{kind}" Target="{dest}"/>'
+                + rels[mclose.start():])
+        if not re.search(r"\bId\s*=\s*[\"']" + re.escape(rid) + r"[\"']", rels):
+            continue
         out[key + "_rid"] = rid
     parts["word/_rels/document.xml.rels"] = rels_encode(rels)
     return out
@@ -2960,8 +3184,13 @@ def template_style_roles(template: Path) -> dict:
         if "caption" in keys and "caption" not in roles:
             roles["caption"] = sid
     used = {}
-    for m in re.finditer(r'<w:pStyle w:val="([^"]+)"', doc):
-        used[m.group(1)] = used.get(m.group(1), 0) + 1
+    # Read the tag's own `w:val` through `attr_of`: the double-quote-only
+    # pattern also required `w:val` to be the first attribute, so a legal
+    # `w:pStyle w:val='Heading1'` made the depth fall back to 2.
+    for m in re.finditer(r"<w:pStyle(?=[\s/>])[^>]*>", doc):
+        sid = attr_of(m.group(0), "w:val")
+        if sid:
+            used[sid] = used.get(sid, 0) + 1
     depth = 0
     for level, sid in roles["headings"].items():
         if used.get(sid, 0) >= 2:
@@ -2976,6 +3205,34 @@ _HEADING_SKIP_PREFIXES = ("figure ", "fig. ", "fig ", "table ", "supplementary f
                           "supplementary table", "extended data ", "box ")
 
 
+def _run_sizes(run: str) -> list:
+    """Every live `w:sz` value in a run, quote-style independent.
+
+    XML attribute quoting is not significant, so `w:val='20'` is the same size
+    as `w:val="20"`; reading only the double-quoted spelling made a legal body
+    run invisible to the dominant-size calculation.
+    """
+    out = []
+    for tag in re.findall(r"<w:sz(?=[\s/>])[^>]*/?>", run or ""):
+        val = attr_of(tag, "w:val")
+        if val is not None and str(val).strip().isdigit():
+            out.append(int(str(val).strip()))
+    return out
+
+
+def _run_is_bold(run: str) -> bool:
+    """True when the run carries a live direct `w:b` that is ON.
+
+    Accepts both legal quote styles and the boolean spellings; a single-quoted
+    `<w:b w:val='1'/>` is bold exactly like `<w:b/>`.
+    """
+    for tag in re.findall(r"<w:b(?=[\s/>])[^>]*/?>", run or ""):
+        val = attr_of(tag, "w:val")
+        if val is None or str(val).strip().lower() in ("1", "true", "on"):
+            return True
+    return False
+
+
 def _body_run_size(doc_xml: str):
     """The document's dominant run size (its body-text size), or None.
 
@@ -2988,13 +3245,13 @@ def _body_run_size(doc_xml: str):
     for _p0, _p1, frag in paragraphs(doc_xml):
         if len(text_of(frag).split()) < 25:
             continue
-        for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", frag):
-            t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run))
-            for s in re.findall(r'<w:sz w:val="(\d+)"', run):
-                weights[int(s)] += len(t)
+        for run in re.findall(r"<w:r\b[\s\S]*?</w:r\s*>", frag):
+            t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run))
+            for s in _run_sizes(run):
+                weights[s] += len(t)
     if weights:
         return weights.most_common(1)[0][0]
-    sizes = Counter(re.findall(r'<w:sz w:val="(\d+)"', doc_xml))
+    sizes = Counter(_run_sizes(doc_xml))
     if not sizes:
         return None
     return int(sizes.most_common(1)[0][0])
@@ -3057,14 +3314,14 @@ def heading_like_paragraphs(doc_xml: str, containers=()) -> list:
         if "<w:numPr" in frag:
             continue
         sizes, all_bold, has_text = [], True, False
-        for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", frag):
-            if not "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run)).strip():
+        for run in re.findall(r"<w:r\b[\s\S]*?</w:r\s*>", frag):
+            if not "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run)).strip():
                 continue
             has_text = True
-            if not re.search(r"<w:b/>|<w:b w:val=\"(?:1|true|on)\"", run):
+            if not _run_is_bold(run):
                 all_bold = False
                 break
-            sizes += [int(s) for s in re.findall(r'<w:sz w:val="(\d+)"', run)]
+            sizes += _run_sizes(run)
         if not (has_text and all_bold and sizes) or max(sizes) < body + 2:
             continue
         out.append((i, text, max(sizes)))
@@ -3181,8 +3438,8 @@ def _correspondence_lead(para_xml: str) -> int:
     before it is skipped by the walk itself, so counting its characters here
     would shift the bold span into the name.
     """
-    for rm in re.finditer(r"<w:r\b[\s\S]*?</w:r>", para_xml):
-        tm = re.search(r"<w:t[^>]*>([\s\S]*?)</w:t>", rm.group(0))
+    for rm in re.finditer(r"<w:r\b[\s\S]*?</w:r\s*>", para_xml):
+        tm = re.search(r"<w:t[^>]*>([\s\S]*?)</w:t\s*>", rm.group(0))
         if not tm:
             continue
         text = unesc(tm.group(1))
@@ -3206,9 +3463,9 @@ def _bold_label_runs(para_xml: str) -> str:
         return para_xml
     left = len(m.group(0)) + _correspondence_lead(para_xml)
     out = para_xml
-    for rm in list(re.finditer(r"<w:r\b[\s\S]*?</w:r>", out)):
+    for rm in list(re.finditer(r"<w:r\b[\s\S]*?</w:r\s*>", out)):
         run = rm.group(0)
-        tm = re.search(r"(<w:t[^>]*>)([\s\S]*?)(</w:t>)", run)
+        tm = re.search(r"(<w:t[^>]*>)([\s\S]*?)(</w:t\s*>)", run)
         if not tm:
             continue
         # `unesc`, not `xml.sax.saxutils.unescape`: the sax decoder only knows
@@ -3272,12 +3529,12 @@ def _label_is_bold(para_xml: str) -> bool:
     if not m:
         return False
     left = len(m.group(0)) + _correspondence_lead(para_xml)
-    for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", para_xml):
-        text = "".join(unesc(t) for t in re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run))
+    for run in re.findall(r"<w:r\b[\s\S]*?</w:r\s*>", para_xml):
+        text = "".join(unesc(t) for t in re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run))
         if not text.strip():
             continue
         take = min(left, len(text))
-        if take > 0 and not re.search(r"<w:b/>|<w:b w:val=\"(?:1|true|on)\"", run):
+        if take > 0 and not _run_is_bold(run):
             return False
         left -= take
         if left <= 0:
@@ -3315,7 +3572,7 @@ def _insert_ppr_extra(ppr_xml: str, extra: str) -> str:
         # as unreadable content (the shipped NeoHeteroclitic main text carries
         # exactly that on its affiliation and correspondence lines, and its
         # `docx validate` fails on it).
-        head = re.sub(r"<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s>])[^>]*>[\s\S]*?</w:rPr>",
+        head = re.sub(r"<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s>])[^>]*>[\s\S]*?</w:rPr\s*>",
                       "", head, count=1)
     rm = re.search(r"<w:rPr(?=[\s>])", head)
     if rm:
@@ -3598,8 +3855,17 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
             typ = attr_of(rm.group(0), "w:type") or "default"
             return "" if (tag, typ) in replaced else rm.group(0)
 
+        # `w:sectPrChange` is revision history: its nested old section must stay
+        # byte-identical. Apply the substitutions/splices only to the LIVE part
+        # and re-attach the record unchanged.
+        body = m.group(0)
+        change = _SECT_CHANGE_RE.search(body)
+        history = ""
+        if change is not None:
+            history = body[change.start():]
+            body = body[:change.start()]
         body = re.sub(r"<w:(header|footer)Reference(?=[\s/>])[^>]*/>",
-                      keep_source_ref, m.group(0))
+                      keep_source_ref, body)
         body = re.sub(r"<w:titlePg[^>]*/>", "", body)
         # The OPENING tag only: `[^>]*` greedily consumed the `/` of a legal
         # `<w:sectPr att="x"/>`, so the references were inserted AFTER the
@@ -3618,15 +3884,25 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
             # rtlGutter, docGrid, printerSettings. Anchoring only on docGrid or
             # the closing tag put titlePg AFTER textDirection/bidi/rtlGutter,
             # where Word reads the section as schema-invalid.
-            at = body.find("</w:sectPr>")
+            at = None
+            close = re.search(r"</w:sectPr\s*>", body)
+            if close is not None:
+                at = close.start()
+            elif change is not None:
+                # The live close sits in the split-off `w:sectPrChange`
+                # history, so the live section has no close to anchor on. Its
+                # end is `change.start()` in the original section: insert
+                # before the record, exactly where the live close used to be
+                # (R02).
+                at = len(body)
             for tag in ("textDirection", "bidi", "rtlGutter", "docGrid",
                         "printerSettings"):
                 t = body.find(f"<w:{tag}")
-                if t != -1 and (at == -1 or t < at):
+                if t != -1 and (at is None or t < at):
                     at = t
-            if at == -1:
-                at = body.rfind("/>")
-            body = body[:at] + "<w:titlePg/>" + body[at:]
+            if at is not None:
+                body = body[:at] + "<w:titlePg/>" + body[at:]
+        body += history
         out = out[:m.start()] + body + out[m.end():]
     if refs_all:
         root = re.search(r"<w:document\b[^>]*>", out)
@@ -3662,16 +3938,17 @@ def _with_even_odd_headers(parts: dict) -> bool:
         rels, rels_encode = _ooxml_part_codec(
             parts.get("word/_rels/document.xml.rels", b""))
         if "relationships/settings" not in rels:
-            used = set(re.findall(r'Id="([^"]+)"', rels))
+            used = set(re.findall(r"\bId\s*=\s*[\"']([^\"']+)[\"']", rels))
             n = 3001
             while f"rId{n}" in used:
                 n += 1
-            rels = rels.replace(
-                "</Relationships>",
-                f'<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/'
-                f'officeDocument/2006/relationships/settings" Target="settings.xml"/>'
-                f"</Relationships>")
-            parts["word/_rels/document.xml.rels"] = rels_encode(rels)
+            mclose = re.search(r"</Relationships\s*>", rels)
+            if mclose is not None:
+                rels = (rels[:mclose.start()]
+                        + f'<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/'
+                          f'officeDocument/2006/relationships/settings" Target="settings.xml"/>'
+                        + rels[mclose.start():])
+                parts["word/_rels/document.xml.rels"] = rels_encode(rels)
         return True
     text, settings_encode = _ooxml_part_codec(settings)
     if is_on(text, "evenAndOddHeaders"):
@@ -3733,8 +4010,9 @@ def _reorder_numbering_groups(xml: str, pics: str, abstracts: str, nums: str) ->
         if inner[open_end - 2:open_end] == "/>":
             end = open_end
         else:
-            close = inner.find(f"</w:{m.group(1)}>", open_end)
-            end = close + len(f"</w:{m.group(1)}>") if close != -1 else open_end
+            close_m = re.search(rf"</w:{m.group(1)}\s*>", inner[open_end:])
+            close = open_end + close_m.start() if close_m else -1
+            end = close + len(close_m.group(0)) if close_m else open_end
         entries.append((m.group(1), inner[m.start():end]))
         pos = end
     if pos < len(inner):
@@ -3754,6 +4032,21 @@ def _reorder_numbering_groups(xml: str, pics: str, abstracts: str, nums: str) ->
             + xml[close_at:])
 
 
+def _numbering_block(numbering: str, tag: str, id_attr: str, wanted: str) -> str:
+    """The balanced `<w:tag ...>` definition whose `id_attr` equals `wanted`.
+
+    The value may be single- or double-quoted and the attribute may sit in any
+    order; a lazy exact-quote regex read neither. `_element_spans_by_name`
+    balances the element and skips commented-out copies.
+    """
+    for start, end in _element_spans_by_name(numbering, tag):
+        block = numbering[start:end]
+        open_tag = re.match(rf"<w:{tag}(?=[\s/>])[^>]*>", block)
+        if open_tag and attr_of(open_tag.group(0), id_attr) == wanted:
+            return block
+    return ""
+
+
 def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     """Keep the source's list definitions that the template does not define.
 
@@ -3771,64 +4064,81 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     doc_names = [n for n in sorted(parts) if doc_part_re.fullmatch(n)]
     referenced = set()
     for name in doc_names:
-        referenced |= set(re.findall(r'<w:numId(?=[\s/>])[^>]*w:val="(\d+)"',
-                                     _ooxml_part_codec(parts[name])[0]))
-    defined = set(re.findall(r'<w:num(?=[\s/>])[^>]*w:numId="(\d+)"', tpl_numbering))
+        for tag in re.findall(r"<w:numId(?=[\s/>])[^>]*>",
+                              _ooxml_part_codec(parts[name])[0]):
+            val = attr_of(tag, "w:val")
+            if val is not None and val.strip().isdigit():
+                referenced.add(val.strip())
+    defined = set()
+    for tag in re.findall(r"<w:num(?=[\s/>])[^>]*>", tpl_numbering):
+        val = attr_of(tag, "w:numId")
+        if val is not None:
+            defined.add(val.strip())
     missing = sorted(referenced - defined, key=lambda s: (len(s), s))
     if not missing:
         return {}
     both = tpl_numbering + src_numbering
-    next_abs = max((int(x) for x in re.findall(r'w:abstractNumId="(\d+)"', both)), default=0) + 1
-    next_num = max((int(x) for x in re.findall(r'<w:num(?=[\s/>])[^>]*w:numId="(\d+)"', both)),
-                   default=0) + 1
-    next_pic = max((int(x) for x in re.findall(r'w:numPicBulletId="(\d+)"', both)), default=0) + 1
+    next_abs = max((int(x) for x in re.findall(
+        r"w:abstractNumId\s*=\s*[\"'](\d+)[\"']", both)), default=0) + 1
+    next_num = max((int(x) for x in re.findall(
+        r"<w:num(?=[\s/>])[^>]*w:numId\s*=\s*[\"'](\d+)[\"']", both)), default=0) + 1
+    next_pic = max((int(x) for x in re.findall(
+        r"w:numPicBulletId\s*=\s*[\"'](\d+)[\"']", both)), default=0) + 1
     abs_map, abs_blocks, num_blocks, pic_blocks = {}, [], [], []
     num_map = {}
     for old_num in missing:
-        num_block = re.search(
-            rf'<w:num(?=[\s/>])[^>]*w:numId="{re.escape(old_num)}"[\s\S]*?</w:num>', src_numbering)
+        num_block = _numbering_block(src_numbering, "num", "w:numId", old_num)
         if not num_block:
             continue
-        abs_ref = re.search(r'<w:abstractNumId(?=[\s/>])[^>]*w:val="(\d+)"', num_block.group(0))
+        abs_ref = elem_val(num_block, "abstractNumId")
         if not abs_ref:
             continue
-        old_abs = abs_ref.group(1)
+        old_abs = abs_ref
         if old_abs not in abs_map:
-            abs_block = re.search(
-                rf'<w:abstractNum(?=[\s/>])[^>]*w:abstractNumId="{re.escape(old_abs)}"'
-                r'[\s\S]*?</w:abstractNum>', src_numbering)
+            abs_block = _numbering_block(src_numbering, "abstractNum",
+                                         "w:abstractNumId", old_abs)
             if not abs_block:
                 continue
             new_abs = str(next_abs)
             next_abs += 1
-            block = re.sub(rf'w:abstractNumId="{re.escape(old_abs)}"',
-                           f'w:abstractNumId="{new_abs}"', abs_block.group(0), count=1)
+            block = re.sub(
+                r"(<w:abstractNum(?=[\s/>])[^>]*w:abstractNumId\s*=\s*)([\"'])[^\"']*\2",
+                lambda m: m.group(1) + m.group(2) + new_abs + m.group(2),
+                abs_block, count=1)
             # a picture-bullet level references a numPicBullet element that must
             # travel with the copied list (schema order: numPicBullet, abstractNum, num)
             pic_map = {}
-            for pid in sorted(set(re.findall(
-                    r'<w:lvlPicBulletId(?=[\s/>])[^>]*w:val="(\d+)"', block))):
-                pic = re.search(
-                    rf'<w:numPicBullet(?=[\s/>])[^>]*w:numPicBulletId="{re.escape(pid)}"'
-                    r'[\s\S]*?</w:numPicBullet>', src_numbering)
+            for pic_tag in re.finditer(r"<w:lvlPicBulletId(?=[\s/>])[^>]*>", block):
+                pid = attr_of(pic_tag.group(0), "w:val")
+                if not pid:
+                    continue
+                pic = _numbering_block(src_numbering, "numPicBullet",
+                                       "w:numPicBulletId", pid)
                 if not pic:
                     continue
                 new_pid = str(next_pic)
                 next_pic += 1
                 pic_map[pid] = new_pid
-                pic_blocks.append(re.sub(rf'w:numPicBulletId="{re.escape(pid)}"',
-                                         f'w:numPicBulletId="{new_pid}"', pic.group(0), count=1))
+                pic_blocks.append(re.sub(
+                    r"(<w:numPicBullet(?=[\s/>])[^>]*w:numPicBulletId\s*=\s*)([\"'])[^\"']*\2",
+                    lambda m: m.group(1) + m.group(2) + new_pid + m.group(2),
+                    pic, count=1))
             for pid, new_pid in pic_map.items():
-                block = re.sub(rf'(<w:lvlPicBulletId(?=[\s/>])[^>]*w:val="){re.escape(pid)}(")',
-                               rf'\g<1>{new_pid}\g<2>', block)
+                block = re.sub(
+                    rf"(<w:lvlPicBulletId(?=[\s/>])[^>]*w:val\s*=\s*)([\"']){re.escape(pid)}\2",
+                    lambda m: m.group(1) + m.group(2) + new_pid + m.group(2), block)
             abs_map[old_abs] = new_abs
             abs_blocks.append(block)
         new_num = str(next_num)
         next_num += 1
-        carried = re.sub(r'(<w:abstractNumId(?=[\s/>])[^>]*w:val=")[^"]*(")',
-                         rf'\g<1>{abs_map[old_abs]}\g<2>', num_block.group(0), count=1)
-        carried = re.sub(r'(<w:num(?=[\s/>])[^>]*w:numId=")[^"]*(")',
-                         rf'\g<1>{new_num}\g<2>', carried, count=1)
+        carried = re.sub(
+            r"(<w:abstractNumId(?=[\s/>])[^>]*w:val\s*=\s*)([\"'])[^\"']*\2",
+            lambda m: m.group(1) + m.group(2) + abs_map[old_abs] + m.group(2),
+            num_block, count=1)
+        carried = re.sub(
+            r"(<w:num(?=[\s/>])[^>]*w:numId\s*=\s*)([\"'])[^\"']*\2",
+            lambda m: m.group(1) + m.group(2) + new_num + m.group(2),
+            carried, count=1)
         num_blocks.append(carried)
         num_map[old_num] = new_num
     if not num_map:
@@ -3845,8 +4155,9 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     for name in doc_names:
         xml, _doc_encode = _ooxml_part_codec(parts[name])
         new_xml = re.sub(
-            r'(<w:numId(?=[\s/>])[^>]*w:val=")(\d+)(")',
-            lambda m: m.group(1) + num_map.get(m.group(2), m.group(2)) + m.group(3), xml)
+            r"(<w:numId(?=[\s/>])[^>]*w:val\s*=\s*)([\"'])(\d+)\2",
+            lambda m: (m.group(1) + m.group(2)
+                       + num_map.get(m.group(3), m.group(3)) + m.group(2)), xml)
         if new_xml != xml:
             parts[name] = _doc_encode(new_xml)
     return num_map
@@ -3886,6 +4197,16 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             # whole-package read below, and every XML part is refused when it
             # carries a DTD/entity declaration.
             problem = _docx_zip_problem(spkg) or _docx_zip_problem(tpkg)
+            if problem:
+                return {"file": str(src), "ok": False,
+                        "error": f"unreadable DOCX package: {problem}"}
+            # A repeated member name is an AMBIGUOUS package: the dict below
+            # would silently keep the LAST copy and the rewrite would publish
+            # it with ok=True, so readers that pick the earlier copy disagree
+            # about what the document is. Refuse it, exactly as the strip/
+            # refresh helpers already do.
+            problem = (_docx_duplicate_member_problem(spkg)
+                       or _docx_duplicate_member_problem(tpkg))
             if problem:
                 return {"file": str(src), "ok": False,
                         "error": f"unreadable DOCX package: {problem}"}
@@ -3955,12 +4276,12 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             # used only by a comment was dropped and the comment then pointed at
             # an undefined style while the report claimed success.
             doc_part_re = re.compile(
-                r"word/(?:document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml")
+                r"word/(?:document|header[^/]*|footer[^/]*|footnotes|endnotes|comments)\.xml")
             ref_ids = set()
             for name in sorted(parts):
                 if doc_part_re.fullmatch(name):
                     xml = ooxml_part_text(parts[name])
-                    ref_ids |= {m.group(2) for m in _STYLE_REF_RE.finditer(xml)}
+                    ref_ids |= {m.group("val") for m in _STYLE_REF_RE.finditer(xml)}
             kept_styles = []
             for sid in sorted((ref_ids - set(t_by_id) - set(mapping)) | set(collided)):
                 m = re.search(rf'<w:style\b[^>]*w:styleId="{re.escape(sid)}"[\s\S]*?</w:style>',
@@ -3974,10 +4295,16 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                             block, count=1)
                     kept_styles.append(block)
             if kept_styles:
-                tpl_styles = tpl_styles.replace("</w:styles>",
-                                                "".join(kept_styles) + "</w:styles>")
-                parts["word/styles.xml"] = _ooxml_part_codec(
-                    parts["word/styles.xml"])[1](tpl_styles)
+                # Splice before the LIVE close, which may be spelled `</w:styles >`
+                # (XML allows whitespace before `>`): an exact-close replace was a
+                # silent no-op, so the manuscript's style was dropped while the
+                # document kept referencing it.
+                mclose = re.search(r"</w:styles\s*>", tpl_styles)
+                if mclose:
+                    tpl_styles = (tpl_styles[:mclose.start()] + "".join(kept_styles)
+                                  + tpl_styles[mclose.start():])
+                    parts["word/styles.xml"] = _ooxml_part_codec(
+                        parts["word/styles.xml"])[1](tpl_styles)
 
             remapped = stripped = carried_lists = 0
             page_ok = False
@@ -4048,13 +4375,13 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
     try:
         text_ok = _text(src) == _text(out)
         with zipfile.ZipFile(out) as z:
-            check_parts = ["word/document.xml", "word/styles.xml"]
-            if "word/settings.xml" in z.namelist():
-                # The parity setting is spliced into this part; parse it too, or
-                # an encoding mistake there ships inside an ok:true report.
-                check_parts.append("word/settings.xml")
-            if "word/numbering.xml" in copied or carried_lists:
-                check_parts.append("word/numbering.xml")
+            # Parse EVERY XML/rels part the package now carries, not only the
+            # document/styles/settings/numbering set: a malformed copied
+            # header/footer part (or a rels/content-types part written here)
+            # used to ship inside an ok:true report. `[Content_Types].xml` is
+            # an .xml part and is covered by the same walk.
+            check_parts = [n for n in z.namelist()
+                           if n.lower().endswith((".xml", ".rels"))]
             for name in check_parts:
                 ET.fromstring(_docx_xml_part_guarded(z, name))
     except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError, RuntimeError,
@@ -4120,6 +4447,33 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             "front_parts": {k: v for k, v in (front_parts or {}).items() if k != "copied"}}
 
 
+_LATEX_DOCUMENTCLASS = b"\\documentclass"
+
+
+def _latex_has_documentclass(path: Path) -> bool:
+    """True when the file contains `\\documentclass`, in bounded memory.
+
+    `validate_latex` used to read the WHOLE .tex twice with `read_text()` just
+    to decide whether it is a fragment, so an agent-written 10 GiB .tex
+    allocated the whole file twice before any budget applied (F48). Scan a
+    bounded head, then one chunk at a time, carrying only the overlap a marker
+    split across two reads needs.
+    """
+    overlap = len(_LATEX_DOCUMENTCLASS) - 1
+    with path.open("rb") as fh:
+        head = fh.read(8000)
+        if _LATEX_DOCUMENTCLASS in head:
+            return True
+        tail = head[-overlap:] if len(head) >= overlap else head
+        while True:
+            chunk = fh.read(1 << 20)
+            if not chunk:
+                return False
+            if _LATEX_DOCUMENTCLASS in tail + chunk:
+                return True
+            tail = chunk[-overlap:]
+
+
 def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict:
     """Compile one STANDALONE .tex in a scratch copy of its directory.
 
@@ -4129,12 +4483,11 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
     file's compile is what proves it.
     """
     try:
-        head = path.read_text(encoding="utf-8", errors="replace")[:8000]
+        has_documentclass = _latex_has_documentclass(path)
     except OSError as e:
         return {"file": str(path), "kind": "tex", "ok": False,
                 "errors": [f"unreadable: {e}"], "detail": str(e)}
-    if "\\documentclass" not in head and "\\documentclass" not in \
-            path.read_text(encoding="utf-8", errors="replace"):
+    if not has_documentclass:
         return {"file": str(path), "kind": "tex", "ok": None,
                 "detail": "fragment (no \\documentclass): validated through the document "
                           "that inputs it"}
@@ -4168,18 +4521,23 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
                     n for n in names
                     if n == "work" or _is_aux_name(n)
                     or (Path(d) == path.parent and n == target_dir.name)])
-            proc = subprocess.run(argv + [path.name], cwd=str(target_dir),
-                                  capture_output=True, text=True, timeout=timeout)
+            # The shared bounded runner puts latexmk in its OWN session, caps
+            # both streams and kills the whole process GROUP on timeout.
+            # `subprocess.run(capture_output=True)` allocated every byte the
+            # engine printed and left pdflatex children holding the pipe open
+            # after the direct child was killed (F035).
+            returncode, _stdout, _stderr = _run_text_tool(
+                argv + [path.name], timeout, cwd=str(target_dir))
         except (OSError, subprocess.SubprocessError, shutil.Error) as e:
             return {"file": str(path), "kind": "tex", "ok": False, "engine": name,
                     "errors": [f"{type(e).__name__}: {e}"],
                     "detail": "the compile step itself failed"}
-        out = (proc.stdout or "") + (proc.stderr or "")
+        out = (_stdout or "") + (_stderr or "")
         errors = [ln.strip() for ln in out.splitlines() if ln.startswith("!")][:5]
-        return {"file": str(path), "kind": "tex", "ok": proc.returncode == 0, "engine": name,
+        return {"file": str(path), "kind": "tex", "ok": returncode == 0, "engine": name,
                 "errors": errors, "detail": (errors[0] if errors else
-                                             ("compiled" if proc.returncode == 0
-                                              else f"engine exited {proc.returncode}"))}
+                                             ("compiled" if returncode == 0
+                                              else f"engine exited {returncode}"))}
     finally:
         # A validation pass over N .tex files must not leak N full project
         # copies. Only the compile copy this call created is removed from an
@@ -4411,16 +4769,43 @@ def _inflate_bounded(raw: bytes, limit: int = MAX_PDF_PART_BYTES):
 
 
 def _read_pdf_bounded(path: Path):
-    """The PDF's bytes, or None for an unreadable/symlinked/over-budget file."""
+    """The PDF's bytes, or None for an unreadable/symlinked/over-budget file.
+
+    The check-and-reopen version tested `is_symlink()`/`st_size` by NAME and
+    then called `read_bytes()` by name: a swap between the two followed a
+    planted link or allocated an oversized file (F190). Open once with
+    O_NOFOLLOW, fstat THAT descriptor, and read it under the same cap.
+    """
     p = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
-        if p.is_symlink() or not p.is_file():
-            return None
-        if p.stat().st_size > MAX_PDF_BYTES:
-            return None
-        return p.read_bytes()
+        fd = os.open(p, flags)
     except OSError:
         return None
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_PDF_BYTES:
+            return None
+        chunks, total = [], 0
+        while total <= MAX_PDF_BYTES:
+            block = os.read(fd, min(1 << 20, MAX_PDF_BYTES + 1 - total))
+            if not block:
+                break
+            chunks.append(block)
+            total += len(block)
+        if total > MAX_PDF_BYTES:
+            return None
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _xfa_dataset_report(path: Path):
@@ -4482,6 +4867,11 @@ def _pdf_object_bodies(data: bytes) -> dict:
     # hit inside a stream is harmless as long as it is not the LAST definition
     # of the number we resolve -- the dictionary guard below drops those.
     for m in re.finditer(rb"(\d+)\s+0\s+obj", data):
+        # A crafted number longer than CPython's int() digit limit raised
+        # ValueError out of `check_pdf`; an unusable object number is just a
+        # non-object, so skip it.
+        if len(m.group(1)) > 18:
+            continue
         num = int(m.group(1))
         start = m.end()
         end = data.find(b"endobj", start)
@@ -5126,12 +5516,20 @@ def _token_width_twips(token: str, font_pt: float) -> int:
 
 def _cell_font_pt(styles: dict, cell: str) -> float:
     """The largest run size in a cell, else its paragraph style's, else 10 pt."""
-    sizes = [int(x) / 2.0 for x in re.findall(r'<w:sz(?=[\s/>])[^>]*w:val="(\d+)"', cell)]
+    sizes = []
+    for tag in re.findall(r'<w:sz(?=[\s/>])[^>]*>', cell):
+        val = attr_of(tag, "w:val")
+        if val is not None and val.isdigit():
+            sizes.append(int(val) / 2.0)
     if sizes:
         return max(sizes)
-    st = re.search(r'<w:pStyle[^>]*w:val="([^"]+)"', cell)
-    if st:
-        sz = style_sz(styles, st.group(1))
+    # `attr_of` accepts either legal quote style (and any attribute order): the
+    # double-quote-only read returned None for `w:pStyle w:val='...'` and the
+    # cell was measured at the 10 pt fallback.
+    st = re.search(r"<w:pStyle(?=[\s/>])[^>]*>", cell)
+    sid = attr_of(st.group(0), "w:val") if st else None
+    if sid:
+        sz = style_sz(styles, sid)
         if sz:
             try:
                 return int(sz) / 2.0
@@ -5141,7 +5539,7 @@ def _cell_font_pt(styles: dict, cell: str) -> float:
 
 
 def _table_grid_widths(tbl: str) -> list:
-    grid = re.search(r"<w:tblGrid(?=[\s/>]).*?</w:tblGrid>", tbl, re.S)
+    grid = re.search(r"<w:tblGrid(?=[\s/>])[\s\S]*?</w:tblGrid\s*>", tbl, re.S)
     if not grid:
         return []
     # Bounded parse: a well-formed document may carry a 5000-digit width and
@@ -5149,13 +5547,13 @@ def _table_grid_widths(tbl: str) -> list:
     # ended, so the whole package scan crashed). An unparseable grid means the
     # table cannot be laid out: return [] so the caller skips it.
     widths = []
-    for x in re.findall(r'<w:gridCol[^>]*w:w="(\d+)"', grid.group(0)):
+    for tag in re.findall(r'<w:gridCol(?=[\s/>])[^>]*>', grid.group(0)):
+        x = attr_of(tag, "w:w")
+        if x is None or not x.isdigit():
+            continue
         if len(x) > 6:
             return []
-        try:
-            widths.append(int(x))
-        except ValueError:
-            return []
+        widths.append(int(x))
     return widths
 
 
@@ -5170,7 +5568,7 @@ def _table_cell_widths(row: str) -> list:
     """
     out = []
     for _s, _e, cell in _spans(row, CELL_TOKENS):
-        tcpr = re.search(r"<w:tcPr(?=[\s/>]).*?</w:tcPr>", cell, re.S)
+        tcpr = re.search(r"<w:tcPr(?=[\s/>])[\s\S]*?</w:tcPr\s*>", cell, re.S)
         width, span = None, 1
         if tcpr:
             body = tcpr.group(0)
@@ -5183,20 +5581,33 @@ def _table_cell_widths(row: str) -> list:
                         width = int(raw)
                     except ValueError:
                         width = None
-            gs = re.search(r'<w:gridSpan[^>]*w:val="(\d+)"', body)
-            span = int(gs.group(1)) if gs else 1
+            # XML allows single-quoted attributes: a legal `w:val='2'` was
+            # read as span 1, so a merged cell was not recognised and the
+            # geometry rules could rewrite a misaligned grid (F040).
+            gs = re.search(r"<w:gridSpan(?=[\s/>])[^>]*>", body)
+            gs_val = attr_of(gs.group(0), "w:val") if gs else None
+            try:
+                span = int(gs_val) if gs_val is not None else 1
+            except ValueError:
+                span = 1
         out.append((width, span))
     return out
 
 
 def _table_cell_margins(tbl: str) -> tuple:
-    m = re.search(r"<w:tblCellMar(?=[\s/>]).*?</w:tblCellMar>", tbl, re.S)
+    m = re.search(r"<w:tblCellMar(?=[\s/>])[\s\S]*?</w:tblCellMar\s*>", tbl)
     if not m:
         return (108, 108)
-    left = re.search(r'<w:left[^>]*w:w="(\d+)"', m.group(0))
-    right = re.search(r'<w:right[^>]*w:w="(\d+)"', m.group(0))
-    return (int(left.group(1)) if left else 108,
-            int(right.group(1)) if right else 108)
+
+    def _side(name: str) -> int:
+        tag = re.search(rf"<w:{name}(?=[\s/>])[^>]*>", m.group(0))
+        val = attr_of(tag.group(0), "w:w") if tag else None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return 108
+
+    return (_side("left"), _side("right"))
 
 
 def table_layout_rows(xml: str, styles: dict, doc: str, policy: dict = None) -> list:
@@ -5341,7 +5752,7 @@ def table_layout_fixes(xml: str, rows: list) -> list:
             # identical grid would only log a repair that changed nothing.
             continue
         edits_in_tbl = []
-        gm = re.search(r"<w:tblGrid(?=[\s/>]).*?</w:tblGrid>", tbl, re.S)
+        gm = re.search(r"<w:tblGrid(?=[\s/>])[\s\S]*?</w:tblGrid\s*>", tbl, re.S)
         if gm:
             edits_in_tbl.append((gm.start(), gm.end(),
                                  "<w:tblGrid>" + "".join(
@@ -5362,11 +5773,11 @@ def table_layout_fixes(xml: str, rows: list) -> list:
                 if ci >= len(cells):
                     break
                 cell = cells[ci][2]
-                m = re.search(r'<w:tcW[^>]*w:w="(\d+)"', cell)
+                m = re.search(r"<w:tcW(?=[\s/>])[^>]*\bw:w\s*=\s*([\"'])(\d+)\1", cell)
                 if not m:
                     continue
-                abs_start = r0 + cells[ci][0] + m.start(1)
-                abs_end = r0 + cells[ci][0] + m.end(1)
+                abs_start = r0 + cells[ci][0] + m.start(2)
+                abs_end = r0 + cells[ci][0] + m.end(2)
                 edits_in_tbl.append((abs_start, abs_end, str(widths[ci])))
         if edits_in_tbl:
             edits.append((s, e, apply_edits(tbl, edits_in_tbl)))
@@ -5392,10 +5803,15 @@ def referenced_header_footer_parts(parts: dict, document_xml: str) -> set:
             target = str(rel["target"]).lstrip("/").replace("\\", "/")
             targets[rel["id"]] = (target if target.startswith("word/")
                                   else "word/" + target)
-    ref_ids = {attr_of(m.group(0), "r:id")
-               for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>",
-                                    document_xml or "")}
-    ref_ids.discard(None)
+    # The relationship namespace may be bound to any prefix (`rel:id`), not
+    # only the usual `r:`; resolve the prefix from the document itself.
+    prefixes = _rel_prefixes(document_xml or "") or {"r"}
+    ref_ids = set()
+    for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>",
+                         document_xml or ""):
+        rid = _attached_template_rid(m.group(0), prefixes)
+        if rid:
+            ref_ids.add(rid)
     return {targets[rid] for rid in ref_ids if rid in targets}
 
 
@@ -5407,7 +5823,11 @@ def page_field_rows(aux_parts: list, doc: str) -> list:
         if n <= 1:
             continue
         boxed = 0
-        for m in re.finditer(r"<w:txbxContent(?=[\s/>]).*?</w:txbxContent>", xml or "", re.S):
+        # A legal whitespace close (`</w:txbxContent >`) is the same element; an
+        # exact-close pattern missed it, so the note claimed the duplicate
+        # fields were not in a floating text box and gave the wrong repair.
+        for m in re.finditer(r"<w:txbxContent(?=[\s/>]).*?</w:txbxContent\s*>",
+                             xml or "", re.S):
             boxed += len(PAGE_FIELD_INSTR_RE.findall(m.group(0)))
         where = (f"; {boxed} of them sit in a floating text box" if boxed else "")
         rows.append({
@@ -6279,7 +6699,7 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         return report
     try:
         with zipfile.ZipFile(src) as z:
-            problem = _docx_zip_problem(z)
+            problem = _docx_zip_problem(z) or _docx_duplicate_member_problem(z)
             if problem:
                 raise ValueError(problem)
             names = z.namelist()
@@ -6305,13 +6725,9 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
     def visible(xml_text: str) -> str:
         return "\n".join(text_of(p[2]) for p in paragraphs(xml_text))
 
-    try:
-        doc_xml = data["word/document.xml"].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        # A non-UTF-8 main part is an unreadable package, not a traceback out
-        # of a documented `repair-layout` command.
-        report["error"] = f"unreadable DOCX package: {exc}"
-        return report
+    # A legal UTF-16 main part is accepted by scan/fix; decoding it as UTF-8
+    # here reported the same package as unreadable (F078).
+    doc_xml, doc_encode = _ooxml_part_codec(data["word/document.xml"])
     # A malformed main part is an unreadable package (the scanner/validator
     # likewise report FMT-X1): the regex rules below tolerate broken XML and
     # would otherwise "repair" a document Word cannot open.
@@ -6326,7 +6742,7 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
     if edits:
         new_doc = apply_edits(doc_xml, edits)
         if visible(new_doc) == before_text:
-            data["word/document.xml"] = new_doc.encode("utf-8")
+            data["word/document.xml"] = doc_encode(new_doc)
             report["changes"].append(f"rewrote the column grid of {len(edits)} table(s) "
                                      f"from their cell widths")
         else:
@@ -6395,14 +6811,22 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
             targets = {}
             if rels_name in z.namelist():
                 rels_xml = ooxml_part_text(z.read(rels_name))
-                for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
-                    attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
-                    typ = attrs.get("Type", "")
-                    if attrs.get("Id") and (typ.endswith("/header") or typ.endswith("/footer")):
-                        tgt = attrs.get("Target", "").lstrip("/").replace("\\", "/")
-                        targets[attrs["Id"]] = (tgt if tgt.startswith("word/")
-                                                else "word/" + tgt)
-            ref_ids = re.findall(r'<w:(?:header|footer)Reference[^>]*r:id="([^"]+)"', out_doc)
+                for rel in _rels_entries(rels_xml):
+                    # `_rels_entries` already reduces `Type` to its last path
+                    # segment ("header"/"footer"), so test that short form: a
+                    # `Type.endswith("/header")` test is always false here and
+                    # silently skipped the post-repair FMT-S10 re-scan (R01).
+                    typ = str(rel.get("type") or "")
+                    if rel.get("id") and typ in ("header", "footer"):
+                        tgt = str(rel.get("target") or "").lstrip("/").replace("\\", "/")
+                        targets[rel["id"]] = (tgt if tgt.startswith("word/")
+                                              else "word/" + tgt)
+            prefixes = _rel_prefixes(out_doc) or {"r"}
+            ref_ids = []
+            for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>", out_doc):
+                rid = _attached_template_rid(m.group(0), prefixes)
+                if rid:
+                    ref_ids.append(rid)
             aux = [(targets[rid], ooxml_part_text(z.read(targets[rid])))
                    for rid in ref_ids if rid in targets and targets[rid] in z.namelist()]
     except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
@@ -6554,7 +6978,10 @@ def cmd_scan(args) -> int:
         problem = _write_report(
             args.json, out,
             protected=[Path(f) for f in out.get("files") or []]
-            + ([Path(args.pdf)] if args.pdf else []))
+            + ([Path(args.pdf)] if args.pdf else [])
+            # The policy file is a READ input of the same command; letting the
+            # report overwrite it destroyed the scan's own configuration (F028).
+            + ([Path(args.policy)] if getattr(args, "policy", None) else []))
         if problem:
             log(f"error: refusing to write --json: {problem}")
             return 2

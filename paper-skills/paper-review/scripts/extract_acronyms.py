@@ -562,7 +562,7 @@ SKIP_IN_INITIALS = {"and", "or", "of", "the", "for", "in", "to", "with", "using"
                     "based", "from", "on", "a", "an", "at", "by", "as", "that"}
 
 
-def _initials_ok(tok, words):
+def _initials_ok(tok, words, min_ratio=0.70):
     """Do the candidate's word initials spell out the acronym (in order)?
 
     The classical test for "is this phrase really the acronym's expansion":
@@ -617,7 +617,7 @@ def _initials_ok(tok, words):
     # and the loose-clause ceiling keep the "can never be" junk out (scWGS:
     # first letter differs; hg19: 1/4; CN from a 7-word clause: first letter
     # differs).
-    return prev[len(want)] >= max(1, int(0.70 * len(want) + 0.999))
+    return prev[len(want)] >= max(1, int(min_ratio * len(want) + 0.999))
 
 
 def _term_window_before(raw, pos, limit=5):
@@ -805,7 +805,11 @@ def audit_long_forms(acro, swept):
             if " " not in cand and "-" not in cand and "–" not in cand \
                     and "—" not in cand and cand.lower() in known_tokens:
                 continue
-            if not _initials_ok(tok, words):
+            # The candidate comes from a RECORDED definition (def_phrases or
+            # expansions), so the explicit "IQR (interquartile range)" form is
+            # already accepted at the 60% bar above; keep the same bar here or
+            # the definition is recorded but M1b never sees the long form (F190).
+            if not _initials_ok(tok, words, min_ratio=0.60):
                 continue                      # not this acronym's expansion
             try:
                 patterns.append((cand, _phrase_pattern(words)))
@@ -1041,7 +1045,19 @@ def main():
                         # definition: the parenthetical's words do not spell the
                         # token. Recording it as an expansion fabricated both an
                         # expansion and a "defined at first use: Y".
-                        dm = None
+                        # BUT the documented acronym-first compound form is
+                        # "IQR (interquartile range)": IQR covers only 2/3 of its
+                        # initials, so the 70% bar rejected a real definition and
+                        # the token read "never defined" (F190). Accept that
+                        # explicit sentence-initial "TOKEN (two-or-more-word
+                        # expansion)" shape at a 60% coverage bar; the
+                        # first-letter gate still rejects references.
+                        words = dm.group(1).split()
+                        explicit_expansion = (
+                            len(words) >= 2
+                            and _initials_ok(tok, words, min_ratio=0.60))
+                        if not explicit_expansion:
+                            dm = None
                     defines = bool(dm)
                     if dm:
                         rec["expansions"].add(dm.group(1).strip())

@@ -172,8 +172,10 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
                 diags.setdefault("duplicate_comparisons", []).append(
                     f"{rec['id']}: {vid} vs {opp} is reported twice; the duplicate "
                     f"is ignored and the panel is incomplete")
+                # Only the SHEET's target is incomplete: the duplicate is this
+                # target's sheet defect and adds no score to either side, so the
+                # opponent's own directed counts stay exactly as expected (F095).
                 slot_problems.add(vid)
-                slot_problems.add(opp)
                 continue
             seen_opps.add(opp)
             census_obs.append((rec.get("id"), vid, opp, comp))
@@ -318,7 +320,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             "own_counts": {opp: len(v) for opp, v in sorted(st["own"].items())},
             "received_counts": {opp: len(v) for opp, v in sorted(st["received"].items())},
             "judges_seen": st["judges"],
-            "judges_expected": judges,
+            "judges_expected": per_judges.get(vid, judges),
             # Advisory information only (see caption_gate): the orchestrator
             # reports caption lengths and hand-off placeholders, it never gates
             # or ranks anything on them.
@@ -568,7 +570,8 @@ def champion_issue_summary(vid, agg) -> dict:
     return _issue_summary_from_census(vid, (agg or {}).get("issue_census") or {})
 
 
-def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None) -> tuple:
+def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None,
+                       fallback: bool = False) -> tuple:
     """(aggregation, selection) for a round promoted WITHOUT a judge panel.
 
     The shapes are the ones `pin_champion` / `publish_winner` / `finalize_round`
@@ -608,11 +611,19 @@ def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None) -> t
     label = {"revise": f"the review-audit-revised candidate {target}",
              "integrate": f"the integrated revised candidate {target}"}.get(
                  mode, f"candidate {target}")
+    if fallback:
+        label = (f"the round's base {target} (TOLERATED_FAIL fallback: the promised "
+                 f"auto-promoted candidate never finished)")
     trace = [f"auto-promoted by --champion-select {mode}: {label} was promoted directly; "
              f"NO judge panel scored the field, so no ranking key was consulted.",
              "the result is marked auto_promoted and the decision verdict is PROVISIONAL "
              "(not certified): an unjudged winner is an operator choice, not a panel result."]
-    ranking_row = {"id": target, "rep": target, "is_base": False,
+    if fallback:
+        trace.append("tolerate-fail was on and the promised candidate failed after its "
+                     "retry budget without a usable trial, so the round closed with its base "
+                     "instead of staying incomplete; this is a fallback result, not an "
+                     "improvement.")
+    ranking_row = {"id": target, "rep": target, "is_base": target == A1_ID,
                    "n": 0, "median": None, "mean": None, "iqr": None,
                    "vs_original": None, "vs_base": None, "vs_base_vals": [],
                    # An unjudged round has NO defect census: 0 would read as a
@@ -629,6 +640,22 @@ def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None) -> t
            "auto_promoted": True, "judged": False, "champion_select": mode,
            "tiebreak": {"floor": 0, "cells_used": 0, "cell_order": [], "cells_total": 0}}
     return agg, sel
+
+
+def selection_with_tolerated(sel: dict, rrec: dict) -> dict:
+    """`sel` carrying the round's recorded tolerated run list, when it has one.
+
+    `select_champion` derives a winner from the field and cannot know that a
+    stage exhausted its retries; the round record is the only source. Used by
+    `decide`'s re-derivation so decision.json keeps the tolerated run names
+    (F112).
+    """
+    tolerated = (rrec or {}).get("tolerated_fail") if isinstance(rrec, dict) else None
+    if not tolerated:
+        return sel
+    out = dict(sel)
+    out["tolerated_fail"] = dict(tolerated)
+    return out
 
 
 def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
@@ -670,8 +697,23 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
             floor = max(0, int(floor))
         except (TypeError, ValueError):
             floor = tiebreak_defect_floor_of(ctx)
-    sel = derive_ranking(stats, candidates, base_rep,
-                         (agg or {}).get("issue_census") or {}, floor, r)
+    # Resolve a fresh arm that deduplicated into a field member so that member
+    # can compete in the arm's place (F005): `build_field`'s dropped map carries
+    # the representative. Only pay for the walk when a candidate has no stats
+    # row of its own; the ordinary full-panel round needs no resolution.
+    _representatives = {}
+    if any(c not in stats for c in candidates):
+        _field, _dropped = build_field(ctx, r)
+        _representatives = {str(d.get("id")): str(d.get("representative"))
+                            for d in (_dropped or [])
+                            if d.get("representative") and d.get("id") is not None}
+    if _representatives:
+        sel = derive_ranking(stats, candidates, base_rep,
+                             (agg or {}).get("issue_census") or {}, floor, r,
+                             representatives=_representatives)
+    else:
+        sel = derive_ranking(stats, candidates, base_rep,
+                             (agg or {}).get("issue_census") or {}, floor, r)
     for t in sel["ranking"]:
         crit, writing, manual = candidate_tiebreak_inputs(ctx, r, t["id"])
         t["critical_remaining"] = crit
@@ -739,13 +781,14 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
     """The run's per-member summary table (header row, then one row per member).
 
     Every member gets its three evidence columns filled from the round's own
-    records: `defects@K` and the severity totals come from the panel's issue
-    census -- the SAME numbers the ranking reads, over the SAME adaptive prefix
-    -- and `writing*` falls back to the round's frozen review for the rows that
-    have no producing session to self-report it (the pristine original, the
-    round's base), then to the producing run's own marker for an arm the ranking
-    did not admit. A '-' therefore means "this root genuinely has no record",
-    not "this member was not ranked".
+    records: `defects@K` is the adaptive-prefix count the ranking reads, while
+    the severity totals are the WHOLE issue census (all cells, not the prefix),
+    so a row can legitimately show defects@K=2 beside totals summing to 30 --
+    they answer different questions. `writing*` falls back to the round's frozen
+    review for the rows that have no producing session to self-report it (the
+    pristine original, the round's base), then to the producing run's own marker
+    for an arm the ranking did not admit. A '-' therefore means "this root
+    genuinely has no record", not "this member was not ranked".
     """
     st = agg["stats"]
     ranking_by_id = {row["id"]: row for row in (sel.get("ranking") or [])}
@@ -886,6 +929,28 @@ def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
             "captions": cap_info,
             "placeholders": placeholder_info_for(ctx, r, champ_id)}
     write_json_atomic(dst / "meta.json", meta)
+    # A round has ONE pin (the docstring's contract). Re-deciding the round with
+    # a DIFFERENT champion used to append a second pin for the same round while
+    # `build_field` adds every pin with round < r, so the superseded version
+    # re-entered later fields and could win again (F096). Drop every other pin
+    # for this round from the registry and archive its directory under
+    # pins/_superseded/ (evidence is kept, never deleted).
+    superseded_pins = [p for p in (ctx.state.get("pinned") or [])
+                       if p.get("id") != pid and int(p.get("round") or 0) == int(r)]
+    if superseded_pins:
+        for old in superseded_pins:
+            old_id = str(old.get("id") or "")
+            if _safe_state_segment(old_id):
+                old_dir = ctx.pins_dir / old_id
+                if old_dir.is_dir():
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    superseded = unique_path(
+                        ctx.pins_dir / "_superseded" / f"{old_id}.{stamp}")
+                    superseded.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(old_dir), str(superseded))
+        superseded_ids = {str(p.get("id") or "") for p in superseded_pins}
+        ctx.state["pinned"] = [p for p in (ctx.state.get("pinned") or [])
+                               if str(p.get("id") or "") not in superseded_ids]
     cur = find_pin(ctx, pid)
     if cur is None:
         ctx.state["pinned"].append(meta)
@@ -1002,6 +1067,28 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
     except Exception as e:                                      # noqa: BLE001
         review_archive_error = str(e)
         print(f"[run] round {r} WARNING: could not archive the review outputs: {e}")
+    # Scan EVERY run of this round, not only the round_run_plan: the judge
+    # wave (and the journal response on the last round) runs outside the plan
+    # and can itself be tolerated. Missing it here would let a panel certify a
+    # round whose judge used a failed trial. A stale record whose run has since
+    # been retried successfully is removed.
+    _tol_runs = [rec["id"] for rec in ctx.runs(round_no=r)
+                 if rec.get("tolerated_fail") and rec.get("status") == "done"]
+    if _tol_runs:
+        rrec["tolerated_fail"] = {
+            "mode": "on", "failed_runs": _tol_runs,
+            "note": ("stage(s) exhausted their retries; the best failed trial (most "
+                     "required output files, then fewest FAIL messages) was used -- "
+                     "PROVISIONAL, never certified"),
+        }
+    else:
+        rrec.pop("tolerated_fail", None)
+    if rrec.get("tolerated_fail"):
+        # The decision must carry the tolerated stages (a best failed trial was
+        # used) so `decide` can refuse certification and the round JSON/report
+        # name what was salvaged instead of presenting a clean round.
+        sel = dict(sel)
+        sel["tolerated_fail"] = dict(rrec["tolerated_fail"])
     rrec.update({
         "status": "done", "completed": utcnow(),
         "plan": {"rewrites": m, "revises": n, "pool": round_pool_ids(m, n),
@@ -1016,7 +1103,8 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
         "stats": agg["stats"], "diagnostics": agg["diagnostics"], "selection": sel,
         "base_id": agg.get("base_id"), "base_rep": agg.get("base_rep"),
         "auto_promoted": auto_promoted, "judged": not auto_promoted,
-        "certified": False if auto_promoted else rrec.get("certified"),
+        "certified": (False if auto_promoted or rrec.get("tolerated_fail")
+                      else rrec.get("certified")),
         "champion": sel["champion"],
         "champion_rep": sel.get("champion_rep") or sel["champion"],
         "champion_run": (rid_for_fresh(r, sel["champion"]) if is_fresh_vid(sel["champion"])
@@ -1072,6 +1160,7 @@ def sweep_artifacts(ctx: Ctx, cmd: list = None, timeout: int = 0) -> list:
         if not completion_signal_exists(ctx, rec):
             continue
         bump_attempt(rec)
+        bump_stage_attempt(rec)
         postcheck(ctx, rec, source="adopted (completion signal already on disk)")
         if rec["status"] != "done" and cmd:
             problems = repairable_artifact_failure(ctx, rec)
@@ -1366,6 +1455,12 @@ def resolve_agent_model_cmd(harness: str, model: str, agent_cmd_arg: str,
     return argv
 
 
+# How long the `dsh --help` capability probe may boot before its process tree is
+# killed (F139). A module constant (not a literal) so the probe's timeout path
+# is testable without a 180 s wait.
+DSH_PROBE_TIMEOUT_SECONDS = 180
+
+
 def _probe_dsh_headless(exe: str) -> str:
     """Read the installed harness's own headless help ('' = it declares the contract).
 
@@ -1377,12 +1472,38 @@ def _probe_dsh_headless(exe: str) -> str:
     read -- reports '' (see dsh_harness_problem).
     """
     try:
-        proc = subprocess.run([exe, "--profile", "headless", "--help"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, encoding="utf-8", errors="replace", timeout=180)
+        # The probe is a TOOL run: give it its own process group and kill that
+        # group on the timeout, exactly like every other tool call. Without it
+        # `subprocess.run` killed only the direct `dsh` process and the Node
+        # worker/MCP children it spawned survived the 180 s timeout, holding
+        # $DSH_HOME locks/logs (F139). The timeout is recorded instead of
+        # silently reading as "the build declares no contract".
+        proc = subprocess.Popen([exe, "--profile", "headless", "--help"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                encoding="utf-8", errors="replace",
+                                **_tool_popen_kwargs())
+        try:
+            out, _ = proc.communicate(timeout=DSH_PROBE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            # killpg reaches the children that stayed in the probe's group; a
+            # helper that called setsid escaped it, so the subtree is collected
+            # first (same walk the agent sessions use) and killed before the
+            # group is signalled.
+            for pid_ in reversed(_descendant_pids(proc.pid)):
+                with contextlib.suppress(OSError):
+                    os.kill(pid_, signal.SIGKILL)
+            _kill_process_group(proc)
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=5)
+            print(f"  [warn] the `dsh` headless capability probe timed out after "
+                  f"{DSH_PROBE_TIMEOUT_SECONDS} s; its process tree was killed and the "
+                  f"capability check is skipped (the sessions will speak for themselves)",
+                  flush=True)
+            return ""
+        text = out or ""
     except Exception:                                                # noqa: BLE001
         return ""
-    text = proc.stdout or ""
     # The harness is a Node >= 22 application (`node:util` parseEnv): under an
     # older `node` on PATH it dies at import, and the box's own node may well be
     # the older one while the harness was installed by a newer one. That crash
@@ -1487,7 +1608,9 @@ def _coerce_text(s) -> str:
     return str(s)
 
 
-DEFAULT_MAX_TURNS = 3000
+# One source of truth: the CLI/documented default. The attempt runner reads the
+# environment first (`run --max-turns` writes it); this is only the fallback.
+DEFAULT_MAX_TURNS = DEFAULTS["max_turns"]
 
 
 def pipeline_max_turns() -> int:
@@ -1545,16 +1668,68 @@ class _TurnCounter:
                 return
 
 
-def _read_stream_capped(stream, cap: int, on_chunk=None) -> tuple:
-    """(kept text, total characters read) for one agent pipe.
+class _StreamCapture:
+    """A live view of one pipe reader's captured output (F30).
+
+    A timed-out descendant that left the agent's process group can keep the
+    stdout/stderr pipe open, so its reader thread stays blocked and the attempt
+    record ended up EMPTY with no truncation marker -- the failure evidence was
+    lost. The reader publishes its growing buffer as it reads, so the caller can
+    snapshot what arrived even when the reader never returns.
+    """
+
+    def __init__(self):
+        self.chunks: list = []
+        self.size = 0
+        self.tail_chunks: list = []
+        self.tail_cap = 0
+        self.done = None
+
+    def snapshot(self) -> tuple:
+        """(kept text, total characters read, tail text) of what has arrived."""
+        if self.done is not None:
+            return self.done
+        tail = ("".join(list(self.tail_chunks))[-self.tail_cap:]
+                if self.tail_cap > 0 else "")
+        return ("".join(list(self.chunks)), self.size, tail)
+
+
+def _stream_result(capture) -> tuple:
+    """The (kept, total, tail) triple of one captured pipe, live or finished."""
+    if capture is None:
+        return ("", 0, "")
+    if isinstance(capture, _StreamCapture):
+        return capture.snapshot()
+    return capture
+
+
+def _read_stream_capped(stream, cap: int, on_chunk=None, tail_cap: int = 0,
+                        capture=None) -> tuple:
+    """(kept text, total characters read, tail text) for one agent pipe.
 
     The overflow is DISCARDED as it arrives (the child is not blocked on a full
     pipe) and the caller is told the total so it can record the truncation. The
     agent's stdout/stderr used to be buffered whole by `communicate()`, so a
     verbose or looping agent could OOM the orchestrator or fill the root's disk
     with its transcript (F39).
+
+    `tail_cap` additionally keeps the LAST `tail_cap` characters. The head is
+    what the transcript log gets (the CLI banner and the session id live
+    there); the TAIL is what the failure classifier gets, because a provider
+    error, a guard sentence and the CLI's dying words are at the END. Reading
+    only the head made the diagnosis depend on where in a >16 MiB transcript a
+    phrase happened to land: two identical failures of a 39 MB and a 9 MB
+    session were classified differently.
     """
     kept, size = [], 0
+    tail: list = []
+    tail_len = 0
+    if capture is not None:
+        # Share the live lists: the reader appends to them, so a snapshot taken
+        # from another thread sees every chunk read so far.
+        capture.chunks = kept
+        capture.tail_chunks = tail
+        capture.tail_cap = tail_cap
     try:
         while True:
             chunk = stream.read(65536)
@@ -1566,13 +1741,67 @@ def _read_stream_capped(stream, cap: int, on_chunk=None) -> tuple:
                     on_chunk(chunk)
             if size < cap:
                 kept.append(chunk[:cap - size])
+            if tail_cap > 0:
+                tail.append(chunk)
+                tail_len += len(chunk)
+                while len(tail) > 1 and tail_len - len(tail[0]) >= tail_cap:
+                    tail_len -= len(tail.pop(0))
             size += len(chunk)
+            if capture is not None:
+                capture.size = size
     except (OSError, ValueError):
         pass
     finally:
         with contextlib.suppress(OSError, ValueError):
             stream.close()
-    return "".join(kept), size
+    result = ("".join(kept), size, ("".join(tail)[-tail_cap:] if tail_cap > 0 else ""))
+    if capture is not None:
+        capture.done = result
+    return result
+
+
+def _proc_children(pid: int) -> list:
+    """Best-effort live child PIDs of `pid` (POSIX /proc; [] where unavailable)."""
+    kids = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return kids
+    for ent in entries:
+        if not ent.isdigit():
+            continue
+        try:
+            with open(f"/proc/{ent}/stat", "rb") as fh:
+                data = fh.read(4096).decode("utf-8", "replace")
+        except OSError:
+            continue
+        # The `comm` field may contain spaces and parentheses, so parse the
+        # fields AFTER its closing parenthesis: state, ppid, ...
+        rest = data.rsplit(")", 1)[-1].split()
+        if len(rest) >= 2 and rest[1].isdigit() and int(rest[1]) == pid:
+            kids.append(int(ent))
+    return kids
+
+
+def _descendant_pids(root_pid: int) -> list:
+    """Live descendants of `root_pid`, parents before children (F30).
+
+    A descendant that calls setsid leaves the session's process GROUP, so the
+    group kill below cannot reach it, and it can keep the agent's stdout/stderr
+    pipe open for as long as it lives. The PPID chain still names it until its
+    parent dies, so the whole subtree is collected BEFORE any signal is sent and
+    SIGKILLed first. Best effort: no /proc, no walk (the group kill still runs).
+    """
+    out, queue, seen = [], [int(root_pid)], {int(root_pid)}
+    while queue:
+        cur = queue.pop(0)
+        for kid in _proc_children(cur):
+            if kid in seen:
+                continue
+            seen.add(kid)
+            out.append(kid)
+            queue.append(kid)
+    return out
 
 
 def _terminate_agent_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
@@ -1603,6 +1832,14 @@ def _terminate_agent_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
             # its PID is also the group id, so this still names the surviving
             # descendants (F11).
             pgid = proc.pid
+    # A descendant that called setsid left the group: collect it first, while
+    # its PPID chain still names it, and SIGKILL it before the group is
+    # signalled (F30). Killing the children first also keeps them from being
+    # reparented before the group signal lands.
+    escaped = _descendant_pids(proc.pid) if pgid else []
+    for pid_ in reversed(escaped):
+        with contextlib.suppress(OSError):
+            os.kill(pid_, signal.SIGKILL)
     try:
         if pgid:
             os.killpg(pgid, signal.SIGTERM)
@@ -1791,6 +2028,12 @@ def agent_session_env(sb: Path) -> dict:
     otherwise leave open by default.
     """
     env = dict(os.environ)
+    # An explicit --reasoning-effort reaches Claude Code through this variable
+    # for every preset (the legacy preset and the adapters' claude route); the
+    # other harnesses read the same variable from the shared runtime instead.
+    _effort = _model_runtime.reasoning_effort_override()
+    if _effort:
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = _effort
     sandbox = str(Path(sb).resolve())
     roots = [p for p in (env.get("DOCX_MCP_ALLOWED_ROOTS") or "").split(os.pathsep) if p]
     if sandbox not in roots:
@@ -1826,11 +2069,17 @@ def _serve_selfcheck(sb: Path, rec: dict, stop: threading.Event) -> None:
     seen = ""
     while not stop.wait(0.4):
         try:
-            if not request.is_file() or request.is_symlink():
-                continue
-            if request.stat().st_size > 8192:
-                continue
-            raw = request.read_text(encoding="utf-8", errors="replace")
+            # Open ONCE with O_NOFOLLOW and fstat/read that same descriptor: the
+            # old is_file/is_symlink/stat then read_text() let an agent swap the
+            # path for a symlink or a huge file between the check and the read.
+            with _open_regular_no_follow(request) as fh:
+                if os.fstat(fh.fileno()).st_size > 8192:
+                    # Rename the oversized request aside: `continue` re-opened
+                    # the same file forever and never answered (F099).
+                    with contextlib.suppress(OSError):
+                        os.replace(request, box / f"request.oversized-{time.time_ns()}")
+                    continue
+                raw = fh.read(8193).decode("utf-8", "replace")
         except OSError:
             continue
         try:
@@ -1884,6 +2133,11 @@ def _execute_attempt_raw(sb: Path, rec: dict, cmd: list, timeout: int,
                 "error": (f"{prompt_name} could not be read (a symlink/non-regular file, "
                           f"unreadable, or over the byte budget); the attempt was not launched")}
     rec["prompt_sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    # Snapshot the orchestrator's own previous-attempt record BEFORE the agent
+    # launches. The sandbox is agent-writable, so reading it after the child
+    # returns let an agent append its own error text and make the classifier
+    # exclude the genuine failure line (F106).
+    previous_errors = read_text_bounded(sb / "PREVIOUS_ATTEMPT_ERRORS.md")
     max_turns = pipeline_max_turns()
     rec["max_turns"] = max_turns
     turn_counter = None
@@ -1899,6 +2153,7 @@ def _execute_attempt_raw(sb: Path, rec: dict, cmd: list, timeout: int,
     started_at = utcnow()
     rec["last_attempt_started"] = started_at
     rc, out, err, exc = None, "", "", None
+    out_tail = err_tail = ""
     truncation = ""
     try:
         # Popen + a process GROUP, not subprocess.run: a timeout must kill the
@@ -1945,14 +2200,20 @@ def _execute_attempt_raw(sb: Path, rec: dict, cmd: list, timeout: int,
         feeder = threading.Thread(target=_feed, daemon=True)
         feeder.start()
         readers.append(feeder)
+        pipe_readers = []
         for key, stream in (("out", proc.stdout), ("err", proc.stderr)):
-            def _pump(stream=stream, key=key):
-                captured[key] = _read_stream_capped(
+            pipe_capture = _StreamCapture()
+            captured[key] = pipe_capture
+
+            def _pump(stream=stream, key=key, pipe_capture=pipe_capture):
+                pipe_capture.done = _read_stream_capped(
                     stream, MAX_TOOL_OUTPUT_BYTES,
-                    turn_counter.feed if (key == "out" and turn_counter is not None) else None)
+                    turn_counter.feed if (key == "out" and turn_counter is not None) else None,
+                    tail_cap=EVIDENCE_TAIL_BYTES, capture=pipe_capture)
             reader = threading.Thread(target=_pump, daemon=True)
             reader.start()
             readers.append(reader)
+            pipe_readers.append(reader)
         try:
             try:
                 rc, exc = proc.wait(timeout=(timeout or None)), None
@@ -1962,13 +2223,27 @@ def _execute_attempt_raw(sb: Path, rec: dict, cmd: list, timeout: int,
             except Exception as e:  # noqa: BLE001
                 _terminate_agent_tree(proc)
                 rc, exc = None, f"execution error: {e}"
+            # ONE shared wait budget, not a full join per reader: a descendant
+            # that escaped the process group can hold the pipe open, and two
+            # 15 s joins turned a 1 s timeout into a 31 s stall (F30). The
+            # readers publish what they read, so the transcript survives even
+            # when a reader cannot return.
+            deadline = time.monotonic() + 5.0
             for reader in readers:
-                reader.join(15)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                reader.join(remaining)
         finally:
             service_stop.set()
             _unregister_active_agent(proc)
-        out, out_total = captured.get("out", ("", 0))
-        err, err_total = captured.get("err", ("", 0))
+        out, out_total, out_tail = _stream_result(captured.get("out"))
+        err, err_total, err_tail = _stream_result(captured.get("err"))
+        if any(reader.is_alive() for reader in pipe_readers):
+            truncation += ("\n[TRANSCRIPT INCOMPLETE: the agent's stdout/stderr pipe was "
+                           "still held open after the timeout (a descendant escaped the "
+                           "process group); the transcript below is what had arrived when "
+                           "the wait budget expired]\n")
         dropped = []
         if out_total > len(out):
             dropped.append(f"stdout {out_total} chars -> {len(out)}")
@@ -2007,6 +2282,13 @@ def _execute_attempt_raw(sb: Path, rec: dict, cmd: list, timeout: int,
     except OSError:
         pass
     failure_kind = ""
+    # The prompt and the previous-attempt record are the ORCHESTRATOR's own
+    # words, not provider evidence: a retry prompt quotes the prior failure
+    # verbatim, and the record it points the agent at repeats it. An agent that
+    # echoes or quotes either one used to make every retry look like a fresh
+    # overflow, and to report the PREVIOUS attempt's guard sentence as the one
+    # that stopped this one (see `agent_failure_kind`, `agent_runaway_reason`).
+    agent_exclude = (prompt, previous_errors)
     if rc not in (0, None):
         # BOTH streams, unconditionally: a CLI that puts the provider's 413 on
         # stdout and an unrelated warning on stderr used to be classified as ""
@@ -2014,7 +2296,7 @@ def _execute_attempt_raw(sb: Path, rec: dict, cmd: list, timeout: int,
         # then resumed the same oversized session. The patterns are anchored to
         # error-shaped lines, so scanning stdout does not flag a manuscript that
         # merely mentions "payload too large".
-        failure_kind = agent_failure_kind(out, err)
+        failure_kind = agent_failure_kind(out_tail, err_tail, exclude=agent_exclude)
     if failure_kind == "context_overflow":
         exc = ("the agent request exceeded the provider's payload/context limit "
                "(HTTP 413 / request too large); a continuation would resend the same "
@@ -2022,7 +2304,7 @@ def _execute_attempt_raw(sb: Path, rec: dict, cmd: list, timeout: int,
     elif failure_kind == "runaway":
         # The proxy stopped the session itself; keep its sentence, because it
         # names which cap tripped (turns, compactions, a repeated call).
-        exc = agent_runaway_reason(err) or (
+        exc = agent_runaway_reason(err_tail, exclude=agent_exclude) or (
             "the agent session was stopped for looping instead of finishing the "
             "stage; a fresh attempt is required")
     if turn_cap_hit:
@@ -2062,12 +2344,26 @@ def apply_results(ctx: Ctx, results: dict) -> None:
         res = results[rid]
         rec = ctx.run(rid)
         bump_attempt(rec)
+        bump_stage_attempt(rec)
         rec["started"] = rec["started"] or utcnow()
         rec["last_duration"] = round(res.get("dur") or 0.0, 1)
         if res.get("error") or res.get("rc") not in (0,):
+            # A fresh failed attempt supersedes an earlier tolerated result:
+            # the run is no longer "done with a promoted trial", so a later
+            # tolerance decision must be made from this invocation's trials.
+            if rec.get("tolerated_fail"):
+                rec.pop("tolerated_fail", None)
+                _post = dict(rec.get("postcheck") or {})
+                _post.pop("tolerated", None)
+                rec["postcheck"] = _post
             rec["status"] = "failed"
             rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
             rec["last_failure_kind"] = str(res.get("failure_kind") or "")
+            # A process-level failure never reached a postcheck: the previous
+            # attempt's postcheck errors are stale and made
+            # resume_unfinished_reason misclassify this as a content rejection
+            # (no continuation offered).
+            rec.pop("postcheck", None)
             # The process died mid-session: its CLI session id is still in the
             # transcript, and a continuation may finish the work it started.
             sid = capture_agent_session_id(ctx, rec)
@@ -2077,20 +2373,72 @@ def apply_results(ctx: Ctx, results: dict) -> None:
             # attempt exactly like a failed one: record it, so the operator can
             # still see why it ended and where its artifacts/transcript went.
             record_attempt(ctx, rec, False, [rec["last_error"]], [], source="process")
-            print_failure(rid, [rec["last_error"]], note="the agent process failed")
+            print_failure(rid, [rec["last_error"]], note="the agent process failed", ctx=ctx)
         else:
             rec["last_failure_kind"] = ""
             postcheck(ctx, rec)
             if rec["status"] == "done":
+                # A run that was tolerated in an earlier invocation and has now
+                # passed a fresh attempt is no longer a tolerated result: drop
+                # the marker so the round is not left provisional forever.
+                if rec.get("tolerated_fail"):
+                    rec.pop("tolerated_fail", None)
+                    _post = dict(rec.get("postcheck") or {})
+                    _post.pop("tolerated", None)
+                    rec["postcheck"] = _post
                 print(f"  [ok]   {rid} done ({fmt_dur(res.get('dur'))})"
                        + (f"  warnings: {'; '.join(rec['postcheck']['warnings'])[:120]}"
                           if rec["postcheck"]["warnings"] else ""))
             else:
-                print_failure(rid, rec["postcheck"]["errors"])
+                print_failure(rid, rec["postcheck"]["errors"], ctx=ctx)
         ctx.save_state()
 
 
-def print_failure(rid: str, errors, note: str = "") -> None:
+def attempt_start_suffix(rec: dict, budget: int, used: int) -> str:
+    """The launch line's ` [attempt 2/3; 1 re-verification]` tag (empty for the first).
+
+    `used` is how many retry attempts THIS INVOCATION has already spent on the
+    run -- the caller reads it from the live budget (`budget - attempts_left`);
+    the ordinal is `used + 1`. The budget is granted per invocation (a fresh
+    `run` re-grants it), so the tag must not use the run's cumulative counters:
+    a resumed run with four lifetime sessions is still on attempt 1 of its new
+    budget. A scoped repair, a CONTINUATION or a re-verify is part of the
+    attempt it serves, so it is named after the semicolon instead of adding a
+    number (before the split, 2026-11-12 r1_a2_revise printed "[attempt 5/3]"
+    for its third launch).
+    """
+    full_no = int(used) + 1
+    if full_no <= 1:
+        return ""
+    aux = auxiliary_session_summary(rec)
+    return f" [attempt {full_no}/{budget}" + (f"; {aux}" if aux else "") + "]"
+
+
+def failed_run_cell(rid: str, rec: dict, budget: int, spent: int) -> str:
+    """One run's entry in the end-of-invocation FAILED summary.
+
+    `spent` is the retry budget this invocation has actually consumed
+    (`budget - attempts_left`), never the run's cumulative session count: the
+    budget is granted per invocation, so a resumed run starts again at 0. A
+    failed scoped repair/continuation spends the slot of the attempt it serves
+    (it does not add one), and every auxiliary session is named beside it
+    instead of being counted as a retry (which used to print "attempt 5/3").
+    """
+    rec = rec or {}
+    bits = [f"{int(spent)} of {budget} attempt(s) spent"]
+    # The run's lifetime full launches are the same number in the ordinary case;
+    # name them only when a resumed invocation or an out-of-budget stop makes
+    # them differ, so the line never hides an attempt that actually ran.
+    full = stage_attempt_count(rec)
+    if full and full != int(spent):
+        bits.append(f"{full} full launch(es)")
+    aux = auxiliary_session_summary(rec)
+    if aux:
+        bits.append(aux)
+    return f"{rid} (" + "; ".join(bits) + ")"
+
+
+def print_failure(rid: str, errors, note: str = "", ctx=None) -> None:
     """EVERY problem of one failed attempt, one per line, in full.
 
     The old line joined the postcheck's messages and cut the result at 140
@@ -2101,7 +2449,8 @@ def print_failure(rid: str, errors, note: str = "") -> None:
     archive hold.
     """
     msgs = [str(e) for e in (errors or [])]
-    print(f"  [FAIL] {rid}: {len(msgs)} problem(s)" + (f" -- {note}" if note else ""))
+    print(f"  [FAIL] {rid}: {len(msgs)} problem(s)"
+          + (f" -- {note}" if note else ""))
     for m in msgs:
         print(f"        - {m}")
 
@@ -2152,6 +2501,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
         while not completion_signal_exists(ctx, rec):
             if timeout and (time.time() - t0) > timeout:
                 bump_attempt(rec)
+                bump_stage_attempt(rec)
                 rec["status"] = "failed"
                 rec["last_error"] = f"manual wait exceeded {timeout}s"
                 record_attempt(ctx, rec, False, [rec["last_error"]], [], source="manual-timeout")
@@ -2178,11 +2528,12 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
                     # unchanged, so the old order overwrote the previous
                     # attempt's history and left the retry budget unmoved.
                     bump_attempt(rec)
+                    bump_stage_attempt(rec)
                     record_attempt(ctx, rec, False, bad, [], source="malformed-output")
                     ctx.log("malformed-output", rec["id"], "; ".join(bad)[:300])
                     ctx.save_state()
-                    print(f"  [FAIL] {rec['id']}: malformed structured output (unchanged for one "
-                          f"poll interval): {bad[0][:120]}")
+                    print(f"  [FAIL] {rec['id']}: malformed structured output "
+                          f"(unchanged for one poll interval): {bad[0][:120]}")
                     print("         The prompt is re-issued by the retry loop; nothing was adopted "
                           "from this attempt.")
                     return
@@ -2196,6 +2547,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
               "(staging is respected: prompts are only printed once their dependencies exist).")
         sys.exit(130)
     bump_attempt(rec)
+    bump_stage_attempt(rec)
     postcheck(ctx, rec, source="manual (operator-supplied completion signal)")
     ctx.save_state()
     print(f"  [{'ok' if rec['status'] == 'done' else 'FAIL'}] {rec['id']}: "
@@ -2216,19 +2568,22 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
     an incomplete panel must never decide a round.
 
     The retry budget is PER INVOCATION: a fresh `run` grants every failed run
-    another retries+1 attempts (the loop bound below enforces it), while the
-    persistent rec["attempts"] counter keeps recording the lifetime total for
-    the audit. Rationale: an operator who re-runs `run` after inspecting a
-    failure is explicitly asking to try again; using the lifetime counter as the
-    gate made the second `run` a no-op that exited immediately with the old
-    error, which reads like a hang. `retry --run <ID>` remains the explicit
-    single-run reset.
+    another retries+1 attempts (the loop bound below enforces it), while
+    rec["stage_attempts"] keeps the cumulative full-launch history the status
+    table shows and rec["attempts"] the lifetime total of every recorded
+    session for the audit (scoped repairs, CONTINUATIONS and re-verifies
+    included; they are reported beside the budget, never as extra retries).
+    Rationale:
+    an operator who re-runs `run` after inspecting a failure is explicitly
+    asking to try again; using the lifetime counter as the gate made the second
+    `run` a no-op that exited immediately with the old error, which reads like a
+    hang. `retry --run <ID>` remains the explicit single-run reset.
     """
     ids = [i for i in ids if ctx.run(i) is not None]
     if not ids:
         return True, False
     max_rounds = max(1, int(retries) + 1)
-    # Failures observed in THIS invocation, per run. The persistent
+    # Failures observed in THIS invocation, per run. The lifetime
     # rec["attempts"] counter also covers earlier invocations (and a freshly
     # rebuilt sandbox inherits it), so using it for the backoff would make a
     # rebuilt run wait before its FIRST attempt.
@@ -2260,6 +2615,7 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     print(f"  [info] {rid}: process-level failure but artifacts exist -> "
                           f"re-verifying")
                     bump_attempt(rec)
+                    bump_reverification(rec)
                     postcheck(ctx, rec, source="re-verify (process failed, artifacts complete)")
                     ctx.save_state()
                 elif manual:
@@ -2274,7 +2630,11 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     ctx.save_state()
                     continue
                 elif failures_in_phase.get(rid, 0) > retries:
-                    continue
+                    # Every retry is spent. The collection policy uses the best
+                    # failed trial instead of terminating; without a usable
+                    # trial (or with the policy off) the run stays failed.
+                    if manual or not use_best_failed_trial(ctx, rec):
+                        continue
                 else:
                     try:
                         rebuild_sandbox(ctx, rec)
@@ -2312,8 +2672,14 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                                         "checked_at": utcnow()}
                     if failures_in_phase.get(rid, 0) > retries:
                         rec["status"] = "failed"
+                        if use_best_failed_trial(ctx, rec):
+                            ctx.save_state()
+                            continue
+                        aux = auxiliary_session_summary(rec)
                         print(f"        no attempts left in this invocation "
-                              f"({rec.get('attempts')} lifetime); leaving it failed")
+                              f"({failures_in_phase.get(rid, 0)} attempt(s) spent, "
+                              f"budget {max_rounds}"
+                              + (f"; {aux}" if aux else "") + "); leaving it failed")
                         ctx.save_state()
                         continue
                     print("        treating it as a failed attempt: rebuilding the sandbox and "
@@ -2373,8 +2739,9 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                 # 1) A STOPPED session (a stalled turn, a CLI timeout) is CONTINUED
                 # with its own context -- real work, not paperwork -- before
                 # anything else is tried.
-                argv, key, why = resume_gate(ctx, rec, cmd)
-                if argv and run_resume_session_now(ctx, rec, argv, key, why, timeout):
+                argv, key, why, mode = resume_gate(ctx, rec, cmd)
+                if argv and run_resume_session_now(ctx, rec, argv, key, why, timeout,
+                                                   mode=mode):
                     if ctx.run(rid)["status"] == "done":
                         continue
                 # 2) Before spending the next retry (and rebuilding the sandbox the
@@ -2387,6 +2754,15 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     if ctx.run(rid)["status"] == "done":
                         continue
                 failures_in_phase[rid] = failures_in_phase.get(rid, 0) + 1
+    if not manual:
+        for rid in ids:
+            _rec = ctx.run(rid)
+            if (_rec["status"] == "failed"
+                    and failures_in_phase.get(rid, 0) >= max_rounds):
+                # Only after the whole retry budget is spent: a failed
+                # re-verification or a rebuild that could not run yet must
+                # not be turned into a tolerated result prematurely.
+                use_best_failed_trial(ctx, _rec)
     remaining = [rid for rid in ids if ctx.run(rid)["status"] != "done"]
     if remaining:
         paused = [rid for rid in remaining if ctx.run(rid)["status"] == "pending"
@@ -2396,11 +2772,14 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
             print(f"  [{label}] PAUSED (not failed): {paused} already contain agent output but "
                   f"no completion marker.")
         if hard:
-            # Same rule as the round scheduler: name each run's OWN attempt
-            # count, because a run can stop for a reason outside its budget.
-            print(f"  [{label}] FAILED: " + ", ".join(
-                f"{rid} ({int(ctx.run(rid).get('attempts') or 0)} attempt(s), "
-                f"budget {max_rounds})" for rid in hard))
+            # Same rule as the round scheduler: name the budget THIS invocation
+            # actually spent, because a run can stop for a reason outside its
+            # retry budget. A failed repair/continuation spends the slot of the
+            # attempt it serves (never an extra one) and its count is named
+            # beside the budget, not folded into it.
+            print(f"  [{label}] FAIL: " + ", ".join(
+                failed_run_cell(rid, ctx.run(rid), max_rounds,
+                                failures_in_phase.get(rid, 0)) for rid in hard))
             for rid in hard[:6]:
                 err = clip_error_line(ctx.run(rid).get("last_error") or "")
                 if err:
@@ -2563,7 +2942,7 @@ def _revision_plan_rows(sb: Path):
         if not isinstance(row, dict):
             return None
         rid = str(row.get("id") or "").strip()
-        rel = str(row.get("file") or "").strip()
+        rel = _package_rel_under_revised(str(row.get("file") or ""))
         if not rid or rid in seen or not rel:
             return None
         # A row must DESCRIBE the repair it authorizes. The prompt's contract is
@@ -2613,6 +2992,24 @@ def _unsafe_package_rel(rel: str) -> bool:
     """True when a plan row's `file` is not a path inside the revised package."""
     return bool(rel.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", rel)
                 or ".." in Path(rel).parts)
+
+
+def _package_rel_under_revised(value: str) -> str:
+    """A repair plan row's `file` as a path RELATIVE to `revised/`.
+
+    The auditor describes the package it audited, so it naturally writes
+    `revised/manuscript.md`; the repair session and the application audit both
+    name the same file `manuscript.md`. The audit compares the plan's rows with
+    the manifests of `revised/`, so an un-normalized `revised/` prefix made
+    every such row fail the coverage check with "changed without a confirmed
+    plan row naming it" even though the row named exactly that file. Both
+    spellings are accepted here; the stored row is always package-relative.
+    """
+    text = strip_leading_dot_slash(str(value or "").replace("\\", "/").strip())
+    prefix = (REVISED_DIR + "/").lower()
+    while text.lower().startswith(prefix):
+        text = text[len(REVISED_DIR) + 1:].lstrip("/")
+    return text
 
 
 def _revision_repair_ledger(sb: Path, rows: list, with_ids: bool = False):
@@ -2737,7 +3134,12 @@ def _repair_file_text(path: Path):
         if path.suffix.lower() not in _REPAIR_TEXT_EXTS \
                 and path.suffix.lower() != ".docx":
             return None
-        return path.read_bytes().decode("utf-8")
+        # Agent-written package content: read it through the bounded reader so
+        # an oversized file, a planted FIFO or a symlink swap cannot exhaust
+        # memory or read outside the sandbox (F44). `errors="strict"` keeps the
+        # old contract that a binary package is opaque (None), not mojibake.
+        return read_text_bounded(path, errors="strict",
+                                 limit=PACKAGE_TEXT_BYTES_LIMIT)
     except (OSError, UnicodeDecodeError, RuntimeError, NotImplementedError):
         return None
 
@@ -3208,9 +3610,18 @@ def _snapshot_revised_prerepair(sb: Path) -> str:
     if pre.is_symlink() or (pre.exists() and not pre.is_dir()):
         return "revised_prerepair/ is a symlink or not a directory"
     if not pre.exists():
-        if not (sb / REVISED_DIR).is_dir():
-            return f"{REVISED_DIR}/ is missing"
-        shutil.copytree(sb / REVISED_DIR, pre, symlinks=True)
+        rev = sb / REVISED_DIR
+        # is_dir() FOLLOWS a symlink: a `revised -> /outside` root made copytree
+        # copy the outside tree into the audited baseline, which a later restore
+        # then made package content (F43). The root must be a real directory
+        # inside this sandbox, whatever it points at.
+        if rev.is_symlink() or not rev.is_dir():
+            return f"{REVISED_DIR}/ is a symlink, missing or not a directory"
+        try:
+            rev.resolve().relative_to(sb.resolve())
+        except (OSError, ValueError):
+            return f"{REVISED_DIR}/ resolves outside the sandbox"
+        shutil.copytree(rev, pre, symlinks=True)
     return ""
 
 
@@ -3540,6 +3951,14 @@ def revision_chain_pending(rec: dict) -> bool:
     return True
 
 
+# The attempt-identity fields `_execute_attempt_in` writes onto the run record.
+# An auxiliary session runs through the same executor, so all of them are
+# snapshotted and restored around it (F122).
+_AUX_SESSION_IDENTITY_FIELDS = ("agent_command", "prompt_file", "prompt_sha256",
+                                "agent_model", "max_turns", "turn_cap_hit",
+                                "turn_cap_enforced", "last_attempt_started")
+
+
 def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
                      prompt_file: str, log_name: str) -> dict:
     """Run one audit/repair session WITHOUT changing the stage attempt's clock.
@@ -3548,6 +3967,15 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
     are part of the accepted revise attempt, so the attempt's start (and the
     history row `postcheck` later writes) must keep the revise session's own
     values, and the audit/repair durations live in their own records.
+
+    The SAME rule covers the rest of the attempt's identity (F122):
+    `_execute_attempt_in` also writes `agent_command`, `prompt_file`,
+    `prompt_sha256`, `agent_model`, `max_turns` and the turn flags, so after a
+    revision audit the done revise record claimed it had received
+    `REVISION_AUDIT_PROMPT.md` with the audit's digest, command and model. The
+    accepted attempt's identity is snapshotted before the auxiliary session and
+    restored after it, so the run record still identifies the bytes that
+    produced `revised/`.
 
     The PARENT's completion marker is restored after the aux session. The
     sandbox root has one `_pipeline_done.json` (`MARKER_FILE`) and the aux
@@ -3563,12 +3991,17 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
     disposed deletion table, the repair ledger), not from re-labelling the
     parent's marker.
     """
-    started = rec.get("last_attempt_started")
+    # The fields `_execute_attempt_in` writes onto `rec`: the attempt's identity
+    # (F122). Snapshot presence AND value so a field the stage never set is
+    # removed again instead of inheriting the aux session's value.
+    saved_identity = {k: rec[k] for k in _AUX_SESSION_IDENTITY_FIELDS if k in rec}
     marker = sb / MARKER_FILE
     saved_marker = None
-    if marker.is_file():
+    if marker.is_file() and not marker.is_symlink():
         try:
-            saved_marker = marker.read_bytes()
+            # No-follow, bounded read: a planted symlink must not republish an
+            # outside file as this sandbox's completion marker.
+            saved_marker = read_regular_file(marker, MAX_PAYLOAD_BYTES)
         except OSError:
             saved_marker = None
     result = None
@@ -3577,8 +4010,11 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
                                      prompt_file, log_name, False)
         return result
     finally:
-        if started is not None:
-            rec["last_attempt_started"] = started
+        for _field in _AUX_SESSION_IDENTITY_FIELDS:
+            if _field in saved_identity:
+                rec[_field] = saved_identity[_field]
+            else:
+                rec.pop(_field, None)
         restore_error = ""
         try:
             if saved_marker is not None:
@@ -4025,6 +4461,11 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
     and each run keeps the per-invocation retry budget and the exponential
     backoff of `run_phase` (so a lost session still cannot shrink the panel).
     Returns (all_done, paused_for_manual) exactly like `run_phase`.
+
+    A run whose retries are exhausted is handled by `use_best_failed_trial`
+    when --tolerate-fail is on: its best failed trial becomes the run's result
+    and the scheduler continues (PROVISIONAL, never certified). With the policy
+    off, or no usable trial, a still-failed run leaves the round incomplete.
     """
     plan = round_run_plan(ctx, r)
     # FAIL FAST on a plan this build cannot finish. A run kind with no
@@ -4121,6 +4562,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             if state == "signal":
                 signal_rec = ctx.run(e["id"])
                 bump_attempt(signal_rec)
+                bump_stage_attempt(signal_rec)
                 postcheck(ctx, signal_rec, source="recheck (marker already on disk)")
                 ctx.save_state()
                 if signal_rec.get("status") == "done" \
@@ -4179,7 +4621,15 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
         """
         failures[rid] += 1
         attempts_left[rid] -= 1
+        spent = max_attempts - attempts_left[rid]
         if attempts_left[rid] <= 0:
+            # All retries are spent. With --tolerate-fail the best failed
+            # trial (most required output files, then fewest FAIL messages)
+            # becomes this stage's result and the pipeline continues on it;
+            # without a usable trial, or with the policy off, the run is a
+            # hard FAIL exactly as before.
+            if not manual and use_best_failed_trial(ctx, rec):
+                return
             failed_hard.append(rid)
             return
         delay = backoff_delay(retry_backoff, failures[rid], retry_backoff_max)
@@ -4189,12 +4639,18 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
         if delay:
             not_before[rid] = time.time() + delay
         kept = failed_sandbox_dir(ctx, rec)
+        # Read the sandbox's attempt(s) BEFORE the rebuild renames it away, and
+        # name the RETRY ordinal from THIS invocation's budget (not the run's
+        # lifetime sessions): the kept sandbox may hold a full attempt plus the
+        # continuation/re-verify that ran in it, and none of those is a retry.
+        inside = sandbox_attempts(rec) or [attempt_number(rec)]
         try:
             rebuild_sandbox(ctx, rec)
             rec["status"] = "pending"
             if kept.is_dir():
-                print(f"  [retry] {rid}: attempt {attempt_number(rec)} kept in "
-                      f"{kept.relative_to(ctx.root)} (its transcript is under "
+                print(f"  [retry] {rid}: attempt {spent}/{max_attempts} kept in "
+                      f"{kept.relative_to(ctx.root)} (record session(s) "
+                      f"{', '.join(str(a) for a in inside)}; its transcript is under "
                       f"{Path(LOGS_DIRNAME)}/)")
         except DepsNotMet as exc:
             print(f"  [info] {rid}: {exc}")
@@ -4207,6 +4663,8 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             rec["last_error"] = (str(rec.get("last_error") or "")
                                  + f" | sandbox rebuild failed: {exc}")[:600].lstrip(" |")
             ctx.log("rebuild-failed", rid, str(exc)[:300])
+            if not manual and use_best_failed_trial(ctx, rec):
+                return
             failed_hard.append(rid)
 
     with ThreadPoolExecutor(max_workers=max(1, int(jobs))) as ex:
@@ -4248,6 +4706,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 if state == "signal":
                     rec = ctx.run(rid)
                     bump_attempt(rec)
+                    bump_stage_attempt(rec)
                     postcheck(ctx, rec, source="recheck (marker already on disk)")
                     ctx.save_state()
                     if rec["status"] == "done" and revision_chain_pending(rec):
@@ -4260,7 +4719,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                                                          problems, cmd, timeout):
                             continue
                         print_failure(rid, (rec.get("postcheck") or {}).get("errors", []),
-                                      note="the completion signal was already on disk")
+                                      note="the completion signal was already on disk", ctx=ctx)
                         register_failure(rid, rec)
                     continue
                 if state == "dirty":
@@ -4278,8 +4737,8 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     continue
                 rec = ctx.run(rid)
                 print(f"  [{label}] starting {rid} ({e['stage']})"
-                      + (f" [attempt {rec['attempts'] + 1}/{max_attempts}]"
-                         if rec["attempts"] else ""))
+                      + attempt_start_suffix(rec, max_attempts,
+                                             max_attempts - attempts_left[rid]))
                 fut = ex.submit(_execute_attempt_in, ctx.sandbox_of(rec), rec, cmd, timeout)
                 running[fut] = rid
             # 2. wait for a completion (or a short tick to re-check backoff timers)
@@ -4345,6 +4804,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 if rec["status"] == "failed" and not (rec.get("postcheck") or {}).get("errors") \
                         and likely_complete_artifacts(ctx, rec):
                     bump_attempt(rec)
+                    bump_reverification(rec)
                     postcheck(ctx, rec, source="re-verify (process failed, artifacts complete)")
                     ctx.save_state()
                     if rec["status"] == "done":
@@ -4356,10 +4816,10 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                             continue
                 # ... then a repairable artifact-quality failure before the retry
                 # burns the attempt and rebuilds the sandbox it would repair.
-                argv, key, why = resume_gate(ctx, rec, cmd)
+                argv, key, why, mode = resume_gate(ctx, rec, cmd)
                 if argv and len(running) < max(1, int(jobs)) \
                         and start_resume_session(ctx, ex, running, resume_flight, rec,
-                                                 argv, key, why, timeout):
+                                                 argv, key, why, timeout, mode=mode):
                     continue
                 problems = repairable_artifact_failure(ctx, rec)
                 if problems and len(running) < max(1, int(jobs)) \
@@ -4378,15 +4838,19 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             never_started = [rid for rid in hard if not (ctx.run(rid) or {}).get("attempts")]
             tried = [rid for rid in hard if rid not in never_started]
             if tried:
-                # Each run's OWN attempt count, never the invocation's budget: a
-                # run that failed for a reason OUTSIDE its retry budget (a
-                # sandbox that could not be rebuilt, an internal error) never
-                # spent it, and reporting "FAILED after 3 attempt(s)" for a run
-                # with one attempt sends the operator hunting for two attempts
-                # that never happened (2026-09-23: r1_audit).
-                print(f"  [{label}] FAILED: " + ", ".join(
-                    f"{rid} ({int((ctx.run(rid) or {}).get('attempts') or 0)} attempt(s), "
-                    f"budget {max_attempts})" for rid in tried))
+                # The budget THIS invocation spent, never the run's lifetime
+                # count and never the whole budget: a run that failed for a
+                # reason OUTSIDE its retry budget (a sandbox that could not be
+                # rebuilt, an internal error) may have spent only one slot, and
+                # reporting "FAILED after 3 attempt(s)" for a run with one sends
+                # the operator hunting for attempts that never happened
+                # (2026-09-23: r1_audit). The budget is per invocation, so a
+                # resumed run starts again at 0; scoped repairs, CONTINUATIONS
+                # and re-verifies are named beside it, not added to it.
+                print(f"  [{label}] FAIL: " + ", ".join(
+                    failed_run_cell(rid, ctx.run(rid), max_attempts,
+                                    max_attempts - attempts_left[rid])
+                    for rid in tried))
             if never_started:
                 print(f"  [{label}] never started (an upstream run is not done): "
                       + ", ".join(never_started))
@@ -4510,6 +4974,7 @@ def _apply_judge_selection(rrec: dict, only, judge_step: bool, r: int, ctx: Ctx)
             rrec["judges_enabled"] = _sel
 
 
+
 def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 manual: bool, nowait: bool, poll: int,
                 judge_cmd=None, judge_manual: bool = None, judge_timeout=None,
@@ -4551,6 +5016,15 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     print()
     print(f"[run] ==================== ROUND {r}/{R} ====================")
     rrec = ctx.round_rec(r)
+    # A re-drive recomputes the tolerated record from the runs it actually
+    # drives; a stale record/verdict from an earlier invocation must not keep
+    # the round provisional after the failed run was retried successfully.
+    rrec.pop("tolerated_fail", None)
+    # The legacy spelling of the same record: decide reads either one, so a
+    # re-drive that cleared only the new key left an old round PROVISIONAL
+    # after its failed stage had been retried successfully (F104).
+    rrec.pop("almost_fail", None)
+    rrec.pop("certified", None)
     rrec["status"] = "active"
     rrec["started"] = rrec.get("started") or utcnow()
     # `run --only r1_judge_w2_j1` (and its roundless form `w2_j1`) selects WHICH
@@ -4624,7 +5098,27 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
               "Resume with `run` (or reset one run with `retry`).")
         raise
     if not ok:
+        # A paused round (manual --no-wait, or an agent still writing) is NOT a
+        # failure, and a run whose retries were exhausted without a usable trial
+        # is a hard FAIL: the round stays incomplete.
         return False, paused
+    # With --tolerate-fail an exhausted stage was replaced by its best failed
+    # trial (the run is `done` and carries the record); the round must say so,
+    # because its decision is PROVISIONAL and must never be certified.
+    _tf_failed = [e["id"] for e in round_run_plan(ctx, r)
+                  if (ctx.run(e["id"]) or {}).get("tolerated_fail")
+                  and (ctx.run(e["id"]) or {}).get("status") == "done"]
+    _tolerated_fail = ({"mode": "on", "failed_runs": _tf_failed,
+                        "note": ("stage(s) exhausted their retries; the best failed trial "
+                                 "(most required output files, then fewest FAIL messages) "
+                                 "was used -- PROVISIONAL, never certified")}
+                       if _tf_failed else None)
+    if _tolerated_fail:
+        rrec["tolerated_fail"] = dict(_tolerated_fail)
+        rrec["certified"] = False
+        print(f"[run] r{r} {TOLERATED_FAIL_STATUS}: {', '.join(_tf_failed)} exhausted its "
+              f"retries; the best failed trial was used and the round continues "
+              f"(PROVISIONAL, never certified).")
 
     if journal_is_scoped(ctx):
         # A major/minor revision has no judge panel and no champion choice: the
@@ -4729,7 +5223,9 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                   f"stays incomplete. Fix that run (`retry --run "
                   f"{rid_for_fresh(r, auto_target)}`) and re-run.")
             return False, False
-        agg, sel = auto_round_payload(ctx, r, auto_target, csel)
+        agg, sel = auto_round_payload(ctx, r, auto_target, csel, fallback=False)
+        if _tolerated_fail:
+            sel["tolerated_fail"] = dict(_tolerated_fail)
         rrec = ctx.round_rec(r)
         rrec["auto_promoted"] = True
         rrec["judged"] = False
@@ -4741,7 +5237,8 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         ctx.save_state()
         print()
         print(f"[run] r{r} champion: {auto_target} "
-              f"(--champion-select {csel}; NO judge panel, NOT CERTIFIED -- provisional)")
+              f"(--champion-select {csel}; NO judge panel, NOT CERTIFIED -- provisional)"
+              + (" [TOLERATED_FAIL stage used]" if _tolerated_fail else ""))
         print(f"[run] round {r} champion: {auto_target} "
               f"(pinned at {PIN_DIRNAME}/{pin['id']}, digest {pin['digest'][:12]})")
         print(f"[run] round {r} winner published at {winner['directory']}/ "

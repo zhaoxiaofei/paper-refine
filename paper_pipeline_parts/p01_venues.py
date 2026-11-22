@@ -746,6 +746,35 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         if explicit_article_types else None
     top_limits = _clean_length_limits(out.get("length_limits"), "length_limits",
                                       problems) if explicit_article_types else None
+    # A venue-level abstract/main-text block written next to an article_types
+    # table populates ONLY the default type. A default type that states no
+    # number for a section inherits the top-level one; a NON-default type never
+    # borrows it (the README's "a type with null bases carries no numbers" --
+    # the stages name the venue's own table limit instead). The old comment
+    # called this a venue-wide fallback and promised every type the numbers,
+    # which the code never did (F176).
+    if top_limits is not None:
+        _type_limits = default_entry.get("length_limits")
+        if not isinstance(_type_limits, dict):
+            _type_limits = {"source": "",
+                            "abstract": {"base": None, "relaxation": None},
+                            "main_text": {"base": None, "relaxation": None}}
+            default_entry["length_limits"] = _type_limits
+        # The top-level block's `source` is the citation for the numbers it
+        # supplies. The synthesized block used to start with source "" and
+        # `length_limits_source` fell back to the type's label, so the accepted
+        # venue-level source was silently dropped whenever a table was present
+        # (F37). A source the type states itself still wins.
+        if not str(_type_limits.get("source") or "").strip() \
+                and str(top_limits.get("source") or "").strip():
+            _type_limits["source"] = top_limits["source"]
+        for _section in ("abstract", "main_text"):
+            _type = _type_limits.get(_section) or {}
+            _top = top_limits.get(_section) or {}
+            if (_type.get("base") is None and _type.get("relaxation") is None
+                    and (_top.get("base") is not None
+                         or _top.get("relaxation") is not None)):
+                _type_limits[_section] = copy.deepcopy(_top)
     if default_entry["captions"] is not None:
         clean_captions = copy.deepcopy(default_entry["captions"])
     elif top_captions is not None:
@@ -761,6 +790,31 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         clean_limits = copy.deepcopy(EMPTY_LENGTH_LIMITS)
         if top_limits is not None and "cover_letter" in top_limits:
             clean_limits["cover_letter"] = copy.deepcopy(top_limits["cover_letter"])
+    # A profile that carries BOTH a top-level `length_limits` and a
+    # `article_types` table may state different caps for the same section. The
+    # article type wins (it is the selected type's own table), but silently
+    # dropping the top-level numbers left the operator with no report that the
+    # profile says two things (F160).
+    if top_limits is not None and default_entry["length_limits"] is not None:
+        for _section in ("abstract", "main_text"):
+            _top = top_limits.get(_section) or {}
+            _type = default_entry["length_limits"].get(_section) or {}
+            # Only TWO STATED numbers can conflict; `null` means "this block
+            # carries no number", so a top-level value is not contradicted by a
+            # type that states none (and a hand-edited top-level value must keep
+            # loading, as the documented snapshot/re-record path expects).
+            _top_base, _type_base = _top.get("base"), _type.get("base")
+            if _top_base is not None and _type_base is not None \
+                    and (_top_base, _top.get("relaxation")) != (
+                        _type_base, _type.get("relaxation")):
+                problems.append(
+                    f"length_limits.{_section} "
+                    f"(base={_top.get('base')!r}, relaxation={_top.get('relaxation')!r}) "
+                    f"conflicts with article_types[{default_type_id}].length_limits."
+                    f"{_section} (base={_type.get('base')!r}, "
+                    f"relaxation={_type.get('relaxation')!r}); the article type's value is "
+                    f"the one applied -- make the two blocks agree or remove the "
+                    f"top-level number")
 
     journals = _profile_str_list(out.get("journals"), "journals", problems)
     aliases = _profile_str_list(out.get("journal_aliases"), "journal_aliases", problems)
@@ -975,7 +1029,10 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # profile's own `sources` field names where its numbers come from"), and
     # the rebuilt return value used to drop the key, so a stage reading the
     # profile through VenueProfile.data could not name the guideline it used.
-    clean_sources = ({str(k): str(v) for k, v in raw_sources.items()}
+    # The README promises the map is "carried through the loader unchanged":
+    # `str(v)` turned a nested list/dict value into an unparseable Python repr,
+    # so values (not just keys) are preserved here (F186).
+    clean_sources = ({str(k): copy.deepcopy(v) for k, v in raw_sources.items()}
                      if isinstance(raw_sources, dict) else {})
     result = {
         "id": venue_id,
@@ -1328,11 +1385,18 @@ def available_venue_profiles(root=None) -> dict:
                 continue
             origin = f"root: {d}" if root is not None and \
                 Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else f"shipped: {d}"
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as e:
+            # `path.read_text()` here had no regular-file/symlink refusal, no
+            # size cap and no O_NONBLOCK: a FIFO named `*.json` blocked
+            # `set-venue --list`, `status` and every prompt command forever, and
+            # a multi-GB profile was read whole before validation (F32). Use the
+            # same bounded, no-follow reader the state loader uses, and list a
+            # refused entry as INVALID instead of following/blocking on it.
+            data = read_json(path, revive=False)
+            if data is None:
                 found.setdefault(key, {"id": key, "label": key,
-                                       "error": f"{path}: not readable JSON: {e}",
+                                       "error": f"{path}: not readable JSON (missing, a "
+                                                f"symlink/FIFO/device, over the size budget, or "
+                                                f"malformed)",
                                        "origin": origin, "path": str(path)})
                 continue
             declared = (str(data.get("id") or "").strip().lower()
@@ -1361,12 +1425,16 @@ def available_venue_profiles(root=None) -> dict:
                     f"the file declares id {declared!r}; the file name {path.name!r} is "
                     f"the id `set-venue` resolves -- rename the file to {declared}.json "
                     f"or fix its id")
+            if declared:
                 owner = declared_owner.get(declared)
                 if owner is not None and owner[1].parent == path.parent and owner[0] != key:
                     # Two files in the SAME directory declaring one id: name the
                     # duplicate instead of hiding it. The file whose NAME is the
                     # declared id is the rightful owner; the other one is the
-                    # duplicate.
+                    # duplicate. This must run even when THIS file's name is
+                    # the declared id: the duplicate may have been read first,
+                    # and the outer `declared != key` guard made the rightful
+                    # owner's correcting branch unreachable (F042).
                     if key == declared:
                         prior = found.get(owner[0])
                         if prior is not None and not prior.get("error"):
@@ -1419,10 +1487,13 @@ def load_venue_profile(venue_id, root=None) -> VenueProfile:
             if len(matches) != 1:
                 continue
             path = matches[0]
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            raise VenueProfileError(f"{path}: not readable JSON: {e}")
+        # Bounded, no-follow read: a symlinked/FIFO/oversized profile must be
+        # refused rather than followed or read whole (F32).
+        data = read_json(path, revive=False)
+        if data is None:
+            raise VenueProfileError(
+                f"{path}: not readable JSON (missing, a symlink/FIFO/device, over the "
+                f"size budget, or malformed)")
         origin = "root-local profile" if root is not None and \
             Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else "shipped profile"
         # Resolution is by FILE NAME. A hand-added file whose JSON declares a
@@ -1815,7 +1886,11 @@ def stage_venue_template(ctx: "Ctx", sb: Path) -> dict:
                                   manuscript_names=article_type_manuscript_names(ctx))
     if not res or not venue_templates_enabled():
         return {}
-    dst = sb / "venue_template"
+    # The sandbox is agent-writable: a previous attempt can leave
+    # `venue_template` (or a role directory) as a symlink to an outside
+    # directory, so create every level through the no-follow guard and write
+    # each template atomically instead of `copy2`-ing through a planted link.
+    dst = safe_mkdir(sb / "venue_template")
     staged = {}
     for role, value in (("word", res.get("word") or {}), ("latex", res.get("latex") or {})):
         for key, p in value.items():
@@ -1824,12 +1899,12 @@ def stage_venue_template(ctx: "Ctx", sb: Path) -> dict:
                     continue
                 target = dst / role / q.name
                 if not target.is_file() or sha256_file(target) != sha256_file(q):
-                    target.parent.mkdir(parents=True, exist_ok=True)
+                    safe_mkdir(target.parent)
                     if target.is_file():
                         # the previously staged copy is 0444: an UPDATED venue
-                        # template must still be re-stageable (copy2 would raise)
+                        # template must still be re-stageable
                         make_writable(target)
-                    shutil.copy2(q, target)
+                    write_bytes_atomic(target, read_regular_file(q))
                 with contextlib.suppress(OSError):
                     os.chmod(target, 0o444)
                 staged[f"{role}/{q.name}"] = sha256_file(target)
@@ -1864,6 +1939,10 @@ def extract_official_template(path: Path) -> dict:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return {"skipped": "unreadable"}
+        # A commented-out declaration or a fenced example is not authoritative
+        # structure: run every discovery on the SAME comment/fence-stripped
+        # text the section reader uses.
+        text = _strip_source_markup(text, suffix)
         m = TEX_DOCCLASS_RE.search(text)
         out["documentclass"] = m.group(1).strip() if m else ""
         out["sections"] = [{"level": lvl, "title": title}
@@ -2115,7 +2194,7 @@ _TEMPLATE_HEADING_KEY_RE = re.compile(r"[^a-z0-9]+")
 # body sentence, not a caption); the earlier template pattern accepted that prose
 # as a caption and fed it to the numbering check (F72).
 _TEMPLATE_CAPTION_RE = re.compile(
-    r"^\s*(Figure|Fig\.?|Table)\s*(\d{1,3})[A-Za-z]?\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)",
+    r"^\s*(Figure|Fig\.?|Table)\s*S?(\d{1,3})[A-Za-z]?\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)",
     re.I)
 
 
@@ -2236,7 +2315,12 @@ def scan_template_conformance(sources: list, requirements: dict,
         def _separated(rest: str) -> bool:
             rest = re.sub(r"^(?:\*{1,3}|_{1,3})", "", rest)
             rest = re.sub(r"^\}", "", rest)
-            return bool(re.match(r"\s*[.:]", rest))
+            # The label may be continued by its own qualifier ("Ethics
+            # approval.", "Funding statement."); an unrelated continuing word
+            # still fails because the separator must follow the qualifier.
+            return bool(re.match(
+                r"\s*(?:(?:approval|statement|section|policy|declaration|"
+                r"disclosure|details|information)\s*)*[.:]", rest, re.I))
 
         # The requested label itself. Its own pattern may match only a prefix
         # ("ethic" / "acknowledg"), so a separator test after the pattern end
@@ -2618,7 +2702,14 @@ def _docx_exemplar_text(path: Path):
         return None
     try:
         with zipfile.ZipFile(path) as pkg:
-            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+            # The formatter's bounded, entity-guarded reader and shared
+            # UTF-16-aware decoder: a large compressed part must not be
+            # decompressed whole, and a UTF-16 template must still parse.
+            problem = mod._docx_zip_problem(pkg)
+            if problem:
+                return None
+            xml = mod.ooxml_part_text(
+                mod._docx_xml_part_guarded(pkg, "word/document.xml"))
     # RuntimeError is what `zipfile` raises for an ENCRYPTED entry and
     # NotImplementedError for an unsupported compression method: neither is an
     # OSError/BadZipFile/KeyError, so a reader that answers "unreadable" must
@@ -3800,11 +3891,40 @@ def venue_config_findings(ctx) -> tuple:
                         f"{prof.id!r} describes ({known}). Set the venue that matches the journal "
                         f"(`set-venue <id>`) or the journal the venue describes "
                         f"(`set-journal <name>`).")
-    state_cfg = ((getattr(ctx, "state", None) or {}).get("config") or {})
+    _state = getattr(ctx, "state", None)
+    if not isinstance(_state, dict):
+        _state = {}
+    state_cfg = _state.get("config")
+    if state_cfg is None:
+        state_cfg = {}
+    elif not isinstance(state_cfg, dict):
+        # A JSON-VALID non-object `config` passed every shape check in the
+        # loader and got here, where `state_cfg.get` died with a bare
+        # AttributeError on every command that opens the root (F126). Refuse
+        # with the same actionable damaged-registry message the loader uses for
+        # its other containers.
+        die(f"state.json is damaged: 'config' must be an object (got "
+            f"{type(state_cfg).__name__}).\n"
+            f"       {getattr(ctx, 'state_path', 'state.json')}\n"
+            f"       Restore state.json from a backup.")
     mirrored = str(state_cfg.get("venue") or "").strip().lower()
     if mirrored and mirrored != recorded:
         notes.append(f"state.json records venue {mirrored!r} but pipeline_config.json selects "
                      f"{recorded!r}: the config file wins (`set-venue` re-mirrors it).")
+    # The mirror carries every key `setup`/`set-*` writes, and README:431 says a
+    # config/state disagreement is reported. Only the venue was compared, so a
+    # stale journal or article type was silently ignored (F175). One note per
+    # disagreeing key; the config file wins in every case.
+    for _key, _what, _fix in (("journal", "journal", "set-journal"),
+                              ("article_type", "article type", "set-article-type")):
+        _mirrored = str(state_cfg.get(_key) or "").strip()
+        if not _mirrored:
+            continue
+        _configured = str(cfg.get(_key) or "").strip()
+        if _mirrored.casefold() != _configured.casefold():
+            notes.append(f"state.json records {_what} {_mirrored!r} but "
+                         f"pipeline_config.json selects {_configured!r}: the config file "
+                         f"wins (`{_fix}` re-mirrors it).")
     return notes, problems
 
 AGENT_PRESETS = {

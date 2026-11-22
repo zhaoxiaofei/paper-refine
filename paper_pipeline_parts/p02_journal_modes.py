@@ -144,7 +144,17 @@ JOURNAL_FEEDBACK_NAME_RE = re.compile(
 # it sits -- the same reason a "cover"-spelled letter is carved out below.
 ARTICLE_TYPE_MANUSCRIPT_NAME_RE = re.compile(
     r"^(?:letter[\s_-]+(?:to|for)[\s_-]+the[\s_-]+editor|editorial)"
-    r"(?:[\s_.-]+(?:v|rev|version|revision|draft)?[\s_.-]*\d{1,3})?$", re.I)
+    # A version/state suffix marks the AUTHORS' manuscript, not the editors'
+    # letter: `v2`, `_2`, `_draft`, `_final`, `_revised`, `_accepted`,
+    # `_camera_ready`, and combinations (`_final_v2`). The extension-layer strip
+    # above removes a DOTTED `.final`; these underscore/space suffixes are name
+    # segments, not extensions -- `editorial_final.docx` is a manuscript, and
+    # reading it as the journal's feedback dropped it from the corpus (F99).
+    r"(?:[\s_.-]+(?:"
+    r"(?:v|rev|version|revision|draft)[\s_.-]*\d{1,3}"
+    r"|\d{1,3}"
+    r"|draft|final|revised|accepted|camera[\s_.-]?ready"
+    r"))*$", re.I)
 
 
 def is_journal_feedback_name(name) -> bool:
@@ -600,7 +610,7 @@ def seed_concern_candidates(text: str) -> list:
     head_re = re.compile(
         r"^\s*(?:(?:reviewer|referee|editor|comments?|major|minor)\b|"
         r"point\b(?=\s*(?:\d|[:.]))|"
-        r"\d+\s*[.)](?=\s|$)|[-*•]\s+)", re.I)
+        r"\d{1,3}\s*[.)](?=\s|$)|[-*•]\s+)", re.I)
     for i, ln in enumerate(lines):
         if head_re.match(ln):
             starts.append(i)

@@ -10,14 +10,15 @@
 // OOXML writer.
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { accessSync, constants, existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod/v4';
-import { allowedRoots, containedSpawnPath, containsPath, realOrResolved } from './containment.mjs';
-import { inFlightKey } from './derived-output.mjs';
+import { allowedRoots, containedSpawnPath, containsPath, realOrResolved,
+         stageContainedInput } from './containment.mjs';
+import { derivedOutput, inFlightKey } from './derived-output.mjs';
 
-import { runFile } from './run-child.mjs';
+import { isWsl, runFile } from './run-child.mjs';
 
 // The comparer script is NOT welded to one machine: an explicit env override
 // wins, then the repo-relative copy, then a sibling copy, then PATH. A
@@ -57,6 +58,16 @@ const inFlight = new Map();
 
 function isDocx(p) {
   return path.extname(p).toLowerCase() === '.docx';
+}
+
+// The wrapper records the WINDOWS pids it started here; the timeout path reads
+// them back to taskkill a Word/COM server the Unix group kill cannot reach. It
+// lives beside the output so both WSL and Windows can reach it; an empty string
+// means the normal process-group kill only (non-WSL, or no output yet).
+function windowsPidPath(outputPath) {
+  if (!outputPath || process.platform !== 'linux' || !isWsl()) return '';
+  return `${outputPath}.winpids-${process.pid}-${Date.now().toString(36)}-`
+       + Math.random().toString(36).slice(2);
 }
 
 serveStdio(() => {
@@ -139,21 +150,44 @@ serveStdio(() => {
           isError: true,
         };
       }
-      // RE-RESOLVE on the exact strings that are about to become argv: the
-      // containment checks above judged paths the child did not open yet, and a
-      // symlink swapped in between escaped the roots. `containedSpawnPath()`
-      // resolves again and returns the REAL path, so the child opens what was
-      // just validated; a swap is refused, not followed. When containment is
-      // unset the lexical paths are kept unchanged.
+      // The containment checks above judged paths the child has not opened
+      // yet. Re-resolving a path is not enough: the result is still a STRING,
+      // and a writer inside the root can swap it for an outside symlink between
+      // that check and the child's open (F14). When containment is on, the
+      // validated inputs are therefore copied into a private staging directory
+      // and the child receives THOSE copies; a later swap of the user's path
+      // cannot change what it reads. The output is written to the caller's path
+      // (the script removes a stale entry and renames its temp into place), and
+      // the derived default output is named here because the staged input is
+      // not the path the script would derive it from. When containment is unset
+      // the lexical paths are kept unchanged.
       let spawnOriginal = absOriginal;
       let spawnRevised = absRevised;
       let spawnOutput = absOutput;
+      let realOriginal = absOriginal;
+      let realRevised = absRevised;
+      let stagingDir = '';
       if (ALLOWED_ROOTS.length) {
         try {
-          spawnOriginal = containedSpawnPath(absOriginal, ALLOWED_ROOTS);
-          spawnRevised = containedSpawnPath(absRevised, ALLOWED_ROOTS);
-          if (absOutput) spawnOutput = containedSpawnPath(absOutput, ALLOWED_ROOTS);
+          realOriginal = containedSpawnPath(absOriginal, ALLOWED_ROOTS);
+          realRevised = containedSpawnPath(absRevised, ALLOWED_ROOTS);
+          spawnOutput = absOutput
+            ? containedSpawnPath(absOutput, ALLOWED_ROOTS)
+            : derivedOutput(realOriginal, realRevised);
+          // The default output is a write of its own: contain it too.
+          spawnOutput = containedSpawnPath(spawnOutput, ALLOWED_ROOTS);
+          // The stage must be readable by the WINDOWS child. Its directory is
+          // the validated output's directory: Word writes the output there, so
+          // that path mapping is known to work (os.tmpdir() is not necessarily
+          // shared with Windows on WSL).
+          stagingDir = mkdtempSync(path.join(path.dirname(spawnOutput),
+                                             '.docx-mcp-compare-'));
+          spawnOriginal = stageContainedInput(realOriginal, ALLOWED_ROOTS,
+                                              stagingDir, 'original.docx');
+          spawnRevised = stageContainedInput(realRevised, ALLOWED_ROOTS,
+                                             stagingDir, 'revised.docx');
         } catch (error) {
+          if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });
           return {
             content: [{ type: 'text', text: `refused: ${error.message}` }],
             isError: true,
@@ -177,12 +211,14 @@ serveStdio(() => {
       // own 900s); a smaller server-side cap would kill a slow-but-valid Word
       // comparison before the caller's own timeout and silently downgrade the
       // redline to a lower-fidelity fallback.
+      const windowsPidFile = windowsPidPath(spawnOutput);
       const run = () => runFile(COMPARER, argv,
-                                  { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
-      // Key on the path the comparer will actually write, not the input pair:
-      // two revised files that share a basename derive the same redline path.
-      // `inFlightKey` also case-folds it (a case-insensitive destination).
-      const key = inFlightKey(spawnOriginal, spawnRevised, spawnOutput);
+                                  { timeout: 900_000, maxBuffer: 4 * 1024 * 1024,
+                                    windowsPidFile });
+      // Key on the REAL destination, not the random staging directory: two
+      // revised files that share a basename derive the same redline path, and
+      // two concurrent calls for the same input pair must still serialize.
+      const key = inFlightKey(realOriginal, realRevised, spawnOutput);
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(key, next);
@@ -205,6 +241,10 @@ serveStdio(() => {
           isError: true,
         };
       } finally {
+        if (windowsPidFile) {
+          try { rmSync(windowsPidFile, { force: true }); } catch { /* gone */ }
+        }
+        if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });
         if (inFlight.get(key) === next) inFlight.delete(key);
       }
     }

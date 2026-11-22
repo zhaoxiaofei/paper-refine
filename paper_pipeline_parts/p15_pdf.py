@@ -71,11 +71,15 @@ def latex_root_documents(dirp: Path, gaps: list = None) -> list:
             continue
         # Comments and verbatim bodies are not compiled source; a
         # `% \documentclass` or a sample inside verbatim is not a root (F74).
+        # Comments MUST be stripped FIRST: a commented-out `\begin{verbatim}`
+        # otherwise paired with a later commented `\end{verbatim}` and blanked
+        # a real `\documentclass` between them, so a real root was never
+        # detected or compiled (F061).
         # Every non-compiled region counts: the comment/lstlisting/minted
         # environments and inline \verb/\lstinline too, or a fragment whose
         # only `\documentclass` sits in one is compiled standalone (R08).
-        _visible = _TEX_NONCOMPILED_ENV_RE.sub("", head)
-        _visible = strip_tex_comment(_visible)
+        _visible = strip_tex_comment(head)
+        _visible = _TEX_NONCOMPILED_ENV_RE.sub("", _visible)
         _visible = _TEX_INLINE_VERB_RE.sub("", _visible)
         if re.search(r"\\documentclass\b", _visible):
             out.append(rel.as_posix())
@@ -128,6 +132,36 @@ def _copy_evidence_no_follow(src_dir: Path, dst_dir: Path) -> list:
     shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True, symlinks=True,
                     ignore=_ignore)
     return skipped
+
+
+def _evidence_nested_links(src_dir: Path) -> list:
+    """Relative paths of every symlink nested inside one evidence area."""
+    out = []
+    src_dir = Path(src_dir)
+    for p in sorted(src_dir.rglob("*")):
+        if p.is_symlink():
+            out.append(p.relative_to(src_dir).as_posix())
+    return out
+
+
+def _materialise_evidence(src_dir: Path, dst_dir: Path):
+    """Place one evidence area in the build tree without following nested links.
+
+    Symlinking the area is the fast path, but it also exposes every nested link
+    to the PDF compiler. When the area carries a nested link, copy it with the
+    no-follow helper instead and return the links that were skipped.
+    """
+    nested = _evidence_nested_links(src_dir)
+    if nested:
+        return _copy_evidence_no_follow(src_dir, dst_dir), True
+    try:
+        os.symlink(str(Path(src_dir).resolve()), str(dst_dir),
+                   target_is_directory=True)
+        return [], False
+    except OSError:
+        # A platform without symlinks: a real copy is the fallback (correct,
+        # only slower), never a silently missing file.
+        return _copy_evidence_no_follow(src_dir, dst_dir), True
 
 
 def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
@@ -183,21 +217,17 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                 dst_dir = work / name
                 if not src_dir.exists() or dst_dir.exists():
                     continue
-                try:
-                    os.symlink(str(src_dir.resolve()), str(dst_dir),
-                               target_is_directory=True)
-                except OSError:
-                    # A platform without symlinks: a real copy is the fallback
-                    # (correct, only slower), never a silently missing file. A
-                    # NESTED link inside the area is skipped and named (see
-                    # _copy_evidence_no_follow): following it copied outside
-                    # content into the build tree and the compiled PDF.
-                    skipped_links.extend(_copy_evidence_no_follow(src_dir, dst_dir))
-                    if skipped_links:
-                        print(f"warning: skipped {len(skipped_links)} nested symlink(s) "
-                              f"while copying the evidence area {src_dir} into the PDF "
-                              f"build tree (a link is not build content): "
-                              + ", ".join(skipped_links[:5]), file=sys.stderr)
+                # A NESTED link inside the area must never reach the compiler:
+                # following it copied outside content into the build tree and
+                # the compiled PDF. The no-follow copy is used whenever the
+                # area carries one, so the symlink fast path is safe.
+                links, copied = _materialise_evidence(src_dir, dst_dir)
+                skipped_links.extend(links)
+                if links:
+                    print(f"warning: skipped {len(links)} nested symlink(s) "
+                          f"while copying the evidence area {src_dir} into the PDF "
+                          f"build tree (a link is not build content): "
+                          + ", ".join(links[:5]), file=sys.stderr)
         # The package may itself ship a PDF named like the compiled output (a
         # previous render). Leaving it in the build copy meant a compiler that
         # exited 0 WITHOUT writing anything still looked successful: the stale
@@ -207,41 +237,35 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         with contextlib.suppress(OSError):
             (work / rel).with_suffix(".pdf").unlink()
         argv = [exe, "-pdf", "-interaction=nonstopmode", "-halt-on-error", Path(rel).name]
-        # latexmk spawns pdflatex/bibtex children. Starting it in its own
-        # process group and killing the GROUP on timeout stops those children
-        # from writing into the build tree while `finally` removes it (a bare
-        # `subprocess.run(timeout=...)` kills only latexmk itself). Output goes
-        # to temporary FILES: a verbose document must not accumulate unbounded
-        # bytes in the orchestrator (F61).
-        with tempfile.TemporaryFile() as out_tmp, tempfile.TemporaryFile() as err_tmp:
-            proc = subprocess.Popen(argv, cwd=str((work / rel).parent),
-                                    stdout=out_tmp, stderr=err_tmp,
-                                    **_tool_popen_kwargs())
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _kill_process_group(proc)
-                try:
-                    proc.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    pass
-                raise
-            out_tmp.seek(0, os.SEEK_END)
-            out_size = out_tmp.tell()
-            err_tmp.seek(0, os.SEEK_END)
-            err_size = err_tmp.tell()
-            if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
-                return {"ok": False, "tool": "latexmk", "pages": 0,
-                        "error": f"latexmk output over the {MAX_TOOL_OUTPUT_BYTES}-byte budget "
-                                 f"(stdout={out_size}, stderr={err_size}); refusing it"}
-            out_tmp.seek(0)
-            err_tmp.seek(0)
-            stdout = out_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1)
-            stderr = err_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1)
-        out = (stdout or b"").decode("utf-8", "replace") \
-            + (stderr or b"").decode("utf-8", "replace")
+        # latexmk spawns pdflatex/bibtex children. `run_bounded` starts it in its
+        # own process group, kills the GROUP on timeout, and drains stdout and
+        # stderr through capped reader threads: the old TemporaryFile pair wrote
+        # UNBOUNDED bytes to disk and only checked the size after `proc.wait()`,
+        # so an error loop under -interaction=nonstopmode could fill TMPDIR for
+        # the whole timeout before the budget was ever consulted (F142).
+        try:
+            proc_rc, out_b, err_b = run_bounded(
+                argv, timeout=timeout, cwd=str((work / rel).parent))
+        except ToolOutputOverBudget as e:
+            return {"ok": False, "tool": "latexmk", "pages": 0,
+                    "error": f"latexmk output over the {MAX_TOOL_OUTPUT_BYTES}-byte budget "
+                             f"({e}); refusing it",
+                    "skipped_links": skipped_links}
+        out = (out_b or b"").decode("utf-8", "replace") \
+            + (err_b or b"").decode("utf-8", "replace")
         pdf = (work / rel).with_suffix(".pdf")
-        ok = bool(proc.returncode == 0 and pdf.is_file() and pdf.stat().st_size > 0)
+        # A non-empty file is not a render. The reuse path already refuses a
+        # file pdf_signature_problem() rejects; the first compile must apply
+        # the same check or the two runs disagree about the same artifact.
+        sig_problem = ""
+        if proc_rc == 0:
+            if not pdf.is_file():
+                sig_problem = "latexmk exited 0 without writing a PDF"
+            elif pdf.stat().st_size <= 0:
+                sig_problem = "latexmk wrote an empty PDF"
+            else:
+                sig_problem = pdf_signature_problem(pdf) or ""
+        ok = bool(proc_rc == 0 and not sig_problem)
         if ok:
             out_pdf.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(pdf, out_pdf)
@@ -264,7 +288,8 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
         return {"ok": ok, "tool": "latexmk", "pages": _pdf_page_count(out_pdf) if ok else 0,
                 "error": (None if ok else
                           (errors[0] if errors
-                           else f"latexmk exited {proc.returncode} without a PDF")[:300]),
+                           else (sig_problem or
+                                 f"latexmk exited {proc_rc} without a PDF"))[:300]),
                 "errors": errors, "skipped_links": skipped_links}
     except (OSError, subprocess.SubprocessError, shutil.Error) as e:    # noqa: BLE001
         return {"ok": False, "tool": "latexmk", "error": f"{type(e).__name__}: {e}",
@@ -425,6 +450,12 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
                         if res.get("ok") and _made.is_file():
                             out_dir.mkdir(parents=True, exist_ok=True)
                             shutil.move(str(_made), str(out_pdf))
+                        elif res.get("ok"):
+                            # The renderer claimed success but wrote nothing:
+                            # the manifest must not record a PDF that does not
+                            # exist (F088).
+                            res = dict(res, ok=False,
+                                       error="the renderer reported success but wrote no PDF")
                     finally:
                         shutil.rmtree(_tmp, ignore_errors=True)
             except OSError as e:
@@ -566,7 +597,9 @@ def pdf_readme(manifest: dict) -> str:
 
 def pdf_summary(manifest: dict, rounds=None) -> None:
     """One-line summary of a PDF manifest (failures are warnings, never errors)."""
-    rounds = set(int(r) for r in rounds) if rounds else None
+    # An EXPLICIT empty list means NO rounds (the documented contract of
+    # run_pdf_conversion); collapsing it to None summarised every set (F024).
+    rounds = None if rounds is None else {int(r) for r in rounds}
     sets = [s for s in manifest["sets"]
             if rounds is None or int(s.get("round") or 0) in rounds]
     docs = [d for s in sets for d in s["documents"]]

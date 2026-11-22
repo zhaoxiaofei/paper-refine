@@ -551,28 +551,43 @@ def tex_lines(text: str):
         if m:
             lines.append(m.group(1).strip())
             continue
-        cap = TEX_CAPTION.search(line)
-        if cap:
-            before = _line_text(line[:cap.start()])
-            if before:
-                lines.append(before)
-            group = line[cap.end():]
-            depth = 1 + _brace_delta(group)
-            while depth > 0 and i < n:
-                nxt = strip_tex_comment(raw_lines[i]).strip()
-                i += 1
-                group = f"{group}\n{nxt}"
-                depth += _brace_delta(nxt)
-            cap_text, after = _split_group(group)
-            cap_kind = _tex_float_env_after(line[:cap.start()], env_at_start)
-            of = re.match(r"\\captionof\*?\s*\{([^{}]*)\}", line[cap.start():])
-            if of:
-                cap_kind = of.group(1).strip().lower()
-            captions.append((len(lines), cap_kind))
-            lines.append(_strip_latex(cap_text))
-            after = _line_text(after)
-            if after:
-                lines.append(after)
+        # A legal line may carry SEVERAL caption groups
+        # (`\\caption{A.}\\caption{B.}`): the single `search` handled only the
+        # first, leaving the second legend's words in the main-text count while
+        # paper_pipeline's M19 scan subtracted both (F109).
+        if TEX_CAPTION.search(line):
+            rest = line
+            while True:
+                cap = TEX_CAPTION.search(rest)
+                if not cap:
+                    tail = _line_text(rest)
+                    if tail:
+                        lines.append(tail)
+                    break
+                before = _line_text(rest[:cap.start()])
+                if before:
+                    lines.append(before)
+                cap_start = cap.start()
+                cap_prefix = rest[:cap_start]
+                cap_token = rest[cap_start:]
+                group = rest[cap.end():]
+                depth = 1 + _brace_delta(group)
+                while depth > 0 and i < n:
+                    nxt = strip_tex_comment(raw_lines[i]).strip()
+                    i += 1
+                    group = f"{group}\n{nxt}"
+                    depth += _brace_delta(nxt)
+                cap_text, rest = _split_group(group)
+                cap_kind = _tex_float_env_after(cap_prefix, env_at_start)
+                # Read the kind from the MATCHED caption text, not from the
+                # prefix that ends before it: `\captionof{table}{...}` outside
+                # a table float used to keep a None kind and be subtracted as a
+                # figure legend (R01/F109).
+                of = re.match(r"\\captionof\*?\s*\{([^{}]*)\}", cap_token)
+                if of:
+                    cap_kind = of.group(1).strip().lower()
+                captions.append((len(lines), cap_kind))
+                lines.append(_strip_latex(cap_text))
             continue
         stripped = _line_text(line)
         if stripped:

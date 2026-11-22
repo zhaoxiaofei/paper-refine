@@ -2007,6 +2007,21 @@ def _merge_tree(src: Path, dst: Path) -> int:
     return written
 
 
+def _readme_has_venue_row(line: str, vid: str) -> bool:
+    """True when one README table line is the venue's OWN row.
+
+    The venue's row is the one whose FIRST cell is the backticked id. Matching
+    any table line that merely CONTAINS `` `vid` `` accepted a schema row, so a
+    missing venue row was never added/replaced (and a schema line could be
+    overwritten) -- F94 -- and the post-publish substring check could never
+    catch it -- F162.
+    """
+    if not line.startswith("|"):
+        return False
+    cells = line.split("|")
+    return len(cells) > 1 and cells[1].strip() == f"`{vid}`"
+
+
 def _merge_readme_row(staged: Path, dest: Path, vid: str,
                       profile: dict = None) -> str:
     """Publish one venue's row from the staged README into the shared one.
@@ -2025,7 +2040,7 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
         text = read_text_bounded(staged)
         if text is not None:
             staged_lines = text.splitlines()
-    rows = [ln for ln in staged_lines if ln.startswith("|") and f"`{vid}`" in ln]
+    rows = [ln for ln in staged_lines if _readme_has_venue_row(ln, vid)]
     synthesized = False
     if not rows:
         label = str((profile or {}).get("label") or vid)
@@ -2037,12 +2052,19 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
     if not dest.is_file():
         write_text_atomic(dest, row + "\n")
         return "created"
-    try:
-        lines = dest.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as e:
-        return f"unreadable ({e}); the profile was published but its README row was not merged"
+    if dest.is_symlink():
+        # The later atomic write replaces the link, but the READ still followed
+        # it: an external file's contents were copied into the published venue
+        # README (F187). Refuse instead of reading through a link.
+        return ("refused (the destination README is a symlink; it was neither read "
+                "nor replaced)")
+    text = read_text_bounded(dest)
+    if text is None:
+        return ("unreadable (not a regular file within the size budget); the profile "
+                "was published but its README row was not merged")
+    lines = text.splitlines()
     for i, ln in enumerate(lines):
-        if ln.startswith("|") and f"`{vid}`" in ln:
+        if _readme_has_venue_row(ln, vid):
             if ln == row:
                 return "unchanged"
             lines[i] = row
@@ -2083,9 +2105,16 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
     profile, the venue's README row, and the `.official`/`.manuscripts` corpora
     into `dest`, then the caller validates and derives the template pack.
     """
-    roots = [sb / "store"]
+    roots = [sb / "store", sb]
     out = {"profile": None, "readme": "unchanged", "official_files": 0,
            "manuscript_files": 0, "sandbox": str(sb), "notes": []}
+    # The profile/README writes below have no parent-link guard of their own;
+    # `_merge_tree` refuses one for the corpora. Apply the same containment
+    # rule once here so a symlinked store component cannot redirect the
+    # profile or README outside the venue store (F206).
+    if dest.is_symlink():
+        raise OSError(f"refusing to publish through symlinked directory {dest}")
+    _refuse_symlinked_parent(dest)
     profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in roots
                     if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()), None)
     if profile is not None and profile.is_symlink():
@@ -2678,6 +2707,41 @@ def cmd_build_venue_templates(args) -> None:
         print(f"[build-venue-templates] skipped {s['file']}: {s['why']}")
     print(f"[build-venue-templates] files: {', '.join(report['files'])}; "
           f"every input and output is sha256-pinned in {VENUE_PACK_MANIFEST}")
+    _build_root = getattr(args, "root", None)
+    if _build_root and report.get("pack"):
+        # The pack is written inside the venue store; when that is the root's
+        # frozen venue_profiles/ bundle, re-record its digest (F103).
+        _refresh_venue_module_digest(_build_root, Path(report["pack"]).parent)
+
+
+def _refresh_venue_module_digest(root, dest) -> bool:
+    """Re-record `venue_profiles` in the root's frozen-module manifest.
+
+    `add-venue --root` publishes into `<root>/venue_profiles/` -- the frozen
+    bundle `setup` recorded a digest for. Leaving the old digest made the next
+    `status` report the root as tampered with (and offered `sync-code`, which
+    would overwrite the just-published profile). `set-venue` re-records the
+    digest at its install site; this is the equivalent for add-venue and
+    build-venue-templates (F103).
+    """
+    root = Path(root).resolve()
+    if Path(dest).resolve() != (root / VENUE_PROFILES_DIRNAME).resolve():
+        return False
+    state_path = root / "state.json"
+    if not os.path.lexists(state_path):
+        return False
+    st, _problem = load_state_file(state_path)
+    if not isinstance(st, dict):
+        return False
+    pipeline = st.get("pipeline")
+    if not isinstance(pipeline, dict):
+        return False
+    modules = dict(pipeline.get("modules") or {})
+    modules[VENUE_PROFILES_DIRNAME] = asset_dir_digest(root, VENUE_PROFILES_DIRNAME)
+    pipeline["modules"] = modules
+    st["updated"] = utcnow()
+    write_json_atomic(state_path, st)
+    return True
 
 
 def cmd_add_venue(args) -> None:
@@ -2686,8 +2750,19 @@ def cmd_add_venue(args) -> None:
     if not VENUE_ID_RE.match(vid or ""):
         die(f"add-venue needs a slug venue id (letters, digits, '.', '_', '+', '-'): "
             f"got {vid!r}", code=2)
-    dest = Path(getattr(args, "profiles_dir", None)
-                or venue_profiles_write_dir(getattr(args, "root", None))).resolve()
+    dest_arg = Path(getattr(args, "profiles_dir", None)
+                    or venue_profiles_write_dir(getattr(args, "root", None))).expanduser()
+    # A symlinked --profiles-dir used to be followed by `resolve()`/`mkdir` and
+    # every profile/README write landed in the link's target while the command
+    # reported the named store (F206). Refuse before resolving.
+    if dest_arg.is_symlink():
+        die(f"add-venue: refusing symlinked --profiles-dir {dest_arg}: writes would land "
+            f"outside the named venue store", code=1)
+    try:
+        _refuse_symlinked_parent(dest_arg)
+    except OSError as e:
+        die(f"add-venue: {e}", code=1)
+    dest = dest_arg.resolve()
     dest.mkdir(parents=True, exist_ok=True)
     print(f"[add-venue] venue: {vid}")
     print(f"[add-venue] store: {dest}")
@@ -2734,6 +2809,28 @@ def cmd_add_venue(args) -> None:
             print(f"[add-venue] WARNING: {res['error']}")
         if res.get("error") or res.get("rc") != 0:
             die("add-venue writer/audit failed: " + str(res.get("error") or res.get("rc")))
+
+    # A failed/incomplete session stages a HALF-WRITTEN profile and exemplars.
+    # The completion marker and PUBLISH.md used to be printed as notes only, so
+    # a `status: failed` session was published and the command exited 0 (F24).
+    # Refuse before anything reaches the shared store.
+    marker_path = sb / "_pipeline_done.json"
+    if os.path.lexists(marker_path):
+        marker = read_json(marker_path, revive=False)
+        status = (str(marker.get("status") or "").strip().lower()
+                  if isinstance(marker, dict) else "")
+        if status != "complete":
+            why = (str(marker.get("error") or "").strip()
+                   if isinstance(marker, dict) else "")
+            die(f"add-venue: the staging sandbox's _pipeline_done.json records status "
+                f"{status or 'unreadable'!r}"
+                + (f" ({why})" if why else "")
+                + f"; an incomplete or failed session is not published. Nothing was "
+                  f"published to {dest}.", code=1)
+    publish_md = sb / "PUBLISH.md"
+    if os.path.lexists(publish_md):
+        die(f"add-venue: the staging sandbox carries PUBLISH.md, the agent's own record of a "
+            f"publish blocker; refusing to publish its partial artifacts to {dest}.", code=1)
     # The agent works in a sandbox that can only write inside itself; the
     # orchestrator publishes the staged store layout into the shared store.
     # VALIDATE BEFORE PUBLISH: a bad agent-written profile must never replace
@@ -2742,9 +2839,15 @@ def cmd_add_venue(args) -> None:
     staged_profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in (sb / "store", sb)
                            if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()), None)
     if staged_profile is not None:
+        # Agent-written: bound the read and refuse a symlink/FIFO/oversize file
+        # before validation, as every other agent artifact read does (F210).
+        _staged_data = read_json(staged_profile, revive=False)
+        if _staged_data is None:
+            die(f"add-venue: the staged profile {staged_profile.name} is not a readable "
+                f"JSON regular file within the size budget; nothing was published to "
+                f"{dest}", code=1)
         try:
-            VenueProfile(json.loads(staged_profile.read_text(encoding="utf-8")),
-                         origin="add-venue", path=staged_profile)
+            VenueProfile(_staged_data, origin="add-venue", path=staged_profile)
         except (OSError, ValueError, VenueProfileError) as e:
             die(f"add-venue: the staged profile {staged_profile.name} does not validate "
                 f"({e}); nothing was published to {dest}", code=1)
@@ -2771,17 +2874,25 @@ def cmd_add_venue(args) -> None:
     except (OSError, ValueError, VenueProfileError) as exc:
         die("add-venue: repaired profile is invalid; nothing was published: " + str(exc))
     pub = publish_add_venue_staging(sb, dest, vid)
+    if staged_profile is not None and pub["profile"] is None:
+        # The validator accepted a profile the publisher did not find: never
+        # report success with profile=MISSING (F25).
+        die(f"add-venue: the staged profile {staged_profile} validated but was not "
+            f"published; refusing to report success", code=1)
     print(f"[add-venue] staged artifacts published: profile={pub['profile'] or 'MISSING'}, "
           f"README={pub['readme']}, official files={pub['official_files']}, "
           f"exemplar files={pub['manuscript_files']}")
     for note in pub.get("notes") or []:
         print(f"[add-venue] staged note: {note}")
+    _add_venue_root = getattr(args, "root", None)
+    if _add_venue_root:
+        _refresh_venue_module_digest(_add_venue_root, dest)
     if vid in BUILTIN_VENUE_PROFILES:
         try:
-            _published = json.loads((dest / f"{vid}{VENUE_PROFILE_SUFFIX}")
-                                    .read_text(encoding="utf-8"))
+            _published = read_json(dest / f"{vid}{VENUE_PROFILE_SUFFIX}", revive=False)
             _builtin = BUILTIN_VENUE_PROFILES[vid]
-            if (json.dumps(_published, sort_keys=True)
+            if (_published is not None
+                    and json.dumps(_published, sort_keys=True)
                     != json.dumps(_builtin, sort_keys=True)):
                 print(f"[add-venue] NOTE: {vid!r} also has a BUILT-IN fallback and the shipped "
                       f"file now differs from it. A root with NO venue_profiles/{vid}.json "
@@ -2795,13 +2906,25 @@ def cmd_add_venue(args) -> None:
         problems.append(f"{profile_path.name} was not written")
     else:
         try:
-            VenueProfile(json.loads(profile_path.read_text(encoding="utf-8")),
-                         origin="add-venue", path=profile_path)
+            _published = read_json(profile_path, revive=False)
+            if _published is None:
+                problems.append(f"{profile_path.name} is not a readable JSON regular file "
+                                f"within the size budget")
+            else:
+                VenueProfile(_published, origin="add-venue", path=profile_path)
         except (OSError, ValueError, VenueProfileError) as e:
             problems.append(f"{profile_path.name} does not validate: {e}")
     readme = dest / "README.md"
-    if readme.is_file() and vid not in readme.read_text(encoding="utf-8", errors="replace"):
-        problems.append(f"{readme.name} has no row mentioning {vid!r}")
+    if readme.is_file():
+        _readme_text = read_text_bounded(readme)
+        if _readme_text is None:
+            problems.append(f"{readme.name} could not be read as a regular file for the "
+                            f"post-publish row check")
+        elif not any(_readme_has_venue_row(ln, vid)
+                     for ln in _readme_text.splitlines()):
+            # A substring test accepted any mention of the id, so a README with
+            # no row for the venue was reported as fine (F162).
+            problems.append(f"{readme.name} has no row whose first cell is `{vid}`")
     # The store IS the venue_profiles dir here: the exemplar corpus sits next to
     # the profile, not under another venue_profiles/ level.
     ex_dir = dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}"
@@ -2831,6 +2954,10 @@ def cmd_add_venue(args) -> None:
     if report.get("mandatory_sections"):
         print(f"[add-venue] MANDATORY sections (official template): "
               f"{', '.join(report['mandatory_sections'])}")
+    if _add_venue_root:
+        # The template pack lands inside <root>/venue_profiles/ too, so record
+        # the final digest AFTER it is built as well (F103).
+        _refresh_venue_module_digest(_add_venue_root, dest)
     print(f"[add-venue] the official template is AUTHORITATIVE; the recent-practice norm is "
           f"ADVISORY, and the venue profile's own guidelines win over both")
     raise SystemExit(1 if problems else 0)
