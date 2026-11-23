@@ -216,7 +216,7 @@ def redact_secrets(text: str) -> str:
     # A JSON object logged as text still masks its credential-looking string values.
     text = re.sub(
         r'(?i)("(?:api[_-]?key|apikey|key|token|access[_-]?token|auth|'
-        r'authorization|password|secret)"\s*:\s*)"[^"]*"',
+        r'authorization|password|passwd|pwd|secret)"\s*:\s*)"[^"]*"',
         r'\1"[REDACTED]"', text)
     for value in secret_env_values():
         text = text.replace(value, "[REDACTED]")
@@ -5450,6 +5450,22 @@ def email_address_change_problems(before_sources, after_sources, pkg: Path,
     return errs, warns
 
 
+_XML_COMMENT_RE = re.compile(r"<!--(?:[^-]|-(?!->))*-->", re.S)
+
+
+def _mask_xml_comments(xml: str) -> str:
+    """`xml` with every XML comment blanked, length preserved.
+
+    A commented-out element is dead markup: reading it as live style usage,
+    definition, header/footer reference or proofing marker produced a false
+    positive on a package whose real content was clean (F66/F67/F89).
+    """
+    if not xml:
+        return xml or ""
+    return _XML_COMMENT_RE.sub(
+        lambda m: re.sub(r"[^\n]", " ", m.group(0)), xml)
+
+
 def _docx_hf_signature(path: Path) -> dict:
     """What header/footer furniture one DOCX actually carries.
 
@@ -5471,7 +5487,7 @@ def _docx_hf_signature(path: Path) -> dict:
                 # document without furniture: returning {} made _hf_gap treat
                 # the template as requiring nothing and pass vacuously (F122).
                 return unreadable
-            doc = _decode_text_source(raw_doc, "replace")
+            doc = _mask_xml_comments(_decode_text_source(raw_doc, "replace"))
             hf = {}
             for n in names:
                 if not re.search(r"word/(header|footer)\w*\.xml$", n):
@@ -5551,7 +5567,8 @@ def _style_usage(docx: Path) -> set:
         xml = _decode_text_source(raw, "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
-    return {m.group(2) for m in re.finditer(r"""<w:pStyle\b[^>]*\bw:val\s*=\s*(["'])(.*?)\1""", xml) if m.group(2)}
+    return {m.group(2) for m in re.finditer(r"""<w:pStyle\b[^>]*\bw:val\s*=\s*(["'])(.*?)\1""",
+                                           _mask_xml_comments(xml)) if m.group(2)}
 
 
 def _manuscript_front_matter_styles(template: Path) -> set:
@@ -5583,7 +5600,8 @@ def _defined_styles(docx: Path) -> set:
         styles = _decode_text_source(raw, "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
-    return {m.group(2) for m in _STYLE_ID_RE.finditer(styles) if m.group(2)}
+    return {m.group(2) for m in _STYLE_ID_RE.finditer(_mask_xml_comments(styles))
+            if m.group(2)}
 
 
 def _zip_part_too_big(z, name: str) -> bool:
@@ -5954,6 +5972,15 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
     file names (see `_template_docs`).
     """
     out = sb / "out"
+    # A symlinked out/ is not the session's delivered package: walking it read
+    # an outside tree and recorded it as round 1's working original (F65).
+    try:
+        if out.is_symlink() or (out.exists() and not is_within(out.resolve(), sb.resolve())):
+            return {"ok": False,
+                    "errors": ["out/ is a symlink or resolves outside the sandbox: refusing to "
+                               "treat an outside tree as the delivered package"]}
+    except OSError:
+        return {"ok": False, "errors": ["out/ could not be resolved safely"]}
     if not out.is_dir():
         return {"ok": False, "errors": ["out/ is missing: the session produced no package"]}
     # The run's own article-type spellings (from the policy the caller built
@@ -6236,8 +6263,9 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
             # "no styles required", so a rebuilt package passed, and a legal
             # single-quoted output as "all styles missing" (F87). Read the
             # attribute exactly like `_defined_styles`/`_style_usage` already do.
+            # A commented-out style definition is not declared (F89).
             have = {m.group(2) for m in _STYLE_ID_RE.finditer(
-                _decode_text_source(raw, "replace")) if m.group(2)}
+                _mask_xml_comments(_decode_text_source(raw, "replace"))) if m.group(2)}
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError,
                 ValueError):
             style_gap.append({"file": doc.name, "error": "no readable word/styles.xml"})
@@ -6254,7 +6282,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
                 if raw is None:
                     continue
                 want = {m.group(2) for m in _STYLE_ID_RE.finditer(
-                    _decode_text_source(raw, "replace")) if m.group(2)}
+                    _mask_xml_comments(_decode_text_source(raw, "replace"))) if m.group(2)}
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
             continue
         gone = sorted(want - have)

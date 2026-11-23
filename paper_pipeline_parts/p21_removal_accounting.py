@@ -496,8 +496,18 @@ def _reason_denies_movement(reason: str) -> bool:
         r"(?i)\b(?:was|were|is|are|could|can|would|will|has|have|had)\s+"
         r"(?:not|never|cannot)\b[^.;\n]{0,30}\b"
         r"(?:possible|done|performed|carried\s+out|made|allowed|feasible|successful)\b")
-    for clause in re.split(
-            r"(?i)\b(?:and|but|because|while|although|whereas)\b|[.;,]", reason):
+    clauses = re.split(
+        r"(?i)\b(?:and|but|because|while|although|whereas)\b|[.;,]", reason)
+    # An explicit positive survival clause elsewhere in the reason overrides a
+    # negated movement clause: `not moved to Methods, but merged into Results`
+    # states the content survived (F33).
+    _survival = re.compile(
+        r"(?i)\b(?:moved|merged|relocated|incorporated|transferred|folded|"
+        r"integrated|included|absorbed|retained|kept)\b")
+    _negation = re.compile(r"(?i)\b" + negations + r"\b|\bnot\s+(?:only|just)\b")
+    if any(_survival.search(c) and not _negation.search(c) for c in clauses):
+        return False
+    for clause in clauses:
         # "not only moved but also merged" is additive, not a denial.
         if re.search(r"(?i)\bnot\s+(?:only|just)\b", clause):
             continue

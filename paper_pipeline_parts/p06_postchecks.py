@@ -1148,7 +1148,9 @@ def _discovery_decision_cell(line: str, pid: str) -> str:
     if "|" in line:
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         for i, cell in enumerate(cells):
-            if pid not in cell:
+            # The id is matched as a WHOLE token: a substring test let F-1
+            # consume F-10's row/cell (R05).
+            if pid not in set(re.findall(r"\b(?:X|F|AU|R)-\d+\b", cell)):
                 continue
             # The id may share the DECISION cell ("KEPT-BASE: preserves X-001").
             if _DISCOVERY_DECISION_START_RE.match(cell):
@@ -1162,13 +1164,19 @@ def _discovery_decision_cell(line: str, pid: str) -> str:
             for cand in cells[i + 1:]:
                 if _DISCOVERY_NEGATED_RE.search(cand):
                     continue
+                # A later cell that NAMES a different X-/finding id is that
+                # id's disposition, not this one's (F13); ids are compared as
+                # whole tokens so F-10 is not credited to F-1 (R05).
+                _cand_ids = set(re.findall(r"\b(?:X|F|AU|R)-\d+\b", cand))
+                if _cand_ids and pid not in _cand_ids:
+                    continue
                 if _DISCOVERY_DECISION_START_RE.match(cand) \
                         or _DISCOVERY_DECISIONS_RE.search(cand):
                     return cand
             return ""
         return ""
-    i = line.find(pid)
-    return "" if i < 0 else line[i + len(pid):]
+    _m = re.search(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])", line)
+    return "" if _m is None else line[_m.end():]
 
 
 def discovery_ledger_missing(ledger_text: str, ids) -> list:
@@ -2070,6 +2078,13 @@ _COVERAGE_NOWORK_RE = re.compile(
     r"|\b(?:work|check|sweep|pass|review|audit|scan)\s+(?:was|were|is|are)\s+"
     r"(?:not\s+(?:done|performed|run|completed)|skipped|deferred)\b"
     r"|\b(?:could|can)\s+not\s+(?:check|verify|review|examine|inspect)\s+anything\b)")
+# A no-work token is never a named reason: `unable -- pending` and
+# `clean -- basis: no work done` say the sweep did not run. This is checked for
+# `unable` rows too, which the negated-check test deliberately skips (F03).
+_COVERAGE_NOWORK_TOKEN_RE = re.compile(
+    r"(?i)\b(?:pending|not\s+attempted|not\s+done|no\s+work\s+(?:was\s+)?done|"
+    r"no\s+analysis\s+(?:was\s+)?performed|nothing\s+(?:was\s+)?(?:done|checked)|"
+    r"checked\s+nothing|did\s+nothing|unable\s+to\s+(?:check|verify|review))\b")
 _COVERAGE_NAMED_BASIS_RE = re.compile(
     r"(?i)(?:basis\s*:|unable\s*(?:--|—|–)"
     r"|out\s+of\s+scope\s*(?:--|—|–))\s*(.*)$")
@@ -2114,7 +2129,8 @@ def _coverage_reason_named(reason, allow_negated: bool = False) -> bool:
     # named reason; the old length-only test counted its two letters and passed.
     if not reason or re.fullmatch(
             r"(?i)ok|okay|yes|y|done|checked|clean|good|fine|pass|passed|true|false|"
-            r"nil|null|no|none|n/?a|na|tbd|todo|unknown|"
+            r"nil|null|no|none|n/?a|na|tbd|todo|unknown|verified|reviewed|"
+            r"examined|inspected|performed|attempted|complete|completed|pending|"
             # `out of scope -- not applicable` / `unable -- not applicable` is a
             # refusal, not a named reason: refuse it like every other filler.
             r"not\s+applicable|not-applicable|inapplicable", reason):
@@ -2128,6 +2144,10 @@ def _coverage_reason_named(reason, allow_negated: bool = False) -> bool:
         return False
     # A reason that negates the check's own verdict contradicts it -- except in
     # an `unable -- <reason>` row, where the negation is the disposition.
+    # A no-work token is refused for EVERY disposition (including `unable`):
+    # it records that no work happened, not a named reason (F03).
+    if _nowork_token_is_reason(reason):
+        return False
     if not allow_negated and (_COVERAGE_NEGATED_CHECK_RE.search(reason)
                               or _COVERAGE_NOWORK_RE.search(reason)):
         return False
@@ -2170,6 +2190,7 @@ def _coverage_disposition_ok(value) -> bool:
         if _COVERAGE_NEGATED_CHECK_RE.search(_tail) \
                 or _COVERAGE_COUNT_NEGATED_RE.search(_tail) \
                 or _COVERAGE_NOWORK_RE.search(_tail) \
+                or _nowork_token_is_reason(_tail) \
                 or re.search(
                     r"(?i)^[\s;:,.-]*(?:see\s+(?:above|below|here|there|prior|previous|"
                     r"report|details?)|as\s+(?:discussed|above|before|noted|stated))[.!]?\s*$",
@@ -3617,18 +3638,21 @@ def _discovery_status_cells(row) -> list:
     return out
 
 
-def _unable_reason_present(rest: str) -> bool:
-    """True when an `unable -- ...` status states a reason (>= 2 words).
-
-    The token list is case-insensitive: an all-caps reason ("HPC QUOTA
-    EXCEEDED") is exactly as usable as a lowercase one, and the old
-    `[0-9a-z]+` read it as no reason at all and failed a valid session.
-    """
-    return len(re.findall(r"[0-9A-Za-z]+", rest or "")) >= 2
-
-
 # Placeholder class labels the D1 gate refuses: a row must name an issue CLASS,
 # not merely contain a four-letter filler token (F104).
+# Function words / generic deictics are not class names; a table of 25
+# identical `this` rows counted as 25 named classes before (F15).
+_DISCOVERY_GAP_GENERIC_WORDS = frozenset({
+    "a", "am", "an", "and", "another", "are", "as", "at", "be", "been", "both",
+    "but", "by", "can", "could", "did", "do", "does", "doing", "done", "each",
+    "every", "for", "from", "had", "has", "have", "he", "her", "here", "him",
+    "his", "how", "i", "if", "in", "into", "is", "it", "its", "just", "like",
+    "me", "more", "most", "my", "no", "nor", "not", "of", "on", "only", "or",
+    "other", "our", "out", "over", "same", "she", "should", "so", "some", "such",
+    "than", "that", "the", "their", "them", "then", "there", "these", "they",
+    "this", "those", "through", "to", "too", "under", "up", "us", "very", "was",
+    "we", "were", "what", "when", "where", "which", "while", "who", "whom",
+    "why", "will", "with", "would", "you", "your"})
 _DISCOVERY_GAP_PLACEHOLDER_WORDS = frozenset({
     "none", "null", "n/a", "tbd", "todo", "test", "tests", "placeholder",
     "xxx", "xxxx", "stuff", "thing", "things", "misc", "other", "others"})
@@ -3651,8 +3675,12 @@ def discovery_gap_summary(sb: Path) -> dict:
             if re.search(r"(?i)\b(?:uncovered|covered|not[- ]covered|partially covered|"
                          r"no check)\b", t):
                 continue
-            if any(len(w) >= 4 and w.lower() not in _DISCOVERY_GAP_PLACEHOLDER_WORDS
-                   for w in re.findall(r"[A-Za-z]{2,}", t)):
+            # A generic deictic (`this`) is not a CLASS; one SPECIFIC term
+            # (a real class name) is enough (F15).
+            terms = {w.lower() for w in re.findall(r"[A-Za-z]{2,}", t)
+                     if w.lower() not in _DISCOVERY_GAP_PLACEHOLDER_WORDS
+                     and w.lower() not in _DISCOVERY_GAP_GENERIC_WORDS}
+            if terms:
                 return True
         return False
 
@@ -5047,20 +5075,6 @@ def m1b_row_count(m1_md: str) -> int:
     return len(_m1b_table(m1_md)[1])
 
 
-def _is_recorded_reason(cell: str) -> bool:
-    """Is this disposition cell a reason rather than a bare verdict word?
-
-    Length alone is not a reason: `OK — see above` is 13 characters and names
-    nothing, so the shared verdict/filler closure is applied too (F049).
-    """
-    text = re.sub(r"\s+", " ", str(cell or "")).strip()
-    if len(text) < 12 or re.search(r"[A-Za-z]{3}", text) is None:
-        return False
-    if _disposition_filler_closure(text):
-        return False
-    return True
-
-
 def m1b_rows_disposed(m1_md: str) -> bool:
     """Does the M1b table dispose every one of its own rows with a reason?
 
@@ -5507,6 +5521,11 @@ def _structured_output_scan(ctx: Ctx, rec: dict) -> tuple:
     probs, notes = [], []
     for rel, p in structured_output_files(sb, rec):
         inherited = False
+        if p.is_symlink():
+            # Refuse BEFORE hashing: `sha256_file(p)` opened the planted link's
+            # target even though the file was then rejected (F19).
+            probs.append(_structured_problem_for(rel, p))
+            continue
         if rel not in contract:
             try:
                 dig = sha256_file(p)
@@ -7625,31 +7644,6 @@ _DISPOSITION_FILLER_TAIL_RE = re.compile(
     r"it\s+was\s+(?:checked|verified|reviewed|examined)|"
     r"was\s+(?:checked|verified|reviewed|examined))|"
     r"[-—–_.:;,\s]+)$")
-
-
-# A cell that is ONLY a separator or a bare filler token ("-", "\u2014", "n/a",
-# "none", "TBD") is an empty disposition, not a reason: the bare-closure test
-# above fires only for verdict words, so a short table could be "disposed" with
-# `-` and pass (F45). `m1b_rows_disposed` already reads these tokens as NOT
-# disposed, and the gate must share that contract.
-_DISPOSITION_FILLER_ONLY_RE = re.compile(
-    r"(?i)^[-\u2014\u2013_.:,;\s]*(?:x+|n/?a|none|nil|null|tbd|todo)?"
-    r"[-\u2014\u2013_.:,;\s]*$")
-
-
-def _disposition_is_filler_only(cell: str) -> bool:
-    """True for a disposition cell that is only a separator or a filler token."""
-    return bool(_DISPOSITION_FILLER_ONLY_RE.match(str(cell or "").strip()))
-
-
-def _disposition_filler_closure(cell: str) -> bool:
-    """True for a verdict whose reason tail is only a separator or filler token."""
-    text = re.sub(r"\s+", " ", str(cell or "")).strip()
-    m = _DISPOSITION_VERDICT_PREFIX_RE.match(text)
-    if m is None:
-        return False
-    tail = text[m.end():].strip()
-    return bool(tail) and bool(_DISPOSITION_FILLER_TAIL_RE.match(tail))
 
 
 def short_row_indexes(rows: list, widths, header_width: int) -> list:

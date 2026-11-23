@@ -54,7 +54,13 @@ def cmd_setup(args) -> None:
         die("--venue needs a venue id; an explicitly empty value is not 'use the default'",
             code=2)
     venue_profile_file = str(getattr(args, "venue_profile", None) or "").strip()
-    journal_arg = str(getattr(args, "journal", None) or "").strip()
+    _raw_journal = getattr(args, "journal", None)
+    journal_arg = str(_raw_journal or "").strip()
+    if _raw_journal is not None and not journal_arg:
+        # `--journal ''` was silently read as "flag absent" and recorded the
+        # profile default; refuse it like `--venue ''` (F29).
+        die("--journal needs a journal name; an explicitly empty value is not 'use the "
+            "profile default'", code=2)
     if journal_arg:
         # The same one-line/160-character rule `set-journal`/`set-venue` apply:
         # setup is the ONLY route that reached the config (and every stage

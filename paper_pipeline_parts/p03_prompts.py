@@ -359,7 +359,10 @@ def pipeline_fallback_paths() -> list:
         # The pipeline's OWN file: read with the default revive (its Infinity/NaN
         # sentinels must survive), never leniently -- a state file that does not
         # parse exactly is not guessed at.
-        state = read_json(module_path.parent / "state.json")
+        # State is the pipeline's OWN registry: read it with the state cap
+        # (256 MiB), not the 64 MiB agent-output cap, or a valid large registry
+        # looked like "no usable state" and the fallback vanished (F69).
+        state, _state_problem = load_state_file(module_path.parent / "state.json")
     except Exception:                                           # noqa: BLE001
         # A prompt must never fail to render because a state file is unreadable.
         return []

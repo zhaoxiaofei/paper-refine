@@ -504,9 +504,20 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
             continue
         sheets.append(rec)
     newest = {}
+
+    def _usable(rec) -> bool:
+        sj = rec.get("scores")
+        return isinstance(sj, dict) and bool(sj.get("comparisons"))
+
     for rec in sorted(sheets, key=lambda x: (str(x.get("finished") or x.get("created") or ""),
                                              str(x.get("id")))):
-        newest[(rec.get("target_id"), rec.get("judge_index"))] = rec
+        key = (rec.get("target_id"), rec.get("judge_index"))
+        prev = newest.get(key)
+        # A NEWER EMPTY sheet must not supersede a valid older one (F22); it is
+        # kept only when there is no usable sheet for the slot, so the coverage
+        # count still reports it as unreadable.
+        if prev is None or _usable(rec) or not _usable(prev):
+            newest[key] = rec
     opinions = []
     listed = 0
     unreadable_sheets = 0
@@ -522,7 +533,7 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
         if target not in field_ids:
             continue
         sj = rec.get("scores")
-        if not isinstance(sj, dict):
+        if not isinstance(sj, dict) or not (sj.get("comparisons") or []):
             unreadable_sheets += 1
             continue
         lm = rec.get("label_map") or {}

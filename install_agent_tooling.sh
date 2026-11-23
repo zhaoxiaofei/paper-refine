@@ -841,7 +841,13 @@ if [ "$claude_enabled" = 1 ]; then
                     ;;
                 stale)
                     backup_claude_config
-                    "$claude_cli" mcp remove --scope user "$name" >/dev/null 2>&1 || true
+                    # The state says the row EXISTS: a failed remove is fatal
+                    # (the file's no-`|| true` policy), and adding on top of a
+                    # stale row would leave two entries (F85).
+                    if ! "$claude_cli" mcp remove --scope user "$name" >/dev/null 2>&1; then
+                        echo "error: could not remove the stale Claude Code MCP server $name" >&2
+                        exit 1
+                    fi
                     "$claude_cli" mcp add --scope user "$name" -- "$command" "$script"
                     echo "repointed claude MCP server: $name -> $script"
                     ;;

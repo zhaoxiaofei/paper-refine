@@ -1144,7 +1144,12 @@ def main():
     # must not survive as stale generated text in the same work directory
     # (F40). Only the generated corpus/evidence trees are removed.
     for _generated in (corpus_dir, evidence_dir):
-        if os.path.isdir(_generated):
+        # `rmtree` ignores a directory SYMLINK and `makedirs(exist_ok=True)`
+        # then accepts it, so converted text was written through the link
+        # (F76). Unlink the link itself; only a real directory is removed.
+        if os.path.islink(_generated):
+            os.unlink(_generated)
+        elif os.path.isdir(_generated):
             shutil.rmtree(_generated, ignore_errors=True)
     os.makedirs(corpus_dir, exist_ok=True)
     os.makedirs(evidence_dir, exist_ok=True)

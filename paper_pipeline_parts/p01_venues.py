@@ -1717,10 +1717,20 @@ def _name_is_article_type_manuscript(name, type_names=()) -> bool:
             continue
         if norm == t:
             return True
-        if norm.startswith(t + " ") \
-                and re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}",
-                                 norm[len(t) + 1:]):
-            return True
+        if norm.startswith(t + " "):
+            rest = norm[len(t) + 1:]
+            if re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}", rest):
+                return True
+            # The pipeline's own revision token (7 hex), a `.final`/`_final`
+            # spelling and a combined form are version suffixes too; without
+            # this, a renamed article-type manuscript fell through to the
+            # `letter` -> cover branch (F64).
+            if re.fullmatch(r"(?:final|draft|revised|revision)", rest):
+                return True
+            if re.fullmatch(r"[0-9a-f]{7}", rest.replace(" ", "")):
+                return True
+            if re.fullmatch(r"(?:final|draft|revised) ?[0-9a-f]{7}", rest):
+                return True
     return False
 
 
@@ -4268,4 +4278,10 @@ def without_raw_data(m: dict) -> dict:
 
     files = {k: v for k, v in (m or {}).get("files", {}).items()
              if not _raw_data_only(k)}
-    return {"files": files, "count": len(files)}
+    # Preserve the manifest's COVERAGE keys (`unreadable_dirs`, ...): dropping
+    # them made a partially walked winner compare equal to its complete pin,
+    # and an unreadable subtree disappeared from the integrity comparison (F68).
+    out = {k: v for k, v in (m or {}).items() if k not in ("files", "count")}
+    out["files"] = files
+    out["count"] = len(files)
+    return out

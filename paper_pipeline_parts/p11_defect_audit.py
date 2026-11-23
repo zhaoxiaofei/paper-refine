@@ -151,6 +151,11 @@ def _defect_audit_reason_ok(reason) -> bool:
     # A basis names what was checked and why the label holds. After the filler
     # words are dropped, one repeated content word is still no basis, so require
     # two distinct content words (F099).
+    # A no-work sentence (`not attempted`, `unable to check`, `pending`) names
+    # no basis: the TP label would be certified without any work (F06). A named
+    # reason that merely mentions the word and cites a location is real (R06).
+    if _nowork_token_is_reason(text):
+        return False
     words = [w for w in text.split()
              if not _DEFECT_AUDIT_FILLER_TOKEN_RE.match(w)]
     content = [w for w in words if re.search(r"[A-Za-z0-9]", w)]

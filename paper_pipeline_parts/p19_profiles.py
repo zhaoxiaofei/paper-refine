@@ -557,7 +557,9 @@ def _cold_start_findings_md(rows: list, level: int = 1) -> str:
         if status:
             lines.append(f"{field}- Status: {status}")
         verifier = row.get("verifier")
-        if isinstance(verifier, dict) and verifier.get("computed"):
+        # A verifier that COMPUTED 0 is a real result; a truthiness test
+        # dropped it from the markdown while the JSON row carried it (F28).
+        if isinstance(verifier, dict) and verifier.get("computed") is not None:
             lines.append(f"{field}- Verifier: `{verifier.get('script')}` -> "
                          f"`{verifier.get('computed')}`")
         blocks.append("\n".join(lines))

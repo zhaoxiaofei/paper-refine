@@ -607,10 +607,18 @@ def dsh_argv(cfg: dict) -> tuple:
     home, err = ensure_dsh_home()
     if err:
         return [], {}, err
-    fd, patch = tempfile.mkstemp(prefix="paper-qwen-", suffix=".patch.yml")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(dsh_patch_text(cfg))
+    try:
+        fd, patch = tempfile.mkstemp(prefix="paper-qwen-", suffix=".patch.yml")
+    except OSError as exc:
+        return [], {}, f"could not create the DSH patch file: {exc}"
+    # Record the path BEFORE writing: a failed write is then cleaned up by
+    # `_cleanup()` instead of leaving a partial patch behind (F80).
     _PATCH_TMP = patch
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(dsh_patch_text(cfg))
+    except OSError as exc:
+        return [], {}, f"could not write the DSH patch file: {exc}"
     env = dict(os.environ, DSH_HOME=home, PAPER_QWEN_API_KEY=cfg["api_key"])
     return (_build_dsh_argv(patch_path=patch, extra_args=("-",)), env, "")
 

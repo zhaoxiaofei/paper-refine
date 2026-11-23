@@ -1323,7 +1323,7 @@ def display_area_kinds(paras: list) -> list:
     for _, _, para in paras:
         text = text_of(para).strip()
         style = _para_style(para)
-        heading = bool(style and style.startswith("Heading"))
+        heading = bool(_style_kind(style))
         if heading:
             if FIGURES_HEADING_RE.match(text):
                 area = "figure"
@@ -1345,9 +1345,19 @@ def _caption_continuation(para: str) -> bool:
     if "<w:sectPr" in para:
         return False
     style = _para_style(para)
-    if style.startswith("Heading") or style == "Bibliography":
+    if _style_kind(style) or style == "Bibliography":
         return False
-    if caption_label_kind(text_of(para)):
+    text = text_of(para).strip()
+    if caption_label_kind(text):
+        return False
+    # Returning True for EVERY paragraph made a caption block swallow the
+    # ordinary body prose that follows it inside a figures/tables area (F42).
+    # A continuation is short and, when it reads as a full sentence, is not a
+    # continuation at all.
+    words = len(text.split())
+    if words > 30:
+        return False
+    if words > 12 and re.search(r"[.!?][\"'\u2019\u201d)\]]*\s*$", text):
         return False
     return True
 
@@ -1894,7 +1904,7 @@ def display_item_rows(xml: str, policy: dict, doc: str, kind: str) -> tuple:
         j = i - 1
         while j >= 0:
             st = styles.get(j) or ""
-            if st.startswith("Heading") and texts.get(j):
+            if _style_kind(st) and texts.get(j):
                 return texts[j]
             j -= 1
         return ""
@@ -2155,7 +2165,7 @@ def layout_consistency_rows(xml: str, paras: list, title_block_end, doc: str) ->
     # family ends at the first heading after the keywords line (Introduction ...).
     kw_i = keywords_paragraph(paras)[0]
     heading_after_kw = next((i for i in range((kw_i + 1) if kw_i is not None else 0, len(paras))
-                             if styles_of[i].startswith("Heading")), None)
+                             if _style_kind(styles_of[i])), None)
     # A directly formatted Introduction carries no Heading style. The front
     # matter still ends after the Keywords line; falling back to 0 counted the
     # flush abstract as a body paragraph and named it the indentation minority.
@@ -2169,7 +2179,7 @@ def layout_consistency_rows(xml: str, paras: list, title_block_end, doc: str) ->
         if not text:
             continue
         style = para_style(p) or ""
-        if style.startswith("Heading") or style == "Bibliography":
+        if _style_kind(style) or style == "Bibliography":
             continue
         if title_block_end is not None and i < title_block_end:
             continue
@@ -2377,8 +2387,13 @@ def cover_letter_stamp_rows(path: Path, policy: dict) -> list:
             # XML allows either quote character and whitespace around `=`:
             # read every pStyle element's w:val through the shared accessor so
             # a legal '<w:pStyle w:val='TitleMSS'/>' is not read as absent.
+            # Read LIVE styles only: a commented-out pStyle or one inside a
+            # `w:pPrChange` record is not formatting the letter carries (F40).
+            _scan = _mask_noncontent(xml)
+            _scan = _blank_spans(
+                _scan, [(m.start(), m.end()) for m in _REVISION_RECORD_RE.finditer(_scan)])
             used_styles = {v for v in (attr_of(m.group(0), "w:val") for m in
-                                       re.finditer(r"<w:pStyle\b[^>]*>", xml)) if v}
+                                       re.finditer(r"<w:pStyle\b[^>]*>", _scan)) if v}
             if want_parts:
                 for name in pkg.namelist():
                     if not re.match(r"word/(?:header|footer)\w*\.xml$", name):
@@ -2423,7 +2438,9 @@ def cover_letter_stamp_rows(path: Path, policy: dict) -> list:
 # normalised to `H1`..`H9` so a template's `Heading 1` matches a manuscript's
 # `Heading1`.
 
-_HEADING_STYLE_RE = re.compile(r"heading[\s_-]*([1-9])\b", re.I)
+# Word's own id is `Heading1`, but a legal producer may write `heading1`,
+# `H1` or the bare level number; all name the same heading style (F43).
+_HEADING_STYLE_RE = re.compile(r"(?<![A-Za-z])(?:heading[\s_-]*|h)([1-9])\b", re.I)
 
 
 def _para_style(para: str) -> str:
@@ -2432,8 +2449,13 @@ def _para_style(para: str) -> str:
 
 def _style_kind(style: str) -> str:
     """`H<n>` for a heading style id, '' otherwise (style ids are venue data)."""
-    m = _HEADING_STYLE_RE.search(style or "")
-    return f"H{m.group(1)}" if m else ""
+    text = style or ""
+    m = _HEADING_STYLE_RE.search(text)
+    if m:
+        return f"H{m.group(1)}"
+    if re.fullmatch(r"[1-9]", text.strip()):
+        return f"H{text.strip()}"
+    return ""
 
 
 def _style_key(style: str) -> str:
@@ -3598,6 +3620,7 @@ def _median(values: list) -> float:
 
 
 _OCR_HEIGHT_CACHE: dict = {}
+_OCR_HEIGHT_CACHE_MAX = 64
 
 
 def _ocr_word_heights(data: bytes) -> list:
@@ -3616,15 +3639,17 @@ def _ocr_word_heights(data: bytes) -> list:
     if key and key in _OCR_HEIGHT_CACHE:
         return _OCR_HEIGHT_CACHE[key]
     try:
-        proc = subprocess.run(
-            ["tesseract", "stdin", "stdout", "--psm", "11", "tsv"],
-            input=data, capture_output=True, timeout=180)
+        # A bounded runner caps the child's output and kills its process group
+        # on timeout; `capture_output` allocated every byte tesseract printed
+        # (F58).
+        rc, stdout, _stderr = _run_text_tool(
+            ["tesseract", "stdin", "stdout", "--psm", "11", "tsv"], 180, data=data)
     except (OSError, subprocess.SubprocessError):
         return []
-    if proc.returncode != 0 or not proc.stdout:
+    if rc != 0 or not stdout:
         return []
     out = []
-    for line in proc.stdout.decode("utf-8", "replace").splitlines()[1:]:
+    for line in stdout.splitlines()[1:]:
         cols = line.split("\t")
         if len(cols) < 12:
             continue
@@ -3637,6 +3662,10 @@ def _ocr_word_heights(data: bytes) -> list:
         if conf >= 50 and text and len(text) >= 1 and 3 <= h <= 200:
             out.append(h)
     if key:
+        # The cache is process-lifetime and keyed by image hash: without a cap
+        # a scan of many unique rasters grew it without limit (F58).
+        if len(_OCR_HEIGHT_CACHE) >= _OCR_HEIGHT_CACHE_MAX:
+            _OCR_HEIGHT_CACHE.pop(next(iter(_OCR_HEIGHT_CACHE)), None)
         _OCR_HEIGHT_CACHE[key] = out
     return out
 

@@ -121,27 +121,30 @@ def try_engine_api(mod, base, revised, out):
         if cls is None:
             continue
         tmp_cache = None
-        for use_tmp in (False, True):
-            cache = None
-            if use_tmp:
-                if tmp_cache is None:
-                    tmp_cache = tempfile.mkdtemp(prefix="paper-redlines-")
-                cache = tmp_cache
-            try:
-                data, _stdout, _stderr = (cls(cache) if cache else cls()).run_redline(
-                    "paper-refine", base, revised)
-            except Exception as exc:                                # noqa: BLE001
-                print("python_redlines.%s failed: %s" % (eng_name, exc), file=sys.stderr)
-                continue
-            if data:
-                write_out(out, data)
-                if wrote(out):
-                    if tmp_cache:
-                        shutil.rmtree(tmp_cache, ignore_errors=True)
-                    print("python-redlines:%s.run_redline" % eng_name)
-                    return True
-        if tmp_cache:
-            shutil.rmtree(tmp_cache, ignore_errors=True)
+        try:
+            for use_tmp in (False, True):
+                cache = None
+                if use_tmp:
+                    if tmp_cache is None:
+                        tmp_cache = tempfile.mkdtemp(prefix="paper-redlines-")
+                    cache = tmp_cache
+                try:
+                    data, _stdout, _stderr = (cls(cache) if cache else cls()).run_redline(
+                        "paper-refine", base, revised)
+                except Exception as exc:                            # noqa: BLE001
+                    print("python_redlines.%s failed: %s" % (eng_name, exc), file=sys.stderr)
+                    continue
+                if data:
+                    # `write_out` exits via fail()/SystemExit on a write error,
+                    # which `except Exception` does not catch; the finally keeps
+                    # the fallback cache from leaking on that path (F79).
+                    write_out(out, data)
+                    if wrote(out):
+                        print("python-redlines:%s.run_redline" % eng_name)
+                        return True
+        finally:
+            if tmp_cache:
+                shutil.rmtree(tmp_cache, ignore_errors=True)
     return False
 
 

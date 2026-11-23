@@ -510,6 +510,12 @@ PIPELINE_REQUIRED_PARTS = (
     "paper_docx_format_parts/p03_report_cli.py",
 )
 PIPELINE_REQUIRED_ASSET_FILES = (
+    # The adapters import these three unconditionally at module load; omitting
+    # them let a trimmed bundle pass the freeze preflight and die later with
+    # ModuleNotFoundError (F02).
+    "agent-common/agent_common/__init__.py",
+    "agent-common/agent_common/agent_cli.py",
+    "agent-common/agent_common/chat.py",
     "agent-common/agent_common/model_runtime.py",
     "agent-common/agent_common/llm_retry.py",
     "agent-common/agent_common/llm_policy.json",

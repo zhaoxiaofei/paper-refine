@@ -2431,8 +2431,13 @@ def prefer_rewrite_allowed(ctx=None, rec=None) -> bool:
     the context. This is the same binding rule as `content_edit_policy_allowed`.
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
-    if isinstance(policy, dict) and PREFER_REWRITE_OVER_DELETION in policy:
-        return content_edit_prefer_flag(policy[PREFER_REWRITE_OVER_DELETION])
+    if isinstance(policy, dict):
+        if PREFER_REWRITE_OVER_DELETION in policy:
+            return content_edit_prefer_flag(policy[PREFER_REWRITE_OVER_DELETION])
+        # The record was written with prefer OFF (the record omits the key for
+        # that historical default). Falling back to a later invocation's ON
+        # config judged the stage under a policy its prompt never stated (F71).
+        return False
     return prefer_rewrite_over_deletion(ctx)
 
 
@@ -4934,6 +4939,8 @@ def _manual_csv_matches(path: Path, rows: list) -> bool:
     expected = [list(MANUAL_TODO_COLUMNS)] + [
         [r[c] for c in MANUAL_TODO_COLUMNS] for r in _manual_todo_csv_rows(rows)]
     try:
+        if path.is_symlink():
+            return False
         if path.stat().st_size > MANUAL_TODO_MAX_BYTES:
             return False
         with open(path, "r", encoding="utf-8-sig", newline="") as f:

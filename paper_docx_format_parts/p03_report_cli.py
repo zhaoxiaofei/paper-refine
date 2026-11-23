@@ -102,6 +102,15 @@ def _output_path_problem(out, protected=()) -> str:
             return "it is a directory, not a report file"
     except OSError:
         pass
+    # The destination itself is checked above; a SYMLINKED PARENT escapes just
+    # as effectively because `mkdir`/`mkstemp(dir=...)` follow it (F63). Refuse
+    # any symlinked path component.
+    for _anc in (o.parent, *o.parent.parents):
+        try:
+            if _anc.is_symlink():
+                return f"a parent directory ({_anc}) is a symlink; refusing to write through it"
+        except OSError:
+            continue
     try:
         o_real = o.resolve()
     except OSError:
@@ -258,7 +267,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                 fix=("manual" if idx in in_table or "<w:sectPr" in para else None))
         ppr = ppr_of(para)
         style = ppr_style(ppr)
-        if style and style.startswith("Heading"):
+        if _style_kind(style):
             if policy["heading_keep_with_next"] and not is_on(ppr, "keepNext"):
                 row("FMT-T3a", "medium", f"p{idx}", f"heading {text[:40]!r} has no keepNext",
                     "headings can be orphaned at the bottom of a page; add keepNext + keepLines")
@@ -507,7 +516,10 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
         row("FMT-T1", "medium", "document",
             f"mixed quotation marks: {n_straight} straight vs {n_curly} curly",
             "use one apostrophe/quote style throughout", )
-    words = max(1, len(re.findall(r"\S+", full)))
+    # A spaced em dash (or any punctuation-only token) is not a word: counting
+    # it in the denominator understated the very density being measured (F52).
+    words = max(1, sum(1 for _tok in re.findall(r"\S+", full)
+                       if re.search(r"[A-Za-z0-9]", _tok)))
     em = full.count(EM)
     density = em * 1000.0 / words
     if density > policy["max_em_dashes_per_1000"]:
@@ -572,7 +584,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # left `_tab_depth` stuck at 1 after a legal `</w:tabs >`, so every later
     # run-level `<w:tab/>` was misread as a tab-stop DEFINITION.
     for _tok in re.finditer(r"<w:tabs(?=[\s/>])[^>]*>|</w:tabs\s*>|<w:tab(?=[\s/>])[^>]*/>",
-                            xml):
+                            _mask_noncontent(xml)):
         _raw = _tok.group(0)
         if _raw.startswith("</"):
             _tab_depth = max(0, _tab_depth - 1)
@@ -598,7 +610,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # heading) that scan, hygiene and the fixer all use.
     para_is_ref = ref_flags
     para_is_ref_rows = ref_flags
-    para_is_head = [bool((para_style(p[2]) or "").startswith("Heading"))
+    para_is_head = [bool(_style_kind(para_style(p[2])))
                     for p in paras]
     # A caption/legend paragraph is not a display-item CALL-OUT: the ordering
     # rule below (FMT-O1) reads the prose, so the caption blocks are excluded the
@@ -823,7 +835,7 @@ def _kill_tool_group(proc) -> None:
         pass
 
 
-def _run_text_tool(argv, timeout: int, cwd=None) -> tuple:
+def _run_text_tool(argv, timeout: int, cwd=None, data: bytes = None) -> tuple:
     """Run a child with output bounded in size AND lifetime.
 
     The old version pointed stdout/stderr at unbounded TemporaryFiles and
@@ -835,7 +847,9 @@ def _run_text_tool(argv, timeout: int, cwd=None) -> tuple:
     stream raises `ToolOutputOverBudget` as before.
     """
     cap = MAX_TOOL_OUTPUT_BYTES
-    proc = subprocess.Popen([str(a) for a in argv], cwd=cwd, stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen([str(a) for a in argv], cwd=cwd,
+                            stdin=(subprocess.PIPE if data is not None
+                                   else subprocess.DEVNULL),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             **_tool_popen_kwargs())
     over_budget = threading.Event()
@@ -871,6 +885,14 @@ def _run_text_tool(argv, timeout: int, cwd=None) -> tuple:
                threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)]
     for thread in readers:
         thread.start()
+    # Feed stdin AFTER the stdout/stderr readers are running: a child that
+    # writes before it reads cannot deadlock the write.
+    if data is not None:
+        try:
+            proc.stdin.write(data)
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
     timed_out = False
     try:
         proc.wait(timeout=timeout)
@@ -1035,7 +1057,8 @@ def analyse_package(path: Path, policy: dict) -> dict:
     # `attr_of` accepts single- or double-quoted attributes; OOXML permits both.
     prefixes = _rel_prefixes(xml) or {"r"}
     ref_ids = {_attached_template_rid(m.group(0), prefixes)
-               for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>", xml)}
+               for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>",
+                                    _mask_noncontent(xml))}
     ref_ids.discard(None)
     referenced = {part_targets[rid] for rid in ref_ids if rid in part_targets}
     res["rows"].extend(page_field_rows(
@@ -1713,7 +1736,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
     for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
         ppr = ppr_of(para)
         style = ppr_style(ppr)
-        if not style or not style.startswith("Heading"):
+        if not _style_kind(style):
             continue
         new_para = para
         if policy["heading_keep_with_next"] and not is_on(ppr, "keepNext"):
@@ -1966,10 +1989,18 @@ def fix_document(xml: str, styles: dict, policy: dict,
             opening = block[:block.find(">") + 1]
             # An internal cross-reference (`w:anchor`) or a location in another
             # document (`w:docLocation`) is navigation, not a URL: flattening it
-            # destroyed the reference although no FMT-T7 row fired.
-            if "w:anchor=" in opening or "w:docLocation=" in opening:
+            # destroyed the reference although no FMT-T7 row fired. Read the
+            # attributes with the shared parser: a legal `w:anchor = "s1"`
+            # (whitespace around `=`) was not the exact substring and the
+            # internal link was flattened (F37).
+            if attr(opening, "anchor") is not None or attr(opening, "docLocation") is not None:
                 continue
-            inner = block[block.find(">") + 1:block.rfind("</w:hyperlink>")]
+            # The opening regex accepts a legal whitespace-closed
+            # `</w:hyperlink >`; slicing with `rfind("</w:hyperlink>")` returned
+            # -1 for that spelling and dropped the close's `>`, emitting
+            # malformed XML (F36).
+            _close = re.search(r"</w:hyperlink\s*>", block)
+            inner = block[block.find(">") + 1:_close.start()]
             # Strip only the LIVE rPr segments: `w:rPrChange` is the tracked
             # change's formatting HISTORY and must stay byte-identical (the run
             # loop below splits on it for exactly this reason).
@@ -2098,10 +2129,13 @@ def fix_document(xml: str, styles: dict, policy: dict,
         if new != xml:
             xml = new
             changes.append(f"normalized quotation marks (policy: {policy['quote_style']})")
-    if policy["strip_proofing_markers"] and PROOFERR_RE.search(xml):
-        n = len(PROOFERR_RE.findall(xml))
-        xml = PROOFERR_RE.sub("", xml)
-        changes.append(f"removed {n} proofing marker(s) (w:proofErr)")
+    if policy["strip_proofing_markers"]:
+        live_proof = [(m.start(), m.end(), "")
+                      for m in PROOFERR_RE.finditer(_mask_noncontent(xml))]
+        if live_proof:
+            n = len(live_proof)
+            xml = apply_edits(xml, live_proof)
+            changes.append(f"removed {n} proofing marker(s) (w:proofErr)")
 
     # 9. text-level consistency: citations / spelling / hyphenation ------------
     # These DO change document text, so each edit is recorded and the fixer's
@@ -2575,11 +2609,14 @@ def validate_package(path: Path):
     if not exe:
         return None, "docx CLI not on PATH: schema check skipped"
     try:
-        proc = subprocess.run([exe, "validate", str(path)], capture_output=True, text=True, timeout=300)
+        # The validator runs on an untrusted DOCX: its output must be capped
+        # and its process group killed on timeout, like every other tool call
+        # in this module (F59).
+        rc, out, err = _run_text_tool([exe, "validate", str(path)], 300)
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"docx validate could not run: {e}"
-    lines = [ln for ln in (proc.stdout or proc.stderr).strip().splitlines() if ln.strip()]
-    return proc.returncode == 0, (lines[-1] if lines else f"rc={proc.returncode}")
+    lines = [ln for ln in (out or err).strip().splitlines() if ln.strip()]
+    return rc == 0, (lines[-1] if lines else f"rc={rc}")
 
 
 # A footer's page number: bare "2", "Page 2", "Page 2 of 10", "2/10" (F44).
@@ -2676,7 +2713,7 @@ _REVISION_RECORD_RE = re.compile(
     r"<w:(?P<tag>pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|"
     r"sectPrChange|numberingChange)(?=[\s/>])[^>]*/>"
     r"|<w:(?P<open>pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|"
-    r"sectPrChange|numberingChange)(?=[\s>])[\s\S]*?</w:(?P=open)>")
+    r"sectPrChange|numberingChange)(?=[\s>])[\s\S]*?</w:(?P=open)\s*>")
 # The template side must read a section exactly like the manuscript side: a
 # legal self-closing `<w:sectPr .../>` is an empty section, and a lazy match
 # ended at the NESTED close of a `w:sectPrChange`, returning an unbalanced
@@ -2781,6 +2818,33 @@ def _style_index(styles_xml: str) -> tuple:
     return by_id, by_name
 
 
+
+def _apply_live_segments(xml: str, edit) -> str:
+    """Apply `edit` to the LIVE bytes of `xml` only.
+
+    Revision records (`_REVISION_RECORD_RE`) and comments/PIs are history or
+    dead markup; a style remap must not rewrite them (F45). The spans are
+    length-preserving offsets into `xml`, so untouched bytes stay identical.
+    """
+    spans = []
+    for pat in (_REVISION_RECORD_RE, _XML_MISC_SPAN_RE):
+        spans.extend((m.start(), m.end()) for m in pat.finditer(xml or ""))
+    spans.sort()
+    merged = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    out, pos = [], 0
+    for a, b in merged:
+        out.append(edit(xml[pos:a]))
+        out.append(xml[a:b])
+        pos = b
+    out.append(edit(xml[pos:]))
+    return "".join(out)
+
+
 def _strip_direct_format(para: str) -> tuple:
     """(fragment, removed_count): drop direct props that defeat a template style.
 
@@ -2808,11 +2872,18 @@ def _strip_direct_format(para: str) -> tuple:
 
 
 def _remap_style_refs(xml: str, mapping: dict) -> tuple:
-    """(xml, count): rewrite pStyle/rStyle ids through the manuscript->template map."""
+    """(xml, count): rewrite pStyle/rStyle ids through the manuscript->template map.
+
+    Only LIVE references are remapped: a `w:pStyle` inside `w:pPrChange`/
+    `w:rPrChange` is the id BEFORE the edit, and rewriting it destroyed the
+    tracked change's history (F45). The captured attribute is XML-decoded
+    before the lookup because the map keys are decoded style ids; the raw
+    `Emph&amp;A` never matched `Emph&A` and the reference dangled (F46).
+    """
     count = [0]
 
     def sub(m):
-        old = m.group("val")
+        old = unesc(m.group("val"))
         new = mapping.get(old)
         if not new or new == old:
             return m.group(0)
@@ -2821,7 +2892,7 @@ def _remap_style_refs(xml: str, mapping: dict) -> tuple:
                 + _xml_attr_value(new)
                 + m.group(0)[m.end("val") - m.start(0):])
 
-    return _STYLE_REF_RE.sub(sub, xml), count[0]
+    return _apply_live_segments(xml, lambda text: _STYLE_REF_RE.sub(sub, text)), count[0]
 
 
 def _live_sect_pr(sect: str) -> str:
@@ -2899,7 +2970,10 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
     delivered package was not the journal's layout, while the conformance
     report, which read the same last section, showed no gap.
     """
-    t_sects = list(_SECT_RE.finditer(template_doc_xml or ""))
+    # A commented-out/retired template section is not live: the manuscript
+    # side below already masks, and the template side must read the same way
+    # or obsolete geometry from a comment is copied into the manuscript (F39).
+    t_sects = list(_SECT_RE.finditer(_mask_noncontent(template_doc_xml or "")))
     # The MANUSCRIPT side reads the same way `first_section_props` reads it: a
     # legal self-closing `<w:sectPr .../>` is an empty section and must not be
     # skipped, or page 1 silently keeps the author's geometry while the report
@@ -3005,7 +3079,11 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         return {}
     rel_map = {e["id"]: (e["type"], e["target"]) for e in _rels_entries(trels)}
     refs = {"header": {}, "footer": {}}
-    sect = _SECT_RE.findall(tdoc)
+    # A headerReference inside a commented-out/retired template section is not
+    # a live role: harvesting raw bytes copied a dead part into the manuscript
+    # (F54). Masking is length-preserving, so the tags read the same.
+    tdoc_live = _mask_noncontent(tdoc)
+    sect = _SECT_RE.findall(tdoc_live)
     ref_re = re.compile(r"<w:(header|footer)Reference\b[^>]*>")
 
     def harvest(xml: str, roles: tuple) -> None:
@@ -3054,7 +3132,13 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
                 # bare `venue_logo.png` (which resolves to word/venue_logo.png,
                 # a missing part -- the logo then renders as an empty frame).
                 media = rm["target"]
-                src_media = posixpath.normpath(posixpath.join("word", media))
+                # A package-absolute target (`/word/media/logo.png`) is
+                # resolved from the package root, not from `word/`: joining
+                # discarded `word/` and the image was never copied (F56).
+                if media.startswith("/"):
+                    src_media = posixpath.normpath(media.lstrip("/"))
+                else:
+                    src_media = posixpath.normpath(posixpath.join("word", media))
                 if not src_media.startswith("word/") or ".." in Path(src_media).parts:
                     continue
                 dest_media = posixpath.join(posixpath.dirname(src_media),
@@ -3276,7 +3360,7 @@ def template_style_roles(template: Path) -> dict:
     # Read the tag's own `w:val` through `attr_of`: the double-quote-only
     # pattern also required `w:val` to be the first attribute, so a legal
     # `w:pStyle w:val='Heading1'` made the depth fall back to 2.
-    for m in re.finditer(r"<w:pStyle(?=[\s/>])[^>]*>", doc):
+    for m in re.finditer(r"<w:pStyle(?=[\s/>])[^>]*>", _mask_noncontent(doc)):
         sid = attr_of(m.group(0), "w:val")
         if sid:
             used[sid] = used.get(sid, 0) + 1
@@ -3302,7 +3386,10 @@ def _run_sizes(run: str) -> list:
     run invisible to the dominant-size calculation.
     """
     out = []
-    for tag in re.findall(r"<w:sz(?=[\s/>])[^>]*/?>", run or ""):
+    # `w:rPrChange` is the run's formatting BEFORE the tracked edit and a
+    # comment is not markup: neither is the live size (F41).
+    live = _mask_noncontent(live_rpr(run or ""))
+    for tag in re.findall(r"<w:sz(?=[\s/>])[^>]*/?>", live):
         val = attr_of(tag, "w:val")
         if val is not None and str(val).strip().isdigit():
             out.append(int(str(val).strip()))
@@ -3315,7 +3402,8 @@ def _run_is_bold(run: str) -> bool:
     Accepts both legal quote styles and the boolean spellings; a single-quoted
     `<w:b w:val='1'/>` is bold exactly like `<w:b/>`.
     """
-    for tag in re.findall(r"<w:b(?=[\s/>])[^>]*/?>", run or ""):
+    for tag in re.findall(r"<w:b(?=[\s/>])[^>]*/?>",
+                          _mask_noncontent(live_rpr(run or ""))):
         val = attr_of(tag, "w:val")
         if val is None or str(val).strip().lower() in ("1", "true", "on"):
             return True
@@ -3334,8 +3422,11 @@ def _body_run_size(doc_xml: str):
     for _p0, _p1, frag in paragraphs(doc_xml):
         if len(text_of(frag).split()) < 25:
             continue
-        for run in re.findall(r"<w:r\b[\s\S]*?</w:r\s*>", frag):
-            t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run))
+        # `runs()` skips comments and the unrendered Fallback branch, and
+        # `_run_sizes()` ignores `w:rPrChange`: dead runs must not shift the
+        # body size that drives heading detection (F57).
+        for _r0, _r1, run in runs(frag):
+            t = text_of(run)
             for s in _run_sizes(run):
                 weights[s] += len(t)
     if weights:
@@ -5647,7 +5738,8 @@ def _token_width_twips(token: str, font_pt: float) -> int:
 def _cell_font_pt(styles: dict, cell: str) -> float:
     """The largest run size in a cell, else its paragraph style's, else 10 pt."""
     sizes = []
-    for tag in re.findall(r'<w:sz(?=[\s/>])[^>]*>', cell):
+    live_cell = _mask_noncontent(cell)
+    for tag in re.findall(r'<w:sz(?=[\s/>])[^>]*>', live_cell):
         val = attr_of(tag, "w:val")
         if val is not None and val.isdigit():
             sizes.append(int(val) / 2.0)
@@ -5656,7 +5748,7 @@ def _cell_font_pt(styles: dict, cell: str) -> float:
     # `attr_of` accepts either legal quote style (and any attribute order): the
     # double-quote-only read returned None for `w:pStyle w:val='...'` and the
     # cell was measured at the 10 pt fallback.
-    st = re.search(r"<w:pStyle(?=[\s/>])[^>]*>", cell)
+    st = re.search(r"<w:pStyle(?=[\s/>])[^>]*>", live_cell)
     sid = attr_of(st.group(0), "w:val") if st else None
     if sid:
         sz = style_sz(styles, sid)
@@ -5698,7 +5790,10 @@ def _table_cell_widths(row: str) -> list:
     """
     out = []
     for _s, _e, cell in _spans(row, CELL_TOKENS):
-        tcpr = re.search(r"<w:tcPr(?=[\s/>])[\s\S]*?</w:tcPr\s*>", cell, re.S)
+        # Read the LIVE properties only: a commented-out w:tcW before the live
+        # one supplied the table's geometry and rewrote the live grid (F38).
+        live_cell = _mask_noncontent(cell)
+        tcpr = re.search(r"<w:tcPr(?=[\s/>])[\s\S]*?</w:tcPr\s*>", live_cell, re.S)
         width, span = None, 1
         if tcpr:
             body = tcpr.group(0)
@@ -5949,7 +6044,10 @@ def page_field_rows(aux_parts: list, doc: str) -> list:
     """FMT-S10: a referenced header/footer part carries more than one PAGE field."""
     rows = []
     for name, xml in aux_parts:
-        n = len(PAGE_FIELD_INSTR_RE.findall(xml or ""))
+        # A commented-out PAGE field is not printed: counting raw bytes let a
+        # header with one live field look like it had two (F51).
+        live_xml = _mask_noncontent(xml or "")
+        n = len(PAGE_FIELD_INSTR_RE.findall(live_xml))
         if n <= 1:
             continue
         boxed = 0
@@ -5957,7 +6055,7 @@ def page_field_rows(aux_parts: list, doc: str) -> list:
         # exact-close pattern missed it, so the note claimed the duplicate
         # fields were not in a floating text box and gave the wrong repair.
         for m in re.finditer(r"<w:txbxContent(?=[\s/>]).*?</w:txbxContent\s*>",
-                             xml or "", re.S):
+                             live_xml, re.S):
             boxed += len(PAGE_FIELD_INSTR_RE.findall(m.group(0)))
         where = (f"; {boxed} of them sit in a floating text box" if boxed else "")
         rows.append({
@@ -5986,7 +6084,7 @@ def page_field_fixes(part_xml: str) -> list:
         # it. Leave this shape to the author (the scan still reports it).
         return []
     spans = [(s, e) for s, e, _frag in _spans(part_xml or "", PARA_TOKENS)
-             if PAGE_FIELD_INSTR_RE.search(part_xml[s:e])]
+             if PAGE_FIELD_INSTR_RE.search(_mask_noncontent(part_xml[s:e]))]
     if len(spans) <= 1:
         return []
     edits = []
@@ -5998,9 +6096,10 @@ def page_field_fixes(part_xml: str) -> list:
         # verification (text + part names, never paragraph children) then
         # certified the loss as a text-identical success. Refuse this shape --
         # the scan leaves it to the author like the text-box case above.
+        para_live = _mask_noncontent(para)
         if re.search(r"<w:(?:drawing|pict|object|bookmarkStart|bookmarkEnd|"
                      r"fldData|footnoteReference|endnoteReference|commentReference|"
-                     r"txbxContent|sym)(?=[\s/>])", para):
+                     r"txbxContent|sym)(?=[\s/>])", para_live):
             continue
         # Only a paragraph whose VISIBLE text is the page number (the field's
         # cached result) may be removed; a page number sharing a paragraph with

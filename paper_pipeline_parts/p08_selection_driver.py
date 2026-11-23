@@ -66,6 +66,11 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
     per_judges = {vid: (int(round_judges(ctx, r)) if not selection
                         else len({k for v, k in selection if v == str(vid)}))
                   for vid in field_ids}
+    # A selected session whose TARGET was deduplicated out of the field has no
+    # row in `per_judges`; the old expectation then became 0 for every version
+    # and a zero-score panel read as complete (F21). It is an unresolved gap.
+    selection_unresolved = sorted({str(v) for v, _k in selection}
+                                  - {str(v) for v in field_ids}) if selection else []
     diags = {"sheets_used": 0, "sheets_expected": sum(per_judges.values()),
              "scores_collected": 0, "unresolved": [], "incomplete_sheets": [],
              "superseded_sheets": [], "out_of_range_sheets": [],
@@ -289,7 +294,8 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             "n": len(flat),
             "expected_n": expected_for.get(vid, expected),
             "complete": (len(flat) == expected_for.get(vid, expected)
-                         and vid not in slot_problems),
+                         and vid not in slot_problems
+                         and not selection_unresolved),
             "median": float(statistics.median(flat)) if flat else None,
             "mean": float(statistics.fmean(flat)) if flat else None,
             "iqr": iqr_of(flat) if flat else None,
@@ -343,6 +349,10 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             diags["incomplete_sheets"].append(
                 f"{vid}: {len(flat)} of {expected_for.get(vid, expected)} directed "
                 f"scores collected")
+    for _vid in selection_unresolved:
+        diags["incomplete_sheets"].append(
+            f"{_vid}: a selected judge session targets a version that is not a field "
+            f"member, so its panel can never be complete")
     # Missing-sheet diagnostics, driven by the RECORDED sessions (a recomputed
     # token would miss legacy/unsalted ids and misreport whole panels as absent).
     for vid in field_ids:

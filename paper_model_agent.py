@@ -598,10 +598,18 @@ def dsh_argv(cfg: dict) -> tuple:
     text = dsh_patch_text(cfg)
     patch = ""
     if text:
-        fd, patch = tempfile.mkstemp(prefix="paper-model-", suffix=".patch.yml")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        try:
+            fd, patch = tempfile.mkstemp(prefix="paper-model-", suffix=".patch.yml")
+        except OSError as exc:
+            return [], {}, f"could not create the DSH patch file: {exc}"
+        # Record the path BEFORE writing: a failed write is then cleaned up by
+        # `_cleanup()` instead of leaving a partial patch behind (F80).
         _PATCH_TMP = patch
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as exc:
+            return [], {}, f"could not write the DSH patch file: {exc}"
     env = dict(os.environ, DSH_HOME=home)
     if cfg["family"] == "endpoint":
         env[cfg["api_key_env"]] = cfg.get("api_key") or "dummy"
