@@ -148,6 +148,8 @@ def _defect_audit_reason_ok(reason) -> bool:
     text = " ".join(str(reason or "").split()).strip(" \t.;:,—-–")
     if not text or _DEFECT_AUDIT_FILLER_RE.match(text):
         return False
+    if _reason_is_generic_filler(text):
+        return False
     # A basis names what was checked and why the label holds. After the filler
     # words are dropped, one repeated content word is still no basis, so require
     # two distinct content words (F099).

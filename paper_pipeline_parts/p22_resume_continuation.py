@@ -486,7 +486,24 @@ def _audit_disposition_ok(value) -> bool:
     text = str(value or "").strip()
     if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
         return False
+    if _reason_is_generic_filler(text):
+        return False
     if _AUDIT_COUNT_RE.search(text):
+        # The count prefix itself is a complete verdict, but a TAIL made only
+        # of generic filler (`0 findings -- lorem ipsum`, `0 findings; all
+        # good`) names no check or artifact and is not a disposition (F12).
+        # The tail is read with the SHARED helper: the hand-rolled strip
+        # pattern put ".", "-" and the dashes in one class, which Python read
+        # as a RANGE from "." through the em dash, so every letter of a
+        # `;`/`:`/`,` tail was eaten and the filler check never saw it, while
+        # a `--` tail kept its hyphens and refused the complete zero verdict
+        # `0 findings -- none`. The coverage gate already had the right rule
+        # (and the bare-none exemption); both gates now read a count tail the
+        # same way.
+        _count = re.match(r"(?i)^\s*(\d+)\s+finding(?:s)?\b", text)
+        if _count is not None and _count_tail_is_filler(
+                text[_count.end():], int(_count.group(1))):
+            return False
         # A count is a complete verdict, so the WHOLE-CELL negation veto is
         # wrong in both directions (F01/F68). A tail that negates the check
         # itself (`0 findings; the sweep could not run`, `3 findings; the pass

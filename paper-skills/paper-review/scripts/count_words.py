@@ -641,6 +641,42 @@ def caption_ranges(lines: list, kinds=("figure",)) -> list:
     return ranges
 
 
+def _blank_indented_code(text: str) -> str:
+    """Blank CommonMark indented (4-space/tab) code blocks; keep line breaks.
+
+    A code block starts only at top level after a blank line (or at the start
+    of the document). Inside a list item the same indent is continuation prose,
+    and a hanging reference entry is prose, so the blanket `^(?: {4}|\\t)` pass
+    blanked prose the reader counts (R02, 2026-11-23).
+    """
+    lines = str(text or "").split("\n")
+    out, in_list, prev_blank = [], False, True
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        indented = bool(re.match(r"^(?: {4}|\t)", line))
+        if indented and prev_blank and not in_list:
+            # Blank the block, its internal blank lines included, preserving
+            # the line count so section detection sees the same structure.
+            while i < len(lines) and (not lines[i].strip()
+                                      or re.match(r"^(?: {4}|\t)", lines[i])):
+                out.append("")
+                i += 1
+            prev_blank = True
+            continue
+        out.append(line)
+        if line.strip():
+            if re.match(r"^ {0,3}(?:[-*+]|\d{1,3}[.)])\s+\S", line):
+                in_list = True
+            elif not indented:
+                in_list = False
+            prev_blank = False
+        else:
+            prev_blank = True
+        i += 1
+    return "\n".join(out)
+
+
 def strip_markdown_nonprose(text: str) -> str:
     """Blank fenced code, HTML comments and YAML front matter in Markdown.
 
@@ -658,6 +694,13 @@ def strip_markdown_nonprose(text: str) -> str:
     src = re.sub(r"\A---[ \t]*\n.*?\n---[ \t]*(?:\n|\Z)", _blank, src,
                  count=1, flags=re.S)
     src = re.sub(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$", _blank, src)
+    # CommonMark allows an UNCLOSED fence through EOF; the closed-fence pass
+    # above left it (and its code) in the count (F10, 2026-11-23).
+    src = re.sub(r"(?ms)^[ \t]*(?:```|~~~)[^\n]*\n.*\Z", _blank, src)
+    # An indented (4-space/tab) code block is code even without a fence, but
+    # only at top level after a blank line; list continuations and hanging
+    # reference entries are prose (R02).
+    src = _blank_indented_code(src)
     src = re.sub(r"(?s)<!--.*?-->", _blank, src)
     return src
 
@@ -752,8 +795,20 @@ def _name_is_type_manuscript(name: str, type_names=()) -> bool:
             continue
         if norm == t:
             return True
-        if norm.startswith(t + " ") and re.fullmatch(
-                r"(?:v|rev|version|revision|draft)? ?\d{1,3}", norm[len(t) + 1:]):
+        if not norm.startswith(t + " "):
+            continue
+        rest = norm[len(t) + 1:]
+        if re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}", rest):
+            return True
+        # Mirror the pipeline's `_name_is_article_type_manuscript()` suffixes
+        # (F64 added final/draft/revised and the 7-hex content token there).
+        # The standalone M19 counter did not, so a renamed article-type
+        # manuscript fell through to the cover-letter bound (F31).
+        if re.fullmatch(r"(?:final|draft|revised|revision)", rest):
+            return True
+        if re.fullmatch(r"[0-9a-f]{7}", rest.replace(" ", "")):
+            return True
+        if re.fullmatch(r"(?:final|draft|revised) ?[0-9a-f]{7}", rest):
             return True
     return False
 

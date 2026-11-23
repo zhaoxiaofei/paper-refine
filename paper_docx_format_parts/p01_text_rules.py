@@ -592,9 +592,46 @@ def _table_row_like(text: str) -> bool:
     t = (text or "").strip()
     if t.startswith("|") and t.endswith("|") and t.count("|") >= 3:
         return True
+    # GFM permits tables without outer pipes (`A | B`, `--- | ---`, `1 | 2`).
+    # The old test required both outer pipes, so those rows were prose and the
+    # one-sentence/mega-paragraph rules could fire on table content (F28).
+    # A prose sentence with an inline pipe is not a table row (R05): an
+    # unoutered row must not end like a sentence and must be made of short
+    # cells. A multi-word row is accepted only beside a delimiter row, which
+    # the caller checks because it has the neighbouring lines.
+    if "|" in t and re.search(r"\S\s*\|\s*\S", t) \
+            and not re.search(r"[.!?][\"'\u2019\u201d)\]]?$", t):
+        cells = [c.strip() for c in t.strip("|").split("|")]
+        if cells and all(c and len(c.split()) <= 1 for c in cells):
+            return True
+    if re.fullmatch(r"\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*", t):
+        return True
     if t.count("&") >= 2 and ("\\\\" in t or t.endswith("\\")):
         return True
     return t.count("\t") >= 2
+
+
+def _table_row_context(paras: list, i: int) -> bool:
+    """True when paragraph `i` is a row of the GFM table it belongs to.
+
+    `_table_row_like()` reads one line's shape. A multi-word unoutered row is a
+    table row only when a delimiter row is adjacent; otherwise a pipe is
+    ordinary prose and the FMT-T9k one-sentence rule stays eligible (R05).
+    """
+    if i < 0 or i >= len(paras):
+        return False
+    t = str(paras[i] or "").strip()
+    if "|" not in t:
+        return False
+    if _table_row_like(t):
+        return True
+    for j in (i - 1, i + 1):
+        if 0 <= j < len(paras) and re.fullmatch(
+                r"\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*",
+                str(paras[j] or "").strip()):
+            return True
+    return False
+
 
 ABSTRACT_HEAD_RE = re.compile(r"^\s*(?:abstract|summary)\s*:?\s*$", re.I)
 # End-anchored to the label's own punctuation: a prose sentence that happens to
@@ -610,6 +647,14 @@ BODY_HEAD_RE = re.compile(
     r"^\s*(?:\d+[.)]?\s*)?(?:introduction|results|discussion|conclusions?|background|"
     r"related work|results\s*(?:&|and)\s*discussion|"
     r"discussion\s*(?:&|and)\s*conclusions?)\s*:?\s*$", re.I)
+
+# A reference-list heading is a section boundary, not prose: without this
+# `section_kinds` never emitted its documented `refs` label and a `.md` source's
+# `## References` label left the reference text under the front-matter sentence
+# bar (F11, 2026-11-23).
+REFS_HEAD_RE = re.compile(
+    r"^\s*(?:\d+[.)]?\s*)?(?:references?|reference\s+list|bibliography|"
+    r"literature\s+cited|works\s+cited)\s*:?\s*$", re.I)
 
 
 def _md_heading_text(text: str) -> str:
@@ -668,7 +713,9 @@ def section_kinds(paras: list, headings: list = None) -> list:
     """
     kinds, mode = [], "front"
     for i, text in enumerate(paras):
-        t = (text or "").strip()
+        # A Markdown heading's furniture (`## References`) is not prose: test
+        # the heading text so the documented section labels actually apply.
+        t = _md_heading_text(text).strip()
         head = bool(headings[i]) if headings and i < len(headings) else False
         if LEGEND_RE.match(t) or LEGEND_RE.match(caption_label_text(t)):
             kinds.append("legend")
@@ -686,11 +733,18 @@ def section_kinds(paras: list, headings: list = None) -> list:
         if METHODS_HEAD_RE.match(t):
             mode, kinds = "methods", kinds + ["heading"]
             continue
+        if REFS_HEAD_RE.match(t):
+            mode, kinds = "refs", kinds + ["heading"]
+            continue
         if BODY_HEAD_RE.match(t):
             mode, kinds = "body", kinds + ["heading"]
             continue
         if head or (t and len(t.split()) <= 8 and not re.search(r"[.;:,]$", t)
                     and t[:1].isupper() and " " in t):
+            # A refs mode ends at the next section heading; without this, an
+            # unrecognised heading left every following paragraph as refs.
+            if mode == "refs":
+                mode = "body"
             kinds.append("heading")
             continue
         kinds.append(mode)
@@ -785,6 +839,38 @@ def _abbrev_ends_sentence(text: str, end: int, word: str) -> bool:
     return bool(re.match(r"[A-Z]", after[:1]))
 
 
+# A sentence-final terminator may be followed by closing punctuation (a quote,
+# parenthesis or bracket) before the space. The old `[.!?](?=\s)` missed those
+# boundaries and merged quoted/parenthetical sentences (F25, 2026-11-23).
+_SENTENCE_BOUNDARY_RE = re.compile(r"""([.!?])(["'\u2019\u201d)\]}]*)(?=\s)""")
+# A one-letter word is an initial only in an initial-like context: at the start
+# of the sentence, or after a function word/a citation verb ("J. Smith",
+# "by J. Smith", "Smith cited J. Smith"). After an ordinary content word
+# ("vitamin C. The cells") it is a symbol whose period ends the sentence.
+_SINGLE_LETTER_INITIAL_PRECEDERS = frozenset(" ".join((
+    "a an the this these those our your their his her its my",
+    "by and or for from of to in on at as with without via per than vs versus",
+    "see cite cited cites said says wrote written report reports reported",
+    "author authors editor editors dr prof mr mrs ms",
+)).split())
+
+
+def _single_letter_ends_sentence(text: str, start: int, period: int,
+                                 closers: str) -> bool:
+    """Whether a one-letter word before `period` ends a real sentence."""
+    after = text[period + 1 + len(closers):].lstrip()
+    if not after or not re.match(r"[A-Z]", after[:1]):
+        return False                       # a continuation ("p. 3", "e. coli")
+    # The token immediately before the period is the one-letter word itself;
+    # the INITIAL-like context is decided by the token before THAT one.
+    before = text[start:period]
+    tokens = re.findall(r"\S+", before)
+    prev = tokens[-2].strip("\"'([{") if len(tokens) >= 2 else ""
+    if not prev:
+        return False                       # sentence-initial "J. Smith"
+    return prev.lower() not in _SINGLE_LETTER_INITIAL_PRECEDERS
+
+
 def split_sentences(text: str) -> list:
     """Split prose into sentences, keeping an abbreviation's period intact.
 
@@ -797,14 +883,16 @@ def split_sentences(text: str) -> list:
     """
     text = text or ""
     pieces, start = [], 0
-    for m in re.finditer(r"[.!?](?=\s)", text):
+    for m in _SENTENCE_BOUNDARY_RE.finditer(text):
         end = m.end()
-        if m.group(0) == ".":
-            tail = re.search(r"(\S+)$", text[start:end - 1])
+        if m.group(1) == ".":
+            tail = re.search(r"(\S+)$", text[start:m.start()])
             word = tail.group(1) if tail else ""
             if re.fullmatch(r"[A-Za-z]", word):
-                continue
-            if _SENTENCE_ABBREV_RE.match(word):
+                if not _single_letter_ends_sentence(
+                        text, start, m.start(), m.group(2)):
+                    continue
+            elif _SENTENCE_ABBREV_RE.match(word):
                 if not _abbrev_ends_sentence(text, end, word):
                     continue
         pieces.append(text[start:end])
@@ -1310,7 +1398,7 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
                     and not (area and i < len(area) and area[i])
                     and not SINGLE_SENTENCE_SKIP_TEXT_RE.match(stripped)
                     and not SINGLE_SENTENCE_SKIP_SECTION_RE.match(section_of[i])
-                    and not _table_row_like(stripped)
+                    and not _table_row_context(paras, i)
                     and not caption_label_kind(caption_probe)
                     and not LEGEND_RE.match(caption_probe)):
                 rows.append({
@@ -2774,6 +2862,8 @@ def _cell_number(cell: str):
 
 def _fmt_number(value: float) -> str:
     """A human number: thousands separators, no trailing zeros."""
+    if value == 0:
+        value = 0.0                          # never print IEEE negative zero as "-0"
     if value and abs(value) < 5e-7:
         # Six decimals rounded every real p-value below 5e-7 to "0" (and a
         # negative one to "-0"): keep the magnitude in scientific notation.

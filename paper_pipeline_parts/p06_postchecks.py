@@ -2151,6 +2151,11 @@ def _coverage_reason_named(reason, allow_negated: bool = False) -> bool:
     if not allow_negated and (_COVERAGE_NEGATED_CHECK_RE.search(reason)
                               or _COVERAGE_NOWORK_RE.search(reason)):
         return False
+    # A tail built only from generic approval/placeholder words names nothing:
+    # `lorem ipsum dolor sit amet`, `all good` and `no problems` used to pass
+    # because only their length was measured (F12, 2026-11-23).
+    if _reason_is_generic_filler(reason):
+        return False
     # At least three alphanumeric characters: a one- or two-character token
     # (`x`, `ok`, `ab`, `12`) and punctuation alone cannot name an artifact or
     # a reason.
@@ -2198,6 +2203,8 @@ def _coverage_disposition_ok(value) -> bool:
             # The count form used to bypass the negation test entirely: `0 findings
             # -- not checked` (and `0 findings; the sweep did not run`) certified a
             # sweep that never ran (F112). The tail must not negate the check.
+            return False
+        if _count_tail_is_filler(_tail, int(_count.group(1))):
             return False
     m = _COVERAGE_NAMED_BASIS_RE.search(text)
     if m is None:

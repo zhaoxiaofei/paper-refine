@@ -1986,7 +1986,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
         edits, n = [], 0
         for m in re.finditer(r"<w:hyperlink(?=[\s>]).*?</w:hyperlink\s*>", xml, re.S):
             block = m.group(0)
-            opening = block[:block.find(">") + 1]
+            # A legal attribute value may contain `>`; the quote-aware slice is
+            # the same one the adjacent `conv` walker uses (R04, the F08 class).
+            _open_end = _tag_end(block, 0)
+            if _open_end < 0:
+                continue
+            opening = block[:_open_end + 1]
             # An internal cross-reference (`w:anchor`) or a location in another
             # document (`w:docLocation`) is navigation, not a URL: flattening it
             # destroyed the reference although no FMT-T7 row fired. Read the
@@ -2000,11 +2005,11 @@ def fix_document(xml: str, styles: dict, policy: dict,
             # -1 for that spelling and dropped the close's `>`, emitting
             # malformed XML (F36).
             _close = re.search(r"</w:hyperlink\s*>", block)
-            inner = block[block.find(">") + 1:_close.start()]
+            inner = block[_open_end + 1:_close.start()]
             # Strip only the LIVE rPr segments: `w:rPrChange` is the tracked
             # change's formatting HISTORY and must stay byte-identical (the run
             # loop below splits on it for exactly this reason).
-            _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange>)", inner, flags=re.S)
+            _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange\s*>)", inner, flags=re.S)
             for _si in range(0, len(_segs), 2):
                 for _pat in (r"<w:rStyle[^>]*/>", r"<w:color[^>]*/>", r"<w:u[^>]*/>"):
                     _segs[_si] = re.sub(_pat, "", _segs[_si])
@@ -2029,7 +2034,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
                     continue
                 # Strip only the LIVE segments: rPrChange is the tracked
                 # change's history and must stay byte-identical.
-                _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange>)", rpr, flags=re.S)
+                _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange\s*>)", rpr, flags=re.S)
                 for _si in range(0, len(_segs), 2):
                     for tag in ("rStyle", "color", "u", "i", "iCs"):
                         _segs[_si] = re.sub(rf"<w:{tag}(?=[\s/>])[^>]*/>", "", _segs[_si])
@@ -2066,9 +2071,10 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # quotes before comparing, so that corruption shipped silently.
         def conv(mm, prev_open):
             raw = mm.group(0)
-            open_tag = raw[:raw.find(">") + 1]
+            _open_end = _tag_end(raw, 0)
+            open_tag = raw[:_open_end + 1]
             close_tag = raw[raw.rfind("<"):]
-            text = unesc(raw[raw.find(">") + 1:raw.rfind("<")])
+            text = _text_token_text(raw)
             if policy["quote_style"] == "curly":
                 # An apostrophe inside a word is always a right single quote.
                 text = re.sub(r"(?<=\w)'(?=\w)", "\u2019", text)
@@ -3551,7 +3557,7 @@ def _ppr_extra(ppr_xml: str) -> str:
     # children are spliced into a target pPr as one string, and spacing/jc
     # before keepNext/keepLines produced a schema-invalid bag. rPr is last.
     for tag in ("keepNext", "keepLines", "spacing", "ind", "jc", "rPr"):
-        keep += re.findall(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s>])[^>]*>[\s\S]*?</w:{tag}>",
+        keep += re.findall(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s>])[^>]*>[\s\S]*?</w:{tag}\s*>",
                            ppr_xml)
     return "".join(keep)
 

@@ -211,12 +211,27 @@ def redact_secrets(text: str) -> str:
     text = re.sub(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@", text)
     text = re.sub(
         r"(?i)([?&](?:api[_-]?key|apikey|key|token|access[_-]?token|auth|"
-        r"authorization|password|secret)=)[^&\s'\"]+",
+        r"authorization|password|secret|sig|signature|x-(?:amz|goog)-[a-z-]+)=)"
+        r"[^&\s'\"]+",
+        r"\1[REDACTED]", text)
+    # Cloud signed URLs and SAS tokens carry their credential in the query
+    # name (`?sig=`, `X-Goog-Signature=`, `X-Amz-Signature=`); the old short
+    # name list left them in the run log and transcript (F07, 2026-11-23).
+    # Header/colon forms (`Authorization: Bearer ...`, `api_key: ...`,
+    # `X-Api-Key: ...`) are the same class and were also unmasked.
+    text = re.sub(
+        r"(?im)^(\s*(?:authorization|proxy-authorization)\s*:\s*)"
+        r"(?:(?:bearer|basic|digest|token)\s+)?\S+",
+        lambda m: m.group(1) + "[REDACTED]", text)
+    text = re.sub(
+        r"(?im)^(\s*(?:x-api-key|x-goog-api-key|x-amz-security-token|"
+        r"api[_-]?key|apikey|token|secret)\s*:\s*)\S+",
         r"\1[REDACTED]", text)
     # A JSON object logged as text still masks its credential-looking string values.
     text = re.sub(
         r'(?i)("(?:api[_-]?key|apikey|key|token|access[_-]?token|auth|'
-        r'authorization|password|passwd|pwd|secret)"\s*:\s*)"[^"]*"',
+        r'authorization|password|passwd|pwd|secret|sig|signature|'
+        r'x-(?:amz|goog)-[a-z-]+)"\s*:\s*)"[^"]*"',
         r'\1"[REDACTED]"', text)
     for value in secret_env_values():
         text = text.replace(value, "[REDACTED]")
@@ -7519,7 +7534,7 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
             for _p0, _p1, para in mod.paragraphs(xml):
                 style = mod.elem_val(mod.ppr_of(para), "pStyle")
                 rows.append((mod.text_of(para), style == "Bibliography",
-                             bool(style and style.startswith("Heading"))))
+                             _style_id_is_heading(style)))
             out.append((prefix + rel, rows))
         suffixes = (".tex", ".ltx", ".md", ".markdown", ".txt") \
             + ((".bib",) if include_bib else ())

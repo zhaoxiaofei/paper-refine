@@ -219,7 +219,12 @@ CELL_TOKENS = re.compile(r"<w:tc(?=[\s/>])|</w:tc\s*>")
 # `(?<!/)` guard the tag was read as an opening one and the lazy body ran to the
 # NEXT run's `</w:t>`, so `text_of` returned literal markup and the writer
 # escaped it into the first run, deleting the following run wrapper.
-TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t\s*>", re.S)
+#
+# The attribute class is QUOTE-AWARE: XML permits `>` inside a quoted attribute
+# value (`w:rsidR="a>b"`), and `[^>]*` split the tag there, so `text_of`
+# returned the rest of the attribute text as manuscript text (F08, 2026-11-23).
+_XML_ATTRIBUTES = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
+TEXT_RE = re.compile(r"<w:t(?:\s" + _XML_ATTRIBUTES + r")?(?<!/)>.*?</w:t\s*>", re.S)
 # A soft break/tab inside a paragraph (`<w:br/>`, `<w:cr/>`, `<w:tab/>`).
 # `text_of` renders each as a NEWLINE: it is a delimiter, not content, so every
 # text comparison still sees the same words AND the line-edge rules see the
@@ -234,7 +239,7 @@ NON_TEXT_TOKENS = re.compile(r"<w:(?:noBreakHyphen|sym)(?=[\s/>])[^>]*/?>")
 # The same walk, in DOCUMENT ORDER, for the callers that need both kinds of
 # piece at once (the text writer splices a fragment's new text at its own
 # offset, so a break counts as one character exactly like `text_of` says).
-_FRAG_OR_BREAK_PATTERN = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t\s*>"
+_FRAG_OR_BREAK_PATTERN = re.compile(r"<w:t(?:\s" + _XML_ATTRIBUTES + r")?(?<!/)>(?s:.*?)</w:t\s*>"
                                     r"|<w:(?:br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>",
                                     re.S)
 # The tab-STOP definitions a paragraph carries in `<w:pPr><w:tabs>`: `<w:tab>`
@@ -721,6 +726,20 @@ def _tag_end(text: str, start: int) -> int:
     return -1
 
 
+def _text_token_text(tok: str) -> str:
+    """Decoded text between a `<w:t ...>` open tag and its close tag.
+
+    `find(">")` is not the open tag's end: XML permits `>` inside a quoted
+    attribute value, so the shared walkers must use the quote-aware `_tag_end`
+    (F08, 2026-11-23).
+    """
+    start = _tag_end(tok, 0)
+    end = tok.rfind("<")
+    if start < 0 or end <= start:
+        return ""
+    return unesc(tok[start + 1:end])
+
+
 def _spans(xml: str, tokens: re.Pattern) -> list:
     """(start, end, text) for balanced elements; nested elements each get a span."""
     text = _mask_noncontent(xml)
@@ -842,7 +861,7 @@ def text_of(frag: str) -> str:
             # the surrounding words do not fuse.
             parts.append("\ufffd")
         else:
-            parts.append(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
+            parts.append(_text_token_text(tok))
     return "".join(parts)
 
 
@@ -1043,7 +1062,6 @@ def elem(frag: str | None, tag: str) -> str | None:
 
 
 _XML_MISC = r"<!--(?:[^-]|-(?!->))*-->|<\?(?:[^?]|\?(?!>))*\?>"
-_XML_ATTRIBUTES = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
 _CHILD_TAG_RE = re.compile(rf"{_XML_MISC}|<(/?)([A-Za-z0-9:_.-]+)(?=[\s/>])({_XML_ATTRIBUTES})>")
 
 # Namespace declarations and QName-valued mc: attributes. `_CANON_TAG_RE` is
@@ -1541,7 +1559,7 @@ def field_result_text_ranges(para: str, doc_spans=None, para_start: int = 0) -> 
             # could land inside a live Zotero field result.
             pos += 1
             continue
-        text = unesc(tok[tok.find(">") + 1:tok.rfind("<")])
+        text = _text_token_text(tok)
         runs.append((m.start(), m.end(), pos, pos + len(text)))
         pos += len(text)
     if doc_spans is None:
@@ -2769,7 +2787,7 @@ def split_run_text_span(run: str, start: int, end: int):
     if re.fullmatch(
             r"\s*<w:r(?=[\s/>])[^>]*>\s*"
             r"(?:<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s/>])[\s\S]*?</w:rPr>)?\s*"
-            r"</w:r>\s*", run[:tm.start()] + run[tm.end():]) is None:
+            r"</w:r\s*>\s*", run[:tm.start()] + run[tm.end():]) is None:
         return None
     text = unesc(tm.group(2))
     if text != text_of(run):

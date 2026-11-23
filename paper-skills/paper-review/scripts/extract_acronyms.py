@@ -672,7 +672,11 @@ def _comma_definitions(raw):
                             r"(?:\s+[A-Za-z][A-Za-z0-9\-\u2010\u2011\u2012\u2013\u2014]*)*",
                             body):
             continue
-        if not _initials_ok(tok, words):
+        # The parenthetical path already accepts a RECORDED definition at 60%
+        # (the "IQR (interquartile range)" form); a comma key is the same
+        # recorded definition, so the stricter 70% default silently dropped a
+        # legal key entry (F27, 2026-11-23).
+        if not _initials_ok(tok, words, min_ratio=0.60):
             continue
         out[tok] = (body, m.start(1), m.start(2) + len(body))
     return out

@@ -5215,8 +5215,14 @@ def _pkg4_cited_labels(expr: str, plural: bool = True) -> list:
     is a citation of Figure 2 followed by the count 3, not a two-item list.
     """
     out = []
+    # The documented contract includes the keyword-bearing example
+    # ("Figures 2-4" cites 2, 3 and 4); the production caller strips the
+    # keyword, but the helper itself did not, so its public contract and test
+    # surface disagreed (F22, 2026-11-23).
+    expr = re.sub(r"(?i)^\s*(?:supplementary\s+)?(?:figures?|figs?\.?)\s*",
+                  "", str(expr or ""))
     # Keep the separators so a comma can be told apart from "and"/"&"/";".
-    parts = re.split(r"\s*(,|and\b|&|;)\s*", str(expr or ""), flags=re.I)
+    parts = re.split(r"\s*(,|and\b|&|;)\s*", expr, flags=re.I)
     for i in range(0, len(parts), 2):
         token = parts[i].strip()
         if not token:

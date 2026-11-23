@@ -2244,8 +2244,15 @@ def _docx_heading_style(style_id, style_names=None) -> bool:
     sid = str(style_id or "").strip()
     if not sid:
         return False
-    if sid.startswith("Heading"):
-        return True
+    if _style_id_is_heading(sid):
+        # A declared style name outranks a short id: a custom style whose id is
+        # `H1` but whose styles.xml name is "Body Text" is prose, not a
+        # heading (test_wave2_G8 C130). An undeclared `H1`/`heading1` is a
+        # heading; a `HeadingN` id keeps the old unconditional behavior.
+        if sid.lower().startswith("heading"):
+            return True
+        name = str((style_names or {}).get(sid) or "").strip()
+        return not name or bool(_DOCX_HEADING_NAME_RE.match(name))
     name = str((style_names or {}).get(sid) or "").strip()
     return bool(name and _DOCX_HEADING_NAME_RE.match(name))
 

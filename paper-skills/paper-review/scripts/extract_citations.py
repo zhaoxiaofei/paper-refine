@@ -271,7 +271,10 @@ FIG_CAPTION_RE = re.compile(
 TABLE_CAPTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:extended\s+data|supplementary\s+)?tables?\.?\s*"
     r"(?:s\d+|\d+[a-z]?)\s*" + CAP_SEP, re.I)
-NUM_ENTRY_RE = re.compile(r"^\s*(?:[\[(]?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
+# A bracketed label may be glued to its entry (`[1]Smith`); a bare ordinal
+# still needs whitespace, or a decimal-leading prose sentence (`3.5-fold ...`)
+# reads as a numbered entry and extends the reference region (R01).
+NUM_ENTRY_RE = re.compile(r"^\s*(?:[\[(]\d{1,3}[\].)]\s*|\d{1,3}[.)\]]\s+)")
 BULLET_ENTRY_RE = re.compile(r"^\s*[-*•]\s+\S")
 YEAR_RE = re.compile(r"\b(?:1[5-9]|20)\d{2}[a-z]?\b")
 ENTRY_HINT_RE = re.compile(

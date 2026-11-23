@@ -266,16 +266,16 @@ TEXT_RUN_RE = re.compile(
     # non-breaking hyphen and a symbol glyph have no w:t either: `text_of`
     # renders them as "-" and U+FFFD, and dropping them fused
     # `ten<w:noBreakHyphen/>year` into "tenyear".
-    r"<w:(instrText|t)(?:\s[^>]*)?>(.*?)</w:\1>"
+    r"<w:(instrText|t)(?:\s[^>]*)?>(.*?)</w:\1\s*>"
     r"|<w:(br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>", re.S)
 
 # `mc:AlternateContent` carries the same content twice (Choice + Fallback);
 # Word renders ONE of them. Splitting the raw XML read both and doubled every
 # text-box / DrawingML fallback in the review corpus. Substituting the visible
 # branch first is the same rule the pipeline's text_of applies.
-_MC_ALTERNATE_RE = re.compile(r"<mc:AlternateContent\b.*?</mc:AlternateContent>", re.S)
-_MC_CHOICE_RE = re.compile(r"<mc:Choice\b.*?</mc:Choice>", re.S)
-_MC_FALLBACK_RE = re.compile(r"<mc:Fallback\b.*?</mc:Fallback>", re.S)
+_MC_ALTERNATE_RE = re.compile(r"<mc:AlternateContent\b.*?</mc:AlternateContent\s*>", re.S)
+_MC_CHOICE_RE = re.compile(r"<mc:Choice\b.*?</mc:Choice\s*>", re.S)
+_MC_FALLBACK_RE = re.compile(r"<mc:Fallback\b.*?</mc:Fallback\s*>", re.S)
 
 
 def _mc_visible_branch(m) -> str:
@@ -405,19 +405,19 @@ def docx_part_to_lines(xml: str):
     xml = re.sub(r"<!--.*?-->", "", xml, flags=re.S)
     # Moved-FROM content is the pre-move position (deleted); only moveTo is the
     # current text. Extracting both duplicated passages (F26).
-    xml = re.sub(r"<w:moveFrom\b.*?</w:moveFrom>", "", xml, flags=re.S)
+    xml = re.sub(r"<w:moveFrom\b.*?</w:moveFrom\s*>", "", xml, flags=re.S)
     xml = re.sub(r"<w:moveFrom\b[^>]*/>", "", xml)
     # Hidden runs (`w:vanish`) are not visible prose. Dropping them (with a
     # note) keeps a hidden draft value from entering the manuscript corpus as
     # an ordinary claim (F27). Only a property that is ON hides the run.
     _visible = xml
-    for _run in re.findall(r"<w:r\b[^>]*>.*?</w:r>", xml, flags=re.S):
+    for _run in re.findall(r"<w:r\b[^>]*>.*?</w:r\s*>", xml, flags=re.S):
         if _run_is_hidden(_run):
             _visible = _visible.replace(_run, "", 1)
     if _visible != xml:
         notes.append("hidden text omitted (w:vanish)")
         xml = _visible
-    for para in re.split(r"</w:p>", _MC_ALTERNATE_RE.sub(_mc_visible_branch, xml)):
+    for para in re.split(r"</w:p\s*>", _MC_ALTERNATE_RE.sub(_mc_visible_branch, xml)):
         if "<w:ins " in para:
             notes.append("tracked-insertion present in a paragraph")
         if "<w:del " in para:

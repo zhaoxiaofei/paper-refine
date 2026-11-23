@@ -49,8 +49,7 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
                           "-" if tok.startswith("<w:noBreakHyphen") else "\ufffd",
                           tok))
         else:
-            frags.append((m.start(), m.end(),
-                          unesc(tok[tok.find(">") + 1:tok.rfind("<")]), tok))
+            frags.append((m.start(), m.end(), _text_token_text(tok), tok))
     text = "".join(f[2] for f in frags)
     edits = [(s, e, r) for s, e, r in edits
              if 0 <= s <= e <= len(text) and (e > s or r)]
@@ -420,7 +419,7 @@ def _xml_span_for_text_range(frag: str, a: int, b: int):
         elif NON_TEXT_TOKENS.fullmatch(tok):
             length = 1                          # the hyphen/U+FFFD placeholder
         else:
-            length = len(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
+            length = len(_text_token_text(tok))
         if pos + length > a and lo is None:
             lo = m.start()
         if pos < b:
@@ -2798,7 +2797,7 @@ def visual_text_lines(para: str) -> list:
         # a text token of length 0: the tab neither advanced the text offset nor
         # split the line, and every line-edge span after it was mispositioned.
         if re.match(r"<w:t(?=[\s>])", tok):
-            offset += len(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
+            offset += len(_text_token_text(tok))
         elif NON_TEXT_TOKENS.fullmatch(tok):
             # `text_of` renders noBreakHyphen/sym as ONE character but they do
             # not start a new visual line; advancing zero shifted every later
@@ -6440,10 +6439,9 @@ def _iter_wt_elements(para: str):
     # `(?<!/)` guard `<w:t />` was read as an opening element and the lazy body
     # ran to the NEXT `</w:t>`, so live markup became "text" and was escaped
     # into the replacement. `TEXT_RE`/`_text_fragments` already carry the guard.
-    for m in re.finditer(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t\s*>", para, re.S):
+    for m in TEXT_RE.finditer(para):
         inner = m.group(0)
-        text = unesc(inner[inner.find(">") + 1:inner.rfind("<")])
-        yield m.start(), m.end(), text
+        yield m.start(), m.end(), _text_token_text(inner)
 
 
 def _set_wt_text(para: str, start: int, end: int, text: str) -> str:

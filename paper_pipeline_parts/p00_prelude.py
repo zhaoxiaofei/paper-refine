@@ -38,6 +38,17 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# One heading-style predicate for every pipeline reader: the formatter already
+# accepts `heading1`/`H1`/bare levels, but these readers used a case-sensitive
+# `startswith("Heading")`, so a legal style id was not a heading and front
+# matter/reference classification differed between readers (F13, 2026-11-23).
+_DOCX_HEADING_STYLE_ID_RE = re.compile(r"(?i)^(?:heading[\s_-]*|h)[1-9]$|^[1-9]$")
+
+
+def _style_id_is_heading(style) -> bool:
+    """True when a `w:pStyle` id names a heading level (case-insensitive)."""
+    return bool(_DOCX_HEADING_STYLE_ID_RE.match(str(style or "").strip()))
+
 # 3.0.0 -- pool/integration release: every round is planned with M REWRITTEN
 # candidates (w1..wM, staged first, before the review) and N
 # REVIEWED-AND-THEN-REVISED candidates (a2..a{1+N}, one shared $paper-review pass

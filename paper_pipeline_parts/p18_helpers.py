@@ -679,7 +679,7 @@ def _reference_entry_keys(package: Path) -> set:
                 # like a heading in its text alone. Mark it so the shared scan
                 # ends the reference list on it (F007).
                 _reference_entries_in_lines(
-                    (("# " + line) if str(style or "").startswith("Heading") else line
+                    (("# " + line) if _style_id_is_heading(style) else line
                      for line, style in paras), entries)
     return entries
 
@@ -3612,6 +3612,87 @@ def _unable_reason_present(rest: str) -> bool:
     return len(re.findall(r"[0-9A-Za-z]+", text)) >= 2
 
 
+# A reason made only of generic approval/placeholder prose names no artifact,
+# check or evidence. `lorem ipsum dolor sit amet`, `all good` and `no problems`
+# passed every reason-bearing gate because each required only length or a few
+# words (F12, 2026-11-23). This is the shared "common words only" test; a real
+# reason keeps at least one token outside this vocabulary (a path, check id,
+# location, quoted value or the object it examined).
+_REASON_GENERIC_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+_REASON_GENERIC_WORDS = frozenset("""
+    a an the this that these those it its they them he she we you i
+    is are was were be been being am do does did has have had
+    and or but nor not no none all any some very quite pretty well
+    for of to in on at as with by from into over under about
+    ok okay good fine great excellent nice clean pass passed yes true false
+    done checked check checks checking review reviewed verify verified test tested
+    inspect inspected examined examine looked look seems seem appears appear
+    find finding findings
+    problem problems issue issues wrong nothing everything anything stuff misc
+    things thing pending tbd todo n/a na
+    lorem ipsum dolor sit amet consectetur adipiscing elit sed eiusmod tempor
+    incididunt labore et dolore magna aliqua ut enim ad minim veniam quis
+    nostrud exercitation ullamco laboris nisi aliquip ex ea commodo consequat
+    foo bar baz qux quux asdf qwerty blah blahblah
+    basis unable out of scope see above below here there discussed noted
+""".split())
+
+
+# `no problems found` / `no issues detected` are pure result closures: the
+# `found` token was the only substantive-looking word, but it names no
+# artifact or check. `examined, nothing found` stays a legitimate clean basis
+# (it states the work that was done; the `clean` contract spells it out).
+_GENERIC_RESULT_PHRASE_RE = re.compile(
+    r"(?i)\b(?:no|zero)\s+(?:problems?|issues?|errors?|defects?|findings?)\s+"
+    r"(?:found|detected|seen|identified)\b")
+
+
+def _reason_is_generic_filler(text) -> bool:
+    """True when `text` is made ONLY of generic approval/placeholder words."""
+    raw = str(text or "")
+    m = _GENERIC_RESULT_PHRASE_RE.search(raw)
+    if m:
+        # The closure is filler only when nothing outside it names the object
+        # it examined; `no problems found in section 3` names section 3.
+        rest = raw[:m.start()] + " " + raw[m.end():]
+        rest_words = _REASON_GENERIC_WORD_RE.findall(rest.lower())
+        if not rest_words or all(w in _REASON_GENERIC_WORDS for w in rest_words):
+            return True
+    words = _REASON_GENERIC_WORD_RE.findall(raw.lower())
+    if not words:
+        return True
+    return all(w in _REASON_GENERIC_WORDS for w in words)
+
+
+# An inability clause in a POSITIVE count's tail is evidence about one item
+# (`3 findings; unable to see`), not approval filler: a finding count is a
+# complete verdict and an inability in the EVIDENCE must not veto it (F01/F68).
+# A ZERO count gets no such exemption -- `0 findings -- unable to check` names
+# nothing and is refused by the count gate itself (F12).
+_COUNT_TAIL_INABILITY_RE = re.compile(
+    r"(?i)\b(?:unable|not\s+able|failed|could\s+not|couldn['\u2019]t|cannot|"
+    r"can['\u2019]t)\s+to\s+\w+")
+
+
+def _count_tail_is_filler(tail, count=None) -> bool:
+    """A count form's tail must name a check/artifact, not just approval prose.
+
+    A bare `none`/`no`/`zero`/`nothing` is the complete zero verdict and stays
+    accepted (`0 findings; none`); `0 findings -- lorem ipsum` does not (R03).
+    ``count`` (when the caller has it) lets a positive count keep an inability
+    clause as evidence; the zero-count forms are refused by the caller's own
+    negation gate.
+    """
+    t = str(tail or "").strip(" \t;:,.\u2014\u2013-")
+    if not t:
+        return False
+    if re.fullmatch(r"(?i)(?:none|no|zero|nothing)", t):
+        return False
+    if count and _COUNT_TAIL_INABILITY_RE.search(t):
+        return False
+    return _reason_is_generic_filler(t)
+
+
 def _is_recorded_reason(cell: str) -> bool:
     """Is this disposition cell a reason rather than a bare verdict word?
 
@@ -3621,7 +3702,7 @@ def _is_recorded_reason(cell: str) -> bool:
     text = re.sub(r"\s+", " ", str(cell or "")).strip()
     if len(text) < 12 or re.search(r"[A-Za-z]{3}", text) is None:
         return False
-    if _disposition_filler_closure(text):
+    if _disposition_filler_closure(text) or _reason_is_generic_filler(text):
         return False
     return True
 
@@ -3688,6 +3769,8 @@ def _disposition_filler_closure(cell: str) -> bool:
     and a verdict-prefixed anonymous pointer is filler too (F04/F14).
     """
     text = re.sub(r"\s+", " ", str(cell or "")).strip()
+    if _reason_is_generic_filler(text):
+        return True
     if _nowork_token_is_reason(text) or _DISPOSITION_ANON_POINTER_RE.search(text):
         return True
     m = _DISPOSITION_VERDICT_PREFIX_RE.match(text)
@@ -3727,6 +3810,14 @@ def journal_seed_coverage_problems(sb: Path, seed: dict, rows: list,
         if not isinstance(raw_seed, dict) or not isinstance(raw_seed.get("candidates"), list):
             return ["feedback/CONCERN_SEED.json cannot be read as the seeded candidate "
                     "ledger: the per-candidate feedback coverage gate is UNVERIFIED"]
+        # A present candidate block whose entries carry no `seed_id` is NOT an
+        # empty seed: treating it as one silently disabled per-candidate
+        # coverage, so a renamed id key let a concern escape the letter (F17).
+        raw_candidates = raw_seed.get("candidates") or []
+        if raw_candidates:
+            return ["feedback/CONCERN_SEED.json carries "
+                    f"{len(raw_candidates)} candidate block(s) but no `seed_id`: the "
+                    "per-candidate feedback coverage gate cannot match them"]
         return []
     p = Path(sb) / SEED_COVERAGE_REL
     if not p.is_file():
