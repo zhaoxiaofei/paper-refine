@@ -229,7 +229,48 @@ EOF
 )
 
 ENCODED="$(printf '%s' "$PS_SCRIPT" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)"
-powershell.exe -NoProfile -NonInteractive -EncodedCommand "$ENCODED"
+# Word is a single-instance COM automation server, so a poisoned instance (left
+# behind by a killed run) or a modal dialog can make this call block forever.
+# The script therefore bounds its own call -- but it must NEVER bound it below
+# the caller's budget, because the CALLER owns the kill policy: the docx-compare
+# MCP server caps this same comparison at 900 s and escalates to taskkill on the
+# recorded Windows pids (F133), the only kill that reaches a Windows
+# powershell.exe/WINWORD from WSL, and the redline chain bounds it at 900 s as
+# well (mcp_compare_docx(timeout=900)).  A 180 s cap here failed a slow-but-valid
+# comparison minutes before that budget and silently downgraded the redline to a
+# lower-fidelity backend -- the very defect the MCP layer already fixed once
+# (C10) -- so the default is that same 900 s budget, and DOCXCOMPARE_TIMEOUT
+# overrides it (0 disables the cap for a caller that carries a larger budget).
+# `-k` makes the bound real: a child that ignores SIGTERM must not keep the
+# wrapper waiting, so SIGKILL follows the grace period and that exit (137) also
+# reads as a timeout.  `timeout` is optional (it is absent on some Git Bash
+# setups); without it the behaviour is the historical unbounded call.
+timeout_s="${DOCXCOMPARE_TIMEOUT:-900}"
+case "$timeout_s" in
+    '' | *[!0-9]*)
+        echo "Error: DOCXCOMPARE_TIMEOUT must be a whole number of seconds (0 disables the cap): $timeout_s" >&2
+        exit 2
+        ;;
+esac
+# `10#` so a leading zero is read as decimal, not as octal arithmetic.
+timeout_s=$((10#$timeout_s))
+TIMEOUT_BIN="$(command -v timeout || true)"
+if (( timeout_s > 0 )) && [[ -z "$TIMEOUT_BIN" && -n "${DOCXCOMPARE_TIMEOUT:-}" ]]; then
+    echo "Warning: DOCXCOMPARE_TIMEOUT is set but 'timeout' is not installed; running unbounded" >&2
+fi
+rc=0
+if (( timeout_s > 0 )) && [[ -n "$TIMEOUT_BIN" ]]; then
+    "$TIMEOUT_BIN" -k 30 "$timeout_s" \
+        powershell.exe -NoProfile -NonInteractive -EncodedCommand "$ENCODED" || rc=$?
+else
+    powershell.exe -NoProfile -NonInteractive -EncodedCommand "$ENCODED" || rc=$?
+fi
+if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+    echo "Error: Word comparison timed out after ${timeout_s}s: $OUTPUT" >&2
+    exit 124
+elif [[ $rc -ne 0 ]]; then
+    exit "$rc"
+fi
 
 if [[ ! -s "$OUTPUT_TMP" ]]; then
     echo "Error: no comparison document was written: $OUTPUT" >&2

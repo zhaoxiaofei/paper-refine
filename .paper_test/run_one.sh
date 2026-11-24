@@ -24,9 +24,14 @@ start=$(date +%s)
 # PYTHONDONTWRITEBYTECODE: N suites importing the pipeline concurrently all try to
 # write the same __pycache__ entry; that is safe, but the tree stays clean (and the
 # parallel run a little quieter) if nobody writes it.
+# -u (unbuffered): a redirected stdout is block-buffered, so a suite that blocks
+# for tens of minutes leaves a ZERO-BYTE log and the operator cannot tell how far
+# it got.  The 2026-11-24 baseline gate hit exactly that: two suites held the run
+# for an hour with empty logs.  Unbuffered output costs nothing at this volume
+# and makes such a stall diagnosable.
 TMPDIR="$rundir/tmp/$suite" TMP="$rundir/tmp/$suite" TEMP="$rundir/tmp/$suite" \
 PYTHONDONTWRITEBYTECODE=1 \
-    "$python" "$ws/.paper_test/$suite" >"$rundir/$suite.log" 2>&1
+    "$python" -u "$ws/.paper_test/$suite" >"$rundir/$suite.log" 2>&1
 rc=$?
 end=$(date +%s)
 printf '%s\n' "$rc" >"$rundir/status/$suite.rc"

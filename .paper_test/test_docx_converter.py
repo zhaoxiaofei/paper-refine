@@ -388,13 +388,17 @@ def test_codex_exec_mcp_approval():
 # =====================================================================
 
 def test_converter_safety_and_timeout_parity():
-    """docx2pdf.sh must not run macros; the MCP cap must not undercut the caller.
+    """docx2pdf.sh must not run macros; no cap may undercut the caller.
 
     Word's automation default is msoAutomationSecurityLow, i.e. macros in the
     opened document are ENABLED: converting an untrusted submission would run
     its payload on the operator's host. And the server's own 180 s kill made a
     slow-but-valid Word render fail before the orchestrator's 900 s budget, so
     the first-choice renderer silently degraded to a lower-fidelity fallback.
+    The same rule binds the scripts' OWN caps (C10, one layer down): a
+    `DOCX2PDF_TIMEOUT`/`DOCXCOMPARE_TIMEOUT` default below that budget fails a
+    slow-but-valid conversion before the caller's timeout, and a SIGTERM-only
+    timeout cannot bound a child that ignores it.
     """
     print()
     print("== converter safety: no macro execution, no truncated render budget ==")
@@ -409,12 +413,27 @@ def test_converter_safety_and_timeout_parity():
     m = re.search(r"timeout:\s*(\d[\d_]*)\s*,\s*maxBuffer", src)
     check("the MCP conversion call declares an explicit timeout", bool(m),
           m.group(0) if m else "no `timeout: N, maxBuffer` in index.js")
+    budget_s = inspect.signature(nb.render_docx_visual).parameters["timeout"].default
     if m:
         cap_ms = int(m.group(1).replace("_", ""))
-        budget_s = inspect.signature(nb.render_docx_visual).parameters["timeout"].default
         check("the MCP server cap is not below the orchestrator's render budget",
               cap_ms >= int(budget_s) * 1000,
               f"server {cap_ms} ms vs render_docx_visual {budget_s} s")
+    # The shell scripts bound their own Word call. The bound must sit at or
+    # above the caller's budget (the converter and the redline chain both cap
+    # the call at render_docx_visual's default), and `-k` must escalate, or a
+    # TERM-ignoring powershell.exe keeps the wrapper waiting forever.
+    for name, variable in (("docx2pdf.sh", "DOCX2PDF_TIMEOUT"),
+                           ("docxcompare.sh", "DOCXCOMPARE_TIMEOUT")):
+        body = (WS / name).read_text(encoding="utf-8")
+        cap = re.search(r"\$\{" + variable + r":-(\d+)\}", body)
+        check(f"{name}'s own {variable} default is not below the render budget",
+              bool(cap) and int(cap.group(1)) >= int(budget_s),
+              f"{variable} {cap.group(1) if cap else 'missing'} vs {budget_s} s")
+        kill = re.search(r'"\$TIMEOUT_BIN"\s+-k\s+\d+', body)
+        check(f"{name} escalates to SIGKILL so a TERM-ignoring child cannot hang it",
+              bool(kill),
+              kill.group(0) if kill else "no `timeout -k <grace> <cap>` in the script")
 
 
 def test_refusal_messages_evaluate():
