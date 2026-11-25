@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 07/24 of the pipeline -- executed by the
+# Part 07/25 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -93,7 +93,6 @@ WRITING_RUBRIC = """WRITING RUBRIC — use it to justify every `writing`-tier ro
   asserts, a conclusion whose missing step leaves it unsupported, or a claim stronger/weaker than
   its evidence belongs to the `correctness` tier (the class rule above), where that tier's rows
   count first; this rubric justifies only rows whose meaning survives the fix."""
-
 
 def language_pass_report(pkg: Path) -> dict:
     """The L1–L11 language-pass artifact of one package: coverage per step."""
@@ -3506,13 +3505,6 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
     return rec
 
 
-def _journal_concern_source(ctx: Ctx, r: int) -> Path:
-    """The sandbox that carries the concern ledger for this round."""
-    rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
-    _require_done(ctx, rid, "the concern ledger is the input of this stage")
-    return ctx.sandbox_of(ctx.run(rid))
-
-
 def _response_file_text(path: Path):
     """Extracted text of one package file, or None when the format is not read."""
     if not path.is_file():
@@ -3971,7 +3963,13 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
                           ensure_external_content_rule(
                               response_prompt(ctx, sb, r, target_label or target.parent.name,
                                               ledger) + note + shared_blocks()))
-    ledger_rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
+    if journal_is_scoped(ctx):
+        _rep = ctx.run(rid_concern_repair(r))
+        ledger_rid = (rid_concern_repair(r)
+                      if _rep is not None and _rep.get("status") == "done"
+                      else rid_concerns(r))
+    else:
+        ledger_rid = rid_feedback(r)
     rec = ctx.register(rid, "response", r, f"runs/{rid}", upstream_run_id=ledger_rid,
                        package_run_id=package_rid,
                        target_dir=target.relative_to(ctx.root).as_posix()
@@ -3983,9 +3981,8 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
                                                           follow_dir_links=True)
     if (sb / "previous_package").is_dir():
         rec["inputs_manifest"]["previous_package"] = hash_manifest(sb / "previous_package")
+    attach_response_plan(ctx, r, sb, rec)
     return rec
-
-
 def _journal_feedback_labels(ctx: Ctx) -> list:
     return [label for _p, label in journal_feedback_files(ctx)]
 
@@ -4111,8 +4108,7 @@ THE LEDGER IS THE DELIVERABLE (one row per distinct concern):
     name the corresponding `author`s in the `author` cell. Never merge two
     demands, never split one.
   * `quote` is VERBATIM from the feedback (<=300 chars, whitespace-normalised):
-    it is checked mechanically against feedback/text/ and feedback/llm/text/, so
-    a paraphrase fails.
+    it is checked against feedback/text/ and feedback/llm/text/, so a paraphrase fails; preserve the reviewer's typos, wrong punctuation and capitalization (never "fix" the quote).
   * `id` is stable and human-usable: `ED-<k>` for editor/decision points,
     `R<n>-<k>` for reviewer n (R1-3 = reviewer 1, third point).
   * `action` says what answering it demands: text | analysis | new-experiment |
@@ -4150,8 +4146,8 @@ def concerns_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
 
 This run REPLACES the general review of a {mode} revision (option
 {info['option']}: {info['label']}). The review feedback of
-{from_j} — the human editors'/reviewers' comments
-and/or the false-positive-filtered LLM review — requires an answer to every
+{from_j} — the human editors'/reviewers' comments (a concern-scoped
+major/minor revision admits HUMAN feedback only) — requires an answer to every
 point, and the manuscript may change ONLY where a concern requires it. Deliver
 the concern ledger AND the finding list the single revision session follows.
 
@@ -4182,11 +4178,12 @@ CURRENT `base/`. Use the reviewer-visible copy only to resolve a quote and to
 decide whether `base/` already answers a concern; never edit it, never copy its
 text, and never quote it as the authors' current prose.
 
-When `feedback/llm/` is present, its false positives were ALREADY filtered out
-upstream: every remaining item is a real concern with the same standing as a
-human reviewer's point. Enumerate it, answer it, and never dismiss it as a model
-false positive; a row you still believe is wrong gets `not-applicable` (or
-action `disagree`) with the concrete rationale — never a silent omission. Name
+When `feedback/llm/` is present AND this mode admits the LLM stream
+(transfer/resubmit/`llm` — never major/minor), its false positives were ALREADY
+filtered out upstream: every remaining item is a real concern with the same
+standing as a human reviewer's point. A major/minor revision stages no
+`feedback/llm/` and may NOT enumerate one: `llm_review_feedback/` is not a
+concern source for a concern-scoped revision. Name
 the LLM the file itself names as `author`, else "LLM review (pre-filtered)"; a
 demand the letter and the LLM review both raise is ONE row naming both sources,
 separated by `;` (`editor_letter.txt; llm_review.md`), with the quote verbatim in
@@ -4287,6 +4284,7 @@ WHAT YOU READ:
   * target/   — the FINAL package ({target_label}); every change you claim must
     exist here. revision_report.json and DIFF_LEDGER.md name what changed and
     where — use them, never your memory.
+{_response_plan_note()}
   * previous_package/ — when present, the READ-ONLY package the revision started
     from (the scoped revision's base/, or the reviewer-visible original
     submission for a resubmit). Use it ONLY to check a `before` span; it is not
@@ -4410,10 +4408,11 @@ def journal_revise_block(ctx: Ctx) -> str:
 === {mode.upper()} REVISION — CONCERN-SCOPED EDITS ONLY ===
 This is a real {mode} revision: the review raised the concerns now in
 `guided_review/findings.json` (every finding has `check: "JF"` and a `concern` id;
-`concerns/JF_concerns.md` carries the sources' own words — human reviewers
-and/or the false-positive-filtered LLM review, with the same standing).
+`concerns/JF_concerns.md` carries the sources' own words — HUMAN reviewers only:
+a concern-scoped revision admits no LLM-review finding).
   * Change the manuscript ONLY where a concern requires it. Every edit names the
-    JF finding id / concern id that raised it.
+    JF finding id / concern id that raised it. `response_plan/` is the point-by-
+    point response written BEFORE this revision: implement it, never edit it.
   * NO unrelated changes: no restructuring, no style re-wording, no new findings
     from a rescan, no renames, no deletions, no added documents, no figure
     regeneration. Anything else you notice goes to MANUAL_STEPS.md as a note for
@@ -4444,7 +4443,7 @@ findings the same standing). The review's JF findings (`check: "JF"`, with a
 `concern` id) are mandatory: every one is either fixed in the package or
 recorded as a manual item with the exact steps.
 {tail}
-The manuscript must answer every concern; the normal findings still apply.
+The manuscript must answer every concern; the normal findings still apply. When `response_plan/` is present, implement that point-by-point response plan and never edit it.
 When `feedback/original_submission/` exists it is the earlier, reviewer-visible
 version -- EVIDENCE, not the package you edit: read it only to understand a
 concern, and make every edit, and quote every location, in the current `base/`.
@@ -4656,8 +4655,8 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
             errs.append(f"concern {cid}: the `source` cell is empty (name the feedback file "
                         f"the quote comes from)")
         if not author:
-            errs.append(f"concern {cid}: the `author` cell is empty (name the reviewer or "
-                        f"'LLM review (pre-filtered)')")
+            errs.append(f"concern {cid}: the `author` cell is empty (name the reviewer/LLM "
+                        f"label the source carries)")
         def _strong_labels(src: str, labels) -> list:
             """A STRONG alias hit only; a cross-stream weak suffix is not one."""
             low = str(src or "").strip().lower()
@@ -8159,13 +8158,12 @@ def postcheck_response(ctx: Ctx, rec: dict):
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     target = sb / "target"
-    src_rec = ctx.run(rid_concerns(r)) or ctx.run(rid_feedback(r))
-    if src_rec is None:
-        errs.append("the concern ledger's sandbox is missing (no concerns/feedback run in this "
-                    "round): the letter cannot be verified against the concerns")
+    try:
+        src = _journal_concern_source(ctx, r)
+    except RuntimeError:
         src = None
-    else:
-        src = ctx.sandbox_of(src_rec)
+        errs.append("the concern ledger's sandbox is missing (no concerns/feedback/repair run "
+                    "in this round): the letter cannot be verified against the concerns")
     ledger_rows = {str(row.get("id")): row
                    for row in (journal_concern_rows(src) if src else [])}
     md = sb / JOURNAL_RESPONSE_MD_REL
@@ -8241,10 +8239,11 @@ def postcheck_response(ctx: Ctx, rec: dict):
             if len(re.findall(r"\S+", c_norm)) < 4 and not _full_quote:
                 errs.append(f"response {cid!r}: the Comment quotation is shorter than 4 words "
                             f"({comment!r}); quote the reviewer's own wording, not a label")
-            elif not response_comment_is_verbatim(comment, concern_quote):
+            elif not response_comment_verifies(ctx, sb, ledger_rows.get(cid), comment,
+                                                concern_quote):
                 errs.append(f"response {cid!r}: the Comment quotation is not verbatim from the "
-                            f"reviewer feedback (the concern ledger's quote is {concern_quote!r}); "
-                            f"it may be a shorter excerpt but must add no words")
+                            f"reviewer feedback (preserve its typos and punctuation; it may be "
+                            f"a shorter excerpt but must add no words)")
         changes = [c for c in (row.get("changes") or []) if isinstance(c, dict)]
         new_data = [str(x) for x in (row.get("new_data") or []) if str(x).strip()]
         # Bind the letter's own `**Changes:**` claims to the same row's validated
@@ -9045,15 +9044,15 @@ def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: i
             f"finish the round first")
     response_dir = None
     if journal_needs_response(ctx):
+        ph = {"cmd": cmd, "timeout": timeout, "jobs": jobs, "retries": retries,
+              "manual": manual, "nowait": nowait, "poll": poll,
+              "retry_backoff": retry_backoff, "retry_backoff_max": retry_backoff_max}
         rid = rid_response(r)
         rec = ctx.run(rid)
         done = bool(rec and rec.get("status") == "done"
                     and (ctx.sandbox_of(rec) / JOURNAL_RESPONSE_MD_REL).is_file())
         if not done:
             materialize_response(ctx, r, target=target, target_label=label)
-            ph = {"cmd": cmd, "timeout": timeout, "jobs": jobs, "retries": retries,
-                  "manual": manual, "nowait": nowait, "poll": poll,
-                  "retry_backoff": retry_backoff, "retry_backoff_max": retry_backoff_max}
             ok, paused = run_phase(ctx, [rid], label="journal response", **ph)
             if not ok:
                 return False, paused
@@ -9062,11 +9061,20 @@ def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: i
         if problem:
             die("response publication blocked: " + problem)
         response_dir = ctx.sandbox_of(rec)
+        # The letter is itself an LLM deliverable: an independent audit must
+        # dispose every concern and every claim, and ONE repair pass applies the
+        # confirmed defects (see p24; the repair edits only response/).
+        if response_audit_of(ctx) == "on":
+            response_dir, _ok, _paused = run_response_deliverable_chain(
+                ctx, r, response_dir, ph)
+            if not _ok:
+                return False, _paused
     dst = publish_journal_submission(ctx, target, label, response_dir=response_dir)
     ctx.state.setdefault("journal", {})
     ctx.state["journal"].update({"mode": journal_mode_of(ctx),
                                  "submission_dir": dst.relative_to(ctx.root).as_posix(),
                                  "response": bool(response_dir),
+                                 "response_audit": response_audit_of(ctx),
                                  "published_at": utcnow()})
     ctx.save_state()
     print(f"[run] journal submission assembled: {dst} "

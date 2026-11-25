@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/24 of the pipeline -- executed by the
+# Part 09/25 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -389,6 +389,12 @@ def cmd_setup(args) -> None:
             if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
                 forced.append("audit off (the guided review's audits do not run in this mode)")
             args.audit = "off"
+            # The post-revise chain runs in a concern-scoped revision too: its
+            # object is the revision's OWN delta plus the repaired human-concern
+            # findings, so it needs no general review. It remains the independent
+            # check of the revised manuscript and the bounded repair applies its
+            # plan without leaving the admitted concerns.
+
             args.revision_audit = "on"
             forced.append("revision audit on (mandatory concern-scoped post-write verification)")
             # The scoped review is formatting/writing only: a full discovery
@@ -890,6 +896,12 @@ def cmd_setup(args) -> None:
                # non-empty; "off" leaves the revised version final. The env
                # override PAPER_REVISION_AUDIT works on an existing root.
                "revision_audit": str(getattr(args, "revision_audit", "on") or "on").lower(),
+               # The concern ledger and the response-to-reviewers letter are
+               # LLM-written deliverables: each gets an independent audit and a
+               # one-pass repair. ON by default; `off` records the skip and the
+               # deliverable is then reported as unaudited.
+               "concern_audit": str(getattr(args, "concern_audit", "on") or "on").lower(),
+               "response_audit": str(getattr(args, "response_audit", "on") or "on").lower(),
                # The COLD-START REVIEW's recorded policy: "on" (default) plans one
                # extra independent session per full-scope round; "off" is the
                # documented off switch (`set-cold-start-review` flips it on an
@@ -3705,6 +3717,9 @@ def cmd_set_revision_mode(args) -> None:
                 forced.append("champion_select=revise (a scoped revision has no integration arm)")
             ctx.cfg["audit"] = "off"
             forced.append("audit=off")
+            # Keep the operator's revision-audit policy: the scoped variant
+            # audits the revision's own delta against the repaired concerns.
+
             ctx.cfg["revision_audit"] = "on"
             forced.append("revision_audit=on (mandatory concern-scoped post-write audit)")
             if str(ctx.cfg.get("cold_start_review", COLD_START_REVIEW_DEFAULT)).lower() != "off":

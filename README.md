@@ -466,11 +466,11 @@ human letter should drive the revision.
 | — | `init` | start a **new submission**: conform to the venue's template (or its guidelines → academic convention when no template ships) first, then the default rounds | **not written** | allowed | the round's full review |
 | option 1 | `transfer` | revise for a **new journal** (e.g. read iScience, submit to Frontiers in Immunology) | **not written** | allowed | the round's full review + the decision letter's concerns |
 | option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
-| option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review, no audit, no judge panel |
-| option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only |
+| option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review and no judge panel; the scoped revision audit/bounded repair, the concern audit/repair and the response audit/repair DO run |
+| option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only (same audit/repair chain as 3) |
 | option 5 | `llm` | revise against the pre-filtered `llm_review_feedback/` area only (explicit selection only; an unconfigured root remains on `continue`) | **not written** | allowed | the round's full review + the LLM review's concerns |
 
-**The pre-filtered `llm` area supplements the normal full review; it never replaces it.** Options 3–4 are concern-scoped major/minor modes: their edits are confined to the admitted human concerns, and their base is the previously reviewed submission — the round itself stages no general review, no audit and no judge panel. Where a mode replaces the general review, every class the external pre-filter dropped and every class the concern ledger does not cover is recorded as a named gap, never treated as clean.
+**The pre-filtered `llm` area supplements the normal full review; it never replaces it.** Options 3–4 are concern-scoped major/minor modes: their edits are confined to the admitted HUMAN concerns, and their base is the previously reviewed submission — the round itself stages no general review and no judge panel. It DOES stage the concern audit → concern repair pair, the scoped revision audit → bounded repair pair, and the response audit → response repair pair: every LLM-written deliverable is checked by an independent session and its confirmed defects are applied by one repair pass. Where a mode replaces the general review, every class the external pre-filter dropped and every class the concern ledger does not cover is recorded as a named gap, never treated as clean.
 
 Both `init` and `transfer` run the conforming agent before round 1: an
 applicable official Word template takes precedence; otherwise the agent uses
@@ -482,7 +482,7 @@ explicit opt-out from conformance, not an opt-out from auditing a writer that ra
 
 How each mode runs:
 
-* **The four journal modes** enumerate the letter into a concern ledger
+* **The journal modes** enumerate the letter into a concern ledger
   (`concerns/JF_concerns.json|md`: one row per distinct concern, verbatim
   quote — checked against the text rendering of the feedback — plus `action`
   and `disposition`). The feedback is EXTERNAL prose: it never becomes a
@@ -494,21 +494,32 @@ How each mode runs:
   `original_submission/` is never discovered as a letter: it is staged
   READ-ONLY and separately under `feedback/original_submission/`, and every
   journal stage may read it only as the reviewer-visible earlier manuscript.
-  A sibling `llm_review_feedback/` area is read too, when present: its
-  remaining findings were already filtered for false positives, so they are
-  enumerated with the same standing as the human points (staged under
-  `feedback/llm/`, origin kept in the ledger's `source`/`author` columns, and
-  never silently dropped).
+  A sibling `llm_review_feedback/` area is read too in the modes that admit
+  it (`transfer`, `resubmit`, `llm`), when present: its remaining findings
+  were already filtered for false positives, so they are enumerated with the
+  same standing as the human points (staged under `feedback/llm/`, origin kept
+  in the ledger's `source`/`author` columns, and never silently dropped).
+  **Major/minor do NOT admit that stream:** only a human reviewer's demand may
+  become a concern or a finding there.
 * **Options 1–2** feed the ledger into the normal round: the review reconciles
   every concern (`guided_review/concerns_reconciled.json`) and files a `check: "JF"`
   finding for each unanswered one; the rewrites carry the concern block; the
   revise arms answer the findings; the judge panel and `decide` work as usual.
 * **Options 3–4** run a different, restricted path: `r1_concerns` produces the
   ledger AND the only finding list (`check: "JF"`, one finding per concern);
-  the single `r1_a2_revise` session edits the manuscript ONLY for those ids
+  `r1_concern_audit` independently disposes every concern against the HUMAN
+  feedback (confirmed / defective / dropped), and `r1_concern_repair` applies
+  only the confirmed corrections/removals and regenerates the finding list.
+  The point-by-point response is written FIRST as `r1_response_draft` (the
+  reviewer's verbatim quotation — typos and wrong punctuation preserved — plus
+  the authors' intended answer and planned changes); the reviser implements
+  that plan. The single `r1_a2_revise` session edits the manuscript ONLY for
+  those ids
   (every other observation goes to `MANUAL_STEPS.md`), and the code-side scope
   guard fails the attempt for a changed file the ledger does not name or a
-  file added/removed. There is no judge panel and no champion decision —
+  file added/removed. The revised package then gets the scoped `REVISION AUDIT`
+  → `BOUNDED REPAIR` pair (auditing the revision's own delta against the
+  repaired concerns). There is no judge panel and no champion decision —
   `decide` reports the scoped revision instead.
 * **Option 5 (`llm`)** runs like options 1–2 (the normal round with the concern
   ledger reconciled by the review, rewrites allowed) with two differences: only
@@ -517,10 +528,20 @@ How each mode runs:
   response letter or `journal_submission/` package is produced — there is no
   journal to submit to. The mode is selected only with `--revision-mode llm`
   (or `set-revision-mode llm`); the directory's presence is not a selector.
-* **Options 2–4** then run a response stage: `RESPONSE_TO_REVIEWERS.md` +
-  `response_map.json`, one block/row per concern, every cited file verified to
-  exist in the final package, `planned` rows forbidden from claiming results,
-  and a new-experiment concern required to cite its new data.
+* **Options 2–4** write the point-by-point response in TWO steps. In a
+  concern-scoped or resubmit round, `response_draft` is written BEFORE the
+  revision: it fixes the reviewer's verbatim quotation and the authors'
+  intended answer, and the reviser implements it. After the revision, the FINAL response stage
+  reconciles the same letter with the package: `RESPONSE_TO_REVIEWERS.md` +
+  `response_map.json`, one block/row per concern, the reviewer's own text
+  character-for-character (typos, wrong punctuation and capitalization
+  preserved), every cited file/span verified to exist in the final package,
+  `planned` rows forbidden from claiming results, and a new-experiment concern
+  required to cite its new data. The letter is an LLM deliverable:
+  `RESPONSE AUDIT` disposes every concern row and every claim against the
+  repaired ledger, the final package and the revision ledger, and `RESPONSE
+  REPAIR` applies only confirmed defects to `response/` (never to the
+  manuscript) before `journal_submission/` is assembled.
 * **The four journal modes** finish by assembling `<root>/journal_submission/`: the final
   package minus `raw_data/` and — unless `--submit-code on` /
   `set-submit-code on` asks for it — the analysis-code area (`code/`), minus
@@ -1032,6 +1053,13 @@ boxes.
 | `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran). **After its postcheck**, an independent REVISION AUDITOR writes `revision_audit/REPAIR_PLAN.json` (no edits), and a non-empty plan runs ONE bounded-repair session that re-validates and applies only confirmed rows, records `revised/REPAIR_LEDGER.json`, and re-passes the revise postcheck (mandatory in general and concern-scoped major/minor revisions) |
 | `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members). It reconciles every frozen X-* id in its difference ledger — a dropped id is accounted for, never applied |
 | `judge` | `judge_t…_j…` | blind pairwise panels over the round's field (the id is an opaque token: it carries no round and no arm) |
+| `concerns` | `r<r>_concerns` | (major/minor) the scoped reconciliation: one session writes the concern ledger and the only `JF` finding list the revise arm consumes. It sees HUMAN feedback only |
+| `concern_audit` | `r<r>_concern_audit` | **on by default** (`--concern-audit off` skips the pair and records the skip): an INDEPENDENT session disposes every generated concern — `confirmed`, `defective` (with the exact current value, the replacement and a re-runnable basis) or `dropped` — against the HUMAN feedback and the base. It adds no concern; its observations go to `concern_audit/UNRESOLVED.md` |
+| `concern_repair` | `r<r>_concern_repair` | the ONE repair pass over the ledger + `JF` finding list: it re-validates every audit row (Rule 1B), applies only confirmed corrections/merges/removals, regenerates `SEED_COVERAGE.md` and the finding list, and records `concern_repair/REPAIR_LEDGER.json`. It never edits the manuscript |
+| `response_draft` | `r<r>_response_draft` | (resubmit/major/minor) the point-by-point response PLAN, written BEFORE the revision: the reviewer's verbatim quotation (typos/punctuation preserved) + the authors' intended answer + planned changes; `changes`/`new_data` stay empty. The reviser implements it |
+| `response` | `r<r>_response` | (resubmit/major/minor) the FINAL point-by-point response letter + `response_map.json`, reconciled with the final package after the revision: one block/row per repaired concern, every cited file/span verified, the reviewer's text verbatim |
+| `response_audit` | `r<r>_response_audit` | **on by default** (`--response-audit off` records the skip): an INDEPENDENT session disposes every response row and claim against the repaired ledger, the final package and the revision ledger — missing answer, unsupported claim, wrong citation/status, overclaim, inconsistency. A manuscript observation goes to `response_audit/UNRESOLVED.md` |
+| `response_repair` | `r<r>_response_repair` | the ONE repair pass over `response/` only: it re-validates each audit row, corrects/downgrades only confirmed defects, never edits the manuscript, and re-passes `postcheck_response` before the submission is assembled |
 
 Each run keeps its sandbox under `runs/<id>/` (`base/`, `guided_review/`, the stage's
 own output directory, `PROMPT.md`, `_pipeline_done.json`). Completion is a
@@ -1048,7 +1076,7 @@ Every corpus the pipeline handles carries one pristine input area and two
 | `non_revised/` (in the root) | the pristine copy of `--source` | read-only: re-hashed at the start of every `run`/`decide`, byte-verified in every sandbox, never written (the operator's `--source` is never touched at all) |
 | `raw_data/` (inside each corpus) | the raw data — figure and table sources, data tables, the analysis snapshot the author's own scripts regenerate; an older corpus may also keep feedback here | read-only: a package CARRIES it, and the pipeline puts the untouched original's copy back after every package-producing stage; NOT submission content |
 | `human_review_feedback/` (inside each corpus) | the REAL editors'/reviewers' comments from the previous submission (decision letters, referee reports), plus any previous response-to-reviewers as context; its child `original_submission/`, when present, is the manuscript version those reviewers actually saw | read-only and NOT submission content like raw_data; the journal modes build the concern ledger and the response letter from it, and a judge may read it (under `evidence/human_review_feedback/` in its view) to score how well a version ADDRESSES the human-raised concerns; `original_submission/` is evidence for resolving a concern and checking whether the current `base/` already answers it — never the submission, a sweep surface or a source of text |
-| `llm_review_feedback/` (inside each corpus, optional) | a machine-generated review of the previous submission whose false positives were filtered out upstream (any file types); every remaining finding is a real concern with the same standing as a human reviewer's point | read-only and NOT submission content like the other evidence areas; the journal modes stage it under `feedback/llm/` and enumerate its findings into the concern ledger (origin kept in `source`/`author`; a row closed `not-applicable`/`disagree` needs the recorded rationale), and a judge may read it under `evidence/llm_review_feedback/` in its view to score how well a version ADDRESSES those findings |
+| `llm_review_feedback/` (inside each corpus, optional) | a machine-generated review of the previous submission whose false positives were filtered out upstream (any file types); every remaining finding is a real concern with the same standing as a human reviewer's point **only in the modes that admit the LLM stream** (`transfer`, `resubmit`, `llm`) | read-only and NOT submission content like the other evidence areas; those modes stage it under `feedback/llm/` and enumerate its findings into the concern ledger (origin kept in `source`/`author`; a row closed `not-applicable`/`disagree` needs the recorded rationale), and a judge may read it under `evidence/llm_review_feedback/` in its view to score how well a version ADDRESSES those findings. **Major/minor do not stage it** — a concern-scoped revision admits human reviewer demands only |
 
 The names are CANONICAL and strict: the pipeline has one name per input area,
 and the removed legacy spellings (`non-revised/`, `raw_figs/`) are neither
@@ -1126,7 +1154,9 @@ The selection items are comma-separated and combine as a **union**:
 * a **stage name** — the stage in every round: `rewrite`, `review`, `audit`,
   `revise`, `integrate`, `judge`, plus the aliases `w`, `a`/`a2`, `i`, `merge`,
   `j` (plurals work too); in a journal revision mode the chain's `feedback`,
-  `concerns` and `response` stages are selectable as well (`fb`, `resp`);
+  `concerns`, `concern_audit`, `concern_repair`, `response_draft`, `response`,
+  `response_audit` and `response_repair` stages are selectable as well (`fb`,
+  `ca`, `cr`, `rd`, `resp`, `ra`, `rr`);
 * **`ROUND:STAGE`** — one stage of one round (`2:merge`, `3:judge`;
   `.`/`/` separate as well, and `all` stands for every stage, e.g. `2:all`);
 * **one agent SESSION** — the session, not its whole stage: `rewriter2` (only
@@ -1459,9 +1489,12 @@ manuscript files:
   it is never swept, counted or quoted as the authors' current prose.
 * **`llm_review_feedback/`** — an optional machine-generated review of the
   previous submission whose false-positive findings were filtered out upstream
-  (any file types). The journal modes stage it beside the human feedback
-  (`feedback/llm/…`) and enumerate every remaining finding as a real concern
-  with the same standing as a human reviewer's point; the blind judges read it
+  (any file types). The modes that admit the LLM stream (`transfer`, `resubmit`,
+  `llm`) stage it beside the human feedback (`feedback/llm/…`) and enumerate
+  every remaining finding as a real concern with the same standing as a human
+  reviewer's point; a major/minor revision stages neither it nor a row derived
+  from it (only human reviewer demands may become concerns/findings). The blind
+  judges read it
   under `evidence/llm_review_feedback/…` and judge how a version addresses it.
   A finding is never dismissed merely because a model wrote it, and a row the
   authors still believe is wrong is closed `not-applicable`/`disagree` with a

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 17/24 of the pipeline -- executed by the
+# Part 17/25 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -864,6 +864,25 @@ def build_parser() -> argparse.ArgumentParser:
                          "major/minor; a non-empty repair plan runs one bounded repair pass. "
                          "This audit cannot be disabled. --no-audit controls only the earlier "
                          "review-disposition audit")
+    ps.add_argument("--concern-audit", choices=("on", "off"), default="on",
+                    help="audit the GENERATED concern ledger (and its JF finding list) with an "
+                         "independent session, then apply its dispositions in ONE repair pass. "
+                         "ON by default for major/minor revisions. The audit disposes every "
+                         "concern (confirmed / defective / dropped) against the HUMAN feedback; "
+                         "the repair corrects/removes only confirmed rows and regenerates the "
+                         "finding list. OFF records the skip and the scoped revision consumes "
+                         "the generated ledger unaudited.")
+    ps.add_argument("--no-concern-audit", dest="concern_audit", action="store_const",
+                    const="off", help="same as --concern-audit off")
+    ps.add_argument("--response-audit", choices=("on", "off"), default="on",
+                    help="audit the RESPONSE-TO-REVIEWERS letter + response_map.json with an "
+                         "independent session, then repair only confirmed defects in a second "
+                         "session. ON by default in every mode that writes a response. The "
+                         "repair edits only response/ and never the manuscript; a claim the "
+                         "final package does not support is corrected or downgraded, never "
+                         "invented.")
+    ps.add_argument("--no-response-audit", dest="response_audit", action="store_const",
+                    const="off", help="same as --response-audit off")
     ps.add_argument("--guided-review",
                     dest="guided_review", choices=list(GUIDED_REVIEW_MODES),
                     default=GUIDED_REVIEW_DEFAULT,
@@ -1187,8 +1206,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "(--only 1,2 = only rounds 1 and 2, every stage; --only 1-3), a STAGE "
                          "name (--only audit = that stage in every round; guided_review, "
                          "cold_start_review, rewrite, audit, revise, integrate, judge, and the "
-                         "journal modes' feedback, concerns, response; `review` selects BOTH "
-                         "discovery passes; aliases w, a/a2, i, merge, j, fb, resp), "
+                         "journal modes' feedback, concerns, concern_audit, concern_repair, "
+                         "response_draft, response, response_audit, response_repair; `review` "
+                         "selects BOTH discovery passes; aliases w, a/a2, i, merge, j, fb, ca, "
+                         "cr, rd, resp, ra, rr), "
                          "ROUND:STAGE (--only 2:merge,3:judge = round 2's integration and round "
                          "3's judge; '.' and '/' also separate, 'all' stands for every stage), or "
                          "ONE AGENT SESSION instead of its whole stage: --only rewriter2 runs only "

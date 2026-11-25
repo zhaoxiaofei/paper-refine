@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 06/24 of the pipeline -- executed by the
+# Part 06/25 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -645,8 +645,18 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
         # second agent was launched into the first one's work.
         d = sb / "concerns"
         return d.is_dir() and any(d.iterdir())
-    if rec["kind"] == "response":
+    if rec["kind"] in ("response", "response_draft"):
         d = sb / "response"
+        return d.is_dir() and any(d.iterdir())
+    if rec["kind"] in ("concern_audit", "concern_repair",
+                       "response_audit", "response_repair"):
+        # These stages own a dedicated output directory (the audit's sheet or
+        # the repair's ledger). A partially written one must read as work in
+        # progress, so a second agent is never launched into it.
+        d = sb / {"concern_audit": "concern_audit",
+                  "concern_repair": "concern_repair",
+                  "response_audit": "response_audit",
+                  "response_repair": "response_repair"}[rec["kind"]]
         return d.is_dir() and any(d.iterdir())
     # rewrite / revise / integrate: the output package and code/ are the agent's.
     # A revise sandbox is materialized WITH the seeded ledger and language-pass

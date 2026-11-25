@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 03/24 of the pipeline -- executed by the
+# Part 03/25 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -4718,7 +4718,8 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
                           deletions_allowed: bool = True,
                           prefer_rewrite: bool = False,
                           soft_deletions: bool = False,
-                          author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
+                          author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
+                          journal_block: str = "") -> str:
     """The REVISION AUDITOR prompt: audit the revision, write the repair plan only.
 
     The audit's REPAIR_PLAN drives the bounded repair, and the repair prompt
@@ -4745,6 +4746,8 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
     text = with_context_budget(text)
     text = apply_author_to_complete_prompt(text, author_to_complete)
     text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
+    if journal_block:
+        text = text + "\n" + journal_block
     return page_stage_prompt(
         sandbox, text,
         [("SHARED DECISION RULES", shared),

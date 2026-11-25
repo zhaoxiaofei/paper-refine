@@ -577,6 +577,184 @@ def do_concerns(sb: Path, name: str, round_no: int) -> int:
     return 0
 
 
+def _stub_concern_rows(sb: Path) -> list:
+    doc = sb / "concerns" / "JF_concerns.json"
+    if not doc.is_file():
+        return []
+    return (json.loads(doc.read_text(encoding="utf-8")) or {}).get("concerns") or []
+
+
+def _stub_human_feedback_names(sb: Path) -> list:
+    d = sb / "feedback" / "files"
+    return sorted(p.name for p in d.iterdir() if p.is_file()) if d.is_dir() else []
+
+
+def do_concern_audit(sb: Path, name: str, round_no: int) -> int:
+    """Stub: confirm every generated concern, unless PAPER_STUB_CONCERN_AUDIT_DROP
+    names ids to mark `dropped` (a non-demand)."""
+    rows = _stub_concern_rows(sb)
+    drop = {x.strip() for x in (os.environ.get("PAPER_STUB_CONCERN_AUDIT_DROP") or "").split(",")
+            if x.strip()}
+    out = sb / "concern_audit"
+    out.mkdir(parents=True, exist_ok=True)
+    coverage = [{"file": f, "examined": 1,
+                 "defects": sum(1 for r in rows if r["id"] in drop),
+                 "note": "stub: read the staged human feedback file"} for f in
+                _stub_human_feedback_names(sb)]
+    audit = {"round": round_no,
+             "rows": ([{"id": r["id"], "verdict": "dropped",
+                        "defects": [{"type": "not-a-demand",
+                                     "wrong": str(r.get("quote") or "")[:120],
+                                     "correct": "",
+                                     "basis": "stub: the quoted sentence is not a reviewer "
+                                              "demand (closing thanks/background)"}],
+                        "reason": "stub: the quoted sentence is not a reviewer demand",
+                        "evidence": "stub: re-read the quote in its human feedback file"}
+                       if r["id"] in drop else
+                       {"id": r["id"], "verdict": "confirmed", "defects": [],
+                        "reason": "stub: the concern is a human reviewer's demand and the "
+                                  "quote/source/disposition/finding mapping check out",
+                        "evidence": "stub: re-read the ledger row and its human feedback file"}
+                       for r in rows]),
+             "coverage": coverage,
+             "notes": "stub: %d dropped" % sum(1 for r in rows if r["id"] in drop)}
+    write_json(out / "CONCERN_AUDIT.json", audit)
+    (out / "CONCERN_AUDIT.md").write_text("# concern audit (stub)\n", encoding="utf-8")
+    (out / "coverage.md").write_text("# coverage (stub)\n", encoding="utf-8")
+    (out / "UNRESOLVED.md").write_text("none\n", encoding="utf-8")
+    write_json(sb / "_pipeline_done.json", {
+        "stage": "concern_audit", "run_id": name, "round": round_no,
+        "status": "complete", "error": None,
+        "confirmed": len(rows), "defective": 0, "dropped": 0})
+    return 0
+
+
+def do_concern_repair(sb: Path, name: str, round_no: int) -> int:
+    """Stub: confirm every audit row. A confirmed drop removes the concern and its
+    finding, and rewrites SEED_COVERAGE; PAPER_STUB_CONCERN_REPAIR_REJECT names a
+    drop the repair rejects (the concern stays)."""
+    audit_doc = sb / "concern_audit" / "CONCERN_AUDIT.json"
+    audit = json.loads(audit_doc.read_text(encoding="utf-8")) if audit_doc.is_file() else {}
+    reject = {x.strip() for x in (os.environ.get("PAPER_STUB_CONCERN_REPAIR_REJECT") or "")
+              .split(",") if x.strip()}
+    rows, dropped = [], set()
+    for row in (audit.get("rows") or []):
+        cid = row.get("id")
+        if row.get("verdict") == "dropped" and cid not in reject:
+            dropped.add(cid)
+            rows.append({"id": cid, "audit_verdict": "dropped", "verdict": "confirmed",
+                         "action": "dropped",
+                         "reason": "stub: the audit's drop reproduces against the feedback",
+                         "evidence": "stub: re-opened the concern row and its human source"})
+        elif row.get("verdict") == "dropped":
+            rows.append({"id": cid, "audit_verdict": "dropped", "verdict": "rejected",
+                         "action": "kept",
+                         "reason": "stub: the concern is a human demand; the drop is rejected",
+                         "evidence": "stub: re-opened the quote in the human feedback"})
+        else:
+            rows.append({"id": cid, "audit_verdict": row.get("verdict"),
+                         "verdict": "confirmed", "action": "no-change",
+                         "reason": "stub: the audit row reproduces against the ledger and feedback",
+                         "evidence": "stub: re-opened the concern row and its human source"})
+    if dropped:
+        ledger_path = sb / "concerns" / "JF_concerns.json"
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        ledger["concerns"] = [c for c in (ledger.get("concerns") or [])
+                              if c.get("id") not in dropped]
+        write_json(ledger_path, ledger)
+        _write_seed_coverage(sb, ledger["concerns"])
+        fj_path = sb / "guided_review" / "findings.json"
+        fj = json.loads(fj_path.read_text(encoding="utf-8"))
+        fj["findings"] = [f for f in (fj.get("findings") or [])
+                          if f.get("concern") not in dropped]
+        write_json(fj_path, fj)
+    out = sb / "concern_repair"
+    out.mkdir(parents=True, exist_ok=True)
+    write_json(out / "REPAIR_LEDGER.json",
+               {"round": round_no, "rows": rows,
+                "counts": {"input": len(rows), "kept": 0, "corrected": 0,
+                           "merged": 0, "dropped": 0, "rejected": 0},
+                "notes": "stub: no repair needed"})
+    (out / "REPAIR_LOG.md").write_text("# concern repair (stub)\n", encoding="utf-8")
+    write_json(sb / "_pipeline_done.json", {
+        "stage": "concerns", "run_id": name, "round": round_no,
+        "status": "complete", "error": None, "summary": {"rows": len(rows)}})
+    return 0
+
+
+def do_response_audit(sb: Path, name: str, round_no: int) -> int:
+    """Stub: confirm every response row."""
+    rows = _stub_concern_rows(sb)
+    out = sb / "response_audit"
+    out.mkdir(parents=True, exist_ok=True)
+    audit = {"round": round_no,
+             "rows": [{"id": r["id"], "verdict": "confirmed", "defects": [],
+                       "reason": "stub: the letter answers the concern truthfully and its "
+                                 "changes exist in the final package",
+                       "evidence": "stub: re-read the letter block and the package"}
+                      for r in rows],
+             "coverage": [{"file": f, "examined": 1, "defects": 0,
+                           "note": "stub: checked the response deliverable"} for f in
+                          ("response/RESPONSE_TO_REVIEWERS.md", "response/response_map.json")
+                          if (sb / f).is_file()],
+             "notes": "stub: no defects"}
+    write_json(out / "RESPONSE_AUDIT.json", audit)
+    (out / "RESPONSE_AUDIT.md").write_text("# response audit (stub)\n", encoding="utf-8")
+    (out / "coverage.md").write_text("# coverage (stub)\n", encoding="utf-8")
+    (out / "UNRESOLVED.md").write_text("none\n", encoding="utf-8")
+    write_json(sb / "_pipeline_done.json", {
+        "stage": "response_audit", "run_id": name, "round": round_no,
+        "status": "complete", "error": None,
+        "confirmed": len(rows), "defective": 0})
+    return 0
+
+
+def do_response_repair(sb: Path, name: str, round_no: int) -> int:
+    """Stub: confirm every response audit row, change nothing."""
+    audit_doc = sb / "response_audit" / "RESPONSE_AUDIT.json"
+    audit = json.loads(audit_doc.read_text(encoding="utf-8")) if audit_doc.is_file() else {}
+    rows = []
+    for row in (audit.get("rows") or []):
+        rows.append({"id": row.get("id"), "audit_verdict": row.get("verdict"),
+                     "verdict": "confirmed", "action": "no-change",
+                     "reason": "stub: the audit row reproduces against the letter and package",
+                     "evidence": "stub: re-opened the response block and the package"})
+    out = sb / "response_repair"
+    out.mkdir(parents=True, exist_ok=True)
+    write_json(out / "REPAIR_LEDGER.json",
+               {"round": round_no, "rows": rows,
+                "counts": {"input": len(rows), "kept": 0, "corrected": 0, "rejected": 0},
+                "residual": ""})
+    (out / "REPAIR_LOG.md").write_text("# response repair (stub)\n", encoding="utf-8")
+    write_json(sb / "_pipeline_done.json", {
+        "stage": "response", "run_id": name, "round": round_no,
+        "status": "complete", "error": None, "summary": {"rows": len(rows)}})
+    return 0
+
+
+def do_response_draft(sb: Path, name: str, round_no: int) -> int:
+    """Stub: the point-by-point response plan written before the revision."""
+    rows = _stub_concern_rows(sb)
+    out = sb / "response"
+    out.mkdir(parents=True, exist_ok=True)
+    md = ["# Response to reviewers (stub draft)", ""]
+    mapped = []
+    for i, row in enumerate(rows, 1):
+        cid = str(row.get("id") or f"C{i}")
+        md += [f"## {cid}", f"**Comment:** \"{str(row.get('quote') or '')[:120]}\"",
+               "**Response:** stub intended answer", "**Planned changes:** none", ""]
+        mapped.append({"id": cid, "status": "planned", "response": "stub intended answer",
+                       "changes": [], "new_data": []})
+    (out / "RESPONSE_TO_REVIEWERS.md").write_text("\n".join(md), encoding="utf-8")
+    write_json(out / "response_map.json",
+               {"journal_from": "stub-journal", "target_journal": "stub-target",
+                "mode": "stub", "rows": mapped})
+    write_json(sb / "_pipeline_done.json", {
+        "stage": "response_draft", "run_id": name, "round": round_no,
+        "status": "complete", "error": None, "summary": {"rows": len(mapped)}})
+    return 0
+
+
 def do_response(sb: Path, name: str, round_no: int) -> int:
     """Stub of the response-to-reviewers letter (modes 2-4)."""
     rows = []
@@ -1137,6 +1315,16 @@ def main(prompt_text: str = None) -> int:
     name = sb.name
     m = re.search(r"r(\d+)_", name)
     round_no = int(m.group(1)) if m else 1
+    if name.endswith("_concern_audit"):
+        return do_concern_audit(sb, name, round_no)
+    if name.endswith("_concern_repair"):
+        return do_concern_repair(sb, name, round_no)
+    if name.endswith("_response_draft"):
+        return do_response_draft(sb, name, round_no)
+    if name.endswith("_response_audit"):
+        return do_response_audit(sb, name, round_no)
+    if name.endswith("_response_repair"):
+        return do_response_repair(sb, name, round_no)
     if name == "template_rewrite":
         out = sb / "out"
         out.mkdir(exist_ok=True)

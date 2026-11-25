@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 08/24 of the pipeline -- executed by the
+# Part 08/25 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -2838,11 +2838,35 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
         if scoped:
             # A major/minor revision runs NO general review: the concerns run
             # produces the ledger AND the only finding list the single revise
-            # session sees.
+            # session sees. That one session is checked by an INDEPENDENT
+            # concern audit, and its dispositions are applied by ONE repair
+            # pass before any reviser sees the list.
             entries.append({"id": rid_concerns(r), "kind": "concerns", "vid": None,
                             "deps": [rid_a1(r)], "stage": "concerns",
                             "materialize": (lambda c: materialize_concerns(c, r))})
             review_deps = [rid_concerns(r)]
+            if concern_audit_of(ctx) == "on":
+                entries.append({"id": rid_concern_audit(r), "kind": "concern_audit",
+                                "vid": None, "deps": [rid_concerns(r)],
+                                "stage": "concern_audit",
+                                "materialize": (lambda c: materialize_concern_audit(c, r))})
+                entries.append({"id": rid_concern_repair(r), "kind": "concern_repair",
+                                "vid": None,
+                                "deps": [rid_concerns(r), rid_concern_audit(r)],
+                                "stage": "concern_repair",
+                                "materialize": (lambda c: materialize_concern_repair(c, r))})
+                review_deps = [rid_concern_repair(r)]
+            if journal_needs_response(ctx):
+                # The point-by-point response is written FIRST: it fixes the
+                # reviewer's verbatim quotation and the authors' intended answer
+                # before the manuscript changes. The reviser implements that
+                # plan; the final `response` stage reconciles it with the
+                # package after the revision.
+                entries.append({"id": rid_response_draft(r), "kind": "response_draft",
+                                "vid": None, "deps": list(review_deps),
+                                "stage": "response_draft",
+                                "materialize": (lambda c: materialize_response_draft(c, r))})
+                review_deps = [rid_response_draft(r)]
         else:
             # THE GUIDED REVIEW (the round's general checklist pass). With
             # `--no-guided-review` this stage is not planned at all: the probe
@@ -2891,6 +2915,16 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "deps": [rid_a1(r)] + list(review_deps), "stage": "audit",
                             "materialize": (lambda c: materialize_audit(c, r))})
             review_deps.append(rid_audit(r))
+        if (not scoped and n and journal_has_feedback(ctx) and journal_needs_response(ctx)):
+            # resubmit: the point-by-point response is written FIRST, after the
+            # review/audit and before the revise arms, then reconciled with the
+            # package after the round.
+            entries.append({"id": rid_response_draft(r), "kind": "response_draft",
+                            "vid": None,
+                            "deps": [rid_a1(r), rid_feedback(r)] + list(review_deps),
+                            "stage": "response_draft",
+                            "materialize": (lambda c: materialize_response_draft(c, r))})
+            review_deps.append(rid_response_draft(r))
         for j in range(1, n + 1):
             vid = revise_vid(j)
             entries.append({"id": rid_for_fresh(r, vid), "kind": "revise", "vid": vid,
@@ -2899,8 +2933,19 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "materialize": (lambda c, v=vid: materialize_revise(c, r, v))})
     if scoped and journal_needs_response(ctx):
         entries.append({"id": rid_response(r), "kind": "response", "vid": None,
-                        "deps": [rid_for_fresh(r, revise_vid(1))], "stage": "response",
+                        "deps": [rid_for_fresh(r, revise_vid(1)), rid_response_draft(r)],
+                        "stage": "response",
                         "materialize": (lambda c: materialize_response(c, r))})
+        if response_audit_of(ctx) == "on":
+            entries.append({"id": rid_response_audit(r), "kind": "response_audit",
+                            "vid": None, "deps": [rid_response(r)],
+                            "stage": "response_audit",
+                            "materialize": (lambda c: materialize_response_audit(c, r))})
+            entries.append({"id": rid_response_repair(r), "kind": "response_repair",
+                            "vid": None,
+                            "deps": [rid_response(r), rid_response_audit(r)],
+                            "stage": "response_repair",
+                            "materialize": (lambda c: materialize_response_repair(c, r))})
     mask = 0 if scoped else round_integrators(ctx, r)
     arms = integrator_arms(m, n, mask)
     for k in arms:
@@ -4186,6 +4231,11 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
         record_revision_chain_skip(
             ctx, rec, "the round is already decided; a judged candidate is never changed")
         return
+    # A concern-scoped revision IS audited: its object is the revision's own
+    # delta plus the REPAIRED human-concern findings, so it needs no general
+    # review. The prompt gains a scoped block below; the bounded repair stays
+    # inside the admitted concerns because `postcheck_revise` re-runs the scope
+    # guard after it.
     _downstream = [x["id"] for x in ctx.runs(round_no=r)
                    if x.get("status") == "done" and x.get("kind") in ("integrate", "judge")]
     if _downstream:
@@ -4243,6 +4293,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     _audit_ins, _audit_del = content_edit_policy_allowed(ctx, rec)
     _audit_prefer = prefer_rewrite_allowed(ctx, rec)
     _audit_removable = soft_deletions_allowed(ctx, rec)
+    _journal_audit_block = (journal_revision_audit_block(ctx)
+                            if journal_is_scoped(ctx) else "")
     write_text_atomic(sb / REVISION_AUDIT_PROMPT_FILE,
                       revision_audit_prompt(sb, rec["id"], r,
                                             execution_profile=execution_profile_of(ctx),
