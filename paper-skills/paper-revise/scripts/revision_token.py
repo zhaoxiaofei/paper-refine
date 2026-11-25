@@ -401,6 +401,14 @@ def main(argv=None) -> int:
         return 2
     info = revision_token(root)
     if args.verify is not None:
+        # The empty-token rule outranks the comparison: an empty COMPUTED
+        # token (every payload unreadable/over budget) must never equal a
+        # supplied token, or `--verify ""` from an unset shell variable
+        # certifies a package that was never hashed.
+        if not info["token"] and info.get("files"):
+            print("error: no payload file could be read or hashed; the token is empty",
+                  file=sys.stderr)
+            return 1
         ok = info["token"] == args.verify
         print(f"{'OK' if ok else 'MISMATCH'}: content token {info['token']} vs --verify "
               f"{args.verify}")

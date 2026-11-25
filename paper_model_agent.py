@@ -569,7 +569,12 @@ def dsh_argv(cfg: dict) -> tuple:
     home, err = ensure_dsh_home()
     if err:
         return [], {}, err
-    text = dsh_patch_text(cfg)
+    try:
+        text = dsh_patch_text(cfg)
+    except rt.ConfigError as exc:
+        # An operator-settable context/max-token combination is a clean
+        # configuration error, not a traceback out of main() (F67).
+        return [], {}, str(exc)
     patch = ""
     if text:
         fd, patch = tempfile.mkstemp(prefix="paper-model-", suffix=".patch.yml")

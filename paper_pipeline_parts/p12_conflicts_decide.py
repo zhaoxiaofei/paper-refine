@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 12/23 of the pipeline -- executed by the
+# Part 12/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1641,10 +1641,25 @@ def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
 
 
 def _parse_ci(cell: str):
-    """(low, high) from `[-0.51, -0.02]`, `(0.1, 0.5)` or `[1e-3, 0.5]`, or None."""
+    """(low, high) from `[-0.51, -0.02]`, `(0.1, 0.5)` or `[1e-3, 0.5]`, or None.
+
+    A REVERSED pair (`[0.5, -0.5]`) is not an interval: returning it let the
+    PKG-12 comparison treat `lo > 0` as "the interval excludes 0" on a value
+    that cannot be a confidence interval (F120). The scan records the malformed
+    cell as an unexamined input (`_ci_is_reversed`) rather than consuming it.
+    """
     text = str(cell).replace("\u2212", "-")      # typographic minus
     m = CI_CELL_RE.match(text)
-    return (float(m.group("lo")), float(m.group("hi"))) if m else None
+    if not m:
+        return None
+    lo, hi = float(m.group("lo")), float(m.group("hi"))
+    return (lo, hi) if lo <= hi else None
+
+
+def _ci_is_reversed(cell) -> bool:
+    """True for a cell that parses as an interval but is written high-to-low."""
+    m = CI_CELL_RE.match(str(cell).replace("\u2212", "-"))
+    return bool(m) and float(m.group("lo")) > float(m.group("hi"))
 
 
 def _parse_p(cell: str):
@@ -1803,6 +1818,15 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
                 continue
             for n_cell, p_cell, ci_cell in blocks:
                 pval, ci = _parse_p(p_cell), _parse_ci(ci_cell)
+                if ci is None and _ci_is_reversed(ci_cell):
+                    # A malformed interval must not vanish: the row's p/interval
+                    # agreement was NOT checked, so the scan records the input
+                    # as a coverage gap (F120).
+                    gaps.append(f"{rel}: line {line_no} carries the reversed interval "
+                                f"{str(ci_cell).strip()[:40]!r}, which is not a valid "
+                                f"confidence interval, so this row's p/interval agreement "
+                                f"was NOT checked")
+                    continue
                 if pval is None or ci is None:
                     continue
                 inferior_by_p = _p_reports_significant(p_cell, pval, strict=caption_strict)
@@ -1856,18 +1880,27 @@ POOLED_UNITS_VALUE_COLUMNS = ("mean", "pct_within", "value", "score")
 
 
 def _pooled_units_by_method(path: Path, gaps: list = None) -> dict:
-    """{method: (n_units, mean of the value column)} for a pooled-units table."""
+    """{method: (n_units, mean of the value column)} for a pooled-units table.
+
+    TWO legal shapes: one row per unit (the count is the number of rows) and one
+    row per method carrying its own `n_units` column. Counting rows for the
+    second shape read a 21-unit table as ONE unit, so a pooled table computed on
+    a 9-unit subset passed the `n_table >= n_units` test (F093). A header is
+    matched case-insensitively: an exported `Method`/`Mean` table is the same
+    data table, and skipping it was a silent zero (F094).
+    """
     header, body = _read_delimited_table(path, gaps=gaps)
     if not header or not body:
         return {}
-    header = [h.strip() for h in header]
+    header = [h.strip().lower() for h in header]
     if "method" not in header:
         return {}
     col = next((c for c in POOLED_UNITS_VALUE_COLUMNS if c in header), None)
     if col is None:
         return {}
     mi, vi = header.index("method"), header.index(col)
-    groups = {}
+    ni = header.index("n_units") if "n_units" in header else None
+    groups, counted = {}, {}
     for r in body:
         if len(r) <= max(mi, vi):
             continue
@@ -1878,8 +1911,16 @@ def _pooled_units_by_method(path: Path, gaps: list = None) -> dict:
             val = float(str(r[vi]).strip().replace("\u2212", "-"))
         except ValueError:
             continue
-        groups.setdefault(str(r[mi]).strip(), []).append(val)
-    return {m: (len(v), sum(v) / len(v)) for m, v in groups.items()}
+        key = str(r[mi]).strip()
+        groups.setdefault(key, []).append(val)
+        if ni is not None and len(r) > ni:
+            try:
+                counted[key] = int(float(str(r[ni]).strip().replace("\u2212", "-")))
+            except ValueError:
+                # A non-numeric cell is not a count: fall back to the row count
+                # for that method instead of inventing a number.
+                counted.pop(key, None)
+    return {m: (counted.get(m, len(v)), sum(v) / len(v)) for m, v in groups.items()}
 
 
 # PKG-16 (2026-10-17, second pass): the REQUIRED FORM's software list vs the
@@ -1973,6 +2014,7 @@ def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
     root = Path(root)
     forms = []
     mains = []
+    other_mains = []
     for p in sorted(_iter_tree_files(root)):
         if not p.is_file():
             continue
@@ -1983,8 +2025,26 @@ def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
         elif p.suffix.lower() == ".docx" and docx_document_role(p.name) == "main" \
                 and "supp" not in low and not ("reporting" in low and "summary" in low):
             mains.append(p)
-    if not forms or not mains:
+        elif p.suffix.lower() in (".pdf", ".tex", ".ltx", ".md", ".txt") \
+                and docx_document_role(p.name) == "main" \
+                and "supp" not in low and not ("reporting" in low and "summary" in low):
+            # A LaTeX/PDF/Markdown main text carries the Software paragraph
+            # this check compares against, but the DOCX-only reader cannot
+            # parse it. Remember it so the class is recorded as UNEXAMINED
+            # instead of returning a clean empty list (F017).
+            other_mains.append(p)
+    if not forms:
         return []
+    if not mains:
+        if other_mains:
+            gaps = [f"{p.relative_to(root).as_posix()}: not a .docx main text, so PKG-16 "
+                    f"could NOT compare this manuscript's software list with the "
+                    f"Reporting Summary (the check reads .docx main texts only)"
+                    for p in other_mains[:4]]
+        else:
+            gaps = ["package: no main-text document at all, so PKG-16 could NOT compare "
+                    "the Reporting Summary with the manuscript's software list"]
+        return _with_table_gaps([], gaps, "PKG-16", limit)
     main_paras = []
     main_gaps = []
     for p in mains:
@@ -3061,9 +3121,16 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
         header, body = _read_delimited_table(p, gaps=gaps)
         if not header:
             continue
-        header = [h.strip() for h in header]
-        if not {"method", "n_units", "mean"}.issubset(header):
+        # A capitalised export (`Method`/`N_units`/`Mean`) is the same table:
+        # the exact-lowercase membership test skipped it with no gap (F094).
+        bare = [h.strip().lower() for h in header]
+        if not {"method", "n_units", "mean"}.issubset(bare):
+            # It is a `*mcb*pooled*.tsv` this check cannot read: record the
+            # unexamined input instead of reporting the pooled section clean.
+            gaps.append(f"{p.relative_to(root).as_posix()}: header lacks "
+                        f"method/n_units/mean ({', '.join(str(h).strip() for h in header[:8])})")
             continue
+        header = bare
         mi, ni, avi = header.index("method"), header.index("n_units"), header.index("mean")
         units = {}
         table_tokens = set(re.findall(
@@ -3085,6 +3152,13 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
                 units_file = q
                 break
         if not units:
+            if candidates:
+                # The sibling units table(s) exist but none carried a shape this
+                # check can read (no method/value column, or unreadable): the
+                # comparison never ran, so name it (F093/F094).
+                gaps.append(f"{p.relative_to(root).as_posix()}: no sibling *units*.tsv "
+                            f"carried the per-method or per-unit shape (checked "
+                            f"{', '.join(q.name for q in candidates[:3])})")
             continue
         caption = ""
         caption_files = [p.with_suffix(ext) for ext in (".tex", ".ltx", ".md")]
@@ -3171,18 +3245,48 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
     """PKG-14: a cover letter that hides a prior editorial decision in the corpus."""
     root = Path(root)
     feedback = []
+    gaps = []
     for area in EVIDENCE_DIRNAMES:
         d = root / area
         if not d.is_dir():
             continue
         for p in sorted(_iter_tree_files(d)):
-            if not p.is_file() or p.suffix.lower() not in (".txt", ".md", ".html", ".json"):
+            if not p.is_file():
                 continue
-            try:
-                text = read_text_bounded(p)
-                if text is None:
+            rel = p.relative_to(root).as_posix()
+            suffix = p.suffix.lower()
+            if suffix == ".docx":
+                # A decision letter arrives as a Word attachment in the normal
+                # case: skipping it made the PKG-14 blocker unexamined with no
+                # gap row (F097).
+                paras = _docx_paragraphs(p)
+                if paras is None:
+                    gaps.append(f"{rel}: unreadable or unsupported DOCX, so its editorial "
+                                f"decisions were NOT checked")
                     continue
-            except OSError:
+                text = "\n".join(paras)
+            elif suffix == ".pdf":
+                text, failure = _pdf_text_info(p)
+                if failure:
+                    gaps.append(f"{rel}: PDF text extraction failed ({failure}), so its "
+                                f"editorial decisions were NOT checked")
+                    continue
+                if not text.strip():
+                    gaps.append(f"{rel}: the PDF has no extractable text (image-only), so "
+                                f"its editorial decisions were NOT checked")
+                    continue
+            elif suffix in (".txt", ".md", ".html", ".json"):
+                try:
+                    text = read_text_bounded(p)
+                except OSError as e:
+                    gaps.append(f"{rel}: unreadable ({type(e).__name__}: {e}), so its "
+                                f"editorial decisions were NOT checked")
+                    continue
+                if text is None:
+                    gaps.append(f"{rel}: unreadable or over the byte budget, so its "
+                                f"editorial decisions were NOT checked")
+                    continue
+            else:
                 continue
             seen_decision_ids = set()
             for m in PRIOR_DECISION_ID_RE.finditer(text[:200000]):
@@ -3201,7 +3305,9 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
                     "snippet": text[max(0, m.start() - 400):m.start() + 4000],
                 })
     if not feedback:
-        return []
+        # With no decision found, still surface the inputs this scan could not
+        # read: an unreadable attachment is not a clean "no prior decision".
+        return _with_table_gaps([], gaps, "PKG-14", limit) if gaps else []
     letters = []
     if submitted_docs is not None:
         letters = [rel for rel in submitted_docs
@@ -3211,7 +3317,6 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
                    if p.is_file() and p.suffix.lower() in (".docx", ".tex", ".ltx", ".pdf")
                    and docx_document_role(p.name) in ("cover", "main")]
     rows = []
-    gaps = []
     for rel in sorted(letters):
         p = root / rel
         if p.suffix.lower() == ".docx":
@@ -4517,7 +4622,17 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
                                f"hand")})
                 continue
             text = p.read_text("utf-8", "replace")
-        except OSError:
+        except OSError as e:
+            # An unreadable text file is the same coverage gap the size cap
+            # already records: the bare `continue` delivered an empty PKG-1 list
+            # for a file nobody read, which reads as "no internal material"
+            # (F092).
+            rows.append({
+                "rule": "PKG-1", "severity": "low", "fix": "none", "file": rel,
+                "line": 0, "gap": True, "advisory": True,
+                "detail": (f"{rel}: the file could not be read "
+                           f"({type(e).__name__}: {e}), so its internal working material "
+                           f"was NOT checked; inspect it by hand")})
             continue
         for i, line in enumerate(text.splitlines(), 1):
             for label, pattern in INTERNAL_ARTIFACT_RES:
@@ -5290,6 +5405,7 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
                        "items by hand")})
         return rows
     cited = {}
+    doc_rels = []
     for p in sorted(root.rglob("*")):
         if not p.is_file() or p.is_symlink() \
                 or is_non_document_name(p.name) or _is_aux_doc(p.name):
@@ -5303,6 +5419,17 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
             continue
         if p.suffix.lower() == ".docx":
             lines = _docx_paragraphs(p)
+            if lines is None:
+                # An unparsable DOCX contributes no citations; that is a
+                # COVERAGE GAP, never a clean "no cited item is missing" (F095).
+                rows.append({
+                    "rule": "PKG-4", "severity": "low", "fix": "none", "file": rel,
+                    "line": 0, "gap": True, "advisory": True,
+                    "detail": (f"{rel}: the DOCX could not be parsed, so the display items "
+                               f"it cites were NOT checked against the package; open it "
+                               f"and check the cited figures by hand")})
+                continue
+            doc_rels.append(rel)
         elif p.suffix.lower() in PACKAGE_TEXT_EXTS:
             try:
                 if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
@@ -5320,6 +5447,12 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
                 plural = bool(re.search(r"(?i)fig(?:ure)?s\.?$", m.group("kw").strip()))
                 for label in _pkg4_cited_labels(m.group("labels"), plural=plural):
                     cited.setdefault(label, (rel, i, m.group(0)))
+    # A cited figure can be EMBEDDED in the document (the CopyNumBench shape:
+    # five images inside the main text and no `Figure*.png`). A name-based
+    # inventory cannot map an embedded image to a citation label, but it must
+    # not assert the document does not embed the item (F096).
+    embedded = sum(len(v) for v in embedded_media_digests(root, doc_rels).values()) \
+        if cited and doc_rels else 0
     for label, (rel, line, text) in sorted(cited.items()):
         if label in carried_labels:
             continue
@@ -5330,6 +5463,12 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
             detail += (f" -- the package holds it only as "
                        + ", ".join(f"`{w}`" for w in where[:3])
                        + ", in an area the submission does not carry")
+        elif embedded:
+            detail += (f" (no file of that name exists anywhere in the package; "
+                       f"{embedded} image part(s) ARE embedded in the submitted "
+                       f"document(s), and a name-based check cannot map an embedded image "
+                       f"to a citation label, so confirm by hand that this cited item is "
+                       f"one of them)")
         else:
             detail += (" (no file of that name exists anywhere in the package, and the "
                        "document does not embed it)")
@@ -5679,10 +5818,14 @@ def write_final_clean_zip(dirp: Path, zip_path: Path) -> dict:
     """Compress the published package into `zip_path`, KEEPING `dirp` in place.
 
     The archive holds the directory itself (`<dir name>/...`), so unzipping it
-    beside the directory restores exactly the published tree. The bytes are
-    deterministic (sorted entries, fixed entry timestamps), so a repeat `decide`
-    over an unchanged package keeps the existing archive instead of rewriting it
-    (no churn). The directory is never removed or modified by this function.
+    beside the directory restores the published tree. A file symlink is never
+    package content, so it is SKIPPED and named in `skipped_links` -- and
+    `final_clean_publication_problems` turns that into a publication problem:
+    returning `ok: True` alone let the delivered archive silently differ from
+    the published directory (F098). The bytes are deterministic (sorted entries,
+    fixed entry timestamps), so a repeat `decide` over an unchanged package
+    keeps the existing archive instead of rewriting it (no churn). The
+    directory is never removed or modified by this function.
     """
     ztmp = tmp_path_for(zip_path)
     n_files = 0
@@ -6129,8 +6272,13 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # then served stale bytes while the record reported the NEW digest.
     # One manifest function on both sides (corpus_dir_manifest: the same one the
     # pin check uses) makes the identity comparable; differing file sets and
-    # differing content both republish.
-    if dst.is_dir() and corpus_dir_manifest(dst) == manifest:
+    # differing content both republish. A delivered directory carrying a FILE
+    # SYMLINK is not reusable either: `corpus_dir_manifest` ignores links, and
+    # the archive that describes the tree refuses to carry one, so reusing it
+    # delivered a package the archive silently differed from (F098).
+    _dst_links = ([q for q in dst.rglob("*") if q.is_symlink()]
+                  if dst.is_dir() else [])
+    if dst.is_dir() and not _dst_links and corpus_dir_manifest(dst) == manifest:
         rmtree_force(tmp, ignore_errors=True)
         return dict(_meta, path=str(dst), digest=final_digest, pin_digest=pin_digest,
                     files=manifest["count"], renamed=counter["renamed"],
@@ -6561,6 +6709,17 @@ def final_clean_publication_problems(final_clean: dict) -> list:
     if isinstance(archive, dict) and archive.get("ok") is False:
         problems.append("the final_clean_version archive was not written: "
                         + str(archive.get("error") or "unknown archive error"))
+    if isinstance(archive, dict) and archive.get("ok") is not False \
+            and (archive.get("skipped_links") or []):
+        # `ok: True` only says the zip file exists: a skipped entry means the
+        # archive does NOT restore the published tree, so the hand-over package
+        # silently differs from the judged corpus (F098).
+        links = [str(x) for x in (archive.get("skipped_links") or [])]
+        problems.append(
+            f"the final_clean_version archive OMITS {len(links)} symlinked "
+            f"entr{'y' if len(links) == 1 else 'ies'} the published directory carries "
+            f"({', '.join(links[:5])}{' ...' if len(links) > 5 else ''}), so unzipping it "
+            f"does not restore the published tree")
     return problems
 
 
@@ -6715,12 +6874,29 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
         return info
     outdir = sb / output_dir_for_kind(rec.get("kind"))
     report = None
+    unreadable = None
     for name in STAGE_REPORT_NAMES:
         cand = outdir / name
         if cand.is_file():
             report = read_json(cand, revive=False, lenient=True)
-            if report:
-                break
+            if report is not None:
+                # An EMPTY report ({}) is a legitimate "no items"; only a
+                # value that could not be parsed is unknown evidence.
+                if report:
+                    break
+                unreadable = None
+                continue
+            unreadable = cand
+    if unreadable is not None and not report:
+        # A corrupt ledger is NOT "no open items": `report = report or {}`
+        # silently dropped every manual-required/fixed-with-caveat item and the
+        # package was reported submission-ready (F099). Fail closed, exactly
+        # like the missing-sandbox branch.
+        info["error"] = (f"the champion's {unreadable.name} is corrupt or unreadable "
+                         f"({unreadable.relative_to(ctx.root).as_posix()}); the open author "
+                         f"items it records are UNKNOWN")
+        info["report_unreadable"] = True
+        return info
     report = report or {}
     raw_counts = ((report.get("counts_by_status") or report.get("counts") or {})
                   if isinstance(report, dict) else {})
@@ -7472,7 +7648,16 @@ def collect_residuals(ctx: Ctx) -> dict:
                     f"per-difference artifact", gate=True)
         if kind == "guided_review":
             for rel, probs in sorted((rec.get("artifact_quality") or {}).items()):
-                add(f"{rid}: decision artifact {rel}: {str(probs[0])[:140]}", gate=True)
+                # `artifact_quality_report` only records an artifact that HAS
+                # problems, so an empty/non-list value is a malformed record.
+                # Indexing it raised IndexError and aborted `decide` before any
+                # report was written; it must become a gate item instead (F100).
+                if isinstance(probs, (list, tuple)):
+                    prob = str(probs[0])[:140] if probs else \
+                        "(the record carries an EMPTY problem list)"
+                else:
+                    prob = str(probs)[:140] if probs is not None else "(missing problem list)"
+                add(f"{rid}: decision artifact {rel}: {prob}", gate=True)
             for prob in (rec.get("discovery_contract") or []):
                 add(f"{rid}: discovery round: {str(prob)[:160]}", gate=True)
         if kind == "cold_start_review":
@@ -8857,6 +9042,18 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             if _stale_gaps.exists():
                 with contextlib.suppress(OSError):
                     _stale_gaps.unlink()
+        # A round record that PREDATES `tiebreak_defect_floor` (a legacy root
+        # decided before the field existed) was decided with the historical
+        # default, not with today's mutable config. Leaving it None made both
+        # `select_champion` and `score_model_doc` fall back to
+        # `tiebreak_defect_floor_of(ctx)`, so `set-tiebreak-defect-floor`
+        # re-ranked a past round under a key it never used (F013). Backfill the
+        # recorded floor the round was actually decided with, on the record the
+        # decision's own report/score_model read.
+        if "tiebreak_defect_floor" not in rrec or \
+                rrec.get("tiebreak_defect_floor") is None:
+            rrec["tiebreak_defect_floor"] = DEFAULT_TIEBREAK_DEFECT_FLOOR
+            _panel_gaps_dirty = True
         sel = select_champion(ctx, r, agg, floor=rrec.get("tiebreak_defect_floor"))
         # `select_champion` derives the winner from the field and cannot know a
         # tolerated stage; `finalize_round` recorded it on the round. Re-derive
@@ -8907,6 +9104,47 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                 "readiness": _no_round, "exit_code": 2})
         except OSError as e:
             print(f"[decide] WARNING: could not write reports/decision.json: {e}")
+        # README.md and `status` both promise `reports/DECISION_REPORT.md`, but
+        # this branch exited before the report was built, so the promised path
+        # was absent (or a STALE report from an earlier decision stayed beside
+        # the new decision.json). Write an explicit no-answer report: the
+        # normal template's "final answer" section would name a round-0
+        # "champion None", which is not a state this decision has (F016).
+        try:
+            _rep = [
+                "# Round Pipeline — Decision Report", "",
+                f"Generated: {utcnow()}  |  pipeline root: `{ctx.root}`  |  "
+                f"orchestrator v{VERSION}",
+                f"Config: rounds={ctx.rounds_count()} "
+                f"judges/version={judges_config_note(ctx)} "
+                f"integrators/round={integrators_config_note(ctx)} "
+                f"| source: `{ctx.cfg.get('source')}`",
+                "",
+                "**Certification: NOT CERTIFIED.** No round has completed, so there is "
+                "no champion, no judge panel and no published package to assess.",
+                "",
+                "## 0. Integrity", "",
+                f"- pristine original: {'ok' if pok else 'CHANGED'} ({pdetail})",
+                f"- pinned champion chain: {'ok' if not perrs else 'CHANGED'} "
+                f"({len(ctx.state.get('pinned') or [])} pinned version(s))",
+            ]
+            for e in perrs:
+                _rep.append(f"  - {e}")
+            if problems:
+                _rep += ["", "**Problems recorded while recomputing the decision:**", ""]
+                _rep += [f"- {p}" for p in problems]
+            _rep += [
+                "", "## Final answer", "",
+                "There is no final answer: no round reached status `done`. Run the "
+                "round(s) with `run` (repairing a failed session with "
+                "`retry --run <ID>`), then re-run `decide`. The sibling "
+                f"`{FINAL_CLEAN_README_NAME}` records the same skipped-publication "
+                "state.", "",
+            ]
+            write_text_atomic(ctx.reports_dir / "DECISION_REPORT.md", "\n".join(_rep))
+            print(f"[decide] report:   {ctx.reports_dir / 'DECISION_REPORT.md'}")
+        except OSError as e:
+            print(f"[decide] WARNING: could not write reports/DECISION_REPORT.md: {e}")
         # The sibling status readme is documented in README.md as the record
         # of the skip when no winner/pin exists, and write_final_clean_readme()
         # says decide always writes it. This branch used to exit before the

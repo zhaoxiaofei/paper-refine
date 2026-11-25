@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 15/23 of the pipeline -- executed by the
+# Part 15/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -316,12 +316,24 @@ def convert_docx_to_pdf_persistent(docx: Path, out_dir: Path,
 
 
 def _pdf_previous_records(stored: dict) -> dict:
-    """{(label, rel): record} of a stored PDF manifest (for idempotent reuse)."""
+    """{(label, rel): record} of a stored PDF manifest (for idempotent reuse).
+
+    A hand-edited/partially-written manifest can carry any JSON shape under
+    `sets`/`documents`; the top-level guard alone still crashed the pass with
+    AttributeError. Entries of the wrong shape are unusable data, not a
+    reason to abort `track`/`decide` (F121).
+    """
     if not isinstance(stored, dict):
         return {}
     out = {}
-    for s in stored.get("sets") or []:
-        for d in s.get("documents") or []:
+    sets = stored.get("sets")
+    for s in sets if isinstance(sets, list) else []:
+        if not isinstance(s, dict):
+            continue
+        documents = s.get("documents")
+        for d in documents if isinstance(documents, list) else []:
+            if not isinstance(d, dict):
+                continue
             out[(str(s.get("label") or ""), str(d.get("rel") or ""))] = d
     return out
 
@@ -404,7 +416,24 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
             src, follow_dir_links=True, on_error="<unreadable>"))
         for rel in latex_root_documents(src):
             digest = _latex_digest
-            _job_src, _job_rel, out_pdf = next(_latex_jobs)
+            # The two directory scans can disagree if a file appeared or
+            # vanished between them; a bare `next()` then raised StopIteration
+            # out of a function documented "never raises" (F063).
+            _job = next(_latex_jobs, None)
+            if _job is None:
+                docs.append({"rel": rel, "kind": "latex", "out": "", "sha256": digest,
+                             "out_sha256": "", "ok": False, "tool": None, "pages": 0,
+                             "error": "the LaTeX job list changed between scans "
+                                      "(the directory was modified during the render pass)"})
+                continue
+            _job_src, _job_rel, out_pdf = _job
+            if str(_job_rel) != str(rel) or Path(_job_src) != Path(src):
+                docs.append({"rel": rel, "kind": "latex", "out": "", "sha256": digest,
+                             "out_sha256": "", "ok": False, "tool": None, "pages": 0,
+                             "error": "the LaTeX job list no longer matches the directory "
+                                      "scan (the directory was modified during the render "
+                                      "pass)"})
+                continue
             rec = _reuse_pdf_record(previous, label, rel, digest, out_pdf, "latex")
             if rec is None:
                 # The evidence areas are read-only INPUTS the manuscript may
@@ -497,10 +526,17 @@ def _reuse_pdf_record(previous: dict, label: str, rel: str, digest: str,
     long as its source digest is unchanged (PR151-164).
     """
     rec = previous.get((label, rel))
+    try:
+        cached_digest = sha256_file(out_pdf) if out_pdf.is_file() else None
+    except OSError:
+        # A symlink/FIFO planted at the recorded render path makes
+        # `sha256_file` raise ELOOP; `render_pdf_set` is documented never to
+        # raise, so a bad cache probe is a cache MISS (F015).
+        return None
     if (rec and rec.get("ok") and rec.get("sha256") == digest and rec.get("kind") == kind
-            and out_pdf.is_file() and out_pdf.stat().st_size > 0
+            and cached_digest is not None and out_pdf.stat().st_size > 0
             and rec.get("out_sha256")
-            and rec.get("out_sha256") == sha256_file(out_pdf)
+            and rec.get("out_sha256") == cached_digest
             and not pdf_signature_problem(out_pdf)):
         fresh = dict(rec)
         fresh["cached"] = True
@@ -517,13 +553,20 @@ def run_pdf_conversion(ctx: Ctx, rounds=None, versions=None, include_original: b
                                else range(1, ctx.rounds_count() + 1))]
     versions = None if versions is None else list(versions)
     out_root = ensure_aux_output_root(ctx.root, PDF_DIRNAME)
-    stored = read_json(out_root / PDF_MANIFEST) or {}
+    stored = read_json(out_root / PDF_MANIFEST)
+    if not isinstance(stored, dict):
+        # `read_json` returns whatever JSON value is on disk: a bare list used
+        # to crash later with AttributeError (F117).
+        stored = {}
     previous = _pdf_previous_records(stored)
     # Like the tracking manifest, this one ACCUMULATES: a `track --round 2`
     # refreshes round 2's rows and keeps every other recorded set (and its
     # up-to-date check, so an unchanged source is never re-rendered).
-    prev_sets = {str(s.get("label")): s for s in stored.get("sets") or []}
-    set_order = [str(s.get("label")) for s in stored.get("sets") or []]
+    stored_value = stored.get("sets")
+    stored_sets = ([s for s in stored_value if isinstance(s, dict)]
+                   if isinstance(stored_value, list) else [])
+    prev_sets = {str(s.get("label")): s for s in stored_sets}
+    set_order = [str(s.get("label")) for s in stored_sets]
 
     def put_set(entry: dict) -> None:
         label = str(entry.get("label"))
@@ -585,10 +628,15 @@ def pdf_readme(manifest: dict) -> str:
          "stage: the row says so and the run continues.", "",
          "`prune` never deletes this tree, so the renders outlive the pipeline run.", "",
          "| set | document | kind | tool | pages | result |", "|---|---|---|---|---|---|"]
-    for s in manifest["sets"]:
-        for d in s["documents"]:
-            L.append(f"| {s['label']} | `{_md_cell(d['rel'], 80)}` | {d['kind']} | "
-                     f"{_md_cell(d.get('tool') or '-')} | {d.get('pages') or '-'} | "
+    for s in manifest.get("sets") or []:
+        if not isinstance(s, dict):
+            continue
+        for d in s.get("documents") or []:
+            if not isinstance(d, dict):
+                continue
+            L.append(f"| {s.get('label')} | `{_md_cell(d.get('rel'), 80)}` | "
+                     f"{d.get('kind')} | {_md_cell(d.get('tool') or '-')} | "
+                     f"{d.get('pages') or '-'} | "
                      f"{'ok' if d.get('ok') else 'WARNING: ' + _md_cell(d.get('error'), 140)} |")
     L += ["", "## Notes", ""] + [f"- {n}" for n in manifest.get("notes") or []]
     L.append("")

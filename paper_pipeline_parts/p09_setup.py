@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/23 of the pipeline -- executed by the
+# Part 09/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -48,16 +48,30 @@ def cmd_setup(args) -> None:
     # optional here: without it the venue profile's own default applies (0 for
     # a venue that publishes no legend number), and the resolved value is what
     # the config records.
-    venue_arg = str(getattr(args, "venue", None) or "").strip()
+    _raw_venue = getattr(args, "venue", None)
+    venue_arg = str(_raw_venue or "").strip()
+    if _raw_venue is not None and not venue_arg:
+        die("--venue needs a venue id; an explicitly empty value is not 'use the default'",
+            code=2)
     venue_profile_file = str(getattr(args, "venue_profile", None) or "").strip()
-    journal_arg = str(getattr(args, "journal", None) or "").strip()
+    _raw_journal = getattr(args, "journal", None)
+    journal_arg = str(_raw_journal or "").strip()
+    if _raw_journal is not None and not journal_arg:
+        # `--journal ''` was silently read as "flag absent" and recorded the
+        # profile default; refuse it like `--venue ''` (F29).
+        die("--journal needs a journal name; an explicitly empty value is not 'use the "
+            "profile default'", code=2)
     if journal_arg:
         # The same one-line/160-character rule `set-journal`/`set-venue` apply:
         # setup is the ONLY route that reached the config (and every stage
         # prompt) unvalidated, so a newline or an overlong name was accepted at
         # root creation and rejected only afterwards.
         journal_arg = _validate_journal_name(journal_arg)
-    article_arg = str(getattr(args, "article_type", None) or "").strip().lower()
+    _raw_article = getattr(args, "article_type", None)
+    article_arg = str(_raw_article or "").strip().lower()
+    if _raw_article is not None and not article_arg:
+        die("--article-type needs an article-type id; an explicitly empty value is not "
+            "'use the default'", code=2)
     strict_venue = bool(getattr(args, "strict_venue", False))
     if venue_profile_file:
         # A brand-new venue on a FRESH root: setup had no way to accept a
@@ -67,6 +81,9 @@ def cmd_setup(args) -> None:
         pf = Path(venue_profile_file).expanduser()
         if not pf.is_file():
             die(f"--venue-profile {venue_profile_file!r} is not a readable file", code=2)
+        if pf.is_symlink():
+            die(f"--venue-profile {venue_profile_file!r} is a symlink; pass the real file "
+                f"so the bytes validated here are the bytes installed", code=2)
         try:
             _pdata = json.loads(pf.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
@@ -138,31 +155,40 @@ def cmd_setup(args) -> None:
         _fmt_mod = _format_module()
         _policy_defaults = dict(getattr(_fmt_mod, "POLICY_DEFAULTS", {}) or {}) \
             if _fmt_mod is not None else {}
-        _policy_extra = {"unlink_zotero_fields_at_publish"}
+        # Not a formatter POLICY_DEFAULTS member, but a documented BOOLEAN
+        # switch (README) that `_policy_flag` reads as bool(value): without a
+        # type entry a non-empty list/object/number was accepted and silently
+        # enabled the irreversible unlink (F011).
+        _policy_extra = {"unlink_zotero_fields_at_publish": "bool"}
         _unknown = sorted(k for k in format_policy
                           if k not in _policy_defaults and k not in _policy_extra)
         if _unknown:
             die(f"--format-policy has unknown key(s): {', '.join(_unknown)}; known keys are "
-                f"{', '.join(sorted(set(_policy_defaults) | _policy_extra))}", code=2)
+                f"{', '.join(sorted(set(_policy_defaults) | set(_policy_extra)))}", code=2)
         _bad_types = []
         for _k, _v in format_policy.items():
-            if _k not in _policy_defaults:
-                continue
-            _d = _policy_defaults[_k]
-            if isinstance(_d, bool):
+            if _k in _policy_extra:
                 _ok = isinstance(_v, bool)
-            elif isinstance(_d, (int, float)):
-                _ok = isinstance(_v, (int, float)) and not isinstance(_v, bool)
-            elif isinstance(_d, str):
-                _ok = isinstance(_v, str)
-            elif isinstance(_d, list):
-                _ok = isinstance(_v, list)
-            elif isinstance(_d, dict):
-                _ok = isinstance(_v, dict)
-            else:                                      # pragma: no cover
-                _ok = True
+                _expected = _policy_extra[_k]
+            elif _k in _policy_defaults:
+                _d = _policy_defaults[_k]
+                if isinstance(_d, bool):
+                    _ok = isinstance(_v, bool)
+                elif isinstance(_d, (int, float)):
+                    _ok = isinstance(_v, (int, float)) and not isinstance(_v, bool)
+                elif isinstance(_d, str):
+                    _ok = isinstance(_v, str)
+                elif isinstance(_d, list):
+                    _ok = isinstance(_v, list)
+                elif isinstance(_d, dict):
+                    _ok = isinstance(_v, dict)
+                else:                                  # pragma: no cover
+                    _ok = True
+                _expected = type(_d).__name__
+            else:
+                continue
             if not _ok:
-                _bad_types.append(f"{_k}={_v!r} (expected {type(_d).__name__})")
+                _bad_types.append(f"{_k}={_v!r} (expected {_expected})")
         if _bad_types:
             die("--format-policy has invalid value(s): " + "; ".join(_bad_types), code=2)
     format_fix = str(getattr(args, "format_fix", DEFAULT_FORMAT_FIX) or
@@ -803,7 +829,10 @@ def cmd_setup(args) -> None:
         try:
             _dest = root / VENUE_PROFILES_DIRNAME / f"{venue_profile.id}{VENUE_PROFILE_SUFFIX}"
             _dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(pf, _dest)
+            # Install the bytes that were VALIDATED, never re-open `pf`: a
+            # symlink/concurrent writer could swap the file between the check
+            # and this copy and the root would run unvalidated bytes.
+            write_json_atomic(_dest, _pdata)
             print(f"[setup] venue profile:           installed {venue_profile.id!r} from "
                   f"{venue_profile_file} into {VENUE_PROFILES_DIRNAME}/ (the new root is "
                   f"self-contained)")
@@ -1603,8 +1632,11 @@ def cmd_set_venue(args) -> None:
             if _profile_existed:
                 try:
                     _profile_prior = _profile_dest.read_bytes()
-                except OSError:
-                    _profile_prior = None
+                except OSError as e:
+                    # Without the prior bytes the rollback below cannot restore
+                    # the file it overwrites, so refuse before installing.
+                    die(f"cannot read the existing profile {_profile_dest}: {e}; "
+                        f"refusing to overwrite bytes that cannot be restored")
             write_json_atomic(_profile_dest, profile.to_dict())
             print(f"[set-venue] installed profile -> {_profile_dest}")
             profile = VenueProfile(profile.to_dict(),
@@ -1959,7 +1991,7 @@ def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
     return with_context_budget(CONTRADICTION_RULE + text)
 
 
-def _merge_tree(src: Path, dst: Path) -> int:
+def _merge_tree(src: Path, dst: Path, notes: list = None) -> int:
     """Copy every file under `src` into `dst` (creating paths); count writes.
 
     Every symlink -- a source entry the staged agent planted, a symlinked source
@@ -1969,15 +2001,27 @@ def _merge_tree(src: Path, dst: Path) -> int:
     the link's target, and `copy2` followed a destination link (overwriting its
     external target).
     """
-    src = Path(src)
+    src, dst = Path(src), Path(dst)
     if src.is_symlink():
         # The loop below refuses links INSIDE src, but `Path.rglob` on a
         # symlinked src enumerates the TARGET's files as ordinary regular
         # files, so every one of them was published.
         raise OSError(f"refusing to publish from symlinked directory {src}")
+    # A symlinked DESTINATION was never checked: `target.parent.mkdir` and
+    # `os.replace` both follow it and write outside the venue store (F005).
+    if dst.is_symlink():
+        raise OSError(f"refusing to publish through symlinked directory {dst}")
+    _refuse_symlinked_parent(dst)
     written = 0
     for p in sorted(src.rglob("*")):
-        if p.is_symlink() or not p.is_file():
+        if p.is_symlink():
+            # Do not drop a staged link silently: its disappearance is a named
+            # gap, not a successful publication (F031).
+            if notes is not None:
+                notes.append(f"{p.relative_to(src).as_posix()}: skipped a symlinked "
+                             f"staged entry (not published)")
+            continue
+        if not p.is_file():
             continue
         rel = p.relative_to(src)
         target = dst / rel
@@ -2097,6 +2141,32 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
     return "synthesized" if synthesized else "appended"
 
 
+def _add_venue_staged_roots(sb: Path, notes: list = None) -> list:
+    """The add-venue staging roots, refusing a symlinked `store/` (F007).
+
+    `is_file()`/`is_dir()` FOLLOW an ancestor symlink, so a planted
+    `store -> /outside` made the publisher read the profile/README and copy the
+    official tree from the host into the shared venue store; only the final
+    component was checked. Refuse the staged `store/` itself (and a non-directory
+    entry of that name) and keep the sandbox root, which is not reached through
+    an agent-planted link.
+    """
+    sb = Path(sb)
+    roots = []
+    for cand in (sb / "store", sb):
+        if cand != sb:
+            if cand.is_symlink():
+                if notes is not None:
+                    notes.append(f"{cand.name}: refused a symlinked staging directory")
+                continue
+            if cand.exists() and not cand.is_dir():
+                if notes is not None:
+                    notes.append(f"{cand.name}: refused a staging entry that is not a directory")
+                continue
+        roots.append(cand)
+    return roots
+
+
 def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
     """Publish a completed `add-venue` sandbox into the shared store.
 
@@ -2105,9 +2175,9 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
     profile, the venue's README row, and the `.official`/`.manuscripts` corpora
     into `dest`, then the caller validates and derives the template pack.
     """
-    roots = [sb / "store", sb]
     out = {"profile": None, "readme": "unchanged", "official_files": 0,
            "manuscript_files": 0, "sandbox": str(sb), "notes": []}
+    roots = _add_venue_staged_roots(sb, out["notes"])
     # The profile/README writes below have no parent-link guard of their own;
     # `_merge_tree` refuses one for the corpora. Apply the same containment
     # rule once here so a symlinked store component cannot redirect the
@@ -2152,14 +2222,15 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
         # operator gets a note and the rest of the staging still publishes.
         out["notes"].append(f"{official.name}: refused a symlinked staged directory")
     elif official is not None:
-        out["official_files"] = _merge_tree(official, dest / f"{vid}{VENUE_OFFICIAL_SUFFIX}")
+        out["official_files"] = _merge_tree(
+            official, dest / f"{vid}{VENUE_OFFICIAL_SUFFIX}", out["notes"])
     manuscripts = next((r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}" for r in roots
                         if (r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}").is_dir()), None)
     if manuscripts is not None and manuscripts.is_symlink():
         out["notes"].append(f"{manuscripts.name}: refused a symlinked staged directory")
     elif manuscripts is not None:
-        out["manuscript_files"] = _merge_tree(manuscripts,
-                                              dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}")
+        out["manuscript_files"] = _merge_tree(
+            manuscripts, dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}", out["notes"])
     for rel, why in (("PUBLISH.md", "the agent explained a publish blocker"),
                      ("_pipeline_done.json", "the agent's completion marker")):
         if (sb / rel).is_file():
@@ -2170,7 +2241,7 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
 def latest_add_venue_sandbox(dest: Path, vid: str):
     """The newest `<dest>/.add-venue/<vid>-*` sandbox, or None."""
     base = Path(dest) / ".add-venue"
-    if not base.is_dir():
+    if not base.is_dir() or base.is_symlink():
         return None
     # Match the EXACT `<vid>-<stamp>` segment, not a name prefix: for
     # vid="nature", `nature-biotechnology-2026...` also startswith "nature-"
@@ -2185,7 +2256,8 @@ def latest_add_venue_sandbox(dest: Path, vid: str):
         m = pat.match(p.name)
         return (m.group(1), m.group(2) or "", p.name)
 
-    cands = sorted((p for p in base.iterdir() if p.is_dir() and pat.match(p.name)),
+    cands = sorted((p for p in base.iterdir()
+                    if p.is_dir() and not p.is_symlink() and pat.match(p.name)),
                    key=_stamp_key)
     return cands[-1] if cands else None
 
@@ -2836,8 +2908,10 @@ def cmd_add_venue(args) -> None:
     # VALIDATE BEFORE PUBLISH: a bad agent-written profile must never replace
     # the store's copy (the shipped default is read at import, so publishing an
     # invalid one could brick every later command, including the repair tools).
-    staged_profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in (sb / "store", sb)
-                           if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()), None)
+    staged_profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}"
+                           for r in _add_venue_staged_roots(sb)
+                           if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()
+                           and not (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_symlink()), None)
     if staged_profile is not None:
         # Agent-written: bound the read and refuse a symlink/FIFO/oversize file
         # before validation, as every other agent artifact read does (F210).
@@ -3791,7 +3865,11 @@ def no_progress_measure(row: dict):
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
     census = row.get("defect_prefix_census")
     if census is None:
-        census = (int(row.get("defect_prefix_total") or 0),)
+        # A missing ordered census is MISSING EVIDENCE, never zero: substituting
+        # `defect_prefix_total` (or 0) made an unmeasured row the cleanest
+        # possible key and silently disabled `--stop-after-no-progress` (F009).
+        # Use the SAME sentinel `champion_sort_key()` uses.
+        census = (10 ** 9,)
     return (
         tuple(int(x) for x in census),
         -(med if med is not None else -99.0),
@@ -4425,12 +4503,22 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     retry_note = (f"attempts/run={retries + 1} (retries={retries}, exponential backoff "
                   f"{retry_backoff}s..{retry_backoff_max}s)"
                   if retries else "no automatic retry (--retries 0)")
+    # The label names the PRESET the run was configured with; a custom
+    # --agent-cmd/PAPER_AGENT_CMD replaces the executable that actually runs.
+    # Printing only the preset made the banner claim `agent=dsh/deepseek-flash`
+    # while the stages ran an entirely different command (recorded truthfully
+    # in run_policy.agent_model_ignored, but invisible in the log).
+    _agent_override = _agent_cmd_override(getattr(args, "agent_cmd", None), use_env=True)
+    _agent_shown = agent_label
+    if _agent_override:
+        _shown_cmd = " ".join(Path(str(x)).name for x in _agent_override[:2])[:90]
+        _agent_shown = f"{agent_label} [preset label; runs {_shown_cmd}]"
     print(f"[run] jobs={_jobs} timeout={timeout or 'none'}s "
           f"judge-timeout={judge_timeout or 'none'}s {retry_note} "
           f"rounds={ctx.rounds_count()} judges/version={judges_config_note(ctx)} "
           f"integrators={integrators_config_note(ctx)} "
           f"champion-select={champion_select_of(ctx)} "
-          f"agent={agent_label}")
+          f"agent={_agent_shown}")
     # The optional `docx` CLI is offered to every agent in every stage (see
     # DOCX_CLI_RULE). It is never required, but the operator should be able to
     # see from the run log whether the agents can actually reach it.

@@ -159,6 +159,19 @@ missing = pp._missing_bundle_assets(tmp)
 check("F89 a bundle with no formatter parts is refused by the preflight",
       want <= set(missing), str(missing))
 
+# R02: every executed ordered part must be a required bundle asset, so a bundle
+# missing the new p23 part is refused by the preflight instead of failing later
+# with a NameError.
+part_glob = sorted(p.name for p in (ROOT / "paper_pipeline_parts").glob("p[0-9][0-9]_*.py"))
+listed_parts = {Path(name).name for name in pp.PIPELINE_REQUIRED_PARTS
+                if Path(name).parent == Path("paper_pipeline_parts")}
+check("R02 every executed pipeline part is in PIPELINE_REQUIRED_PARTS",
+      set(part_glob) <= listed_parts, str(sorted(set(part_glob) - listed_parts)))
+(tmp / "paper_pipeline_parts" / "p23_postchecks_mcp.py").unlink(missing_ok=True)
+r02_missing = pp._missing_bundle_assets(tmp)
+check("R02 a bundle missing p23_postchecks_mcp.py is refused by the preflight",
+      "paper_pipeline_parts/p23_postchecks_mcp.py" in r02_missing, str(r02_missing))
+
 # F86: the shipped prompt prose states the manuscript rule, not a scorer's reward.
 prompts = (ROOT / "paper_pipeline_parts/p03_prompts.py").read_text(encoding="utf-8")
 check("F86 no stage prompt states the benchmark's reward model",

@@ -125,6 +125,29 @@ export function containedSpawnPath(target, roots) {
   return real;
 }
 
+/** True when the two paths name the SAME filesystem object.
+ *
+ * The output==input refusal used to compare lower-cased path strings on every
+ * platform, so on a case-sensitive filesystem `report.docx` and `Report.docx`
+ * (two distinct files) were one file and a legal output was refused (F053). An
+ * existing file is identified by device+inode; only a path that does not exist
+ * yet (the redline OUTPUT) falls back to the naming convention, and only win32
+ * folds case.
+ */
+export function sameFile(a, b) {
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    // At least one side does not exist yet: the fallback below decides.
+  }
+  if (process.platform === 'win32') {
+    return String(a).toLowerCase() === String(b).toLowerCase();
+  }
+  return String(a) === String(b);
+}
+
 /** Copy a validated input into a PRIVATE staging directory and return that copy.
  *
  * `containedSpawnPath()` still returns a path STRING: after it is re-validated,

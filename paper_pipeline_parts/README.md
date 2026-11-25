@@ -25,6 +25,7 @@ it executes is a real Python file (each carries
 | `p20_judge_conflicts.py` | the cross-judge conflict audit (split from `p12` to keep every part under 10,000 lines) |
 | `p21_removal_accounting.py` | removal accounting: soft-deletion unit filter, finding-removal ledger gate, the revision-ledger final-status reader, and the outline/disposition-artifact gate (split from `p06`/`p07` to keep every part under 10,000 lines) |
 | `p22_resume_continuation.py` | session continuation: CLI session-id capture, resume argv, the continuation gate and the continuation prompt, plus the audit coverage/disposition gates (split from `p06`/`p07` to keep every part under 10,000 lines) |
+| `p23_postchecks_mcp.py` | the MCP stdio JSON-RPC client, the docx converter/comparer wrappers and the orchestrator's visual render chain (split from `p06` to keep every part under 10,000 lines) |
 | `p13_redlines.py` | tracked-changes generation |
 | `p14_tracking.py` | difference-tracking copies and persistent renders |
 | `p15_pdf.py` | PDF rendering |

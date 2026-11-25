@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 20/23 of the pipeline -- judge-conflict audit, split from p12 to keep every part under 10,000 lines -- executed by the
+# Part 20/24 of the pipeline -- judge-conflict audit, split from p12 to keep every part under 10,000 lines -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -404,8 +404,10 @@ def detect_round_judge_conflicts(opinions: list) -> list:
 def _merge_judge_conflicts(mechanical: list, llm: list) -> list:
     """Merge the LLM answer into the mechanical list, one row per real conflict."""
     def base_of(c) -> tuple:
-        return (c.get("kind"), str(c.get("member")), str(c.get("opponent")),
-                tuple(sorted(set(c.get("judges") or []))))
+        # The judge set is EVIDENCE for a conflict, not part of its identity:
+        # keying on it made the auditor's echo of a mechanical row (same pair,
+        # same claim, but only the judges it quoted) a second manual check.
+        return (c.get("kind"), str(c.get("member")), str(c.get("opponent")))
 
     def merge_into(old, c):
         if len(str(c.get("summary") or "")) > len(str(old.get("summary") or "")):
@@ -414,6 +416,10 @@ def _merge_judge_conflicts(mechanical: list, llm: list) -> list:
             old["manual_check"] = c["manual_check"]
         if c.get("subject") and not old.get("subject"):
             old["subject"] = c["subject"]
+        judges = sorted({str(j) for j in (old.get("judges") or []) + (c.get("judges") or [])
+                         if j})
+        if judges:
+            old["judges"] = judges
         seen = {(e.get("judge_run"), e.get("side"), e.get("text"))
                 for e in old.get("evidence") or []}
         for e in c.get("evidence") or []:
@@ -586,7 +592,24 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
             })
     if isinstance(coverage, dict):
         inapplicable = int(dropped.get("out_of_field") or 0)
-        unusable = max(0, (listed - len(opinions)) - inapplicable)
+        # A DUPLICATE opponent row and a SELF-comparison row are structural
+        # no-ops: aggregate_round keeps exactly one opinion per
+        # (target, judge_index, opponent) and a version is never compared with
+        # itself, so neither is a comparison the audit failed to perform.
+        # Counting them as "could not be audited" made coverage["complete"]
+        # false and `write_round_judge_conflicts` refuse a report for a panel
+        # that WAS fully audited -- one repeated label then blocked
+        # certification of a complete round (F110).
+        #
+        # An ABSTENTION deliberately stays in `unusable` (F002): a comparison
+        # whose every check is `unable` is a directed judgment the panel did not
+        # make, so the audit may not claim complete coverage of it. That is the
+        # opposite of a benign sheet artifact and must keep refusing a
+        # "fully audited" report. A genuine extraction failure (unresolved
+        # label, missing/out-of-range score, non-mapping row) counts too.
+        structural = sum(int(dropped.get(k) or 0)
+                         for k in ("duplicate_opponent", "self_comparison"))
+        unusable = max(0, (listed - len(opinions)) - inapplicable - structural)
         coverage.update({
             "sheets_selected": len(newest),
             "sheets_unreadable": unreadable_sheets,
@@ -594,6 +617,7 @@ def round_judge_opinions(ctx: Ctx, r: int, field=None, coverage: dict = None) ->
             "comparisons_extracted": len(opinions),
             "comparisons_dropped": listed - len(opinions),
             "abstained": int(dropped.get("abstained") or 0),
+            "structural_drops": structural,
             "dropped": dict(sorted(dropped.items())),
             "complete": bool(unusable == 0 and unreadable_sheets == 0),
         })
@@ -740,6 +764,18 @@ def run_judge_conflict_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
         info["error"] = info.get("error") or "the agent wrote no parseable conflicts.json"
         info["ok"] = False
         return [], info
+    raw_conflicts = data.get("conflicts")
+    if not isinstance(raw_conflicts, list):
+        # An object/string here used to be iterated as its keys/characters and
+        # every entry dropped, so a schema-violating answer was cached as a
+        # SUCCESSFUL zero-conflict audit (and never retried). Refuse it.
+        got = "missing" if raw_conflicts is None else type(raw_conflicts).__name__
+        info["error"] = F"conflicts.json's 'conflicts' must be an array, got {got}"
+        info["ok"] = False
+        return [], info
+    malformed = sum(1 for c in raw_conflicts if not isinstance(c, dict))
+    if malformed:
+        info["rejected_malformed"] = malformed
     conflicts = _normalize_llm_conflicts(data)
     kept, rejected = _validate_llm_conflicts(conflicts, payload.get("opinions") or [])
     info["conflicts"] = len(kept)
@@ -750,11 +786,29 @@ def run_judge_conflict_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
     return kept, info
 
 
+def _conflict_dict_rows(value) -> tuple:
+    """(dict rows, dropped count) of a stored `conflicts` value.
+
+    The normalizer refuses a non-dict row when it WRITES a report, but these
+    readers also open hand-edited/partially-written reports; calling ``.get()``
+    on every entry crashed the command. Skip junk, and count it so the report
+    says the row was ignored instead of presenting a shorter clean list.
+    """
+    if isinstance(value, list):
+        rows = [c for c in value if isinstance(c, dict)]
+        return rows, len(value) - len(rows)
+    if value in (None, ""):
+        return [], 0
+    return [], 1
+
+
 def judge_conflicts_markdown(data: dict) -> str:
     """The per-round MANUAL TODO list (checkbox items) for the report files."""
     r = int(data.get("round") or 0)
-    conflicts = data.get("conflicts") or []
+    conflicts, dropped = _conflict_dict_rows(data.get("conflicts"))
     counts = data.get("counts") or _judge_conflict_counts(conflicts)
+    if dropped:
+        counts = _judge_conflict_counts(conflicts)
     lines = [
         F"# Judge-conflict manual checks — round {r}",
         "",
@@ -779,6 +833,10 @@ def judge_conflicts_markdown(data: dict) -> str:
             F"{cov.get('comparisons_listed', 0)} listed directed comparison(s) were auditable"
             + ("" if cov.get("complete", True)
                else F" -- dropped: {cov.get('dropped')}"))
+        lines.append("")
+    if dropped:
+        lines.append(F"Warning: {dropped} malformed conflict row(s) were ignored; "
+                     "the machine-readable report is the source of truth.")
         lines.append("")
     if not conflicts:
         lines.append("No cross-judge conflicts were detected for this round.")
@@ -817,16 +875,32 @@ def write_judge_conflicts_todo(ctx: Ctx) -> Path:
         "",
     ]
     total = 0
+    unaudited = []
     for r in range(1, ctx.rounds_count() + 1):
-        data = read_json(ctx.reports_dir / F"round{r}_judge_conflicts.json",
-                         revive=False, lenient=True)
+        report_path = ctx.reports_dir / F"round{r}_judge_conflicts.json"
+        data = read_json(report_path, revive=False, lenient=True)
         if not isinstance(data, dict):
+            # A round whose conflict audit produced no JSON is UNKNOWN, not
+            # clean: skipping it silently made a failed audit look like a
+            # round with no conflicts.
+            unaudited.append(r)
+            lines.append(F"## Round {r} — NOT AUDITED")
+            lines.append("")
+            lines.append(F"No readable `reports/{report_path.name}`: the round's cross-judge "
+                         "conflict audit produced no report, so its manual checks are "
+                         "UNKNOWN, not zero.")
+            lines.append("")
             continue
-        conflicts = data.get("conflicts") or []
+        conflicts, dropped = _conflict_dict_rows(data.get("conflicts"))
         total += len(conflicts)
         counts = data.get("counts") or _judge_conflict_counts(conflicts)
+        if dropped:
+            counts = _judge_conflict_counts(conflicts)
         lines.append(F"## Round {r} — {counts.get('total', len(conflicts))} conflict(s)")
         lines.append("")
+        if dropped:
+            lines.append(F"Warning: {dropped} malformed conflict row(s) were ignored.")
+            lines.append("")
         if not conflicts:
             lines.append("None detected.")
             lines.append("")
@@ -851,7 +925,12 @@ def write_judge_conflicts_todo(ctx: Ctx) -> Path:
                          F"{c.get('summary')}")
             lines.append(F"      verify: {c.get('manual_check')}")
         lines.append("")
-    lines.append(F"**{total} manual check(s) across the decided round(s).**")
+    if unaudited:
+        lines.append(F"**WARNING: round(s) {', '.join(str(x) for x in unaudited)} were NOT "
+                     "audited — their manual checks are unknown.**")
+        lines.append("")
+    audited = max(0, ctx.rounds_count() - len(unaudited))
+    lines.append(F"**{total} manual check(s) across {audited} audited round(s).**")
     p = ctx.reports_dir / "JUDGE_CONFLICTS_TODO.md"
     write_text_atomic(p, "\n".join(lines) + "\n")
     return p
@@ -869,6 +948,9 @@ def _judge_conflict_rules_fingerprint() -> str:
 
     pieces = [VERSION, repr(JUDGE_CONFLICT_KINDS), repr(JUDGE_CONFLICT_SEVERITIES),
               repr(_JUDGE_CONFLICT_SEV_RANK), repr(_JUDGE_CONFLICT_STOPWORDS),
+              # The manual_check text is copied verbatim into the report, so a
+              # fixed instruction must invalidate the cached report too (F114).
+              repr(sorted(_JUDGE_CONFLICT_MANUAL.items())),
               _JUDGE_CONFLICT_TOKEN_RE.pattern, _JUDGE_CONFLICT_NUMBER_RE.pattern,
               _SMALL_COUNT_BEFORE_RE.pattern, _SMALL_COUNT_NOUN_RE.pattern]
     for fn in (detect_round_judge_conflicts, _merge_judge_conflicts,
@@ -947,6 +1029,14 @@ def write_round_judge_conflicts(ctx: Ctx, r: int, agg: dict = None, agent_cmd: l
             and not force:
         already_llm = bool((existing.get("agent") or {}).get("ok"))
         if not (agent_cmd and use_agent and not already_llm):
+            # The JSON may survive while its sibling .md was deleted (or never
+            # written by an interrupted run); callers print the .md path as a
+            # produced artifact. Rewrite both from the stored report, as the
+            # defect-audit reuse path does, instead of returning a cache hit
+            # that leaves the printed TODO file absent (F111).
+            write_json_atomic(json_path, existing)
+            write_text_atomic(ctx.reports_dir / F"round{r}_judge_conflicts.md",
+                              judge_conflicts_markdown(existing))
             return existing
     llm_conflicts = []
     if agent_cmd and use_agent:
@@ -1212,14 +1302,42 @@ REVIEW_FINDINGS_SOURCES = (("findings.json", "review"), ("findings_extra.json", 
 
 
 def review_findings_rows(ctx: Ctx, r: int) -> list:
-    """The archived review findings of one round, flattened ([] when none)."""
+    """The archived review findings of one round, flattened ([] when none).
+
+    A malformed archive raises OSError instead of reading as "no findings": the
+    caller writes a header-only CSV whose shape means "nothing was reviewed",
+    so a shape violation must not be presented as a clean empty review (F118).
+    An id-keyed mapping is the one recoverable shape and is read by its values.
+    """
     arch = ctx.reports_dir / f"round{int(r)}_review"
     rows = []
     for name, source in REVIEW_FINDINGS_SOURCES:
-        data = read_json(arch / name, revive=False, lenient=True)
+        path = arch / name
+        data = read_json(path, revive=False, lenient=True)
         if not isinstance(data, dict):
+            if path.is_file():
+                raise OSError(F"archived review {path} is not a JSON object; refusing to "
+                              "report it as 'no findings'")
             continue
-        for f in data.get("findings") or []:
+        raw = data.get("findings")
+        if isinstance(raw, dict):
+            entries = []
+            for key, f in raw.items():
+                if not isinstance(f, dict):
+                    continue
+                item = dict(f)
+                if item.get("id") in (None, ""):
+                    item["id"] = str(key)
+                entries.append(item)
+        elif isinstance(raw, list):
+            entries = raw
+        elif raw is None:
+            entries = []
+        else:
+            raise OSError(F"archived review {path}: 'findings' is "
+                          F"{type(raw).__name__}, not an array; refusing to report it "
+                          "as 'no findings'")
+        for f in entries:
             if not isinstance(f, dict):
                 continue
             rows.append({
@@ -1245,6 +1363,15 @@ def write_round_review_findings(ctx: Ctx, r: int) -> Path:
     rows = review_findings_rows(ctx, r)
     p = ctx.reports_dir / f"round{int(r)}_review_findings.csv"
     return write_csv_atomic(p, REVIEW_FINDINGS_FIELDS, rows)
+
+
+def _csv_data_rows(path: Path) -> int:
+    """Data rows in a written CSV (0 when unreadable); the header is not a row."""
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            return max(0, sum(1 for _ in csv.reader(f)) - 1)
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return 0
 
 
 ISSUE_MATRIX_META_FIELDS = ("run", "round", "version")
@@ -1400,15 +1527,27 @@ def backfill_round_raw_scores(ctx: Ctx) -> list:
             except Exception as e:                               # noqa: BLE001
                 print(f"[run] r{r} WARNING: could not write reports/{name}: {e}")
         # The review's own finding list (verbal descriptions included) is only
-        # written when the round actually has an archived review.
-        if not (ctx.reports_dir / f"round{r}_review_findings.csv").is_file() \
-                and any((ctx.reports_dir / f"round{r}_review" / name).is_file()
-                        for name, _src in REVIEW_FINDINGS_SOURCES):
-            try:
-                out.append(write_round_review_findings(ctx, r))
-            except Exception as e:                               # noqa: BLE001
-                print(f"[run] r{r} WARNING: could not write "
-                      f"reports/round{r}_review_findings.csv: {e}")
+        # written when the round actually has an archived review. A header-only
+        # CSV can also be the residue of a malformed archive, so re-derive it
+        # when the archive now yields rows (F118): an empty file must not
+        # suppress every later regeneration.
+        review_csv = ctx.reports_dir / f"round{r}_review_findings.csv"
+        has_review = any((ctx.reports_dir / f"round{r}_review" / name).is_file()
+                         for name, _src in REVIEW_FINDINGS_SOURCES)
+        if has_review:
+            need = not review_csv.is_file()
+            if not need and _csv_data_rows(review_csv) == 0:
+                try:
+                    need = bool(review_findings_rows(ctx, r))
+                except Exception as e:                           # noqa: BLE001
+                    print(f"[run] r{r} WARNING: could not read the archived review: {e}")
+                    need = False
+            if need:
+                try:
+                    out.append(write_round_review_findings(ctx, r))
+                except Exception as e:                           # noqa: BLE001
+                    print(f"[run] r{r} WARNING: could not write "
+                          f"reports/round{r}_review_findings.csv: {e}")
     if out:
         print("[run] raw scores written for round(s) decided before this report existed: "
               + ", ".join(f"reports/{p.name}" for p in out))

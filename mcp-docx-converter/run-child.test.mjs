@@ -185,11 +185,17 @@ if (typeof runner.killProcessTree === 'function') {
 // `killProcessTree` takes its runners: the check is hermetic and never touches
 // a real process tree.
 if (typeof runner.runFile === 'function') {
+  const started = Date.now();
   try {
     await runner.runFile(
       process.execPath,
-      ['-e', "process.stdout.write('x'.repeat(4096)); process.exit(0);"],
-      { maxBuffer: 256,
+      // The child must KEEP RUNNING after the write: when it exits on its own,
+      // 'close' settles the promise even without the overflow grace timer, so
+      // the test passed on exactly the regression it names (F173) -- the
+      // compare copy was fixed and this one was not (F052).
+      ['-e', "process.stdout.write('x'.repeat(4096));"
+             + "setTimeout(() => process.exit(0), 1500);"],
+      { maxBuffer: 256, killGraceMs: 100,
         killTree: () => ({ ok: false, error: 'simulated taskkill denial' }) },
     );
     fails.push('overflow with a failing kill: runFile resolved instead of rejecting');
@@ -197,6 +203,8 @@ if (typeof runner.runFile === 'function') {
   } catch (err) {
     try {
       assert.match(err.message, /tree kill incomplete: simulated taskkill denial/);
+      assert.ok(Date.now() - started < 1200,
+                `overflow settled only when the child exited (${Date.now() - started}ms)`);
       console.log('OK overflow with a failing kill names the tree-kill failure');
     } catch (assertErr) {
       fails.push(`overflow with a failing kill: ${assertErr.message}`);

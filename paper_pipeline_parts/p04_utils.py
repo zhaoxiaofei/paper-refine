@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 04/23 of the pipeline -- executed by the
+# Part 04/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -3247,7 +3247,12 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                      "relaxation": limits["abstract"].get("relaxation"),
                      "cap": abs_cap,
                      "over_limit": abs_cap is not None and words > abs_cap, "note": ""})
-    span_start, included, end_found = _word_rules.main_text_lines(lines, bounds, excludes)
+    # One counter, one text: count_words.py normalizes a Markdown heading
+    # before its keyword-continuation test, so the pipeline's twin must too or
+    # a bolded wrapped keyword line is prose to one counter and a keyword item
+    # to the other (F057).
+    span_start, included, end_found = _word_rules.main_text_lines(
+        lines, bounds, excludes, normalize_keywords=True)
     words, caption_words = _word_rules.count_main_text(
         lines, span_start, included, spans, count_caption_words)
     notes = []
@@ -7087,7 +7092,10 @@ def _seed_write(path: Path, text: str) -> bool:
     # materialization -- ~20 files per session, measured as ~0.7s per sandbox on
     # the operator's mount, which is exactly the latency the scheduling tests
     # (and the real run) pay for a pure input.
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # safe_mkdir refuses a symlinked component BEFORE creating anything: the
+    # bare mkdir followed a planted link and the guarded write then aborted the
+    # seed with an unhandled OSError (F002).
+    safe_mkdir(path.parent)
     tmp = tmp_path_for(path)
 
     def do(f) -> None:
@@ -7114,7 +7122,7 @@ def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
             else {"rows": [], "by_rule": {}, "high": 0, "medium": 0, "low": 0,
                   "unavailable": "base/ is missing"})
     work = sb / GUIDED_REVIEW_DIR / "work"
-    work.mkdir(parents=True, exist_ok=True)
+    safe_mkdir(work)                 # refuse a planted symlink, never follow it (F002)
     write_json_atomic(work / "FORMAT_SCAN.json", info)
     lines = [
         "# M20 — OOXML style/formatting (pipeline-mandated)",
@@ -7167,7 +7175,7 @@ def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
     if not rows:
         lines.append("| - | — | — | — | — | no code-side formatting finding | — |  |")
     art = sb / GUIDED_REVIEW_DIR / "artifacts"
-    art.mkdir(parents=True, exist_ok=True)
+    safe_mkdir(art)                  # refuse a planted symlink, never follow it (F002)
     _seed_write(art / "M20_formatting.md", "\n".join(lines) + "\n")
     return info
 
@@ -7895,13 +7903,13 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
     mod = _format_module()
     if mod is None:
         return {"unavailable": f"{DOCX_FORMAT_MODULE} not found"}
-    work.mkdir(parents=True, exist_ok=True)
+    safe_mkdir(work)                 # refuse a planted symlink, never follow it (F002)
     if art is not None:
         # The review layout's artifacts/ directory is created HERE because the
         # provenance pack is seeded before the M18/M19/M20 skeleton block; a
         # missing directory made the artifact copies silently not happen (the
         # work/ copies and PROVENANCE.json are written by the same loop).
-        art.mkdir(parents=True, exist_ok=True)
+        safe_mkdir(art)              # refuse a planted symlink, never follow it (F002)
     docs = corpus_text_documents(sources)
     _table_coverage = {}
     tables = data_table_texts(sources, coverage=_table_coverage)
@@ -8261,7 +8269,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         work, art = sb / "judge_review" / "work", sb / "judge_review" / "artifacts"
     else:
         work, art = sb / "work", None
-    work.mkdir(parents=True, exist_ok=True)
+    safe_mkdir(work)                 # refuse a planted symlink, never follow it (F002)
     ev = code_side_evidence(ctx, corpus_dir, f"{sb.name}:{where}")
     write_json_atomic(work / "FORMAT_SCAN.json", ev.get("format") or {})
     seed_format_policy_file(ctx, sb)

@@ -102,6 +102,15 @@ def _output_path_problem(out, protected=()) -> str:
             return "it is a directory, not a report file"
     except OSError:
         pass
+    # The destination itself is checked above; a SYMLINKED PARENT escapes just
+    # as effectively because `mkdir`/`mkstemp(dir=...)` follow it (F63). Refuse
+    # any symlinked path component.
+    for _anc in (o.parent, *o.parent.parents):
+        try:
+            if _anc.is_symlink():
+                return f"a parent directory ({_anc}) is a symlink; refusing to write through it"
+        except OSError:
+            continue
     try:
         o_real = o.resolve()
     except OSError:
@@ -258,7 +267,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                 fix=("manual" if idx in in_table or "<w:sectPr" in para else None))
         ppr = ppr_of(para)
         style = ppr_style(ppr)
-        if style and style.startswith("Heading"):
+        if _style_kind(style):
             if policy["heading_keep_with_next"] and not is_on(ppr, "keepNext"):
                 row("FMT-T3a", "medium", f"p{idx}", f"heading {text[:40]!r} has no keepNext",
                     "headings can be orphaned at the bottom of a page; add keepNext + keepLines")
@@ -452,7 +461,16 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
         style = para_style(p)
         ital = [text_of(r[2]) for r in runs(p)
                 if text_of(r[2]).strip() and run_is_italic(styles, style, r[2])]
-        field = in_field(franges, p0)
+        # Probe EVERY run, not the paragraph's opening `<w:p>` offset: a complex
+        # Zotero bibliography field BEGINS in its first entry paragraph, so the
+        # `fldChar begin` lies AFTER p0 and `in_field(franges, p0)` reported the
+        # first entry unprotected while later entries were protected (F032).
+        # The rest of the file already takes a RUN offset (p0 + r0).
+        field = ""
+        for _r0, _r1, _run in runs(p):
+            field = in_field(franges, p0 + _r0)
+            if field:
+                break
         # "No italic run" is not "no italic JOURNAL TITLE": a book/report/thesis
         # entry has no journal title to italicize. Only an ARTICLE-like entry --
         # one whose remaining text carries a volume/page locator (a digit that
@@ -470,7 +488,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
         # every URL run in a mixed paragraph as a link, so a plain URL beside a
         # hyperlinked one never produced the FMT-T7a mixed-treatment row.
         link_spans = [(m.start(), m.end()) for m in
-                      re.finditer(r"<w:hyperlink\b[^>]*>.*?</w:hyperlink>", para, re.S)]
+                      re.finditer(r"<w:hyperlink\b[^>]*>.*?</w:hyperlink\s*>", para, re.S)]
         for r0, r1, run in runs(para):
             rtext = text_of(run)
             if not URL_RE.search(rtext):
@@ -501,13 +519,38 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             "pick one treatment (plain black, or one link colour/underline) everywhere")
 
     # ---- text hygiene ---------------------------------------------------------
+    doc_field_results = _field_result_spans(xml)
     full = "\n".join(text_of(p[2]) for p in paras)
     n_straight, n_curly = len(STRAIGHT_RE.findall(full)), len(CURLY_RE.findall(full))
+    # A quote that sits in a live field RESULT cannot be normalized by this
+    # tool (Word/Zotero regenerate the result; rewriting it would change what
+    # the citation shows and the live-field fence rejects the repair). Counting
+    # such a quote as a MECHANICAL FMT-T1 row made the documented fixer unable
+    # to clear its own row, with no `error` explaining why (F026): the row is
+    # field-protected (style-field under a normalizing policy) instead.
+    _field_quote_paras = 0
+    if n_straight and n_curly:
+        for _p0, _p1, _para in paras:
+            _spans = field_result_text_ranges(_para, doc_field_results, _p0)
+            if not _spans:
+                continue
+            _ptext = text_of(_para)
+            if any(any(a <= m.start() < b for a, b in _spans)
+                   for m in re.finditer(r"[\"'\u2018\u2019\u201c\u201d]", _ptext)):
+                _field_quote_paras += 1
     if n_straight and n_curly:
         row("FMT-T1", "medium", "document",
-            f"mixed quotation marks: {n_straight} straight vs {n_curly} curly",
-            "use one apostrophe/quote style throughout", )
-    words = max(1, len(re.findall(r"\S+", full)))
+            f"mixed quotation marks: {n_straight} straight vs {n_curly} curly"
+            + (f" ({_field_quote_paras} paragraph(s) hold a quote inside a live "
+               f"Zotero field result)" if _field_quote_paras else ""),
+            "use one apostrophe/quote style throughout"
+            + ("; a field result's quotation style comes from the CSL style, "
+               "not from the document's runs" if _field_quote_paras else ""),
+            protected=bool(_field_quote_paras))
+    # A spaced em dash (or any punctuation-only token) is not a word: counting
+    # it in the denominator understated the very density being measured (F52).
+    words = max(1, sum(1 for _tok in re.findall(r"\S+", full)
+                       if re.search(r"[A-Za-z0-9]", _tok)))
     em = full.count(EM)
     density = em * 1000.0 / words
     if density > policy["max_em_dashes_per_1000"]:
@@ -526,7 +569,6 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # (possible lowercase sentence start) and FMT-G3 (missing space after
     # punctuation) are reported for the editing arms.
     is_ref_para = ref_flags
-    doc_field_results = _field_result_spans(xml)
     field_result_text = [field_result_text_ranges(p[2], doc_field_results, p[0])
                          for p in paras]
     rows.extend(hygiene_rows(paras, is_ref_para, doc, protected=field_result_text))
@@ -572,7 +614,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # left `_tab_depth` stuck at 1 after a legal `</w:tabs >`, so every later
     # run-level `<w:tab/>` was misread as a tab-stop DEFINITION.
     for _tok in re.finditer(r"<w:tabs(?=[\s/>])[^>]*>|</w:tabs\s*>|<w:tab(?=[\s/>])[^>]*/>",
-                            xml):
+                            _mask_noncontent(xml)):
         _raw = _tok.group(0)
         if _raw.startswith("</"):
             _tab_depth = max(0, _tab_depth - 1)
@@ -598,7 +640,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # heading) that scan, hygiene and the fixer all use.
     para_is_ref = ref_flags
     para_is_ref_rows = ref_flags
-    para_is_head = [bool((para_style(p[2]) or "").startswith("Heading"))
+    para_is_head = [bool(_style_kind(para_style(p[2])))
                     for p in paras]
     # A caption/legend paragraph is not a display-item CALL-OUT: the ordering
     # rule below (FMT-O1) reads the prose, so the caption blocks are excluded the
@@ -823,7 +865,7 @@ def _kill_tool_group(proc) -> None:
         pass
 
 
-def _run_text_tool(argv, timeout: int, cwd=None) -> tuple:
+def _run_text_tool(argv, timeout: int, cwd=None, data: bytes = None) -> tuple:
     """Run a child with output bounded in size AND lifetime.
 
     The old version pointed stdout/stderr at unbounded TemporaryFiles and
@@ -835,7 +877,9 @@ def _run_text_tool(argv, timeout: int, cwd=None) -> tuple:
     stream raises `ToolOutputOverBudget` as before.
     """
     cap = MAX_TOOL_OUTPUT_BYTES
-    proc = subprocess.Popen([str(a) for a in argv], cwd=cwd, stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen([str(a) for a in argv], cwd=cwd,
+                            stdin=(subprocess.PIPE if data is not None
+                                   else subprocess.DEVNULL),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             **_tool_popen_kwargs())
     over_budget = threading.Event()
@@ -871,6 +915,14 @@ def _run_text_tool(argv, timeout: int, cwd=None) -> tuple:
                threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)]
     for thread in readers:
         thread.start()
+    # Feed stdin AFTER the stdout/stderr readers are running: a child that
+    # writes before it reads cannot deadlock the write.
+    if data is not None:
+        try:
+            proc.stdin.write(data)
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
     timed_out = False
     try:
         proc.wait(timeout=timeout)
@@ -1035,7 +1087,8 @@ def analyse_package(path: Path, policy: dict) -> dict:
     # `attr_of` accepts single- or double-quoted attributes; OOXML permits both.
     prefixes = _rel_prefixes(xml) or {"r"}
     ref_ids = {_attached_template_rid(m.group(0), prefixes)
-               for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>", xml)}
+               for m in re.finditer(r"<w:(?:header|footer)Reference\b[^>]*>",
+                                    _mask_noncontent(xml))}
     ref_ids.discard(None)
     referenced = {part_targets[rid] for rid in ref_ids if rid in part_targets}
     res["rows"].extend(page_field_rows(
@@ -1302,14 +1355,35 @@ def apply_edits(xml: str, edits: list) -> str:
     # sharing a start the WIDER one, so a containing range owns its contents --
     # and drop the ranges it subsumes or partially overlaps, exactly as
     # `rewrite_text_spans` resolves its overlapping edits.
-    accepted = []
+    accepted, insertions = [], []
     for start, end, new in sorted(edits, key=lambda e: (e[0], -e[1])):
+        if start == end:
+            # A ZERO-LENGTH insertion is not an overlapping range: sorting
+            # `(5,10)` before `(5,5)` made the insertion look contained and
+            # silently dropped it although `rewrite_text_spans` keeps both
+            # (F056).
+            insertions.append((start, end, new))
+            continue
         if accepted and start < accepted[-1][1]:
             continue
         accepted.append((start, end, new))
-    for start, end, new in reversed(accepted):
-        xml = xml[:start] + new + xml[end:]
-    return xml
+    # An insertion STRICTLY inside an accepted replacement is ambiguous (the
+    # replaced bytes are gone); one anchored at either boundary is well defined
+    # and is kept.
+    insertions = [ins for ins in insertions
+                  if not any(a < ins[0] < b for a, b, _n in accepted)]
+    events = ([(a, 1, b, n) for a, b, n in accepted]
+              + [(a, 0, b, n) for a, b, n in insertions])
+    events.sort(key=lambda e: (e[0], e[1], -e[2]))
+    out, cursor = [], 0
+    for start, _prio, end, new in events:
+        if start < cursor:
+            continue
+        out.append(xml[cursor:start])
+        out.append(new)
+        cursor = end
+    out.append(xml[cursor:])
+    return "".join(out)
 
 
 # CT_PPrBase's children that PRECEDE `w:spacing`, in schema order: a child spliced
@@ -1604,9 +1678,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
                                   _set_para_style(para, majority)))
                     n += 1
                 continue
-            at = plist[i][0] + para.find(pstyle)
+            span = _para_child_span(para, "pStyle")
+            if span is None:
+                continue
+            at = plist[i][0] + span[0]
             replacement = f'<w:pStyle w:val="{majority}"/>' if majority else ""
-            edits.append((at, at + len(pstyle), replacement))
+            edits.append((at, at + (span[1] - span[0]), replacement))
             n += 1
     if edits:
         xml = apply_edits(xml, edits)
@@ -1665,8 +1742,11 @@ def fix_document(xml: str, styles: dict, policy: dict,
                        and attr(old, "before") == str(policy["caption_space"])
                        and attr(old, "after") == str(policy["caption_space"]))
             if not already:
-                at = p0 + para.find(old)
-                edits.append((at, at + len(old), want_sp))
+                span = _para_child_span(para, "spacing")
+                if span is None:
+                    continue
+                at = p0 + span[0]
+                edits.append((at, at + (span[1] - span[0]), want_sp))
                 n += 1
         else:
             # `w:spacing` is late in CT_PPrBase's child sequence: anchoring it
@@ -1686,7 +1766,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
     for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
         ppr = ppr_of(para)
         style = ppr_style(ppr)
-        if not style or not style.startswith("Heading"):
+        if not _style_kind(style):
             continue
         new_para = para
         if policy["heading_keep_with_next"] and not is_on(ppr, "keepNext"):
@@ -1696,8 +1776,16 @@ def fix_document(xml: str, styles: dict, policy: dict,
             live = child_elem(ppr, "keepNext")
             if live is not None:
                 # `<w:keepNext w:val="0"/>` is explicitly OFF: flip it on in
-                # place instead of adding a duplicate element.
-                new_para = new_para.replace(live, "<w:keepNext/>", 1)
+                # place instead of adding a duplicate element. Splice the LIVE
+                # child's span: `str.replace(live, ...)` replaced the first
+                # identical text, which can be an earlier commented-out copy, so
+                # the live property stayed off and the re-scan rejected the file
+                # (F030). `_para_child_span` is the comment-aware reader used by
+                # the other property repairs.
+                span = _para_child_span(para, "keepNext")
+                if span is None:
+                    continue
+                new_para = para[:span[0]] + "<w:keepNext/>" + para[span[1]:]
             else:
                 element = ("<w:keepNext/>" if ppr and "<w:keepLines" in ppr
                            else "<w:keepNext/><w:keepLines/>")
@@ -1728,7 +1816,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # `<w:sectPr .../>`; the old non-greedy pattern ran past it to the NEXT
         # section's closing tag, so a self-closing first section never got its
         # w:titlePg added.
-        s = next(SECT_READ_RE.finditer(xml), None)
+        s = next(SECT_READ_RE.finditer(_mask_noncontent(xml)), None)
         if s is not None and "<w:headerReference" in s.group(0) \
                 and not is_on(s.group(0), "titlePg"):
             body = s.group(0)
@@ -1934,19 +2022,32 @@ def fix_document(xml: str, styles: dict, policy: dict,
     # 7. URL/email treatment ----------------------------------------------------
     if policy["url_style"] == "plain":
         edits, n = [], 0
-        for m in re.finditer(r"<w:hyperlink(?=[\s>]).*?</w:hyperlink>", xml, re.S):
+        for m in re.finditer(r"<w:hyperlink(?=[\s>]).*?</w:hyperlink\s*>", xml, re.S):
             block = m.group(0)
-            opening = block[:block.find(">") + 1]
+            # A legal attribute value may contain `>`; the quote-aware slice is
+            # the same one the adjacent `conv` walker uses (R04, the F08 class).
+            _open_end = _tag_end(block, 0)
+            if _open_end < 0:
+                continue
+            opening = block[:_open_end + 1]
             # An internal cross-reference (`w:anchor`) or a location in another
             # document (`w:docLocation`) is navigation, not a URL: flattening it
-            # destroyed the reference although no FMT-T7 row fired.
-            if "w:anchor=" in opening or "w:docLocation=" in opening:
+            # destroyed the reference although no FMT-T7 row fired. Read the
+            # attributes with the shared parser: a legal `w:anchor = "s1"`
+            # (whitespace around `=`) was not the exact substring and the
+            # internal link was flattened (F37).
+            if attr(opening, "anchor") is not None or attr(opening, "docLocation") is not None:
                 continue
-            inner = block[block.find(">") + 1:block.rfind("</w:hyperlink>")]
+            # The opening regex accepts a legal whitespace-closed
+            # `</w:hyperlink >`; slicing with `rfind("</w:hyperlink>")` returned
+            # -1 for that spelling and dropped the close's `>`, emitting
+            # malformed XML (F36).
+            _close = re.search(r"</w:hyperlink\s*>", block)
+            inner = block[_open_end + 1:_close.start()]
             # Strip only the LIVE rPr segments: `w:rPrChange` is the tracked
             # change's formatting HISTORY and must stay byte-identical (the run
             # loop below splits on it for exactly this reason).
-            _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange>)", inner, flags=re.S)
+            _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange\s*>)", inner, flags=re.S)
             for _si in range(0, len(_segs), 2):
                 for _pat in (r"<w:rStyle[^>]*/>", r"<w:color[^>]*/>", r"<w:u[^>]*/>"):
                     _segs[_si] = re.sub(_pat, "", _segs[_si])
@@ -1971,7 +2072,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
                     continue
                 # Strip only the LIVE segments: rPrChange is the tracked
                 # change's history and must stay byte-identical.
-                _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange>)", rpr, flags=re.S)
+                _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange\s*>)", rpr, flags=re.S)
                 for _si in range(0, len(_segs), 2):
                     for tag in ("rStyle", "color", "u", "i", "iCs"):
                         _segs[_si] = re.sub(rf"<w:{tag}(?=[\s/>])[^>]*/>", "", _segs[_si])
@@ -2006,11 +2107,21 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # and keying `'` off the `"` state flipped a quoted phrase inside-out
         # (`'quoted'` -> '\u2018quoted\u2018'); the text-identity verifier strips
         # quotes before comparing, so that corruption shipped silently.
+        #
+        # A `<w:t>` inside a live field RESULT is NOT ordinary text: Word (and
+        # Zotero's refresh) regenerates it from the stored item, so rewriting
+        # its quote characters changes what the citation/reference currently
+        # shows and makes `zotero_field_signature(before) != signature(after)` --
+        # the live-field fence then rejects the whole repair although the scan
+        # called the row mechanical (F026). Leave those tokens verbatim.
+        _quote_field_spans = _field_result_spans(xml)
+
         def conv(mm, prev_open):
             raw = mm.group(0)
-            open_tag = raw[:raw.find(">") + 1]
+            _open_end = _tag_end(raw, 0)
+            open_tag = raw[:_open_end + 1]
             close_tag = raw[raw.rfind("<"):]
-            text = unesc(raw[raw.find(">") + 1:raw.rfind("<")])
+            text = _text_token_text(raw)
             if policy["quote_style"] == "curly":
                 # An apostrophe inside a word is always a right single quote.
                 text = re.sub(r"(?<=\w)'(?=\w)", "\u2019", text)
@@ -2034,7 +2145,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
                     prev_open = text[-1] in quote_openers
             return open_tag + esc(text) + close_tag, prev_open
 
-        def _paragraph(xml_frag: str) -> str:
+        def _paragraph(xml_frag: str, base: int = 0) -> str:
             """Normalize one paragraph's text runs with state across runs."""
             prev_open = True
             pieces, pos = [], 0
@@ -2052,6 +2163,17 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 if re.search(r"<w:(?:tab|br|cr)(?=[\s/>])", gap):
                     prev_open = True
                 pieces.append(gap)
+                if in_field_result(_quote_field_spans, base + mm.start(),
+                                   base + mm.end()):
+                    # The token IS the live result: carry the visible quote
+                    # state (so a quote after the field still closes) but copy
+                    # the bytes unchanged -- a rewrite would break the fence.
+                    for ch in _text_token_text(mm.group(0)):
+                        if ch not in "\"'":
+                            prev_open = ch in quote_openers
+                    pieces.append(mm.group(0))
+                    pos = mm.end()
+                    continue
                 new_frag, prev_open = conv(mm, prev_open)
                 pieces.append(new_frag)
                 pos = mm.end()
@@ -2064,17 +2186,20 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # and turning the outer closing quote into a second opening quote.
         for p0, p1, para in paragraphs(xml):
             pieces.append(xml[pos:p0])
-            pieces.append(_paragraph(para))
+            pieces.append(_paragraph(para, p0))
             pos = p1
-        pieces.append(_paragraph(xml[pos:]))
+        pieces.append(_paragraph(xml[pos:], pos))
         new = "".join(pieces)
         if new != xml:
             xml = new
             changes.append(f"normalized quotation marks (policy: {policy['quote_style']})")
-    if policy["strip_proofing_markers"] and PROOFERR_RE.search(xml):
-        n = len(PROOFERR_RE.findall(xml))
-        xml = PROOFERR_RE.sub("", xml)
-        changes.append(f"removed {n} proofing marker(s) (w:proofErr)")
+    if policy["strip_proofing_markers"]:
+        live_proof = [(m.start(), m.end(), "")
+                      for m in PROOFERR_RE.finditer(_mask_noncontent(xml))]
+        if live_proof:
+            n = len(live_proof)
+            xml = apply_edits(xml, live_proof)
+            changes.append(f"removed {n} proofing marker(s) (w:proofErr)")
 
     # 9. text-level consistency: citations / spelling / hyphenation ------------
     # These DO change document text, so each edit is recorded and the fixer's
@@ -2476,19 +2601,30 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     remaining = sorted(mech_after)
     # The body-only analyse_document() call above cannot see a header/footer
     # part. Re-read every REFERENCED aux part the fixer touched (orphan parts are
-    # ignored by the scanner and must not fail the fence here).
+    # ignored by the scanner and must not fail the fence here). The AUX rules
+    # derive `fix` from the CURRENT shape, so after a PARTIAL repair the
+    # surviving row can be reclassified manual and the old `fix=="mechanical"`
+    # filter dropped it: keep the same ROW (rule + location) when it was
+    # mechanical BEFORE the fix and is still present after, unless that row was
+    # already manual before (F025). Row identity matters: another row of the
+    # same rule may legitimately be editorial (a refused caption merge beside a
+    # repaired one) and must not fail the fence.
     aux_remaining = []
     for name, (_axml, arels) in aux.items():
         if name not in referenced_aux:
             continue
         fixed = _ooxml_part_codec(parts_new.get(name, _axml.encode("utf-8")))[0]
-        _aux_rows, _aux_fixes = drawing_geometry_rows(fixed, arels, sizes, src.name,
-                                                      policy)
-        aux_remaining += [r["rule"] for r in _aux_rows
+        _aux_before = (drawing_geometry_rows(_axml, arels, sizes, src.name, policy)[0]
+                       + page_field_rows([(name, _axml)], src.name))
+        _before_mech = {(r["rule"], r.get("_part") or r.get("location"))
+                        for r in _aux_before if r.get("fix") == "mechanical"}
+        _aux_after = (drawing_geometry_rows(fixed, arels, sizes, src.name, policy)[0]
+                      + page_field_rows([(name, fixed)], src.name))
+        aux_remaining += [r["rule"] for r in _aux_after
                           if r["rule"] in MECHANICAL_RULES
-                          and r.get("fix") == "mechanical"]
-        aux_remaining += [r["rule"] for r in page_field_rows([(name, fixed)], src.name)
-                          if r.get("fix") == "mechanical"]
+                          and (r.get("fix") == "mechanical"
+                               or (r["rule"], r.get("_part") or r.get("location"))
+                               in _before_mech)]
     remaining = sorted(set(remaining) | set(aux_remaining))
     schema = validate_package(tmp_out)
     verified = {
@@ -2513,14 +2649,32 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         "zotero_field_deleted": field_problems["deleted"],
         "zotero_field_plain_text": field_problems["plain_text"],
     }
-    ok = bool(same_parts
-              and (verified["text_identical"] or verified["text_diff_only_quotes"]
+    text_ok = bool(verified["text_identical"] or verified["text_diff_only_quotes"]
                    or (verified["text_stage_diff_only_quotes"]
                        and verified["text_diff_only_recorded_edits"]))
+    ok = bool(same_parts
+              and text_ok
               and not remaining
               and xml_wellformed
               and schema[0] is not False
               and not field_errors)
+    # `cmd_fix` prints `rep["error"]` when the output is refused; without one it
+    # fell back to a generic "a verification check failed", so a live-field
+    # refusal named no field at all (F026). State the check that failed.
+    failure_reasons = []
+    if not same_parts:
+        failure_reasons.append("the package parts were not carried through unchanged")
+    if not text_ok:
+        failure_reasons.append("the document text changed beyond the recorded edits")
+    if remaining:
+        failure_reasons.append("mechanical finding(s) still present: "
+                               + ", ".join(remaining))
+    if not xml_wellformed:
+        failure_reasons.append(f"the output is not well-formed XML: {xml_detail}")
+    if schema[0] is False:
+        failure_reasons.append(f"schema validation failed: {schema[1]}")
+    if field_errors:
+        failure_reasons.append("live-field check failed: " + "; ".join(field_errors))
     if ok:
         try:
             os.replace(tmp_out, out)
@@ -2538,8 +2692,13 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             tmp_out.unlink()
         except OSError:
             pass
-    return {"source": str(src), "output": str(out), "changes": changes, "verified": verified,
-            "zotero_refresh": zotero_refresh, "reference_repair": reference_repair, "ok": ok}
+    result = {"source": str(src), "output": str(out), "changes": changes,
+              "verified": verified, "zotero_refresh": zotero_refresh,
+              "reference_repair": reference_repair, "ok": ok}
+    if not ok:
+        result["error"] = ("; ".join(failure_reasons)
+                           or "a verification check failed")
+    return result
 
 
 def validate_package(path: Path):
@@ -2548,11 +2707,14 @@ def validate_package(path: Path):
     if not exe:
         return None, "docx CLI not on PATH: schema check skipped"
     try:
-        proc = subprocess.run([exe, "validate", str(path)], capture_output=True, text=True, timeout=300)
+        # The validator runs on an untrusted DOCX: its output must be capped
+        # and its process group killed on timeout, like every other tool call
+        # in this module (F59).
+        rc, out, err = _run_text_tool([exe, "validate", str(path)], 300)
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"docx validate could not run: {e}"
-    lines = [ln for ln in (proc.stdout or proc.stderr).strip().splitlines() if ln.strip()]
-    return proc.returncode == 0, (lines[-1] if lines else f"rc={proc.returncode}")
+    lines = [ln for ln in (out or err).strip().splitlines() if ln.strip()]
+    return rc == 0, (lines[-1] if lines else f"rc={rc}")
 
 
 # A footer's page number: bare "2", "Page 2", "Page 2 of 10", "2/10" (F44).
@@ -2649,7 +2811,7 @@ _REVISION_RECORD_RE = re.compile(
     r"<w:(?P<tag>pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|"
     r"sectPrChange|numberingChange)(?=[\s/>])[^>]*/>"
     r"|<w:(?P<open>pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|"
-    r"sectPrChange|numberingChange)(?=[\s>])[\s\S]*?</w:(?P=open)>")
+    r"sectPrChange|numberingChange)(?=[\s>])[\s\S]*?</w:(?P=open)\s*>")
 # The template side must read a section exactly like the manuscript side: a
 # legal self-closing `<w:sectPr .../>` is an empty section, and a lazy match
 # ended at the NESTED close of a `w:sectPrChange`, returning an unbalanced
@@ -2754,6 +2916,33 @@ def _style_index(styles_xml: str) -> tuple:
     return by_id, by_name
 
 
+
+def _apply_live_segments(xml: str, edit) -> str:
+    """Apply `edit` to the LIVE bytes of `xml` only.
+
+    Revision records (`_REVISION_RECORD_RE`) and comments/PIs are history or
+    dead markup; a style remap must not rewrite them (F45). The spans are
+    length-preserving offsets into `xml`, so untouched bytes stay identical.
+    """
+    spans = []
+    for pat in (_REVISION_RECORD_RE, _XML_MISC_SPAN_RE):
+        spans.extend((m.start(), m.end()) for m in pat.finditer(xml or ""))
+    spans.sort()
+    merged = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    out, pos = [], 0
+    for a, b in merged:
+        out.append(edit(xml[pos:a]))
+        out.append(xml[a:b])
+        pos = b
+    out.append(edit(xml[pos:]))
+    return "".join(out)
+
+
 def _strip_direct_format(para: str) -> tuple:
     """(fragment, removed_count): drop direct props that defeat a template style.
 
@@ -2781,11 +2970,18 @@ def _strip_direct_format(para: str) -> tuple:
 
 
 def _remap_style_refs(xml: str, mapping: dict) -> tuple:
-    """(xml, count): rewrite pStyle/rStyle ids through the manuscript->template map."""
+    """(xml, count): rewrite pStyle/rStyle ids through the manuscript->template map.
+
+    Only LIVE references are remapped: a `w:pStyle` inside `w:pPrChange`/
+    `w:rPrChange` is the id BEFORE the edit, and rewriting it destroyed the
+    tracked change's history (F45). The captured attribute is XML-decoded
+    before the lookup because the map keys are decoded style ids; the raw
+    `Emph&amp;A` never matched `Emph&A` and the reference dangled (F46).
+    """
     count = [0]
 
     def sub(m):
-        old = m.group("val")
+        old = unesc(m.group("val"))
         new = mapping.get(old)
         if not new or new == old:
             return m.group(0)
@@ -2794,7 +2990,7 @@ def _remap_style_refs(xml: str, mapping: dict) -> tuple:
                 + _xml_attr_value(new)
                 + m.group(0)[m.end("val") - m.start(0):])
 
-    return _STYLE_REF_RE.sub(sub, xml), count[0]
+    return _apply_live_segments(xml, lambda text: _STYLE_REF_RE.sub(sub, text)), count[0]
 
 
 def _live_sect_pr(sect: str) -> str:
@@ -2810,6 +3006,58 @@ def _live_sect_pr(sect: str) -> str:
     return _SECT_CHANGE_RE.sub(lambda m: " " * len(m.group(0)), sect)
 
 
+def _noncontent_runs(text: str) -> list:
+    """(start, end, original) for every run `_mask_noncontent` blanks.
+
+    The mask is length-preserving, so a caller may locate a live span in the
+    masked copy and splice the ORIGINAL bytes. This helper recovers those
+    original runs for a protected edit.
+    """
+    masked = _mask_noncontent(text)
+    runs = []
+    i, n = 0, len(text)
+    while i < n:
+        if masked[i] == text[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and masked[j] != text[j]:
+            j += 1
+        runs.append((i, j, text[i:j]))
+        i = j
+    return runs
+
+
+def _protect_noncontent(text: str) -> tuple:
+    """(protected, runs): cover each masked span with a unique sentinel.
+
+    A section splice must FIND its anchors in `_mask_noncontent` (a
+    commented-out section is not the live one) but it must not REWRITE those
+    spans: the header/footer substitution regexes would otherwise edit a
+    reference inside a comment, and the splice would lose the comment or a
+    tracked deletion. The sentinel is a NUL-delimited index that no XML tag or
+    substitution can match; `_restore_noncontent` puts every original run back
+    after the live edit.
+    """
+    runs = _noncontent_runs(text)
+    if not runs:
+        return text, []
+    parts, pos = [], 0
+    for idx, (start, end, _orig) in enumerate(runs):
+        parts.append(text[pos:start])
+        parts.append(f"\x00{idx}\x00")
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts), [orig for _s, _e, orig in runs]
+
+
+def _restore_noncontent(text: str, runs: list) -> str:
+    """Put every span protected by `_protect_noncontent` back byte-for-byte."""
+    for idx, orig in enumerate(runs):
+        text = text.replace(f"\x00{idx}\x00", orig, 1)
+    return text
+
+
 def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
     """(xml, applied): give EVERY manuscript section the template's geometry.
 
@@ -2820,12 +3068,15 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
     delivered package was not the journal's layout, while the conformance
     report, which read the same last section, showed no gap.
     """
-    t_sects = list(_SECT_RE.finditer(template_doc_xml or ""))
+    # A commented-out/retired template section is not live: the manuscript
+    # side below already masks, and the template side must read the same way
+    # or obsolete geometry from a comment is copied into the manuscript (F39).
+    t_sects = list(_SECT_RE.finditer(_mask_noncontent(template_doc_xml or "")))
     # The MANUSCRIPT side reads the same way `first_section_props` reads it: a
     # legal self-closing `<w:sectPr .../>` is an empty section and must not be
     # skipped, or page 1 silently keeps the author's geometry while the report
     # (which reads the first section correctly) shows the template's.
-    m_sects = list(SECT_READ_RE.finditer(doc_xml))
+    m_sects = list(SECT_READ_RE.finditer(_mask_noncontent(doc_xml)))
     if not t_sects or not m_sects:
         return doc_xml, False
     # CT_SectPr's child order; a replacement must keep the sequence valid even
@@ -2884,8 +3135,18 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
         return body
 
     for m in reversed(m_sects):                     # backwards: offsets stay valid
-        doc_xml = doc_xml[:m.start()] + adopt(m.group(0)) + doc_xml[m.end():]
+        body, runs = _protect_noncontent(doc_xml[m.start():m.end()])
+        doc_xml = (doc_xml[:m.start()] + _restore_noncontent(adopt(body), runs)
+                   + doc_xml[m.end():])
     return doc_xml, True
+
+
+def _ct_has_partname(ct: str, partname: str) -> bool:
+    """Whether the content-types part already declares `partname` (decoded)."""
+    for m in re.finditer(r"<Override(?=[\s/>])[^>]*>", ct or ""):
+        if attr_of(m.group(0), "PartName") == partname:
+            return True
+    return False
 
 
 def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> dict:
@@ -2916,7 +3177,11 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         return {}
     rel_map = {e["id"]: (e["type"], e["target"]) for e in _rels_entries(trels)}
     refs = {"header": {}, "footer": {}}
-    sect = _SECT_RE.findall(tdoc)
+    # A headerReference inside a commented-out/retired template section is not
+    # a live role: harvesting raw bytes copied a dead part into the manuscript
+    # (F54). Masking is length-preserving, so the tags read the same.
+    tdoc_live = _mask_noncontent(tdoc)
+    sect = _SECT_RE.findall(tdoc_live)
     ref_re = re.compile(r"<w:(header|footer)Reference\b[^>]*>")
 
     def harvest(xml: str, roles: tuple) -> None:
@@ -2965,7 +3230,13 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
                 # bare `venue_logo.png` (which resolves to word/venue_logo.png,
                 # a missing part -- the logo then renders as an empty frame).
                 media = rm["target"]
-                src_media = posixpath.normpath(posixpath.join("word", media))
+                # A package-absolute target (`/word/media/logo.png`) is
+                # resolved from the package root, not from `word/`: joining
+                # discarded `word/` and the image was never copied (F56).
+                if media.startswith("/"):
+                    src_media = posixpath.normpath(media.lstrip("/"))
+                else:
+                    src_media = posixpath.normpath(posixpath.join("word", media))
                 if not src_media.startswith("word/") or ".." in Path(src_media).parts:
                     continue
                 dest_media = posixpath.join(posixpath.dirname(src_media),
@@ -3088,7 +3359,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     ct, ct_encode = _ooxml_part_codec(parts.get("[Content_Types].xml", b""))
     for name in copied:
         kind = "header" if name.startswith("header") else "footer"
-        if f'PartName="/word/{name}"' not in ct:
+        if not _ct_has_partname(ct, f"/word/{name}"):
             ct = ct.replace("</Types>",
                             f'<Override PartName="/word/{name}" ContentType="application/vnd.'
                             f'openxmlformats-officedocument.wordprocessingml.{kind}+xml"/>'
@@ -3187,7 +3458,7 @@ def template_style_roles(template: Path) -> dict:
     # Read the tag's own `w:val` through `attr_of`: the double-quote-only
     # pattern also required `w:val` to be the first attribute, so a legal
     # `w:pStyle w:val='Heading1'` made the depth fall back to 2.
-    for m in re.finditer(r"<w:pStyle(?=[\s/>])[^>]*>", doc):
+    for m in re.finditer(r"<w:pStyle(?=[\s/>])[^>]*>", _mask_noncontent(doc)):
         sid = attr_of(m.group(0), "w:val")
         if sid:
             used[sid] = used.get(sid, 0) + 1
@@ -3213,7 +3484,10 @@ def _run_sizes(run: str) -> list:
     run invisible to the dominant-size calculation.
     """
     out = []
-    for tag in re.findall(r"<w:sz(?=[\s/>])[^>]*/?>", run or ""):
+    # `w:rPrChange` is the run's formatting BEFORE the tracked edit and a
+    # comment is not markup: neither is the live size (F41).
+    live = _mask_noncontent(live_rpr(run or ""))
+    for tag in re.findall(r"<w:sz(?=[\s/>])[^>]*/?>", live):
         val = attr_of(tag, "w:val")
         if val is not None and str(val).strip().isdigit():
             out.append(int(str(val).strip()))
@@ -3226,7 +3500,8 @@ def _run_is_bold(run: str) -> bool:
     Accepts both legal quote styles and the boolean spellings; a single-quoted
     `<w:b w:val='1'/>` is bold exactly like `<w:b/>`.
     """
-    for tag in re.findall(r"<w:b(?=[\s/>])[^>]*/?>", run or ""):
+    for tag in re.findall(r"<w:b(?=[\s/>])[^>]*/?>",
+                          _mask_noncontent(live_rpr(run or ""))):
         val = attr_of(tag, "w:val")
         if val is None or str(val).strip().lower() in ("1", "true", "on"):
             return True
@@ -3245,8 +3520,11 @@ def _body_run_size(doc_xml: str):
     for _p0, _p1, frag in paragraphs(doc_xml):
         if len(text_of(frag).split()) < 25:
             continue
-        for run in re.findall(r"<w:r\b[\s\S]*?</w:r\s*>", frag):
-            t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t\s*>", run))
+        # `runs()` skips comments and the unrendered Fallback branch, and
+        # `_run_sizes()` ignores `w:rPrChange`: dead runs must not shift the
+        # body size that drives heading detection (F57).
+        for _r0, _r1, run in runs(frag):
+            t = text_of(run)
             for s in _run_sizes(run):
                 weights[s] += len(t)
     if weights:
@@ -3371,7 +3649,7 @@ def _ppr_extra(ppr_xml: str) -> str:
     # children are spliced into a target pPr as one string, and spacing/jc
     # before keepNext/keepLines produced a schema-invalid bag. rPr is last.
     for tag in ("keepNext", "keepLines", "spacing", "ind", "jc", "rPr"):
-        keep += re.findall(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s>])[^>]*>[\s\S]*?</w:{tag}>",
+        keep += re.findall(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s>])[^>]*>[\s\S]*?</w:{tag}\s*>",
                            ppr_xml)
     return "".join(keep)
 
@@ -3455,7 +3733,7 @@ def _bold_label_runs(para_xml: str) -> str:
     at the colon so only the label is bold -- the concatenated w:t text stays
     byte-identical.
     """
-    RPR_RE = re.compile(r"<w:rPr(?=[\s/>])(?:[^>]*/>|[^>]*>[\s\S]*?</w:rPr>)")
+    RPR_RE = re.compile(r"<w:rPr(?=[\s/>])(?:[^>]*/>|[^>]*>[\s\S]*?</w:rPr\s*>)")
 
     raw_text = text_of(para_xml)
     m = _CORRESP_RE.match(raw_text.strip())
@@ -3580,8 +3858,27 @@ def _insert_ppr_extra(ppr_xml: str, extra: str) -> str:
     elif change:
         head = head + extra
     else:
-        head = head.replace("</w:pPr>", extra + "</w:pPr>", 1)
+        close = re.search(r"</w:pPr\s*>", head)
+        if close is not None:
+            head = head[:close.start()] + extra + head[close.start():]
     return head + change
+
+
+def _para_child_span(para: str, tag: str):
+    """(start, end) of a DIRECT live child of the paragraph's own pPr.
+
+    `str.find(element)` matched an identical COMMENTED-OUT property before the
+    live one, so a splice repaired the comment while `changes` claimed the live
+    property was fixed (F012).
+    """
+    ps = _property_element_span(para, "pPr")
+    if ps is None:
+        return None
+    ppr = para[ps[0]:ps[1]]
+    span = _child_element_span(ppr, tag)
+    if span is None:
+        return None
+    return ps[0] + span[0], ps[0] + span[1]
 
 
 def _apply_ppr_extra(frag: str, extra: str) -> str:
@@ -3822,7 +4119,7 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
     # A self-closing `<w:sectPr .../>` IS the page-1 section (see
     # `first_section_props`): skipping it put the venue's logo/title-page
     # furniture on the BODY section while page 1 kept the author's own.
-    sects = list(SECT_READ_RE.finditer(doc_xml))
+    sects = list(SECT_READ_RE.finditer(_mask_noncontent(doc_xml)))
     if not sects:
         return doc_xml, False
     refs_all, refs_body = "", ""
@@ -3857,15 +4154,19 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
 
         # `w:sectPrChange` is revision history: its nested old section must stay
         # byte-identical. Apply the substitutions/splices only to the LIVE part
-        # and re-attach the record unchanged.
-        body = m.group(0)
+        # and re-attach the record unchanged. The span offsets come from the
+        # masked copy, but the bytes edited are the ORIGINAL section: a comment
+        # or tracked deletion inside it must survive byte-for-byte (the
+        # header/footer regexes must not rewrite a reference inside a comment).
+        body, runs = _protect_noncontent(doc_xml[m.start():m.end()])
         change = _SECT_CHANGE_RE.search(body)
         history = ""
         if change is not None:
             history = body[change.start():]
             body = body[:change.start()]
-        body = re.sub(r"<w:(header|footer)Reference(?=[\s/>])[^>]*/>",
-                      keep_source_ref, body)
+        body = re.sub(
+            r"<w:(header|footer)Reference(?=[\s/>])[^>]*(?:/>|>\s*</w:\1\s*>)",
+            keep_source_ref, body)
         body = re.sub(r"<w:titlePg[^>]*/>", "", body)
         # The OPENING tag only: `[^>]*` greedily consumed the `/` of a legal
         # `<w:sectPr att="x"/>`, so the references were inserted AFTER the
@@ -3903,10 +4204,11 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
             if at is not None:
                 body = body[:at] + "<w:titlePg/>" + body[at:]
         body += history
+        body = _restore_noncontent(body, runs)
         out = out[:m.start()] + body + out[m.end():]
     if refs_all:
         root = re.search(r"<w:document\b[^>]*>", out)
-        if root and "xmlns:r=" not in root.group(0):
+        if root and not re.search(r"xmlns:r\s*=", root.group(0)):
             out = out.replace(
                 root.group(0), root.group(0)[:-1] + ' xmlns:r="http://schemas.'
                 'openxmlformats.org/officeDocument/2006/relationships">', 1)
@@ -3929,7 +4231,7 @@ def _with_even_odd_headers(parts: dict) -> bool:
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
             '2006/main"><w:evenAndOddHeaders/></w:settings>').encode("utf-8")
-        if 'PartName="/word/settings.xml"' not in ct:
+        if not _ct_has_partname(ct, "/word/settings.xml"):
             ct = ct.replace(
                 "</Types>", '<Override PartName="/word/settings.xml" ContentType='
                             '"application/vnd.openxmlformats-officedocument.wordprocessingml.'
@@ -3976,7 +4278,14 @@ def _with_even_odd_headers(parts: dict) -> bool:
         if j != -1:
             text = text[:j + 2] + element + text[j + 2:]
         else:
-            text = text.replace("</w:settings>", element + "</w:settings>", 1)
+            cm = re.search(r"</w:settings\s*>", text)
+            if cm is None:
+                # No live close to anchor on: refuse rather than report a
+                # setting that was never written (F092).
+                return False
+            text = text[:cm.start()] + element + text[cm.start():]
+    if element not in text:
+        return False
     parts["word/settings.xml"] = settings_encode(text)
     return True
 
@@ -3995,7 +4304,8 @@ def _reorder_numbering_groups(xml: str, pics: str, abstracts: str, nums: str) ->
     the part. Each existing top-level block keeps its bytes; only the group
     order changes, and the three carried groups join their own group.
     """
-    close_at = xml.rfind("</w:numbering>")
+    _cm = re.search(r"</w:numbering\s*>", xml)
+    close_at = _cm.start() if _cm is not None else -1
     open_m = re.search(r"<w:numbering(?=[\s/>])[^>]*>", xml)
     if close_at == -1 or not open_m:
         return xml
@@ -4059,7 +4369,7 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     a numId the template DOES define keeps the template's definition.
     """
     tpl_numbering = _ooxml_part_codec(parts.get("word/numbering.xml", b""))[0]
-    if not tpl_numbering or "</w:numbering>" not in tpl_numbering:
+    if not tpl_numbering or not re.search(r"</w:numbering\s*>", tpl_numbering):
         return {}
     doc_names = [n for n in sorted(parts) if doc_part_re.fullmatch(n)]
     referenced = set()
@@ -4283,15 +4593,24 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                     xml = ooxml_part_text(parts[name])
                     ref_ids |= {m.group("val") for m in _STYLE_REF_RE.finditer(xml)}
             kept_styles = []
+            style_blocks = []
+            for start, end in _element_spans_by_name(src_styles, "style"):
+                cand = src_styles[start:end]
+                om = re.match(r"<w:style(?=[\s/>])[^>]*>", cand)
+                if om is not None:
+                    style_blocks.append((attr_of(om.group(0), "w:styleId"), cand))
             for sid in sorted((ref_ids - set(t_by_id) - set(mapping)) | set(collided)):
-                m = re.search(rf'<w:style\b[^>]*w:styleId="{re.escape(sid)}"[\s\S]*?</w:style>',
-                              src_styles)
-                if m:
-                    block = m.group(0)
+                # Read the style id through attr_of: a legal single-quoted
+                # `w:styleId='X'` was not found by the double-quote-only regex,
+                # so a manuscript-only style was dropped while the document
+                # still referenced it (F048).
+                block = next((b for (bsid, b) in style_blocks if bsid == sid), None)
+                if block is not None:
                     if sid in collided:
                         block = re.sub(
-                            rf'w:styleId="{re.escape(sid)}"',
-                            f'w:styleId="{_xml_attr_value(collided[sid])}"',
+                            rf"w:styleId\s*=\s*([\"']){re.escape(sid)}\1",
+                            lambda mm: "w:styleId=" + mm.group(1)
+                            + _xml_attr_value(collided[sid]) + mm.group(1),
                             block, count=1)
                     kept_styles.append(block)
             if kept_styles:
@@ -4515,12 +4834,23 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
             # `_is_aux_name()` rule can decide what to leave out. The compile
             # copy itself is skipped, so a workdir that IS the document's
             # directory cannot copy the copy into itself.
+            #
+            # SYMLINKS and other non-regular entries are skipped: `copytree`
+            # defaults to `symlinks=False`, so a directory link in the package
+            # was DEREFERENCED and its outside target copied into the compile
+            # sandbox -- content the package walker refuses for explicitly
+            # named inputs and that can make validation read files outside the
+            # package boundary (F034). The engine may then fail on a missing
+            # `\input`; that is a compile result, not an outside-file leak.
             shutil.copytree(
                 path.parent, target_dir, dirs_exist_ok=True,
                 ignore=lambda d, names: [
                     n for n in names
                     if n == "work" or _is_aux_name(n)
-                    or (Path(d) == path.parent and n == target_dir.name)])
+                    or (Path(d) == path.parent and n == target_dir.name)
+                    or os.path.islink(os.path.join(d, n))
+                    or not (os.path.isdir(os.path.join(d, n))
+                            or os.path.isfile(os.path.join(d, n)))])
             # The shared bounded runner puts latexmk in its OWN session, caps
             # both streams and kills the whole process GROUP on timeout.
             # `subprocess.run(capture_output=True)` allocated every byte the
@@ -5517,16 +5847,23 @@ def _token_width_twips(token: str, font_pt: float) -> int:
 def _cell_font_pt(styles: dict, cell: str) -> float:
     """The largest run size in a cell, else its paragraph style's, else 10 pt."""
     sizes = []
-    for tag in re.findall(r'<w:sz(?=[\s/>])[^>]*>', cell):
+    live_cell = _mask_noncontent(cell)
+    for tag in re.findall(r'<w:sz(?=[\s/>])[^>]*>', live_cell):
         val = attr_of(tag, "w:val")
         if val is not None and val.isdigit():
+            # Bounded parse: a 5000-digit w:sz otherwise raised ValueError
+            # (CPython 3.11+'s int() limit) out of the whole package scan
+            # (F027), like the unbounded grid width `_table_grid_widths`
+            # already refuses.
+            if len(val) > 6:
+                continue
             sizes.append(int(val) / 2.0)
     if sizes:
         return max(sizes)
     # `attr_of` accepts either legal quote style (and any attribute order): the
     # double-quote-only read returned None for `w:pStyle w:val='...'` and the
     # cell was measured at the 10 pt fallback.
-    st = re.search(r"<w:pStyle(?=[\s/>])[^>]*>", cell)
+    st = re.search(r"<w:pStyle(?=[\s/>])[^>]*>", live_cell)
     sid = attr_of(st.group(0), "w:val") if st else None
     if sid:
         sz = style_sz(styles, sid)
@@ -5568,7 +5905,10 @@ def _table_cell_widths(row: str) -> list:
     """
     out = []
     for _s, _e, cell in _spans(row, CELL_TOKENS):
-        tcpr = re.search(r"<w:tcPr(?=[\s/>])[\s\S]*?</w:tcPr\s*>", cell, re.S)
+        # Read the LIVE properties only: a commented-out w:tcW before the live
+        # one supplied the table's geometry and rewrote the live grid (F38).
+        live_cell = _mask_noncontent(cell)
+        tcpr = re.search(r"<w:tcPr(?=[\s/>])[\s\S]*?</w:tcPr\s*>", live_cell, re.S)
         width, span = None, 1
         if tcpr:
             body = tcpr.group(0)
@@ -5819,7 +6159,10 @@ def page_field_rows(aux_parts: list, doc: str) -> list:
     """FMT-S10: a referenced header/footer part carries more than one PAGE field."""
     rows = []
     for name, xml in aux_parts:
-        n = len(PAGE_FIELD_INSTR_RE.findall(xml or ""))
+        # A commented-out PAGE field is not printed: counting raw bytes let a
+        # header with one live field look like it had two (F51).
+        live_xml = _mask_noncontent(xml or "")
+        n = len(PAGE_FIELD_INSTR_RE.findall(live_xml))
         if n <= 1:
             continue
         boxed = 0
@@ -5827,7 +6170,7 @@ def page_field_rows(aux_parts: list, doc: str) -> list:
         # exact-close pattern missed it, so the note claimed the duplicate
         # fields were not in a floating text box and gave the wrong repair.
         for m in re.finditer(r"<w:txbxContent(?=[\s/>]).*?</w:txbxContent\s*>",
-                             xml or "", re.S):
+                             live_xml, re.S):
             boxed += len(PAGE_FIELD_INSTR_RE.findall(m.group(0)))
         where = (f"; {boxed} of them sit in a floating text box" if boxed else "")
         rows.append({
@@ -5856,7 +6199,7 @@ def page_field_fixes(part_xml: str) -> list:
         # it. Leave this shape to the author (the scan still reports it).
         return []
     spans = [(s, e) for s, e, _frag in _spans(part_xml or "", PARA_TOKENS)
-             if PAGE_FIELD_INSTR_RE.search(part_xml[s:e])]
+             if PAGE_FIELD_INSTR_RE.search(_mask_noncontent(part_xml[s:e]))]
     if len(spans) <= 1:
         return []
     edits = []
@@ -5868,9 +6211,10 @@ def page_field_fixes(part_xml: str) -> list:
         # verification (text + part names, never paragraph children) then
         # certified the loss as a text-identical success. Refuse this shape --
         # the scan leaves it to the author like the text-box case above.
+        para_live = _mask_noncontent(para)
         if re.search(r"<w:(?:drawing|pict|object|bookmarkStart|bookmarkEnd|"
                      r"fldData|footnoteReference|endnoteReference|commentReference|"
-                     r"txbxContent|sym)(?=[\s/>])", para):
+                     r"txbxContent|sym)(?=[\s/>])", para_live):
             continue
         # Only a paragraph whose VISIBLE text is the page number (the field's
         # cached result) may be removed; a page number sharing a paragraph with
@@ -6868,7 +7212,12 @@ def cmd_scan_figures(args) -> int:
             # source and the scan proceeded with no vocabulary terms, exit 0.
             ET.fromstring(xml)
             texts.append("\n".join(text_of(p[2]) for p in paragraphs(xml)))
-        except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+        except (OSError, zipfile.BadZipFile, KeyError, RuntimeError,
+                NotImplementedError, ET.ParseError) as e:
+            # ZipFile.read raises NotImplementedError for an unsupported
+            # compression method and RuntimeError for an ENCRYPTED entry: both
+            # escaped `main()` as a traceback while every sibling reader already
+            # caught them (F028). The documented exit is this exit-2 report.
             log(f"error: cannot read {f}: {e}")
             return 2
     if texts:

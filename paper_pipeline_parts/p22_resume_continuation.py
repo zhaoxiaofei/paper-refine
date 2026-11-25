@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 22/23 of the pipeline -- executed by the
+# Part 22/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -39,16 +39,39 @@ def capture_agent_session_id(ctx: Ctx, rec: dict) -> str:
     except Exception:                                            # noqa: BLE001
         return ""
     log = sb / "_agent.log"
-    # The transcript is agent-written: the shared reader refuses a symlink and
-    # applies the byte budget (F38).
-    text = read_text_bounded(log)
+    # The transcript is append-only and can exceed the shared read budget after
+    # two long attempts; the LAST id is at the END, so read a bounded TAIL
+    # instead of treating an over-budget file as empty (F065).
+    try:
+        with _open_regular_no_follow(log) as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 16 * 1024 * 1024))
+            text = fh.read(16 * 1024 * 1024).decode("utf-8", "replace")
+    except OSError:
+        return ""
     if not text:
         return ""
     hits = [(m.start(), m.group(1))
             for pattern in (SESSION_ID_RE, DSH_SESSION_ID_RE)
             for m in pattern.finditer(text)]
     hits.sort()
-    return str(hits[-1][1]) if hits else ""
+    if hits:
+        return str(hits[-1][1])
+    # dsh emits its `sessionId` ONCE at the HEAD of the NDJSON stream; a log
+    # over 16 MiB lost it entirely because only the tail was scanned (F047).
+    # Fall back to the first 64 KiB (the id is at the stream head) and prefer
+    # the last id on that side.
+    try:
+        with _open_regular_no_follow(log) as fh:
+            head = fh.read(64 * 1024).decode("utf-8", "replace")
+    except OSError:
+        return ""
+    head_hits = [(m.start(), m.group(1))
+                 for pattern in (SESSION_ID_RE, DSH_SESSION_ID_RE)
+                 for m in pattern.finditer(head)]
+    head_hits.sort()
+    return str(head_hits[-1][1]) if head_hits else ""
 
 
 def resume_argv_for(cmd: list, session_id: str) -> list:
@@ -140,6 +163,8 @@ def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
     if not reason:
         return [], key, "", ""
     if not cmd:
+        print(f"  [resume] {rec.get('id', '?')}: no continuation -- the stage "
+              f"recorded no resumable command")
         return [], key, "", ""
     used = int((rec.get("resume_attempts") or {}).get(key) or 0)
     if used >= RESUME_ATTEMPT_LIMIT:
@@ -333,6 +358,17 @@ _AUDIT_PROSE_VERB_RE = re.compile(
 _AUDIT_CHECK_SUBJECT_RE = re.compile(
     r"(?i)\b(?:sweep|pass|check|review|audit|scan|re-?derivation|verification|"
     r"coverage|table|session|attempt)\b")
+# A count whose tail records NO work at all ("the sweep was skipped",
+# "we could not check anything", "nobody looked") is not a disposition, even
+# though none of the negated-verb spellings above matches it (F001/F005).
+_AUDIT_NO_WORK_RE = re.compile(
+    r"(?i)(?:\b(?:skip(?:ped|s)?|deferred?|postponed?|not\s+attempted|tbd|todo)\b"
+    r"|\b(?:never|nobody|no\s+one)\s+(?:looked|checked|reviewed|examined|verified|"
+    r"inspected)\b"
+    r"|\bdid\s+not\s+happen\b"
+    r"|\b(?:work|check|sweep|pass|review|audit|scan)\s+(?:was|were|is|are)\s+"
+    r"(?:not\s+(?:done|performed|run|completed)|skipped|deferred)\b"
+    r"|\b(?:could|can)\s+not\s+(?:check|verify|review|examine|inspect)\s+anything\b)")
 _AUDIT_COUNT_NEGATION_RE = re.compile(
     r"(?i)\b(?:not|never|without|could\s+not|cannot|did\s+not|was\s+not|were\s+not|"
     r"has\s+not|have\s+not|is\s+not|are\s+not)\b"
@@ -400,7 +436,11 @@ def _audit_prose_names_object(tail) -> bool:
     `unable to check artwork/text parity` names the object it could not check.
     """
     rest = _AUDIT_PROSE_VERB_RE.sub("", str(tail or ""), count=1)
-    return _audit_names_content(rest.strip(" \t.,;:-\u2014\u2013"))
+    rest = rest.strip(" \t.,;:-\u2014\u2013")
+    # `unable to check x` names a one-letter object, which is filler exactly
+    # like a bare `unable to check` (F082): require a real content token.
+    return (_audit_names_content(rest)
+            and len(re.findall(r"[A-Za-z0-9]", rest)) >= 3)
 
 
 def _audit_count_tail_negates_check(text: str) -> bool:
@@ -446,7 +486,31 @@ def _audit_disposition_ok(value) -> bool:
     text = str(value or "").strip()
     if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
         return False
+    if _reason_is_generic_filler(text):
+        # `no findings` is the documented zero-count spelling and is made ONLY
+        # of generic words, so the shared filler gate refused the very verdict
+        # the prompt accepts as `0 findings`'s equivalent (F021). The count is
+        # the evidence; only a filler TAIL is refused, exactly as the numeric
+        # zero form is below.
+        _zero = re.match(r"(?i)^\s*no\s+finding(?:s)?\b", text)
+        if _zero is None or _count_tail_is_filler(text[_zero.end():], 0):
+            return False
     if _AUDIT_COUNT_RE.search(text):
+        # The count prefix itself is a complete verdict, but a TAIL made only
+        # of generic filler (`0 findings -- lorem ipsum`, `0 findings; all
+        # good`) names no check or artifact and is not a disposition (F12).
+        # The tail is read with the SHARED helper: the hand-rolled strip
+        # pattern put ".", "-" and the dashes in one class, which Python read
+        # as a RANGE from "." through the em dash, so every letter of a
+        # `;`/`:`/`,` tail was eaten and the filler check never saw it, while
+        # a `--` tail kept its hyphens and refused the complete zero verdict
+        # `0 findings -- none`. The coverage gate already had the right rule
+        # (and the bare-none exemption); both gates now read a count tail the
+        # same way.
+        _count = re.match(r"(?i)^\s*(\d+)\s+finding(?:s)?\b", text)
+        if _count is not None and _count_tail_is_filler(
+                text[_count.end():], int(_count.group(1))):
+            return False
         # A count is a complete verdict, so the WHOLE-CELL negation veto is
         # wrong in both directions (F01/F68). A tail that negates the check
         # itself (`0 findings; the sweep could not run`, `3 findings; the pass
@@ -456,7 +520,8 @@ def _audit_disposition_ok(value) -> bool:
         # shared no-work test is applied as well (F008). A ZERO count whose tail
         # carries a bare inability names no object and is not a verdict either
         # (`0 findings -- unable to check`).
-        if _COVERAGE_NOWORK_RE.search(text) or _audit_count_tail_negates_check(text):
+        if (_COVERAGE_NOWORK_RE.search(text) or _AUDIT_NO_WORK_RE.search(text)
+                or _audit_count_tail_negates_check(text)):
             return False
         if re.search(r"(?i)\b(?:0|zero|no)\s+finding", text):
             m = _AUDIT_PROSE_UNABLE_RE.search(text)

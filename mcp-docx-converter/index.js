@@ -1,15 +1,25 @@
 // ~/mcp-docx-converter/index.js
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { accessSync, constants, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdtempSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod/v4';
-import { allowedRoots, containedSpawnPath, containsPath,
+import { allowedRoots, containedSpawnPath, containsPath, realOrResolved,
          stageContainedInput } from './containment.mjs';
 import { pdfKey } from './in-flight.mjs';
 
-import { isWsl, runFile } from './run-child.mjs';
+import { isWsl, runFile, killAllChildren } from './run-child.mjs';
+
+// F042: on SIGTERM/SIGINT the server kills its in-flight Word/COM tree
+// before exiting, so the Python driver's timeout does not orphan
+// bash -> PowerShell -> Word.
+const _shutdown = () => {
+  try { killAllChildren(); } catch { /* best effort */ }
+  process.exit(0);
+};
+process.on('SIGTERM', _shutdown);
+process.on('SIGINT', _shutdown);
 
 // The converter script is NOT welded to one machine: an explicit env override
 // wins, then the repo-relative copy, then a sibling copy, then PATH. A
@@ -127,6 +137,14 @@ serveStdio(() => {
           // shared with Windows on WSL).
           stagingDir = mkdtempSync(path.join(path.dirname(finalPdf),
                                              '.docx-mcp-convert-'));
+          // mkdtemp followed the path string: a directory component swapped
+          // after containedSpawnPath() would create the private stage (and the
+          // copied manuscript) outside the roots. Verify where it really is
+          // before the child reads the copy and writes the PDF (F046).
+          if (!containsPath(stagingDir, ALLOWED_ROOTS)) {
+            throw new Error(`the private staging directory ${stagingDir} is outside `
+                            + `DOCX_MCP_ALLOWED_ROOTS`);
+          }
           spawnPath = stageContainedInput(real, ALLOWED_ROOTS, stagingDir,
                                           'input.docx');
         } catch (error) {
@@ -147,15 +165,15 @@ serveStdio(() => {
       }
       // The destination may be case-insensitive; it is computed once.
       const key = finalPdf ? finalPdf.toLowerCase() : pdfKey(spawnPath);
-      // 900_000 matches the orchestrator's render budget
-      // (paper_pipeline.render_docx_visual(timeout=900)); a smaller server-side
-      // cap would kill a slow-but-valid Word conversion before the caller's
-      // own timeout and silently downgrade the render to a lower-fidelity
-      // fallback.
+      // The server timer must fire BEFORE the caller's deadline, not after it:
+      // the Python caller's 300 s template-render budget used to race a 900 s
+      // server cap, so the client killed the server before runFile could run
+      // its WSL taskkill/diagnostics and a Word/COM process survived (F043).
+      // 240 s leaves the caller 60 s to receive the server's own timeout report.
       const windowsPidFile = windowsPidPath(finalPdf);
       const run = () => runFile(CONVERTER,
                                   finalPdf ? [spawnPath, finalPdf] : [spawnPath],
-                                  { timeout: 900_000, maxBuffer: 4 * 1024 * 1024,
+                                  { timeout: 240_000, maxBuffer: 4 * 1024 * 1024,
                                     windowsPidFile });
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
@@ -163,6 +181,27 @@ serveStdio(() => {
       try {
         // 调用 docx2pdf.sh 脚本；脚本内部会处理路径转换和 PowerShell 调用。
         const { stdout, stderr } = await next;
+        // The child wrote the derived PDF at a path validated before it ran; a
+        // writer inside the allowed root can swap a directory component in
+        // between and redirect the write outside DOCX_MCP_ALLOWED_ROOTS. Check
+        // where the PDF really landed, remove a stray file, and refuse instead
+        // of reporting a contained success (F046).
+        if (ALLOWED_ROOTS.length && finalPdf && existsSync(finalPdf)
+            && !containsPath(finalPdf, ALLOWED_ROOTS)) {
+          let stray = '';
+          try { stray = realOrResolved(finalPdf); } catch { stray = ''; }
+          if (stray) {
+            try {
+              if (lstatSync(stray).isFile()) rmSync(stray, { force: true });
+            } catch { /* already gone */ }
+          }
+          return {
+            content: [{ type: 'text', text: `refused: the PDF was written outside `
+                                            + `DOCX_MCP_ALLOWED_ROOTS (its path changed during `
+                                            + `the run): ${finalPdf}` }],
+            isError: true,
+          };
+        }
         return {
           content: [{
             type: 'text',

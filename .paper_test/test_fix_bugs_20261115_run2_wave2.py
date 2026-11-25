@@ -188,7 +188,7 @@ def test_postchecks_state_journal_docx():
     (d / "work").mkdir()
     (d / "work" / "empty.pdf").write_bytes(b"")
     (d / "work" / "fake.png").write_bytes(b"not an image")
-    (d / "work" / "real.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    (d / "work" / "real.pdf").write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n")
     got = pp.render_evidence_files([d])
     check("F056 empty/magic-less renders are rejected",
           [p.name for p in got] == ["real.pdf"], str(got))

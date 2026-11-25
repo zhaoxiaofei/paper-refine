@@ -54,7 +54,7 @@ RUN_ONE = HERE / "run_one.sh"
 # `[ok ]`/`[FAIL]`, `OK ...`, and `  ok  ...` -- so all three count as evidence;
 # an EMPTY log (or imports-only module) still does not.
 NO_CHECK_RC = 97
-CHECK_LINE_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail|skip)\]|ok\b|fail\b|skip\b)")
+CHECK_LINE_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail|skip)\]|ok\b|fail\b)")
 # A line that actually EXERCISED something. `[skip]` is a coverage statement,
 # not a check: a suite that prints only skip lines used to satisfy the zero-
 # check guard and was reported PASS with its behaviour untested (F90).
@@ -338,7 +338,10 @@ def main() -> int:
           + (f", {len(skip_checks)} skipped" if skip_checks else "")
           + (f", {len(failed)} FAILED {failed}" if failed else "")
           + f"  (logs: {rundir})")
-    return 1 if failed else 0
+    # A skip-only suite verified nothing.  It is reported (SKIP + the count)
+    # but it must not make the run green: CI with zero coverage is not a pass
+    # (F90/TEST-02).  NOCHK suites are already in `failed`.
+    return 1 if (failed or skip_checks) else 0
 
 
 if __name__ == "__main__":

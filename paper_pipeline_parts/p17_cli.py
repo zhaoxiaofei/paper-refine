@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 17/23 of the pipeline -- executed by the
+# Part 17/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1733,7 +1733,10 @@ def main() -> None:
     # process-wide, so `run-decide` keeps it across both phases).
     skip_note = configure_hash_checks(bool(getattr(args, "skip_hash", False)))
     if skip_note:
-        print(f"[{args.cmd}] WARNING: {skip_note}")
+        # An ADVISORY, not part of the command's output: on stdout it preceded
+        # the JSON document of every `--json` command, so a consumer's json.load
+        # failed on a valid flag combination (F020). stderr keeps it visible.
+        print(f"[{args.cmd}] WARNING: {skip_note}", file=sys.stderr)
     try:
         args.func(args)
     except KeyboardInterrupt:

@@ -203,7 +203,7 @@ def test_visual_containment():
     sb = d / "sandbox"
     (sb / "visual_template" / "main").mkdir(parents=True)
     (sb / "work").mkdir(parents=True)
-    (sb / "work" / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+    (sb / "work" / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
     (sb / "visual_template" / "main" / "real.pdf").write_bytes(
         b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n")
     (d / "outside.pdf").write_bytes(b"%PDF-1.4\n" + b"x" * 500 + b"\n%%EOF\n")

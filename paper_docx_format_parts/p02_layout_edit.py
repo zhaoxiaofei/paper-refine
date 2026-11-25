@@ -207,11 +207,20 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
                     pieces.append('<w:t xml:space="preserve">' + esc(repl) + "</w:t>")
             continue
         new_text = carry(local, old_text)
-        open_tag = raw[:raw.find(">") + 1]
+        # The open tag ends at the `>` that closes it, NOT at the first raw
+        # `>`: XML permits `>` inside a quoted attribute value, so
+        # `raw.find(">")` cut `<w:t w:rsidR="a>b" xml:space="preserve">` in
+        # half and the rebuilt element lost xml:space (and the revision
+        # metadata) while the string-based text identity still passed (F033).
+        # The read side already uses the quote-aware `_tag_end`; keep the
+        # element's own attributes and only add xml:space when the rewritten
+        # text needs it.
+        _open_end = _tag_end(raw, 0)
+        open_tag = raw[:_open_end + 1] if _open_end >= 0 else raw[:raw.find(">") + 1]
         close_tag = raw[raw.rfind("<"):]
-        keep_space = ' xml:space="preserve"' if (new_text != new_text.strip()
-                                                 or "xml:space" in open_tag) else ""
-        tag = "<w:t" + keep_space + ">"
+        tag = open_tag
+        if new_text != new_text.strip() and "xml:space" not in open_tag:
+            tag = open_tag[:-1].rstrip() + ' xml:space="preserve">'
         pieces.append(tag + esc(new_text) + close_tag if new_text else tag + close_tag)
     pieces.append(para[cursor:])
     # A zero-length insertion anchored at the FINAL text offset has no following
@@ -1516,7 +1525,11 @@ def _rpr_splice(rpr: str, element: str, tag: str) -> str:
         # rebuilding it as a bare `<w:rPr>` discarded revision metadata the
         # repair was not asked to touch (F24).
         return f"{stripped[:-2].rstrip()}>{element}</w:rPr>"
-    head_end = rpr.find(">") + 1
+    # Same quote-aware boundary as the text writer: `rpr.find(">")` split a
+    # legal `w:rsidR="a>b"` open tag, so the element was spliced inside the
+    # attribute (F033).
+    _rpr_end = _tag_end(rpr, 0)
+    head_end = (_rpr_end + 1) if _rpr_end >= 0 else (rpr.find(">") + 1)
     head, inner = rpr[:head_end], rpr[head_end:]
     close = inner.rfind("</w:rPr>")
     body, tail = (inner[:close], inner[close:]) if close >= 0 else (inner, "")
@@ -2120,20 +2133,25 @@ def paragraph_first_line_indent(frag: str) -> int:
     if ind is None:
         return 0
     v = attr(ind, "firstLine")
-    if v and re.fullmatch(r"-?\d+", v.strip()):
+    # Bounded decimal parse: a well-formed document may carry a 5000-digit
+    # value and CPython 3.11+ refuses `int()` on it (the same guard
+    # `_table_grid_widths` already applies), so an unbounded `\d+` here aborted
+    # the whole scan with a traceback instead of a report (F027).
+    if v and re.fullmatch(r"-?\d{1,6}", v.strip()):
         n = int(v)
         if n:
             return n
     chars = attr(ind, "firstLineChars")
-    if chars and re.fullmatch(r"-?\d+", chars.strip()):
+    if chars and re.fullmatch(r"-?\d{1,6}", chars.strip()):
         n = int(chars)
         if not n:
             return 0
         sz = elem_val(ppr, "sz") if ppr else None
-        if not (sz and re.fullmatch(r"\d+", str(sz).strip())):
+        if not (sz and re.fullmatch(r"\d{1,6}", str(sz).strip())):
             rpr = next((rpr_of(run) for _r0, _r1, run in runs(frag) if rpr_of(run)), None)
             sz = elem_val(rpr, "sz") if rpr else None
-        half_points = int(sz) if sz and re.fullmatch(r"\d+", str(sz).strip()) else 24
+        half_points = (int(sz) if sz and re.fullmatch(r"\d{1,6}", str(sz).strip())
+                       else 24)
         return int(round((n / 100.0) * (half_points / 2.0) * 20))
     return 0
 
@@ -3447,7 +3465,12 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
 
     rows, fixes = [], []
     for idx, (p0, _p1, para) in enumerate(paragraphs(part_xml)):
-        for m in re.finditer(r"<w:(?:drawing|pict)(?=[\s/>]).*?</w:(?:drawing|pict)>",
+        # XML permits whitespace before the `>` of an end tag, so `</w:drawing >`
+        # is the same element as `</w:drawing>`; the exact-close pattern let a
+        # legal hand-edited/producer spelling hide the whole drawing from
+        # FMT-IM1 (the module already reads `</w:p >`/`</w:txbxContent >` this
+        # way) (F029).
+        for m in re.finditer(r"<w:(?:drawing|pict)(?=[\s/>]).*?</w:(?:drawing|pict)\s*>",
                              para, re.S):
             block = m.group(0)
             # A GROUP drawing has one canvas extent plus a geometry per child;

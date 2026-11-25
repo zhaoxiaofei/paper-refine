@@ -108,8 +108,9 @@ export function killProcessTree(child, options = {}) {
       } catch (err) {
         groupError = String((err && err.message) || err);
       }
-      const pids = windowsPids(options.windowsPidFile
-                               || (child && child.windowsPidFile));
+      const pidFile = options.windowsPidFile
+                    || (child && child.windowsPidFile);
+      const pids = windowsPids(pidFile);
       const failures = [];
       for (const wp of pids) {
         let result = null;
@@ -137,6 +138,17 @@ export function killProcessTree(child, options = {}) {
         if (child && typeof child === 'object') child.treeKillError = detail;
         return { ok: false, error: detail };
       }
+      if (pidFile && pids.length === 0) {
+        // A pid file was requested but held nothing: either the wrapper had
+        // not recorded the Windows pids yet or the read failed, so the
+        // taskkill half of the tree kill did not run. Reporting {ok:true} told
+        // the caller the tree was dead when Word/COM could still be alive
+        // (F045); name the gap so the timeout says the kill is incomplete.
+        const detail = `no Windows pids recorded in ${pidFile}; `
+                     + 'the Windows tree kill could not run';
+        if (child && typeof child === 'object') child.treeKillError = detail;
+        return { ok: false, error: detail };
+      }
       return { ok: true };
     }
     if (child && typeof child.kill === 'function') child.kill('SIGKILL');
@@ -145,6 +157,21 @@ export function killProcessTree(child, options = {}) {
     const detail = String((err && err.message) || err);
     if (child && typeof child === 'object') child.treeKillError = detail;
     return { ok: false, error: detail };
+  }
+}
+
+const _ACTIVE_CHILDREN = new Set();
+
+
+export function killAllChildren() {
+  // F042: the Python driver must be able to stop the server's Word/COM tree.
+  // A SIGTERM handler (index.js) calls this before exiting, so a group kill of
+  // the node server does not orphan the bash -> PowerShell -> Word chain.
+  for (const child of [..._ACTIVE_CHILDREN]) {
+    try {
+      const opts = child._killOptions || {};
+      (child._killTree || killProcessTree)(child, opts);
+    } catch { /* best effort */ }
   }
 }
 
@@ -167,6 +194,9 @@ export function runFile(file, args, options = {}) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     if (windowsPidFile) child.windowsPidFile = windowsPidFile;
+    _ACTIVE_CHILDREN.add(child);
+    child._killOptions = { detached, windowsPidFile };
+    child._killTree = killTree;
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -258,8 +288,24 @@ export function runFile(file, args, options = {}) {
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
+      _ACTIVE_CHILDREN.delete(child);
       if (timer) clearTimeout(timer);
       if (graceTimer) clearTimeout(graceTimer);
+      // A grace-timer settle means the tree kill was not confirmed and the
+      // child may still be running: no 'close' event will ever come to release
+      // its two pipe fds, so every failed kill leaked fds (and the child) in
+      // this long-lived server (F047). Destroy the pipes, drop our listeners
+      // and unref the child. The no-op 'error' listener keeps a late stream
+      // error from becoming an uncaught exception.
+      for (const stream of [child.stdout, child.stderr]) {
+        if (!stream) continue;
+        try { stream.removeAllListeners('data'); } catch { /* ignore */ }
+        try { stream.destroy(); } catch { /* ignore */ }
+      }
+      try { child.removeAllListeners('close'); } catch { /* ignore */ }
+      try { child.removeAllListeners('error'); } catch { /* ignore */ }
+      try { child.on('error', () => {}); } catch { /* ignore */ }
+      if (typeof child.unref === 'function') child.unref();
       if (error) reject(error);
       else resolve(result);
     };

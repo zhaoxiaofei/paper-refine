@@ -624,11 +624,6 @@ def run_codex_installer(area: Path, dsh: Path, servers_json: Path, *extra,
     if patch is not None:
         (dsh / "profiles" / "headless" / "cordis.patch.yml").write_text(patch)
     env = dict(os.environ, PATH=f"{area / 'bin'}:{os.environ.get('PATH', '')}")
-    # The installer defaults --profile to $DSH_PROFILE, and this fixture only
-    # creates the "headless" profile.  A developer shell (or a DSH session)
-    # exports DSH_PROFILE=web, which must not leak into the hermetic fixture.
-    env.pop("DSH_PROFILE", None)
-    env.pop("DSH_HOME", None)
     return run(["node", str(WS / "scripts" / "install-codex-mcp.mjs"),
                 "--dsh-home", str(dsh), "--servers-json", str(servers_json),
                 "--no-install", "--no-verify", *extra], cwd=area, env=env)
