@@ -1157,7 +1157,20 @@ await new Promise((r) => setTimeout(r, 300));
 let alive = true;
 try {{
   const pid = Number(readFileSync({json.dumps(str(pidfile))}, 'utf8').trim());
-  process.kill(pid, 0);
+  // A SIGKILLed grandchild is reaped by the kernel/init, not by the runner:
+  // until that reap happens process.kill(pid, 0) still succeeds although the
+  // process cannot run. Poll (bounded) so reap latency under load is not
+  // reported as survival; a genuinely live process never clears.
+  const deadline = Date.now() + 5000;
+  for (;;) {{
+    try {{
+      const stat = readFileSync(`/proc/${{pid}}/stat`, 'utf8');
+      const state = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)[0];
+      if (state === 'Z' || state === 'X') {{ alive = false; break; }}
+    }} catch {{ alive = false; break; }}
+    if (Date.now() >= deadline) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }}
 }} catch {{
   alive = false;
 }}

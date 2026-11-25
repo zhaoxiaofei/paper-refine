@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -30,6 +31,30 @@ def check(name, cond, detail=""):
     print(f"[{'ok ' if cond else 'FAIL'}] {name}" + (f"  -- {detail}" if detail else ""))
     if not cond:
         FAILS.append(name)
+
+
+def still_running(pid: int, timeout: float = 5.0) -> bool:
+    """True while `pid` is more than an unreaped zombie (Linux /proc).
+
+    A SIGKILLed grandchild is reaped by the kernel/init, not by the process
+    that killed it. Until that reap happens, `os.kill(pid, 0)` still succeeds
+    and `/proc/<pid>` still exists although the process can no longer run; a
+    single immediate check therefore reports a killed tree as still alive
+    under load. Wait (bounded) for the window to close, without ever treating
+    a genuinely live process as dead.
+    """
+    deadline = time.time() + timeout
+    while True:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        except OSError:
+            return False
+        rest = stat.rsplit(")", 1)[-1].split()
+        if rest and rest[0] in ("Z", "X"):
+            return False
+        if time.time() >= deadline:
+            return True
+        time.sleep(0.05)
 
 
 def scratch(prefix: str) -> Path:
@@ -1152,14 +1177,10 @@ def test_step2_findings():
     timeout_pids = []
     if pids_file.is_file():
         timeout_pids = [int(x) for x in pids_file.read_text().split()]
-    alive = []
-    for pid in timeout_pids:
+    alive = [pid for pid in timeout_pids if still_running(pid)]
+    for pid in alive:
         try:
-            os.kill(pid, 0)
-            alive.append(pid)
             os.kill(pid, 9)
-        except ProcessLookupError:
-            pass
         except OSError:
             pass
     check("a latexmk timeout returns a structured error", res.get("ok") is False, str(res)[:200])

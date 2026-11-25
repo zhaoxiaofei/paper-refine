@@ -235,7 +235,25 @@ def test_dsh_probe():
           f"elapsed={elapsed:.1f}s")
     child = int(pidfile.read_text(encoding="utf-8").strip())
     time.sleep(0.3)
-    alive = Path(f"/proc/{child}").exists()
+    # A SIGKILLed helper is reaped by the kernel/init, not by the probe: until
+    # that reap happens /proc/<pid> still exists although the process cannot
+    # run. Poll (bounded) so load-induced reap latency is not reported as
+    # survival; a genuinely live process never clears.
+    alive = True
+    deadline = time.time() + 5.0
+    while True:
+        try:
+            stat = Path(f"/proc/{child}/stat").read_text(encoding="utf-8")
+        except OSError:
+            alive = False
+            break
+        rest = stat.rsplit(")", 1)[-1].split()
+        if rest and rest[0] in ("Z", "X"):
+            alive = False
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(0.05)
     if alive:
         try:
             os.kill(child, 9)
