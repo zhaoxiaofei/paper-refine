@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 21/25 of the pipeline -- executed by the
+# Part 21/26 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -31,18 +31,11 @@ def ledger_final_status_map(ledger, wanted=()) -> dict:
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     out = {}
 
-    def row_id(row: dict):
-        for key in ("id", "finding", "finding_id", "frozen_id"):
-            val = row.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        return ""
-
     def visit(node, depth: int, keyed_id: str = ""):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
-            rid = row_id(node) or keyed_id
+            rid = ledger_row_id(node) or keyed_id
             final = _ledger_final_status(node)
             if final and (not want or rid in want):
                 out.setdefault(rid, final)
@@ -53,13 +46,25 @@ def ledger_final_status_map(ledger, wanted=()) -> dict:
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    visit(item, depth + 1)
+                    # An id-keyed mapping whose value is a LIST
+                    # (`{"F-1": [{"final_status": ...}]}`) must carry the key
+                    # down, or the status is stored under "" (F047).
+                    visit(item, depth + 1, keyed_id)
 
     visit(ledger, 0)
     return out
 
 
-_CONTENT_UNIT_CONTAINED = 0.95
+# Fully present means EVERY content token (F003): 0.95 let one value or
+# negation token vanish from a long sentence and still count as a merge.
+_CONTENT_UNIT_CONTAINED = 1.0
+# Polarity is part of the statement (F002): `not`/`never` is a stopword for the
+# similarity terms, so "was effective" was 100% contained by "was not
+# effective". A merge must preserve the polarity of the unit it covers.
+_CONTENT_NEGATION_RE = re.compile(
+    r"(?i)\b(?:not|no|never|none|neither|nor|cannot|can't|won't|isn't|aren't|"
+    r"wasn't|weren't|doesn't|don't|didn't|failed|fails|failing|without|unable|"
+    r"lacked|lacks|lacking|refused|refuses|prevented|prevents|absent)\b")
 
 
 def _content_unit_contained(unit: dict, candidates: list,
@@ -72,29 +77,84 @@ def _content_unit_contained(unit: dict, candidates: list,
     rescues exactly that case (containment, not similarity) without rescuing a
     deleted sentence: a removed claim's content tokens are not all in one
     delivered sentence.
+
+    Containment must not rescue a REVERSED claim: the polarity of the unit and
+    the candidate must match (F002), and a two-token unit is a real short claim
+    ("Samples froze."), not a fragment to skip (F050). Full containment is the
+    documented contract (F003).
     """
     tokens = _content_tokens(unit)
-    if len(tokens) < 3:
+    if len(tokens) < 2:
         return False
+    polarity = bool(_CONTENT_NEGATION_RE.search(str(unit.get("text") or "")))
     for cand in candidates or ():
-        if len(tokens & _content_tokens(cand)) / len(tokens) >= floor:
-            return True
+        cand_text = str(cand.get("text") or "")
+        # Polarity belongs to the CLAUSE that carries the content, not to a
+        # merged sentence: another sentence's negation used to flip the
+        # candidate and defeat containment.
+        clauses = [c for c in re.split(r"(?<=[.!?])\s+|\s*;\s*", cand_text) if c]
+        matched = False
+        for clause in clauses:
+            clause_unit = {"tokens": re.findall(r"[0-9A-Za-z]+", clause.lower())}
+            if len(tokens & _content_tokens(clause_unit)) / len(tokens) < floor:
+                continue
+            matched = True
+            if bool(_CONTENT_NEGATION_RE.search(clause)) == polarity:
+                return True
+        if not matched:
+            # The unit's tokens may be spread across clauses. Then EVERY clause
+            # that carries one of them must agree with the unit's polarity: the
+            # old whole-candidate fallback let an unrelated negation elsewhere
+            # supply the polarity and rescue a reversed claim (F009).
+            contributing = [c for c in clauses
+                            if tokens & _content_tokens({"tokens": re.findall(
+                                r"[0-9A-Za-z]+", c.lower())})]
+            covered = set()
+            for clause in contributing:
+                covered |= tokens & _content_tokens({"tokens": re.findall(
+                    r"[0-9A-Za-z]+", clause.lower())})
+            if len(covered) / len(tokens) >= floor and contributing \
+                    and all(bool(_CONTENT_NEGATION_RE.search(c)) == polarity
+                            for c in contributing):
+                return True
     return False
 
 
-def soft_deletion_missing_units(missing, cand_units, exempt_removed=()) -> list:
+def soft_deletion_missing_units(missing, cand_units, exempt_removed=(),
+                                allow_marker_delete: bool = True) -> list:
     """Drop the documented removable units from a base->package `missing` list.
 
     The one-to-one matcher consumes a candidate for a single base unit, so a
     duplicate's second copy and a merged sentence are still listed as
     `missing`; both are accepted by the soft-deletion policy. Everything else
     in the list is a claim removal and fails the attempt.
+
+    The pipeline-removal exemptions are consumed one-to-one and are scoped to
+    the document they were recorded for (F004): the raw list used to be
+    re-applied by sentence text alone, so a removal in one document whitelisted
+    the same sentence deleted from another, and the second identical copy in a
+    document was re-exempted after the caller had already consumed it.
+    A hand-off marker is exempt only where the author-to-complete policy
+    requires its removal (F070).
     """
     _cand_norms = {u["norm"] for u in cand_units}
-    return [u for u in missing
-            if not (_removal_is_artifact(u["text"], exempt_removed)
-                    or u["norm"] in _cand_norms
-                    or _content_unit_contained(u, cand_units))]
+    exempt_document, exempt_text = _removal_exemption_counters(exempt_removed)
+    kept = []
+    for u in missing:
+        if _removal_is_artifact(u["text"],
+                                allow_marker_delete=allow_marker_delete):
+            continue
+        if u["norm"] in _cand_norms or _content_unit_contained(u, cand_units):
+            continue
+        doc_key = (u.get("document"), u["norm"])
+        if exempt_document.get(doc_key, 0) > 0:
+            exempt_document[doc_key] -= 1
+            continue
+        if exempt_text.get(u["norm"], 0) > 0:
+            exempt_text[u["norm"]] -= 1
+            continue
+        kept.append(u)
+    return kept
 
 
 def deletion_row_fact_loss_problems(sandbox: Path, rows, full_by_ref=None) -> list:
@@ -116,7 +176,16 @@ def deletion_row_fact_loss_problems(sandbox: Path, rows, full_by_ref=None) -> li
     surviving = _fact_survival_keys(_content_unit_sentences(package))
     problems = []
     for row in rows or ():
-        disposition = str(row.get("disposition") or "").strip()
+        # The audit's disposition column is any of the accepted aliases
+        # (`disposition`/`resolution`/`verdict`); reading only the literal
+        # `disposition` key skipped every row of a table that used an alias
+        # (F045).
+        disposition = ""
+        for key in DISPOSITION_COLUMNS:
+            value = str(row.get(key) or "").strip()
+            if value:
+                disposition = value
+                break
         if not re.match(r"(?i)^OK\s*[\u2014\u2013:-]", disposition):
             continue
         paragraph = str((full_by_ref or {}).get(str(row.get("#") or "").strip())
@@ -143,7 +212,13 @@ def deletion_row_fact_loss_problems(sandbox: Path, rows, full_by_ref=None) -> li
 # IS a removal (a workflow artifact that was never manuscript content); a
 # deleted claim is not one of them.
 _EVIDENCE_ARTIFACT_RE = re.compile(
-    r"(?is)(?<![\w.])(?:TODO|TBD|FIXME|XXX|PLACEHOLDER)(?![\w.])"
+    # A placeholder TOKEN is an artifact only when the unit IS a placeholder:
+    # the token starts the unit (optionally bracketed/emphasised) and is
+    # followed by end-of-unit or punctuation. Matching it ANYWHERE exempted a
+    # real claim ("The XXX domain is required for binding.") from removal
+    # accounting (F031). `[CITE]` is unambiguous and stays unanchored.
+    r"(?im)^\s*(?:#{1,6}\s*)?[*_]*[\[(]?\s*"
+    r"(?:TODO|TBD|FIXME|XXX|PLACEHOLDER)\s*[\])]?[*_]*\s*(?:[.:;,!?\u2014\u2013-]|$)"
     r"|\[CITE\]|\blorem\s+ipsum\b"
     r"|^\s*(?:#{1,6}\s*)?(?:instruction|prompt|system|user)\s*:"
     # The instruction patterns are ANCHORED at the sentence start: an
@@ -190,9 +265,16 @@ def _finding_evidence_units(finding_id: str, evidence: str) -> list:
     return units
 
 
-def _removal_is_artifact(text: str, exempt_removed=()) -> bool:
-    """Is this removed sentence one of the documented removable units?"""
-    if _is_handoff_marker(text) or _EVIDENCE_ARTIFACT_RE.search(text):
+def _removal_is_artifact(text: str, exempt_removed=(),
+                         allow_marker_delete: bool = True) -> bool:
+    """Is this removed sentence one of the documented removable units?
+
+    `allow_marker_delete` is false under `author_to_complete: document`, where a
+    base hand-off marker must survive; the soft-deletion helper passes the
+    stage's mode so a required marker is not exempted as an artifact (F070).
+    """
+    if (allow_marker_delete and _is_handoff_marker(text)) \
+            or _EVIDENCE_ARTIFACT_RE.search(text):
         return True
     norm = _deleted_para_norm(text).lower()
     for item in exempt_removed or ():
@@ -202,9 +284,32 @@ def _removal_is_artifact(text: str, exempt_removed=()) -> bool:
     return False
 
 
+def _removal_exemption_counters(exempt_removed) -> tuple:
+    """(document-keyed Counter, text-only Counter) of pipeline removals.
+
+    The document is part of the key: a removal recorded for `supplement.md`
+    may not excuse the same sentence deleted from `main.md` (F004). A bare
+    sentence keeps the historical text-only scope for callers that do not
+    record a document. Counters make every exemption cover ONE occurrence.
+    """
+    by_document = Counter()
+    by_text = Counter()
+    for item in exempt_removed or ():
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            norm = _deleted_para_norm(item[1]).lower()
+            if norm:
+                by_document[(str(item[0]), norm)] += 1
+        else:
+            norm = _deleted_para_norm(item).lower()
+            if norm:
+                by_text[norm] += 1
+    return by_document, by_text
+
+
 def finding_removal_problems(base: Path, package: Path, findings,
                              final_status=None, exempt_removed=(),
-                             skipped: list = None) -> list:
+                             skipped: list = None,
+                             allow_marker_delete: bool = True) -> list:
     """[{id, final, lost}] for findings whose quoted sentence is gone.
 
     Insertions and deletions are ON by default and are the reviser's call, so
@@ -252,7 +357,11 @@ def finding_removal_problems(base: Path, package: Path, findings,
             continue
         fid = str(finding.get("id") or "").strip()
         evidence = str(finding.get("evidence") or "").strip()
-        if not fid or len(evidence) < 20:
+        # A short verbatim quote ("The sky is blue.") is a real unit: the
+        # sentence builder already applies the documented 8-character /
+        # 2-word floor, so the old extra 20-character gate silently exempted
+        # short claims from removal accounting (F049).
+        if not fid:
             continue
         units = _finding_evidence_units(fid, evidence)
         if not units:
@@ -264,8 +373,25 @@ def finding_removal_problems(base: Path, package: Path, findings,
         # The high floor is what keeps this accounting from flagging a
         # legitimate in-place correction whose new wording shares few tokens
         # with the old (a corrected acronym expansion is the common case).
-        quoted = [b for b, cand in _match_content_unit_pairs(units, base_units)[2]
-                  if _content_unit_similarity(b, cand) >= _FINDING_QUOTE_MATCH]
+        quoted = []
+        quoted_base = set()
+        for b in units:
+            for cand in base_units:
+                # Every base copy of the quote is judged, not only the first
+                # one the matcher happens to pair: with the sentence in both
+                # main.md and supplement.md, exempting the supplement copy must
+                # not hide the main.md removal (F004/R02).
+                if id(cand) in quoted_base:
+                    continue
+                if _content_unit_similarity(b, cand) < _FINDING_QUOTE_MATCH:
+                    continue
+                quoted_base.add(id(cand))
+                unit = dict(b)
+                unit["document"] = cand.get("document")
+                unit["line"] = cand.get("line")
+                unit["sentence_index"] = cand.get(
+                    "sentence_index", b.get("sentence_index"))
+                quoted.append(unit)
         if not quoted:
             continue
         gone, _added, _pairs = _match_content_unit_pairs(quoted, rev_units)
@@ -274,9 +400,26 @@ def finding_removal_problems(base: Path, package: Path, findings,
         # unmatched even though its content survives. Rescue that case here as
         # the soft-deletion gate does: an accounting error must mean the claim
         # is gone, not that its sentence was merged.
-        lost = [u["text"] for u in gone
-                if not (_removal_is_artifact(u["text"], exempt_removed)
-                        or _content_unit_contained(u, rev_units))]
+        exempt_document, exempt_text = _removal_exemption_counters(exempt_removed)
+        lost = []
+        for u in gone:
+            if _removal_is_artifact(u["text"],
+                                    allow_marker_delete=allow_marker_delete):
+                continue
+            if _content_unit_contained(u, rev_units):
+                continue
+            norm = _deleted_para_norm(u["text"]).lower()
+            doc_key = (str(u.get("document") or ""), norm)
+            if exempt_document.get(doc_key, 0) > 0:
+                exempt_document[doc_key] -= 1
+                continue
+            if exempt_text.get(norm, 0) > 0:
+                exempt_text[norm] -= 1
+                continue
+            # One row per finding: two documents losing the same sentence is
+            # one removed claim for the warning, not a duplicated sample.
+            if u["text"] not in lost:
+                lost.append(u["text"])
         if not lost:
             continue
         removals.append({"id": fid, "final": statuses.get(fid, ""),
@@ -329,6 +472,54 @@ def revision_ledger_final_status(package: Path, wanted=()) -> dict:
     return ledger_final_status_map(ledger, wanted)
 
 
+def _reason_denies_movement(reason: str) -> bool:
+    """Does a clause of `reason` deny the movement/merge it is used to claim?
+
+    F043: `OK — not moved to Methods` / `failed to merge into Results` must be
+    refused because the reason says the content did NOT survive. R03: the
+    negation has to belong to the movement predicate's own clause. The old
+    24-character window also refused a different negated predicate
+    (`was not lost and was moved to Methods`) and the additive
+    `not only moved but also merged`, both of which are real reasons.
+    """
+    verbs = (r"(?:moved?|moving|merged?|merging|folded?|folding|relocated?|relocating|"
+             r"integrated?|integrating|reported|reporting|restated?|restating|"
+             r"included?|including|placed?|placing|put|putting|found|finding|"
+             r"survives?|surviving)")
+    negations = (r"(?:not|never|no|failed|unable|didn't|did\s+not|could\s+not|"
+                 r"cannot|can't|without)")
+    # A denial can be POST-POSED after the movement word: "moving to Methods
+    # was not possible" / "merging into Results could not be done". The old
+    # clause test required the negation to precede the verb, so these fell
+    # through to the 4-word floor and closed a deleted paragraph as OK (F016).
+    postposed = re.compile(
+        r"(?i)\b(?:was|were|is|are|could|can|would|will|has|have|had)\s+"
+        r"(?:not|never|cannot)\b[^.;\n]{0,30}\b"
+        r"(?:possible|done|performed|carried\s+out|made|allowed|feasible|successful)\b")
+    clauses = re.split(
+        r"(?i)\b(?:and|but|because|while|although|whereas)\b|[.;,]", reason)
+    # An explicit positive survival clause elsewhere in the reason overrides a
+    # negated movement clause: `not moved to Methods, but merged into Results`
+    # states the content survived (F33).
+    _survival = re.compile(
+        r"(?i)\b(?:moved|merged|relocated|incorporated|transferred|folded|"
+        r"integrated|included|absorbed|retained|kept)\b")
+    _negation = re.compile(r"(?i)\b" + negations + r"\b|\bnot\s+(?:only|just)\b")
+    if any(_survival.search(c) and not _negation.search(c) for c in clauses):
+        return False
+    for clause in clauses:
+        # "not only moved but also merged" is additive, not a denial.
+        if re.search(r"(?i)\bnot\s+(?:only|just)\b", clause):
+            continue
+        if postposed.search(clause):
+            return True
+        neg = re.search(r"(?i)\b" + negations + r"\b", clause)
+        verb = re.search(r"(?i)\b" + verbs + r"\b", clause)
+        if neg and verb and neg.start() < verb.start():
+            return True
+    return False
+
+
 def _deletion_disposition_ok(value, allow_nothing_removed: bool = True) -> bool:
     """Does a DELETED_PARAGRAPHS disposition use the seeded vocabulary?
 
@@ -358,6 +549,22 @@ def _deletion_disposition_ok(value, allow_nothing_removed: bool = True) -> bool:
         # this check exists to reject -- but only THAT row may use it.
         if reason.lower() in ("nothing removed", "no rows removed"):
             return bool(allow_nothing_removed)
+        # A NEGATED movement/merge is not a reason: `OK — not moved to Methods`
+        # says the content did NOT survive there, and the old moved-verb branch
+        # accepted it as the opposite (F043). Reject it outright instead of
+        # letting it fall through to the word-count floor. Only the movement
+        # predicate's own clause counts (R03), so a differently negated
+        # predicate or an additive "not only moved" stays a real reason.
+        if _reason_denies_movement(reason):
+            return False
+        # Restating the template is not a reason either (F043): it says no fact
+        # is lost without naming where anything went. The same holds for
+        # "nothing was checked here".
+        if re.fullmatch(
+                r"(?i)(?:no\s+facts?\s+(?:is|are|was|were)\s+lost|"
+                r"nothing\s+(?:was\s+)?(?:lost|removed|checked)(?:\s+here)?)",
+                reason):
+            return False
         words = re.findall(r"[^\s]+", reason)
         # A short closure that says where the content went ("OK - moved to
         # Methods", "OK - merged into Results", "OK - now in Table 2") is a real
@@ -373,7 +580,41 @@ def _deletion_disposition_ok(value, allow_nothing_removed: bool = True) -> bool:
                 r"table\s*\d+|figure\s*\d+|paragraph\s*\d+|supplementary)\b",
                 reason):
             return True
-        return len(words) >= 4
+        # Four arbitrary words are not a reason. The closure must name a
+        # checkable basis: a location/artifact (section, table, figure, line,
+        # paragraph, a named document) with a retention claim, or an
+        # identity/duplication claim ("duplicate", "identical", "the same
+        # fact", "no fact", "already stated").
+        named = re.search(
+            r"(?i)(?:\b(?:sec(?:tion)?|table|figure|paragraph|line|row|appendix|"
+            r"supplement)\b\.?\s*\d|\u00a7\s*\d|"
+            r"\b[\w./-]+\.(?:md|txt|tex|docx|doc|rtf|pdf|csv)\b)", reason)
+        # A section NAME with no number is a checkable location too: the seeded
+        # instruction asks for `OK — <why no fact is lost>`, and the documented
+        # closure of that shape names where the content went ("OK — content
+        # survives in Results"). Requiring a NUMBER after the word rejected
+        # that shape while accepting `OK — survives, line 3`, so the shipped
+        # e2e seeds failed the audit.
+        section = re.search(
+            r"(?i)\b(?:abstract|introduction|background|related\s+work|"
+            r"materials?\s+and\s+methods|methods?|results?|discussion|"
+            r"conclusions?|limitations|acknowledg(?:e)?ments?|"
+            r"supplementary(?:\s+(?:information|material|text|table|figure))?|"
+            r"appendix|main\s+text)\b", reason)
+        claim = re.search(
+            r"(?i)\b(?:duplicate|redundant|identical|surviv\w*|"
+            r"same\s+(?:fact|statement|sentence|value|content)|"
+            r"no\s+(?:fact|value|information)|nothing\s+(?:new|additional)|"
+            r"already\s+(?:stated|present|reported|covered))\b", reason)
+        # An identity/duplication claim is self-sufficient (the original is
+        # the surviving copy even when the row does not name it); every other
+        # claim must name a checkable location (a numbered one or a section
+        # name). `OK — survives` and `OK — line 3` each carry only one half and
+        # close nothing (F041).
+        identity = re.search(
+            r"(?i)\b(?:duplicate|redundant|identical|"
+            r"same\s+(?:fact|statement|sentence|value|content))\b", reason)
+        return bool(identity) or (bool(claim) and (bool(named) or bool(section)))
     if re.match(r"(?i)^manual-required\b", text):
         return True
     if re.match(r"(?i)^fact\s+removed\s*[\u2014\u2013:-]\s*RP-\d+\b", text):

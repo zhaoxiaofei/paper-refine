@@ -69,8 +69,14 @@ function hasDanglingSymlink(p) {
   // it. Walk the existing components and refuse the path when a link on it has
   // no target.
   const abs = path.resolve(p);
-  let cur = path.sep;
-  for (const part of abs.split(path.sep).filter(Boolean)) {
+  // Start at the path's ROOT (POSIX "/" or a Windows drive/UNC root) and join
+  // only the remainder. Seeding the walk at `path.sep` and then feeding it the
+  // drive component produced a path like "\C:" on win32, which lstat throws on,
+  // so the walk returned false for EVERY Windows path and the dangling-link
+  // check never fired (F038).
+  const root = path.parse(abs).root;
+  let cur = root;
+  for (const part of abs.slice(root.length).split(path.sep).filter(Boolean)) {
     cur = path.join(cur, part);
     try {
       if (lstatSync(cur).isSymbolicLink()) {

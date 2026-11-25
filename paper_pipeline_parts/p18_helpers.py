@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 18/25 of the pipeline -- executed by the loader AFTER the command
+# Part 18/26 of the pipeline -- executed by the loader AFTER the command
 # functions, in the loader's own module globals. These are pure helpers
 # (no module-level side effects): the lower-numbered parts call them at
 # runtime, so they may live after the CLI definitions. Split out of
@@ -683,7 +683,7 @@ def _reference_entry_keys(package: Path) -> set:
                 # like a heading in its text alone. Mark it so the shared scan
                 # ends the reference list on it (F007).
                 _reference_entries_in_lines(
-                    (("# " + line) if str(style or "").startswith("Heading") else line
+                    (("# " + line) if _style_id_is_heading(style) else line
                      for line, style in paras), entries)
     return entries
 
@@ -3596,14 +3596,23 @@ def _json_from_text(text: str, lenient: bool):
     best, best_key = None, None
     best_end = None
     rejected = []                    # (start, end) refused only by the prose test
+    accepted = []                    # (start, end, obj)
     for i, end, obj in found:
         json_len = end - i
         tail = text[end:].strip()
         fenced = not tail or set(tail) <= set("`~")
         prose = outside_prose(i, end)
-        if not fenced and prose > 2 * json_len:
+        # A short trailing EXAMPLE annotation does not make the value before it
+        # a prose fragment: `{"a":1}\nNote: schema example is {…}` keeps the
+        # document at the start (F30). Long arbitrary prose still disqualifies
+        # it (a document buried in text is ambiguous).
+        _tail_note = tail if len(tail) < 120 else ""
+        _example_note = bool(re.search(
+            r"(?i)\b(?:example|schema|sample|e\.g\.|for\s+instance)\b", _tail_note))
+        if not fenced and prose > 2 * json_len and not _example_note:
             rejected.append((i, end))
             continue
+        accepted.append((i, end, obj))
         # A value that runs to the end of the text is the document even when an
         # earlier top-level value is the same length: prefer it on a tie.
         key = (json_len, 1 if fenced else 0)
@@ -3619,4 +3628,326 @@ def _json_from_text(text: str, lenient: bool):
         best_start = best_end - best_len
         if any(s < best_start and (e - s) > best_len for s, e in rejected):
             return None
+        # A trailing value introduced by an EXAMPLE marker ("Note: schema
+        # example is {…}") is not the document when an earlier complete
+        # candidate was accepted (F30).
+        _prefix = text[:best_start]
+        # Blank every earlier JSON value first: an "example" key INSIDE the
+        # document must not be read as prose introducing the trailing value.
+        for _s, _e, _o in accepted:
+            if _e <= best_start:
+                _prefix = _prefix[:_s] + (" " * (_e - _s)) + _prefix[_e:]
+        _prefix = _prefix.rstrip()
+        # The marker must introduce THIS value: a sentence boundary between
+        # the marker and the value means it introduced an earlier sentence.
+        _marker = re.search(r"(?i)\b(?:example|schema|sample|e\.g\.|for\s+instance)\b"
+                            r"[^.!?\n]{0,40}$", _prefix[-120:])
+        if _marker:
+            _marker_start = len(_prefix) - len(_prefix[-120:]) + _marker.start()
+            earlier = [c for c in accepted if c[1] <= best_start]
+            # An earlier candidate can be the document the marker's value is an
+            # example of only when it is ADJACENT to the marker: a fenced schema
+            # block separated from the marker by fence syntax is itself an
+            # example, not the document (R01). Among adjacent candidates the
+            # LAST/largest is the document -- returning the earliest promoted a
+            # leading schema example over the real one.
+            _adjacent = [c for c in earlier
+                         if c[1] <= _marker_start
+                         and not re.search(r"[`~]", text[c[1]:_marker_start])]
+            if _adjacent:
+                return max(_adjacent, key=lambda c: (c[1], c[1] - c[0]))[2]
+            if earlier:
+                return best
+            return None
     return best
+
+
+# ---- shared postcheck gate helpers (fix-bugs wave 1; moved here to keep
+# p06/p07 under the 10,000-line source cap) ----------------------------------
+
+def _unable_reason_present(rest: str) -> bool:
+    """True when an `unable -- ...` status states a reason (>= 2 words).
+
+    The token list is case-insensitive: an all-caps reason ("HPC QUOTA
+    EXCEEDED") is exactly as usable as a lowercase one, and the old
+    `[0-9a-z]+` read it as no reason at all and failed a valid session.
+    """
+    text = " ".join(str(rest or "").split()).strip(" \t.;:,—–-")
+    # `see above`, `N/A` and `all good` are not reasons why execution was
+    # impossible (F08).
+    if re.fullmatch(
+            r"(?i)(?:n/?a|none|tbd|todo|see\s+(?:above|below|here|there|report|details?)|"
+            r"as\s+(?:above|discussed|before|noted)|all\s+good|no\s+reason|unknown)",
+            text):
+        return False
+    if _nowork_token_is_reason(text):
+        return False
+    return len(re.findall(r"[0-9A-Za-z]+", text)) >= 2
+
+
+# A reason made only of generic approval/placeholder prose names no artifact,
+# check or evidence. `lorem ipsum dolor sit amet`, `all good` and `no problems`
+# passed every reason-bearing gate because each required only length or a few
+# words (F12, 2026-11-23). This is the shared "common words only" test; a real
+# reason keeps at least one token outside this vocabulary (a path, check id,
+# location, quoted value or the object it examined).
+_REASON_GENERIC_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+_REASON_GENERIC_WORDS = frozenset("""
+    a an the this that these those it its they them he she we you i
+    is are was were be been being am do does did has have had
+    and or but nor not no none all any some very quite pretty well
+    for of to in on at as with by from into over under about
+    ok okay good fine great excellent nice clean pass passed yes true false
+    done checked check checks checking review reviewed verify verified test tested
+    inspect inspected examined examine looked look seems seem appears appear
+    find finding findings
+    problem problems issue issues wrong nothing everything anything stuff misc
+    things thing pending tbd todo n/a na
+    lorem ipsum dolor sit amet consectetur adipiscing elit sed eiusmod tempor
+    incididunt labore et dolore magna aliqua ut enim ad minim veniam quis
+    nostrud exercitation ullamco laboris nisi aliquip ex ea commodo consequat
+    foo bar baz qux quux asdf qwerty blah blahblah
+    basis unable out of scope see above below here there discussed noted
+""".split())
+
+
+# `no problems found` / `no issues detected` are pure result closures: the
+# `found` token was the only substantive-looking word, but it names no
+# artifact or check. `examined, nothing found` stays a legitimate clean basis
+# (it states the work that was done; the `clean` contract spells it out).
+_GENERIC_RESULT_PHRASE_RE = re.compile(
+    r"(?i)\b(?:no|zero)\s+(?:problems?|issues?|errors?|defects?|findings?)\s+"
+    r"(?:found|detected|seen|identified)\b")
+
+
+def _reason_is_generic_filler(text) -> bool:
+    """True when `text` is made ONLY of generic approval/placeholder words."""
+    raw = str(text or "")
+    m = _GENERIC_RESULT_PHRASE_RE.search(raw)
+    if m:
+        # The closure is filler only when nothing outside it names the object
+        # it examined; `no problems found in section 3` names section 3.
+        rest = raw[:m.start()] + " " + raw[m.end():]
+        rest_words = _REASON_GENERIC_WORD_RE.findall(rest.lower())
+        if not rest_words or all(w in _REASON_GENERIC_WORDS for w in rest_words):
+            return True
+    words = _REASON_GENERIC_WORD_RE.findall(raw.lower())
+    if not words:
+        return True
+    return all(w in _REASON_GENERIC_WORDS for w in words)
+
+
+# An inability clause in a POSITIVE count's tail is evidence about one item
+# (`3 findings; unable to see`), not approval filler: a finding count is a
+# complete verdict and an inability in the EVIDENCE must not veto it (F01/F68).
+# A ZERO count gets no such exemption -- `0 findings -- unable to check` names
+# nothing and is refused by the count gate itself (F12).
+_COUNT_TAIL_INABILITY_RE = re.compile(
+    r"(?i)\b(?:unable|not\s+able|failed|could\s+not|couldn['\u2019]t|cannot|"
+    r"can['\u2019]t)\s+to\s+\w+")
+
+
+def _count_tail_is_filler(tail, count=None) -> bool:
+    """A count form's tail must name a check/artifact, not just approval prose.
+
+    A bare `none`/`no`/`zero`/`nothing` is the complete zero verdict and stays
+    accepted (`0 findings; none`); `0 findings -- lorem ipsum` does not (R03).
+    ``count`` (when the caller has it) lets a positive count keep an inability
+    clause as evidence; the zero-count forms are refused by the caller's own
+    negation gate.
+    """
+    t = str(tail or "").strip(" \t;:,.\u2014\u2013-")
+    if not t:
+        return False
+    if re.fullmatch(r"(?i)(?:none|no|zero|nothing)", t):
+        return False
+    if count and _COUNT_TAIL_INABILITY_RE.search(t):
+        return False
+    return _reason_is_generic_filler(t)
+
+
+def _is_recorded_reason(cell: str) -> bool:
+    """Is this disposition cell a reason rather than a bare verdict word?
+
+    Length alone is not a reason: `OK — see above` is 13 characters and names
+    nothing, so the shared verdict/filler closure is applied too (F049).
+    """
+    text = re.sub(r"\s+", " ", str(cell or "")).strip()
+    if len(text) < 12 or re.search(r"[A-Za-z]{3}", text) is None:
+        return False
+    if _disposition_filler_closure(text) or _reason_is_generic_filler(text):
+        return False
+    return True
+
+
+# A cell that is ONLY a separator or a bare filler token ("-", "\u2014", "n/a",
+# "none", "TBD") is an empty disposition, not a reason: the bare-closure test
+# above fires only for verdict words, so a short table could be "disposed" with
+# `-` and pass (F45). `m1b_rows_disposed` already reads these tokens as NOT
+# disposed, and the gate must share that contract.
+_DISPOSITION_FILLER_ONLY_RE = re.compile(
+    r"(?i)^[-\u2014\u2013_.:,;\s]*(?:x+|n/?a|none|nil|null|tbd|todo)?"
+    r"[-\u2014\u2013_.:,;\s]*$")
+
+
+# A whole-cell no-work token is not a disposition, with or without a verdict
+# prefix; `not attempted`/`pending` disposed every seeded row (F04). A
+# verdict-prefixed anonymous pointer (`OK — see above for details`) names no
+# row-specific reason either (F14).
+_DISPOSITION_NOWORK_RE = re.compile(
+    r"(?i)\b(?:pending|not\s+attempted|not\s+done|no\s+work\s+(?:was\s+)?done|"
+    r"no\s+analysis\s+(?:was\s+)?performed|checked\s+nothing|"
+    r"nothing\s+(?:was\s+)?(?:checked|done)|unable\s+to\s+(?:check|verify|review)|"
+    r"did\s+not\s+(?:check|verify|review)|never\s+(?:checked|verified))\b")
+_DISPOSITION_ANON_POINTER_RE = re.compile(
+    r"(?i)\b(?:see\s+(?:above|below|here|there|report|details?)|"
+    r"as\s+(?:discussed|above|before|noted|stated))\b")
+
+# A no-work token is a disposition only when it IS the reason (or its whole
+# tail): a named, evidence-bearing reason may mention the word ("the data are
+# pending release by the consortium; see base/main.md:4") without recording
+# that no work happened (R06). A named location is the documented evidence
+# form, so its presence distinguishes the two.
+_NOWORK_REASON_LOCATION_RE = re.compile(
+    r"(?i)(?:[\w./\\-]+\.(?:md|txt|tex|docx|doc|json|csv|tsv|py|bib|pdf|"
+    r"xlsx?|html?|xml|yaml|yml)(?::\d+(?:-\d+)?)?"
+    r"|\bline\s*\d+|\bp{1,2}\.?\s*\d+\b|\bparagraph\s+\d+"
+    r"|\bsec(?:tion)?\.?\s*\d+)")
+
+
+def _nowork_token_is_reason(text: str) -> bool:
+    """True when a no-work token IS the reason, not a clause naming evidence.
+
+    `pending`, `not attempted` and `unable to check` record that no work
+    happened and must be refused; `the data are pending release by the
+    consortium; see base/main.md:4` names a location and is a real reason (R06).
+    """
+    text = str(text or "")
+    if not (_COVERAGE_NOWORK_TOKEN_RE.search(text)
+            or _DISPOSITION_NOWORK_RE.search(text)):
+        return False
+    return not _NOWORK_REASON_LOCATION_RE.search(text)
+
+
+def _disposition_is_filler_only(cell: str) -> bool:
+    """True for a disposition cell that is only a separator or a filler token."""
+    return bool(_DISPOSITION_FILLER_ONLY_RE.match(str(cell or "").strip()))
+
+
+def _disposition_filler_closure(cell: str) -> bool:
+    """True for a verdict whose reason tail is only a separator or filler token.
+
+    A whole cell that is a no-work token (`not attempted`, `pending`) or an
+    anonymous pointer (`see above`) is filler even without a verdict prefix,
+    and a verdict-prefixed anonymous pointer is filler too (F04/F14).
+    """
+    text = re.sub(r"\s+", " ", str(cell or "")).strip()
+    if _reason_is_generic_filler(text):
+        return True
+    if _nowork_token_is_reason(text) or _DISPOSITION_ANON_POINTER_RE.search(text):
+        return True
+    m = _DISPOSITION_VERDICT_PREFIX_RE.match(text)
+    if m is None:
+        return False
+    tail = text[m.end():].strip()
+    return bool(tail) and bool(_DISPOSITION_FILLER_TAIL_RE.match(tail))
+
+
+SEED_COVERAGE_REL = "concerns/SEED_COVERAGE.md"
+
+
+def journal_seed_coverage_problems(sb: Path, seed: dict, rows: list,
+                                   require_missing: bool = False) -> list:
+    """One disposition per mechanical feedback candidate (seed block).
+
+    The ledger checks each row it is GIVEN but never proved that every seed block
+    was considered: a single valid item passed a letter with several demands
+    (PR151-035). The session now records a coverage table (`S001...`, the ids the
+    prompt shows) mapping each block to the concern rows it produced, or saying
+    why it produced none. The parse is lenient about cell wording but strict
+    about the seed-id set and about every named concern id existing.
+    """
+    candidates = [c for c in (seed.get("candidates") or []) if isinstance(c, dict)]
+    seed_ids = [str(c.get("seed_id") or "").strip() for c in candidates]
+    seed_ids = [x for x in seed_ids if x]
+    if not seed_ids:
+        if not require_missing:
+            return []
+        # Distinguish an ABSENT/unreadable seed (hard error: the coverage gate
+        # was silently disabled) from a readable empty candidate list (F17).
+        seed_path = Path(sb) / "feedback" / "CONCERN_SEED.json"
+        if not seed_path.is_file():
+            return ["feedback/CONCERN_SEED.json is missing: the per-candidate feedback "
+                    "coverage gate cannot be verified"]
+        raw_seed = read_json(seed_path, revive=False, lenient=True)
+        if not isinstance(raw_seed, dict) or not isinstance(raw_seed.get("candidates"), list):
+            return ["feedback/CONCERN_SEED.json cannot be read as the seeded candidate "
+                    "ledger: the per-candidate feedback coverage gate is UNVERIFIED"]
+        # A present candidate block whose entries carry no `seed_id` is NOT an
+        # empty seed: treating it as one silently disabled per-candidate
+        # coverage, so a renamed id key let a concern escape the letter (F17).
+        raw_candidates = raw_seed.get("candidates") or []
+        if raw_candidates:
+            return ["feedback/CONCERN_SEED.json carries "
+                    f"{len(raw_candidates)} candidate block(s) but no `seed_id`: the "
+                    "per-candidate feedback coverage gate cannot match them"]
+        return []
+    p = Path(sb) / SEED_COVERAGE_REL
+    if not p.is_file():
+        return [f"{SEED_COVERAGE_REL} is missing: the feedback split {len(seed_ids)} candidate "
+                f"block(s) and EACH needs a disposition row (its concern ids, or why it "
+                f"produced none) -- one valid concern row does not prove the rest were read"]
+    blocks = parse_markdown_blocks(p)
+    if not blocks:
+        return [f"{SEED_COVERAGE_REL} carries no table"]
+    known = set(seed_ids)
+    ledger_ids = {str(r.get("id")) for r in rows if isinstance(r, dict)}
+    seen, problems = set(), []
+    for block in blocks:
+        header = [str(h).strip().lower() for h in block.get("header") or []]
+        if not any("seed" in h for h in header):
+            continue
+        for row in block.get("rows") or []:
+            sid = str(row.get("seed id") or row.get("seed") or "").strip()
+            if not sid:
+                problems.append(f"{SEED_COVERAGE_REL}: a coverage row has no seed id")
+                continue
+            if sid in seen:
+                problems.append(f"{SEED_COVERAGE_REL}: seed id {sid!r} appears twice")
+            seen.add(sid)
+            if sid not in known:
+                problems.append(f"{SEED_COVERAGE_REL}: {sid!r} is not a seeded candidate id")
+                continue
+            raw_ids = str(row.get("concern ids") or row.get("concerns") or "").strip()
+            ids = [x.strip() for x in re.split(r"[,;]", raw_ids) if x.strip()
+                   and x.strip().lower() not in ("—", "-", "none", "n/a")]
+            disposition = str(row.get("disposition") or "").strip()
+            low = disposition.lower()
+            if low.startswith(("no concern", "skipped", "not-a-concern", "no demand")):
+                # Strip the skip PREFIX before splitting: splitting the raw
+                # `not-a-concern` on its hyphens left `a-concern` as the start
+                # of the "reason", so the three-word bar was never enforced.
+                _pref = re.match(
+                    r"(?i)^(?:no concern|skipped|not-a-concern|no demand)\b", disposition)
+                rest = disposition[_pref.end():] if _pref else disposition
+                reason = re.split(r"[—–:\-]", rest, maxsplit=1)
+                words = re.findall(r"\S+", reason[1] if len(reason) > 1 else "")
+                if len(words) < 3:
+                    problems.append(f"{SEED_COVERAGE_REL}: {sid} is skipped without a real "
+                                    f"reason (at least three words after the dash)")
+                if ids:
+                    problems.append(f"{SEED_COVERAGE_REL}: {sid} is skipped but names "
+                                    f"concern ids {', '.join(ids)}")
+            elif ids:
+                unknown = [x for x in ids if x not in ledger_ids]
+                if unknown:
+                    problems.append(f"{SEED_COVERAGE_REL}: {sid} names concern id(s) "
+                                    f"{', '.join(unknown)} that the ledger does not carry")
+            else:
+                problems.append(f"{SEED_COVERAGE_REL}: {sid} names neither a concern id nor "
+                                f"a skip disposition")
+    missing = [x for x in seed_ids if x not in seen]
+    if missing:
+        problems.append(f"{SEED_COVERAGE_REL} does not dispose {len(missing)} seeded "
+                        f"candidate(s): {', '.join(missing[:8])}")
+    return problems

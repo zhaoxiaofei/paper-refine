@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 01/25 of the pipeline -- executed by the
+# Part 01/26 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1717,10 +1717,20 @@ def _name_is_article_type_manuscript(name, type_names=()) -> bool:
             continue
         if norm == t:
             return True
-        if norm.startswith(t + " ") \
-                and re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}",
-                                 norm[len(t) + 1:]):
-            return True
+        if norm.startswith(t + " "):
+            rest = norm[len(t) + 1:]
+            if re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}", rest):
+                return True
+            # The pipeline's own revision token (7 hex), a `.final`/`_final`
+            # spelling and a combined form are version suffixes too; without
+            # this, a renamed article-type manuscript fell through to the
+            # `letter` -> cover branch (F64).
+            if re.fullmatch(r"(?:final|draft|revised|revision)", rest):
+                return True
+            if re.fullmatch(r"[0-9a-f]{7}", rest.replace(" ", "")):
+                return True
+            if re.fullmatch(r"(?:final|draft|revised) ?[0-9a-f]{7}", rest):
+                return True
     return False
 
 
@@ -2234,8 +2244,15 @@ def _docx_heading_style(style_id, style_names=None) -> bool:
     sid = str(style_id or "").strip()
     if not sid:
         return False
-    if sid.startswith("Heading"):
-        return True
+    if _style_id_is_heading(sid):
+        # A declared style name outranks a short id: a custom style whose id is
+        # `H1` but whose styles.xml name is "Body Text" is prose, not a
+        # heading (test_wave2_G8 C130). An undeclared `H1`/`heading1` is a
+        # heading; a `HeadingN` id keeps the old unconditional behavior.
+        if sid.lower().startswith("heading"):
+            return True
+        name = str((style_names or {}).get(sid) or "").strip()
+        return not name or bool(_DOCX_HEADING_NAME_RE.match(name))
     name = str((style_names or {}).get(sid) or "").strip()
     return bool(name and _DOCX_HEADING_NAME_RE.match(name))
 
@@ -4277,4 +4294,10 @@ def without_raw_data(m: dict) -> dict:
 
     files = {k: v for k, v in (m or {}).get("files", {}).items()
              if not _raw_data_only(k)}
-    return {"files": files, "count": len(files)}
+    # Preserve the manifest's COVERAGE keys (`unreadable_dirs`, ...): dropping
+    # them made a partially walked winner compare equal to its complete pin,
+    # and an unreadable subtree disappeared from the integrity comparison (F68).
+    out = {k: v for k, v in (m or {}).items() if k not in ("files", "count")}
+    out["files"] = files
+    out["count"] = len(files)
+    return out

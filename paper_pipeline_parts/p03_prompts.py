@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 03/25 of the pipeline -- executed by the
+# Part 03/26 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -37,8 +37,8 @@ coverage you must guarantee on top of the full workflow.
 ATTACHED_PHASE1 = """## Phase 1 — $paper-review (identification only; never modify any file in "non_revised/")
 
 Run the complete review workflow as specified by the skill: Phase 0 setup (corpus conversion and
-inventory via convert_corpus.py), the EXHAUSTIVE MANDATORY mechanical sweeps M1–M17, the judgment
-passes J1–J4, and the discovery round D0–D5 — including its proposal of new sweeps for issue
+inventory via convert_corpus.py), the EXHAUSTIVE MANDATORY mechanical sweeps M1–M36, the judgment
+passes J1–J5, and the discovery round D0–D5 — including its proposal of new sweeps for issue
 classes the checklist itself misses. Adhere to the skill's core discipline throughout:
 ENUMERATE → ARTIFACT → AUDIT → REPORT for every mechanical check; every instance gets a row in
 its artifact table (a sweep with zero findings is invalid without a fully disposed artifact); one
@@ -67,8 +67,9 @@ At minimum — and not limited to — the review must surface:
 6. Formatting that violates best practice for manuscript preparation — including but not limited
    to justified alignment of main text (use left alignment), fonts that are too small or too
    large for their part of the manuscript, fancy styles in the cover letter, and the persuading
-   part of the cover letter less than 300 or more than 500 words — unless such formatting is
-   required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
+   part of the cover letter outside the range the venue's own M19 rule states (when the venue
+   states no cover-letter preference, report that instead of applying a default) — unless such
+   formatting is required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
 7. Micro-formatting and consistency defects, including but not limited to: acronym-related errors
    (including but not limited to: repeating fully expanded long-forms after their first use;
    presenting short-forms without their corresponding long-forms at initial mention; failing to
@@ -81,8 +82,9 @@ At minimum — and not limited to — the review must surface:
    dashes [e.g., using a hyphen for a range instead of an en dash]); unit and style inconsistencies
    (e.g., mixed unit styles for the same quantity, and inconsistent citation formatting); font
    (size, normal, bold, italic, etc., properties) inconsistencies, and any other similar stylistic
-   or formatting discrepancies. The entire manuscript should be 1.5-spaced (except that figure
-   caption texts are single-spaced).
+   or formatting discrepancies. Spacing follows the venue template's own style; a venue that
+   states no spacing rule must not be measured against a blanket default (figure captions are
+   single-spaced only where the venue says so).
 
 Length rule (withdraws this master prompt's blanket preference): the "never flag abstract/main-text
 word limits" preference is WITHDRAWN here -- the M19 rule above governs the abstract and main text,
@@ -95,9 +97,10 @@ it, is installed by this checkout's `install_dependencies.sh`: the Zotero helper
 `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
 `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
 `zot` command from pyzotero-cli -- are available as needed.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
-when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
-the FALLBACK when the MCP service and the skill are both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+pyzotero-cli first when it is available; then the Zotero MCP service when your session
+exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
+both unavailable.
 
 At the end of Phase 1, present the complete findings list and automatically begin the revision (do
 not stop for my confirmation).
@@ -109,7 +112,7 @@ Proceed immediately after finishing Phase 1 (which found issues) without asking 
 Run the complete revision workflow as specified by the skill — R0 through V5 — including
 the programmatic A1 ledger (every finding ID from findings.json and findings_extra.json must
 appear exactly once; "not addressed" is not a status), the CAREFUL re-verification of every finding
-with a recorded verdict and rationale, the sequenced edit plan, the edit rules E1–E12, consistency
+with a recorded verdict and rationale, the sequenced edit plan, the edit rules E1–E13, consistency
 propagation P1 with the conflict-priority order, the code-revision step C if source code is in
 scope, and validation V1–V5 (round-trip integrity, diff locality with no unmapped hunks, full
 mechanical rescan of the revised corpus, checksum re-verification of the untouched originals,
@@ -159,9 +162,10 @@ enables it, is installed by this checkout's `install_dependencies.sh`: the Zoter
 `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
 `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
 `zot` command from pyzotero-cli -- are available as needed.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
-when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
-the FALLBACK when the MCP service and the skill are both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+pyzotero-cli first when it is available; then the Zotero MCP service when your session
+exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
+both unavailable.
 
 Final deliverables of Phase 2: the revised/ package (CHANGELOG.md, MANUAL_STEPS.md,
 REVISION_REPORT.md and any other artifacts the skill specifies), the code/ directory and rerun
@@ -188,8 +192,9 @@ The master prompt's STYLE, FORMAT and EVIDENCE discipline does govern @@OUTPUT_D
 1. Formatting that violates best practice for manuscript preparation — including but not limited
    to justified alignment of main text (use left alignment), fonts that are too small or too
    large for their part of the manuscript, fancy styles in the cover letter, and the persuading
-   part of the cover letter less than 300 or more than 500 words — unless such formatting is
-   required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
+   part of the cover letter outside the range the venue's own M19 rule states (when the venue
+   states no cover-letter preference, report that instead of applying a default) — unless such
+   formatting is required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
 2. Micro-formatting and consistency defects, including but not limited to: acronym-related errors
    (including but not limited to: repeating fully expanded long-forms after their first use;
    presenting short-forms without their corresponding long-forms at initial mention; failing to
@@ -202,8 +207,9 @@ The master prompt's STYLE, FORMAT and EVIDENCE discipline does govern @@OUTPUT_D
    dashes [e.g., using a hyphen for a range instead of an en dash]); unit and style inconsistencies
    (e.g., mixed unit styles for the same quantity, and inconsistent citation formatting); font
    (size, normal, bold, italic, etc., properties) inconsistencies, and any other similar stylistic
-   or formatting discrepancies. The entire manuscript should be 1.5-spaced (except that figure
-   caption texts are single-spaced).
+   or formatting discrepancies. Spacing follows the venue template's own style; a venue that
+   states no spacing rule must not be measured against a blanket default (figure captions are
+   single-spaced only where the venue says so).
 
 Length rule (withdraws this master prompt's blanket preference): the "never flag abstract/main-text
 word limits" preference is WITHDRAWN here -- the M19 rule above governs the abstract and main text,
@@ -353,7 +359,10 @@ def pipeline_fallback_paths() -> list:
         # The pipeline's OWN file: read with the default revive (its Infinity/NaN
         # sentinels must survive), never leniently -- a state file that does not
         # parse exactly is not guessed at.
-        state = read_json(module_path.parent / "state.json")
+        # State is the pipeline's OWN registry: read it with the state cap
+        # (256 MiB), not the 64 MiB agent-output cap, or a valid large registry
+        # looked like "no usable state" and the fallback vanished (F69).
+        state, _state_problem = load_state_file(module_path.parent / "state.json")
     except Exception:                                           # noqa: BLE001
         # A prompt must never fail to render because a state file is unreadable.
         return []
@@ -384,17 +393,29 @@ def pipeline_fallback_paths() -> list:
 
 
 def marker_root_rule(out_dir: str = "") -> str:
-    """WHERE the completion marker goes, stated the same way in every prompt.
+    """WHERE and HOW the completion marker is written, stated in every prompt.
 
     The location is part of the contract (the postcheck reads the sandbox root),
     and a real audit session wrote the marker one directory down because its own
     directives said "write everything inside `audit/`" one sentence before the
     marker instruction -- see SIGNAL_ALT_DIRS.
+
+    HOW is the other half.  On 2026-11-12 three revise attempts left a complete
+    package (revision_report.json, work/R6_language.md, a fully disposed M30)
+    and failed on the missing marker alone: the model ended its last turn with a
+    prose summary instead of a file write, and a turn cap or a stalled session
+    then lost a 2.5-hour stage over one line of JSON.  The stage blocks still
+    say WHEN (after the self-check); this rule adds that the marker is a tool
+    call before any closing message, which is a mechanism, not a reordering.
     """
     inside = f" (not inside `{out_dir}/`, and not anywhere else)" if out_dir else ""
     return (f"LOCATION, and it is part of the contract: `{MARKER_FILE}` goes in the SANDBOX ROOT "
             f"-- the directory that holds `PROMPT.md` (and `base/` for the stages that have "
-            f"one){inside}.")
+            f"one){inside}. "
+            f"HOW: it is written with your file-write tool, as the last ACTION of the session -- "
+            f"never as prose. A closing summary is not a step of the work: if you are about to "
+            f"send one and the marker is not on disk, write the marker first. A stage whose "
+            f"deliverables are complete but whose marker is missing is unfinished.")
 
 
 # The contradiction rule EVERY agent prompt carries. Prompts restate rules (the
@@ -457,17 +478,54 @@ def _contract_deliverable(rel: str, author_to_complete: str = None) -> str:
     return (path.parent / target).as_posix()
 
 
-def _postcheck_contract(kind: str, author_to_complete: str = None) -> str:
+def review_prompt_scope(prompt_text: str = None, sb: Path | None = None) -> tuple:
+    """(scope, split_mode, part_b) the review prompt itself declares.
+
+    The pre-flight has no `ctx` to read the round plan from, so it derives the
+    same two facts the prompt states: a "formatting-writing" round runs no
+    discovery phase, and a split session owns only its half's checks/artifacts.
+    `part_b` comes from the prompt's own "YOUR SCOPE (B)" line; the sandbox
+    name is the fallback for a prompt that carries the split marker without the
+    half line (the postcheck derives it from the sandbox name).
+    """
+    text = str(prompt_text or "")
+    scope = ("formatting-writing"
+             if "FORMATTING AND WRITING ONLY" in text else "full")
+    split = "off"
+    if "SPLIT REVIEW" in text:
+        split = ("aspects"
+                 if ("PACKAGING/compliance" in text
+                     or "CONTENT/scientific" in text) else "phases")
+    part_b = "YOUR SCOPE (B)" in text
+    if split != "off" and "YOUR SCOPE (A)" not in text and "YOUR SCOPE (B)" not in text:
+        part_b = bool(sb is not None and Path(sb).name.endswith("_review_b"))
+    return scope, split, part_b
+
+
+def _postcheck_contract(kind: str, author_to_complete: str = None,
+                        scope: str = "full", split: str = "off",
+                        part_b: bool = False) -> str:
     """The stage's acceptance contract, generated from the postcheck's tables.
 
     Printed in the prompt so a session never has to infer -- or read the
     implementation to discover -- what the postcheck will require. The text is
     stage contract, not profile guidance, so it is byte-identical in `high` and
     `medium` (rule 12).
+
+    The review's contract is the POSTCHECK'S contract, not the full-package
+    one: a formatting-writing round runs no discovery phase (so the discovery
+    deliverable is not expected) and a split half owns only its half's sweep
+    artifacts. Printing the full set told a scoped/split session to leave
+    artifacts its own prompt forbids -- the postcheck does not require them.
     """
     table = STAGE_DELIVERABLES.get(kind) or {}
     required = tuple(table.get("required") or ())
     expected = tuple(table.get("expected") or ())
+    no_discovery = bool(kind == "guided_review"
+                        and (scope != "full" or (split != "off" and not part_b)))
+    if no_discovery:
+        expected = tuple(rel for rel in expected
+                         if Path(rel).name != "findings_extra.json")
     lines = ["", "=== WHAT THE POSTCHECK REQUIRES OF THIS STAGE "
                  "(generated from its own tables -- do not infer it) ==="]
     if required:
@@ -483,10 +541,17 @@ def _postcheck_contract(kind: str, author_to_complete: str = None) -> str:
                      f"{FINDINGS_REL} (a real disposition and its basis); a missing "
                      f"row fails the attempt:")
         lines.append("  " + ", ".join(required_review_check_ids()))
-        if SWEEP_ARTIFACTS:
+        if scope != "full" or split != "off":
+            lines.append("A check this session's review scope or split does not run is "
+                         "disposed 'out of scope -- <reason>'; silence is still a missing row.")
+        in_scope = set(scoped_review_checks(scope))
+        artifacts = [(cid, name) for cid, name in SWEEP_ARTIFACTS.items()
+                     if (not in_scope or cid in in_scope)
+                     and (split == "off" or _split_check_owned(split, part_b, cid))]
+        if artifacts:
             lines.append("Each mechanical check below must also leave its enumeration table:")
             lines += [f"  * {cid} -> {ARTIFACTS_REL}/{name}"
-                      for cid, name in SWEEP_ARTIFACTS.items()]
+                      for cid, name in artifacts]
     return "\n".join(lines) + "\n"
 
 
@@ -571,6 +636,7 @@ def selfcheck_block(kind: str, run_id: str, r: int, sb: Path | None = None,
                          "  (no problems right now)\n")
         except Exception:                                       # noqa: BLE001
             state = ""
+    _scope, _split, _part_b = review_prompt_scope(prompt_text, sb)
     return (f"""
 SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
 {first}
@@ -596,7 +662,7 @@ THE POSTCHECK'S ERROR LIST IS YOUR INPUT; ITS IMPLEMENTATION IS NOT. Do not read
 contract you must satisfy is printed below and in the pre-flight's own output. Reading the
 implementation is not a step of this stage, it cannot change a verdict, and it spends the
 context the deliverables need.
-{_postcheck_contract(kind, author_to_complete)}{state}""")
+{_postcheck_contract(kind, author_to_complete, _scope, _split, _part_b)}{state}""")
 
 def judge_selfcheck_block(run_id: str) -> str:
     """The judge session's pre-flight (blinding-safe wording).
@@ -653,7 +719,19 @@ judged again from scratch, which wastes the whole session and leaves the panel i
 """)
 
 
-ORCHESTRATION_DIRECTIVES_HEADER = "ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):"
+ORCHESTRATION_DIRECTIVES_HEADER = (
+    "ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below "
+    "where they conflict):\n"
+    "\n"
+    "SKILL FILES — the $paper-review and $paper-revise packs are READ-ONLY. "
+    "Read SKILL.md and its references from the skill location the run "
+    "provides; when it provides none, the pack is the pipeline root's "
+    "paper-skills/paper-review/ and paper-skills/paper-revise/. Use absolute "
+    "paths. NEVER run `find /`, `grep -r /`, `du /` or any other scan that "
+    "starts at the filesystem root: a root scan is never authorized, and a "
+    "sandboxed run may stop the session for a containment violation. A file "
+    "you cannot find at those locations does not authorize a root scan."
+)
 
 
 REVIEW_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
@@ -874,9 +952,10 @@ enables it, is installed by this checkout's `install_dependencies.sh`: the Zoter
 `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
 `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
 `zot` command from pyzotero-cli -- are available as needed -- read-only.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
-when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
-the FALLBACK when the MCP service and the skill are both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+pyzotero-cli first when it is available; then the Zotero MCP service when your session
+exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
+both unavailable.
 
 === COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
 
@@ -1330,7 +1409,7 @@ def prefer_rewrite_for_sandbox(ctx, rec, prompt: Path) -> bool:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict) and "prefer_rewrite_over_deletion" in policy:
-        return bool(policy["prefer_rewrite_over_deletion"])
+        return content_edit_prefer_flag(policy["prefer_rewrite_over_deletion"])
     prompt = Path(prompt)
     if prompt.is_file():
         from_prompt = prefer_rewrite_from_prompt(prompt)
@@ -1383,8 +1462,11 @@ def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict):
-        return (bool(policy.get("insertions", True)),
-                bool(policy.get("deletions", True)))
+        # Parse the documented string spellings exactly as the postcheck does;
+        # bool('false') is True and prompted the session under the opposite
+        # policy from the one enforced (F132).
+        return (content_edit_flag(policy.get("insertions", True)),
+                content_edit_flag(policy.get("deletions", True)))
     prompt = Path(prompt)
     if prompt.is_file():
         from_prompt = content_edit_policy_from_prompt(prompt)
@@ -1446,8 +1528,12 @@ Layout (paths relative to the sandbox root):
                   DO NOT MODIFY ANYTHING UNDER guided_review/ — not one byte. The orchestrator verifies
                   guided_review/ is byte-identical after your run and a single changed byte FAILS this run.
 @@AUDIT_BLOCK@@
-  revised/      — YOU create this; your revision package goes here (revised documents, CHANGELOG.md,
-                  MANUAL_STEPS.md, REVISION_REPORT.md, revision_report.json, work/).
+  revised/      — the revision package: revised documents, CHANGELOG.md,
+                  MANUAL_STEPS.md, REVISION_REPORT.md, work/. The pipeline has
+                  ALREADY seeded `revised/revision_report.json` (one empty row
+                  per frozen finding id) and `revised/work/R6_language.md` (the
+                  L1-L11 coverage rows); fill them in place and never remove or
+                  recreate `revised/` wholesale.
                   Your OWN report files are pipeline bookkeeping, not submission content: writing
                   them is required, but never edit manuscript text to make a report look better,
                   and never let them change a scientific claim. (The next round, the judges and
@@ -1480,17 +1566,20 @@ Run the complete $paper-revise workflow -- R0 through V5 -- as specified by the 
 the artifacts landing in ./revised. Read the skill's SKILL.md and its references first
 (references/ledger.md, references/edit_rules.md). Required procedure, in order:
   R0  setup/safety: inventory + sha256 of every original; load guided_review/findings.json and, when
-      present, guided_review/round2/findings_extra.json; build the A1 revision-ledger skeleton
-      PROGRAMMATICALLY so that no finding id can be silently dropped (F-* and X-* are separate
-      namespaces; every id appears exactly once, "not addressed" is not a status). The
-      machine-readable ledger (revised/revision_report.json) must NAME every one of those ids as
-      structured data -- a row's id field, a mapping key, or an id list -- because the orchestrator
-      reads the ids from that file and re-runs this stage when an id is missing. Any container name
-      is accepted (the skill's coverage table, `findings`, `ledger`, `rows`, ...); an id that only
-      appears inside a prose sentence is NOT accepted as naming it. An X-* discovery finding is
-      treated exactly like an F-* one -- same ledger row, same evidence bar -- and the V3 rescan
-      re-locates its quoted defect in revised/: a resolution whose evidence is still present after
-      your edits is not resolved, and every X id is reported the same way the F-* list is.
+      present, guided_review/round2/findings_extra.json. The pipeline has ALREADY seeded the A1
+      revision-ledger skeleton at revised/revision_report.json -- one row per frozen finding id,
+      every verdict/rationale/evidence cell EMPTY. Fill those rows IN PLACE (F-* and X-* are
+      separate namespaces; every id appears exactly once, "not addressed" is not a status); never
+      delete, reorder, rename or replace the seeded rows, and never recreate revised/ wholesale
+      (it also carries the seeded language-pass skeleton). The machine-readable ledger must NAME
+      every one of those ids as structured data -- a row's id field, a mapping key, or an id list
+      -- because the orchestrator reads the ids from that file and re-runs this stage when an id
+      is missing. Any container name is accepted (the skill's coverage table, `findings`,
+      `ledger`, `rows`, ...); an id that only appears inside a prose sentence is NOT accepted as
+      naming it. An X-* discovery finding is treated exactly like an F-* one -- same ledger row,
+      same evidence bar -- and the V3 rescan re-locates its quoted defect in revised/: a
+      resolution whose evidence is still present after your edits is not resolved, and every X id
+      is reported the same way the F-* list is.
   R1  re-verify every finding against the sources; record a verdict with a location-checked
       rationale (empty rationale = invalid). False positives are discarded only with a concrete
       recorded rationale; ambiguous wording becomes "clarification"; unverifiable becomes
@@ -1499,7 +1588,9 @@ the artifacts landing in ./revised. Read the skill's SKILL.md and its references
       (the audit block above is authoritative); the ledger still NAMES its id so nothing is
       silently dropped.
   R2  copy the editable documents into revised/ (doc/docx/tex/bib/md/txt/xlsx; never pdf/png).
-  R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E12; P propagation A6
+      revised/ already exists with the seeded ledger and language-pass files: copy INTO it,
+      never delete or recreate it first.
+  R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E13; P propagation A6
       (supplementary tables > supplementary figures/notes > main figures & legends > Methods >
       main text > abstract > cover letter) for every corrected number/label/term/claim; C code
       revisions if in scope; V1-V5 validation (round-trip integrity, diff locality with no unmapped
@@ -1578,9 +1669,10 @@ Explicit requirements that override skill defaults where they conflict:
      `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
      `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
      `zot` command from pyzotero-cli -- may be read.
-     ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service
-     first when your session exposes it; then the Zotero skill; the `zot` command from
-     pyzotero-cli is the FALLBACK when the MCP service and the skill are both unavailable.
+     ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+     pyzotero-cli first when it is available; then the Zotero MCP service when your session
+     exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service
+     are both unavailable.
   7. @@M18_REVISE_RULE@@
   8. Acronym long-form repetition findings (review check M1, rule (k); evidence: the M1b instance
      table in guided_review/artifacts/M1_acronyms.md, one row per un-abbreviated long-form occurrence that
@@ -2261,9 +2353,9 @@ the original.
      rewrite the FORM, not the science. Anything missing from the submission (a whole mandatory
      file, a statement, an accession number) is scaffolded ONLY with the literal
      "[AUTHOR TO COMPLETE: ...]" marker and listed for the author.
-  3. STYLE AND FORMAT ARE UNCHANGED WHERE THE MASTER PROMPT FIXES THEM: left-aligned main text,
-     1.5-spaced text (single-spaced figure captions), the manuscript's fonts/sizes, figure
-     placement, numbering and cross-references. If your reorganization moves a reference, UPDATE
+  3. STYLE AND FORMAT ARE UNCHANGED WHERE THE VENUE TEMPLATE FIXES THEM: left-aligned main text,
+     the venue template's own spacing (single-spaced figure captions where the venue says so),
+     the manuscript's fonts/sizes, figure placement, numbering and cross-references. If your reorganization moves a reference, UPDATE
      the cross-reference so numbering stays coherent; never renumber a family of items.
   4. ONE COPY OF EACH DOCUMENT, ONE CONTENT-HASH VERSION TOKEN PER PACKAGE: every document you
      carry into rewritten/ keeps its ROLE and body, and the whole package gets ONE token -- the
@@ -2334,9 +2426,10 @@ tooling, when this run enables it, is installed by this checkout's `install_depe
 the Zotero helper is `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other
 installed skills under `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`,
 which provides the `zot` command from pyzotero-cli -- are available as needed -- read-only.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
-when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
-the FALLBACK when the MCP service and the skill are both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
+pyzotero-cli first when it is available; then the Zotero MCP service when your session
+exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
+both unavailable.
 
 === CANONICAL OUTPUTS (these exact paths; the pipeline reads them) ===
   rewritten/REWRITE_REPORT.md — REQUIRED. Four sections:
@@ -2624,6 +2717,12 @@ skill documents, references and bundled scripts that you use to ground your comp
 Zotero helper (`$ZOTERO_SKILL`), the `$zotero-use` skill and the READ routes of the `zot` CLI
 when a citation must be resolved. There is no other judge's sheet and no other pipeline sandbox
 anywhere in your reach -- do not go looking.
+
+SKILL FILES — the $paper-review pack is READ-ONLY. Read SKILL.md and its references from the
+skill location the run provides; when it provides none, the pack is the pipeline root's
+paper-skills/paper-review/. Use absolute paths. NEVER run `find /`, `grep -r /`, `du /` or any
+other scan that starts at the filesystem root: a root scan is never authorized, and a sandboxed
+run may stop the session for a containment violation.
 
 Layout (paths relative to the sandbox root):
   target/       — the ONE package you judge, as a complete document corpus at its top level.
@@ -3085,15 +3184,16 @@ def apply_m18(text: str, limit: int) -> str:
 # Renderers, in the order the prompts tell the agents to try them. A probe value
 # is either a PATH executable (checked with shutil.which) or "mcp:<server>",
 # meaning "the Codex MCP server <server> is configured and its script exists".
-# The FIRST entry is the machine's docx-converter MCP service: it must be tried
-# before any other docx->pdf converter (the call is
-# convert_docx_to_pdf(docxPath), which renders through Microsoft Word). Being
-# installed is not enough for that call to succeed: it also has to be
-# pre-approved for the non-interactive session (MCP_APPROVALS below).
+# The FIRST entry is `docx2pdf.sh`, the terminal Word-fidelity converter: the
+# prompts tell the agents to run it before any other docx->pdf converter. The
+# docx-converter MCP tool that wraps it comes second; being installed is not
+# enough for that call to succeed, it also has to be pre-approved for the
+# non-interactive session (MCP_APPROVALS below).
 DOCX_MCP_SERVER = "docx-converter"
 DOCX_MCP_TOOL = "convert_docx_to_pdf"
-# The machine's Word-native COMPARE MCP service: the FIRST choice whenever the
-# pipeline (or an agent) has to track the differences between two .docx files.
+# The machine's Word-native COMPARE MCP service: the FIRST choice for the
+# pipeline's own redline chain whenever it has to track the differences between
+# two .docx files.
 # The tool wraps `docxcompare.sh`, which drives
 # `Word.Application.CompareDocuments` through COM automation -- the comparison
 # engine of Word itself -- and writes the redline next to the pair it was
@@ -3103,8 +3203,8 @@ DOCX_MCP_TOOL = "convert_docx_to_pdf"
 DOCX_COMPARE_MCP_SERVER = "docx-compare"
 DOCX_COMPARE_MCP_TOOL = "compare_docx"
 VISUAL_TOOL_PROBES = (
-    (f"docx-converter MCP tool (`{DOCX_MCP_TOOL}`)", f"mcp:{DOCX_MCP_SERVER}"),
     ("docx2pdf.sh", "docx2pdf.sh"),
+    (f"docx-converter MCP tool (`{DOCX_MCP_TOOL}`)", f"mcp:{DOCX_MCP_SERVER}"),
     ("docx (`docx render`) command", "docx"),
     ("soffice (LibreOffice)", "soffice"),
     ("libreoffice", "libreoffice"),
@@ -3266,8 +3366,10 @@ def mcp_server_configured(name: str) -> bool:
 
     The MCP tools are used by the AGENT sessions the pipeline launches, which
     inherit the operator's Codex configuration; the orchestrator itself also
-    drives this one server (see `mcp_stdio_tool_call`) so the template renders IT
-    seeds use the same first-choice converter. What the probe answers is
+    drives this one server (see `mcp_stdio_tool_call`) so the template renders
+    IT seeds use the orchestrator's first-choice converter (the agent prompts
+    put `docx2pdf.sh` first, with this MCP tool as their fallback). What the
+    probe answers is
     therefore "can the agents we are about to start actually call this server?",
     by checking the config written by `codex mcp add`
     (`[mcp_servers.<name>]`) and verifying that the files the entry names still
@@ -3374,7 +3476,13 @@ def agent_argv(agent_name: str) -> list:
     argv = list(AGENT_PRESETS[agent_name])
     if agent_name != "codex" or len(argv) < 2:
         return argv
-    return [*argv[:2], *codex_mcp_overrides(), *argv[2:]]
+    overrides = list(codex_mcp_overrides())
+    effort = _model_runtime.reasoning_effort_override()
+    if effort:
+        # The legacy codex preset is config-owned; an explicit level still
+        # reaches it through codex's own `-c` override.
+        overrides.append('model_reasoning_effort="%s"' % effort)
+    return [*argv[:2], *overrides, *argv[2:]]
 
 
 # The adapter harness names: the public `--agent-harness` names are the

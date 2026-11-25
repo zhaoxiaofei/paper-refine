@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 23/25 of the pipeline -- the MCP stdio client and the visual
+# Part 23/26 of the pipeline -- the MCP stdio client and the visual
 # render chain, split out of p06_postchecks (which had grown to 10,172 lines
 # after the F083/F084 seed/render gates, over the project's 10,000-line cap).
 # Executed by the loader, in order, in the loader's own module globals; the

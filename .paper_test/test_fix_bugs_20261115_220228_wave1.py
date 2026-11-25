@@ -427,7 +427,11 @@ def test_f147_conform_skipped_exits_zero():
     root, r = setup_root(src, "f147r", "--revision-mode", "transfer",
                          "--journal-feedback", str(letter))
     check("F147 transfer setup succeeds", r.returncode == 0, r.stderr[-300:])
-    c = run_cli("run", "--root", str(root), "--only", "conform", "--manual", "--no-wait")
+    # A non-Word source still conforms to the guidelines/academic convention
+    # (AGENTS.md Rule 1C): the genuine skip-by-configuration case is
+    # --no-template-stage, and it must exit 0 as "does not apply".
+    c = run_cli("run", "--root", str(root), "--only", "conform", "--manual",
+                "--no-wait", "--no-template-stage")
     check("F147 conform-only on a skipped stage exits 0", c.returncode == 0,
           (c.stdout + c.stderr)[-400:])
     check("F147 the output says it does not apply",

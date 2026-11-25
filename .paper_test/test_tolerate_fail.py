@@ -267,23 +267,26 @@ def test_tolerated_trial_is_used_end_to_end() -> None:
     # trial is promoted, and the auto-promoted round closes with a2 -- but the
     # decision must stay PROVISIONAL and refuse certification.
     tmp = scratch("tf-e2e-")
-    stub = tmp / "stub.sh"
+    # A stub agent writes a valid completion marker plus the minimum output
+    # each stage needs, then exits 1 for the AUTHORING session so every stage
+    # exhausts its retries and each best trial is promoted. The mandatory
+    # audit/repair/verification sessions of the merged pipeline must still
+    # succeed: a rejected audit would block acceptance instead of tolerating it.
+    stub = tmp / "stub.py"
     stub.write_text(
-        "#!/bin/sh\n"
-        "mkdir -p guided_review cold_start_review audit revised concerns\n"
-        "echo '[]' > guided_review/findings.json\n"
-        "echo '[]' > guided_review/findings_extra.json\n"
-        "echo '[]' > cold_start_review/findings_cold_start_review.json\n"
-        "printf '# Audit\\n\\nNo findings.\\n' > audit/AUDIT_REPORT.md\n"
-        "if [ -d base ]; then cp -a base/. revised/ 2>/dev/null || true; fi\n"
-        "printf '# Change\\n' > revised/CHANGELOG.md\n"
-        # A legacy marker carries no run_id: a placeholder would be another
-        # run's completion signal, not this trial's.
-        "printf '{\"kind\":\"x\"}\\n' > _pipeline_done.json\n"
-        "exit 1\n", encoding="utf-8")
+        "import importlib.util, sys\n"
+        f"_s = importlib.util.spec_from_file_location('sa', {str(WS / '.paper_test' / 'stub_agent.py')!r})\n"
+        "_sa = importlib.util.module_from_spec(_s); _s.loader.exec_module(_sa)\n"
+        "text = sys.stdin.read()\n"
+        "aux = (text.startswith('INDEPENDENT WRITE AUDITOR')\n"
+        "       or text.startswith('BOUNDED WRITE REPAIR')\n"
+        "       or 'REVISION AUDITOR' in text or 'BOUNDED REPAIR' in text)\n"
+        "rc = _sa.main(text)\n"
+        "sys.exit(rc if aux else (1 if rc == 0 else rc))\n", encoding="utf-8")
     stub.chmod(0o755)
     root = setup_root(tmp, "--tolerate-fail")
-    proc = cli("run", "--root", str(root), "--agent-cmd", json.dumps([str(stub)]),
+    proc = cli("run", "--root", str(root), "--agent-cmd",
+               json.dumps([sys.executable, str(stub)]),
                "--retries", "1", "--retry-backoff", "0", "--no-redline",
                "--no-track", "--no-defect-audit", "--no-conflict-agent", "--jobs", "1")
     check("end-to-end tolerated run exits 0", proc.returncode == 0,

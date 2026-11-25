@@ -1,4 +1,4 @@
-# Part 19/25 of the pipeline -- executed by the loader, in order, in the
+# Part 19/26 of the pipeline -- executed by the loader, in order, in the
 # loader's own module globals.
 # This part carries NO module docstring on purpose: the loader executes every
 # part in the paper_pipeline module's own globals, and a module-level string
@@ -245,6 +245,14 @@ What that means for you:
     a re-validation ledger row) every frozen X-9xx/X-9xxx id you were given.
   * This gap is recorded in the run's state and in the frozen
     `guided_review/findings.json` coverage table. It is not yours to close.
+  * The guided review's own surfaces DO NOT EXIST this round:
+    `guided_review/artifacts/` and `guided_review/work/` carry no seeded
+    sweep tables, because no sweep ran. The disposition mandate's list of
+    seeded tables (M18, M19, M20, M4/NUMBERS_LEDGER, M8, M24, GLOSSARY,
+    IDENTIFIERS, PLACEHOLDERS, PLACEHOLDER_LOOKUP, OUTLINE, CLAIM_STRENGTH,
+    M2_references, M30) therefore has nothing to dispose here: record the
+    M1-M36/J1-J5 classes as the named gap above, and do not invent a table,
+    an artifact or a disposition for one.
 """
 
 
@@ -335,7 +343,13 @@ def _stage_rules_rel(sb: Path, stage: str) -> str:
             if head is None:
                 # Over the agent-output budget (or no longer a regular file):
                 # treat it as another stage's/unusable file rather than reading
-                # the whole thing into memory before slicing.
+                # the whole thing into memory before slicing. An auxiliary
+                # stage must still get its OWN sidecar: returning the reviser's
+                # relative path let it overwrite the reviser's paged file
+                # (PR6F7-036).
+                if stage in ("revision_audit", "revision_repair"):
+                    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(stage)).strip("_") or "stage"
+                    return f"{PROFILE_INSTRUCTIONS_DIR}/PROFILE_RULES_{safe}.md"
                 return PROFILE_RULES_REL
             if f"_Stage: {stage}_" not in head[:4096]:
                 safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(stage)).strip("_") or "stage"
@@ -550,7 +564,9 @@ def _cold_start_findings_md(rows: list, level: int = 1) -> str:
         if status:
             lines.append(f"{field}- Status: {status}")
         verifier = row.get("verifier")
-        if isinstance(verifier, dict) and verifier.get("computed"):
+        # A verifier that COMPUTED 0 is a real result; a truthiness test
+        # dropped it from the markdown while the JSON row carried it (F28).
+        if isinstance(verifier, dict) and verifier.get("computed") is not None:
             lines.append(f"{field}- Verifier: `{verifier.get('script')}` -> "
                          f"`{verifier.get('computed')}`")
         blocks.append("\n".join(lines))
@@ -575,9 +591,8 @@ def synthesize_frozen_review(ctx, r: int, sb) -> dict:
     rows = list(cold_start_findings_rows(ctx, r) or [])
     if journal_is_scoped(ctx):  # defensive: a scoped round never reaches here
         rows = []
-    target = sb / GUIDED_REVIEW_DIR
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "round2").mkdir(parents=True, exist_ok=True)
+    target = safe_mkdir(sb / GUIDED_REVIEW_DIR)
+    safe_mkdir(target / "round2")
     write_json_atomic(sb / FINDINGS_REL, _frozen_review_doc(r))
     rows_md = _cold_start_findings_md(rows, level=1)
     write_text_atomic(sb / GUIDED_REVIEW_DIR / "findings.md",

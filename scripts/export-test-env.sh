@@ -183,7 +183,20 @@ write_conda_export "${STEM}.freeze.env_export.from_history.yml" --from-history
 for f in "${STEM}.freeze.env_export.yml" \
          "${STEM}.freeze.env_export.no_builds.yml" \
          "${STEM}.freeze.env_export.from_history.yml"; do
-  grep -v '^prefix:' "$f" | safe_write "$f"
+  # Run grep to a TEMP first and check its status: piping straight into
+  # safe_write published an EMPTY file when the producer failed, and only
+  # afterwards did pipefail abort -- destroying a good export (F78). Exit 1 is
+  # "no line matched" (a valid empty result); anything else keeps the record.
+  rc=0
+  _prefix_tmp="$(mktemp -- "${f}.tmp.XXXXXXXXXX")"
+  grep -v '^prefix:' "$f" > "${_prefix_tmp}" || rc=$?
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
+    safe_replace "${_prefix_tmp}" "$f"
+  else
+    rm -f "${_prefix_tmp}"
+    echo "error: could not strip the prefix line from $f (grep exit $rc); record left unchanged" >&2
+    exit 1
+  fi
 done
 
 # The no-channels variant: the full export with the whole `channels:` block

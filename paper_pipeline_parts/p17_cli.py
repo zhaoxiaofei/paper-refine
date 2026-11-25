@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 17/25 of the pipeline -- executed by the
+# Part 17/26 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1408,7 +1408,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="also set the target journal, atomically with the venue change")
     psv.add_argument("--article-type", default=None, metavar="ID",
                      help="also select the article type (see `set-article-type`); a type the "
-                          "new venue's profile does not carry falls back to that profile's "
+                          "new venue's profile does not carry is rejected, while a type "
+                          "recorded from the old profile falls back to the new profile's "
                           "default with a note")
     psv.add_argument("--profile", default=None, metavar="FILE",
                      help=f"install a venue profile JSON into "
@@ -2130,6 +2131,16 @@ def cmd_agents(args) -> None:
         resolve_judge_run_ids(ctx, only, label="[agents]", sink=notes)
         only.validate(ctx.rounds_count())
         validate_only_selectors(ctx, only)
+        # The SAME template-first-mode guard `run` applies: `agents --only
+        # 1:conform` reported a successful empty plan where `run` refuses the
+        # selection (F34).
+        if (only_is_template_stage_only(only)
+                or only_names_explicit_stage(only, "conform")) \
+                and journal_mode_of(ctx) not in (JOURNAL_MODE_TRANSFER,
+                                                 JOURNAL_MODE_INIT):
+            die("--only conform is the template-first stage of the transfer and init "
+                f"revision modes: this root's revision mode is {journal_mode_of(ctx)!r}",
+                code=2)
     rows = agent_session_plan(ctx, only)
     if getattr(args, "pending", False):
         for row in rows:

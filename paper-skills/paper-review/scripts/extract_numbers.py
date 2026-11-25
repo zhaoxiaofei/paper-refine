@@ -502,10 +502,17 @@ def main():
     out = os.path.abspath(args.out) if args.out else os.path.dirname(work.rstrip("/"))
     corpus = os.path.join(work, "corpus")
     art_dir = os.path.join(out, "artifacts")
-    os.makedirs(art_dir, exist_ok=True)
+    # Validate --work BEFORE creating anything: an invalid WORK used to leave a
+    # fresh artifact tree behind (F84). A symlinked artifacts directory is a
+    # write outside the work tree; refuse it rather than follow it (F77).
     if not os.path.isdir(corpus):
         print("ERROR: corpus dir not found: %s" % corpus)
         sys.exit(2)
+
+    if os.path.islink(art_dir) or (os.path.exists(art_dir) and not os.path.isdir(art_dir)):
+        print("ERROR: artifacts path is a symlink or not a directory: %s" % art_dir)
+        sys.exit(2)
+    os.makedirs(art_dir, exist_ok=True)
 
     metrics = defaultdict(list)     # (label, value) -> occurrences
     accessions = defaultdict(list)

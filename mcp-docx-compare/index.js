@@ -224,6 +224,9 @@ serveStdio(() => {
         // too, not hand a missing path to Word.
         for (const p of [spawnOriginal, spawnRevised]) {
           if (!existsSync(p)) {
+            // Every other refusal path removes the staging directory; this one
+            // leaked it plus both copied manuscripts (F74).
+            if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });
             return {
               content: [{ type: 'text', text: `refused: every input must be an existing `
                                               + `absolute .docx file: ${p}` }],
@@ -248,6 +251,7 @@ serveStdio(() => {
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(key, next);
+      let keepWindowsPidFile = false;
       try {
         const { stdout, stderr } = await next;
         // The child wrote to a path validated before it ran; a writer inside
@@ -280,16 +284,22 @@ serveStdio(() => {
           }],
         };
       } catch (error) {
+        // Keep the pid file when the tree kill failed: those Windows pids are
+        // still alive and the file is the only record for taskkill (F82).
+        keepWindowsPidFile = /tree kill incomplete/.test(String(error.message || ''));
+        const pidNote = keepWindowsPidFile && windowsPidFile
+          ? `\n[windows pids retained for manual taskkill: ${windowsPidFile}]`
+          : '';
         return {
           content: [{
             type: 'text',
             text: `对比失败: ${error.message}\n标准输出: ${error.stdout ?? ''}\n`
-              + `标准错误: ${error.stderr ?? ''}`,
+              + `标准错误: ${error.stderr ?? ''}${pidNote}`,
           }],
           isError: true,
         };
       } finally {
-        if (windowsPidFile) {
+        if (windowsPidFile && !keepWindowsPidFile) {
           try { rmSync(windowsPidFile, { force: true }); } catch { /* gone */ }
         }
         if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });

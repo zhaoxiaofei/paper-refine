@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 08/25 of the pipeline -- executed by the
+# Part 08/26 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -66,6 +66,11 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
     per_judges = {vid: (int(round_judges(ctx, r)) if not selection
                         else len({k for v, k in selection if v == str(vid)}))
                   for vid in field_ids}
+    # A selected session whose TARGET was deduplicated out of the field has no
+    # row in `per_judges`; the old expectation then became 0 for every version
+    # and a zero-score panel read as complete (F21). It is an unresolved gap.
+    selection_unresolved = sorted({str(v) for v, _k in selection}
+                                  - {str(v) for v in field_ids}) if selection else []
     diags = {"sheets_used": 0, "sheets_expected": sum(per_judges.values()),
              "scores_collected": 0, "unresolved": [], "incomplete_sheets": [],
              "superseded_sheets": [], "out_of_range_sheets": [],
@@ -119,6 +124,15 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
     for rec in sorted(sheets, key=lambda x: (str(x.get("finished") or x.get("created") or ""),
                                              str(x.get("id")))):
         slot = (rec.get("target_id"), rec.get("judge_index"))
+        # A newer DONE record with no usable score sheet must not SUPERSEDE an
+        # earlier valid one: only a sheet that can contribute scores is a
+        # candidate for its slot (F055).
+        _sj = rec.get("scores")
+        if not isinstance(_sj, dict) or not (_sj.get("comparisons") or []):
+            diags.setdefault("unusable_newer_sheets", []).append(
+                f"{rec.get('id')}: no usable score sheet; an earlier sheet for "
+                f"{slot[0]} judge j{slot[1]} stays in force")
+            continue
         if slot in newest:
             old = newest[slot]
             diags["superseded_sheets"].append(
@@ -280,7 +294,8 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             "n": len(flat),
             "expected_n": expected_for.get(vid, expected),
             "complete": (len(flat) == expected_for.get(vid, expected)
-                         and vid not in slot_problems),
+                         and vid not in slot_problems
+                         and not selection_unresolved),
             "median": float(statistics.median(flat)) if flat else None,
             "mean": float(statistics.fmean(flat)) if flat else None,
             "iqr": iqr_of(flat) if flat else None,
@@ -334,6 +349,10 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             diags["incomplete_sheets"].append(
                 f"{vid}: {len(flat)} of {expected_for.get(vid, expected)} directed "
                 f"scores collected")
+    for _vid in selection_unresolved:
+        diags["incomplete_sheets"].append(
+            f"{_vid}: a selected judge session targets a version that is not a field "
+            f"member, so its panel can never be complete")
     # Missing-sheet diagnostics, driven by the RECORDED sessions (a recomputed
     # token would miss legacy/unsalted ids and misreport whole panels as absent).
     for vid in field_ids:
@@ -2143,8 +2162,17 @@ def _execute_attempt_raw(sb: Path, rec: dict, cmd: list, timeout: int,
     turn_counter = None
     turn_cap_hit = False
     if archive_marker:
-        # A previous attempt's marker must never be mistaken for this attempt's result.
-        archive_stale_marker(sb, rec["id"])
+        # A previous attempt's marker must never be mistaken for this attempt's
+        # result. When it could not be archived or removed, refuse to launch:
+        # the stale marker would be read as THIS attempt's completion (F057).
+        stale_failures = archive_stale_marker(sb, rec["id"])
+        if stale_failures:
+            return {"rc": None, "dur": 0.0, "log": str(logf),
+                    "failure_kind": "stale_marker",
+                    "error": ("the previous attempt's completion marker could not be "
+                              "archived or removed (" + "; ".join(stale_failures)
+                              + "); refusing to launch an attempt that could be scored "
+                                "on stale evidence")}
     t0 = time.time()
     # The header is WRITTEN after the agent returns (the log is appended once), so
     # it must carry the time the attempt actually started -- it used to print
@@ -4472,6 +4500,19 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     rec["revision_repair"] = repair_rec
     ctx.save_state()
     if repair_rec["status"] != "done":
+        # A repair that broke its contract leaves edited bytes behind: restore
+        # the audited pre-repair package so the rejected edits are never
+        # published (rule 5). The arm still FAILS -- residual defects and a
+        # failed repair block acceptance (AGENTS.md Rule 1C) -- and when the
+        # baseline is tampered with or missing the rejected bytes cannot be
+        # told apart from valid ones, so nothing is restored either.
+        if not repair_rec.get("rollback_unsafe"):
+            _rollback_error = _restore_revised_from_prerepair(sb)
+            repair_rec["rolled_back"] = not _rollback_error
+            if _rollback_error:
+                repair_rec["rollback_error"] = _rollback_error
+                print(f"  [revision-repair] {rec['id']}: the rejected edits could not be "
+                      f"rolled back ({_rollback_error})")
         rec["status"] = "failed"
         rec["revision_chain"] = "failed"
         rec["last_error"] = "mandatory bounded repair failed: " + str(repair_rec["error"])
@@ -4865,6 +4906,20 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     ctx.save_state()
                     if rec["status"] == "done":
                         print(f"  [ok]   {rid} re-verified after a process-level failure")
+                        if tolerate_fail_of(ctx):
+                            # The bytes are accepted, but the PROCESS failed: on a
+                            # tolerate-fail root that is a tolerated trial, not a
+                            # clean success -- the round stays provisional and is
+                            # never certified (the policy's own rule).
+                            rec["tolerated_fail"] = {
+                                "mode": "on", "reverified": True,
+                                "reason": ("the agent process failed after producing "
+                                           "complete artifacts; the re-verified trial "
+                                           "was used")}
+                            ctx.save_state()
+                            print(f"  [{TOLERATED_FAIL_STATUS}] {rid}: re-verified after a "
+                                  f"process-level failure; the trial is used "
+                                  f"(PROVISIONAL, never certified)")
                         if revision_chain_pending(rec):
                             run_revision_chain(ctx, rec, cmd, timeout)
                             rec = ctx.run(rid)
@@ -4985,7 +5040,7 @@ def round_tracking(ctx: Ctx, r: int, enabled: bool,
         fb_n = sum(1 for v in versions for c in v["comparisons"]
                    if c.get("ok") and not c.get("tool"))
         bad_n = sum(1 for v in versions for c in v["comparisons"]
-                    if not c.get("ok"))
+                    if not c.get("ok") and not c.get("skipped"))
         tools = sorted({c["tool"] for v in versions for c in v["comparisons"]
                         if c.get("ok") and c.get("tool")})
         print(f"[run] round {r} difference tracking: {ok_n} tracked copy(ies)"

@@ -3762,7 +3762,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 304 suites (a few
+any failure. They are independent, so run them in parallel — 306 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

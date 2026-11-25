@@ -22,11 +22,6 @@ it executes is a real Python file (each carries
 | `p10_reports.py` | raw scores, issue census, defect list writers |
 | `p11_defect_audit.py` | the diagnostic LLM defect audit |
 | `p12_conflicts_decide.py` | package-hygiene scans, PKG-2 repair, decision report, `decide`, `status`, `trend` |
-| `p20_judge_conflicts.py` | the cross-judge conflict audit (split from `p12` to keep every part under 10,000 lines) |
-| `p21_removal_accounting.py` | removal accounting: soft-deletion unit filter, finding-removal ledger gate, the revision-ledger final-status reader, and the outline/disposition-artifact gate (split from `p06`/`p07` to keep every part under 10,000 lines) |
-| `p22_resume_continuation.py` | session continuation: CLI session-id capture, resume argv, the continuation gate and the continuation prompt, plus the audit coverage/disposition gates (split from `p06`/`p07` to keep every part under 10,000 lines) |
-| `p23_postchecks_mcp.py` | the MCP stdio JSON-RPC client, the docx converter/comparer wrappers and the orchestrator's visual render chain (split from `p06` to keep every part under 10,000 lines) |
-| `p24_deliverable_audits.py` | the independent audit + one-pass repair of the two LLM journal deliverables that had no second reader: the generated concern ledger / `JF` finding list, and the response-to-reviewers letter + `response_map.json`; also the revision audit's concern-scoped prompt block |
 | `p13_redlines.py` | tracked-changes generation |
 | `p14_tracking.py` | difference-tracking copies and persistent renders |
 | `p15_pdf.py` | PDF rendering |
@@ -34,7 +29,12 @@ it executes is a real Python file (each carries
 | `p17_cli.py` | the argument parser and `main()` |
 | `p18_helpers.py` | the `--only`/`--runs` ROUND/STAGE/SESSION selection grammar (`OnlySpec` and its parsers), shared bounded-subprocess/aux-root/text helpers, and the lenient JSON recovery (`_json_from_text`) -- split out to keep `p04_utils.py` under 10,000 lines |
 | `p19_profiles.py` | the EXECUTION PROFILE (`high` / `medium`: `medium` pages the elaborative rule blocks out of every stage prompt into `INSTRUCTIONS/PROFILE_RULES.md`) and the GUIDED-REVIEW switch (`--no-guided-review`: the cold-start review alone, with the guided classes recorded as a named gap) |
-| `p20_write_quality.py` | mandatory independent audits, bounded repairs and exact-byte acceptance for response, conformity and venue-profile authors; final revision verification |
+| `p20_judge_conflicts.py` | the cross-judge conflict audit (split from `p12` to keep every part under 10,000 lines) |
+| `p21_removal_accounting.py` | removal accounting: soft-deletion unit filter, finding-removal ledger gate, the revision-ledger final-status reader, and the outline/disposition-artifact gate (split from `p06`/`p07` to keep every part under 10,000 lines) |
+| `p22_resume_continuation.py` | session continuation: CLI session-id capture, resume argv, the continuation gate and the continuation prompt, plus the audit coverage/disposition gates (split from `p06`/`p07` to keep every part under 10,000 lines) |
+| `p23_postchecks_mcp.py` | the MCP stdio JSON-RPC client, the docx converter/comparer wrappers and the orchestrator's visual render chain (split from `p06` to keep every part under 10,000 lines) |
+| `p24_deliverable_audits.py` | the independent audit + one-pass repair of the two LLM journal deliverables that had no second reader: the generated concern ledger / `JF` finding list, and the response-to-reviewers letter + `response_map.json`; also the revision audit's concern-scoped prompt block |
+| `p25_write_quality.py` | mandatory independent audits, bounded repairs and exact-byte acceptance for response, conformity and venue-profile authors; final revision verification |
 
 `ranking.py` and `decision_report.py` are **not** executed parts: the loader
 imports them on demand with `_load_pipeline_module` (`p02_journal_modes.py`
@@ -45,8 +45,6 @@ they never run in the loader's globals and need no
 
 | import-on-demand module | responsibility |
 |---|---|
-| `ranking.py` | pure ranking and defect census from the recorded round inputs |
-| `decision_report.py` | Markdown heading and integrity summary from prepared decision data |
 | `ranking.py` | pure ranking and defect census from the recorded round inputs |
 | `decision_report.py` | Markdown heading and integrity summary from prepared decision data |
 

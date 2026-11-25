@@ -882,7 +882,8 @@ def test_f60() -> None:
             return sb if rec.get("id") == "r1_response" else src
 
         def run(self, _rid):
-            return {"id": "r1_concerns", "sandbox": str(src)}
+            return {"id": "r1_concerns", "sandbox": str(src),
+                    "status": "done"}
 
     rec = {"id": "r1_response", "round": 1, "kind": "response"}
     saved = {}

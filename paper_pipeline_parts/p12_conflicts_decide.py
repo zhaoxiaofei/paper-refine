@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 12/25 of the pipeline -- executed by the
+# Part 12/26 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -525,7 +525,9 @@ def declared_submission_set(root: Path) -> dict:
                 token.strip()
                 for token_match in re.finditer(r"`([^`\n]{2,200})`", fragment)
                 for token in (token_match.group(1),)
-                if ("*" in token or "?" in token or "@(" in token)
+                # A `[0-9]` class is a valid glob too; the token prefilter
+                # omitted brackets so the declaration was rejected (F25).
+                if ("*" in token or "?" in token or "@(" in token or "[" in token)
                 and _extglob_to_regex(token.strip()) is not None
             ]
             # A fenced block carries BARE glob lines (`ms-*.docx`), and a
@@ -1457,7 +1459,9 @@ TABLE_TEXT_EXTS = (".tsv", ".csv", ".tab")
 NEAR_MISS_MIN_LEN = 6
 NEAR_MISS_RATIO = 0.90
 MCB_P_SMALL_RULE_RE = re.compile(
-    r"(?i)(?:small\s+\$?p\$?|p\s*(?:<|≤|<=)\s*(?:0?\.05|alpha)|small(?:er)?\s+(?:p|P)\b)")
+    # A LaTeX caption spells the inequality `\le`/`\leq`, not only `<`/`<=`.
+    r"(?i)(?:small\s+\$?p\$?|p\s*(?:<|≤|<=|\\le(?:q)?)\s*(?:0?\.05|alpha)|"
+    r"small(?:er)?\s+(?:p|P)\b)")
 MCB_CI_RULE_RE = re.compile(
     r"(?i)(?:entirely\s+below\s+0|interval[^.]{0,60}below\s+0|CI[^.]{0,40}below\s+0|"
     r"exclu(?:de|ding|des|sion)[^.]{0,20}\b0)")
@@ -1581,7 +1585,9 @@ def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
         if not p.is_file() or p.suffix.lower() not in TABLE_TEXT_EXTS:
             continue
         header, body = _read_delimited_table(p, gaps=gaps)
-        if not header or len(body) < 2:
+        # A one-row table is still two sibling headers to compare; requiring
+        # TWO data rows skipped every one-row table (F32).
+        if not header or len(body) < 1:
             continue
         try:
             rel = p.relative_to(root).as_posix()
@@ -1686,7 +1692,10 @@ def _p_reports_significant(cell: str, parsed=None, strict: bool = False) -> bool
     # Compare the STATED bound to the rule's alpha. The old test returned True
     # for any inequality before a digit, so `p < 0.10` was classified as
     # significant under the caption's 0.05 rule (F096).
-    m = re.search(r"(?:<=|≤|<)\s*\$?\s*(\d*\.\d+|\d+)", text)
+    # Read the FULL numeric token: `p < 0.5e-3`/`p < 5e-4` are 0.0005, not the
+    # mantissa 0.5/5 that the old pattern compared to 0.05 (F27).
+    m = re.search(r"(?:<=|≤|<)\s*\$?\s*((?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)",
+                  text)
     if m:
         try:
             return float(m.group(1)) <= 0.05
@@ -5321,8 +5330,14 @@ def _pkg4_cited_labels(expr: str, plural: bool = True) -> list:
     is a citation of Figure 2 followed by the count 3, not a two-item list.
     """
     out = []
+    # The documented contract includes the keyword-bearing example
+    # ("Figures 2-4" cites 2, 3 and 4); the production caller strips the
+    # keyword, but the helper itself did not, so its public contract and test
+    # surface disagreed (F22, 2026-11-23).
+    expr = re.sub(r"(?i)^\s*(?:supplementary\s+)?(?:figures?|figs?\.?)\s*",
+                  "", str(expr or ""))
     # Keep the separators so a comma can be told apart from "and"/"&"/";".
-    parts = re.split(r"\s*(,|and\b|&|;)\s*", str(expr or ""), flags=re.I)
+    parts = re.split(r"\s*(,|and\b|&|;)\s*", expr, flags=re.I)
     for i in range(0, len(parts), 2):
         token = parts[i].strip()
         if not token:
@@ -6900,7 +6915,8 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
     report = report or {}
     raw_counts = ((report.get("counts_by_status") or report.get("counts") or {})
                   if isinstance(report, dict) else {})
-    info["statuses"] = {str(k): int(v) for k, v in raw_counts.items() if is_int(v)}
+    info["statuses"] = {str(k).strip().lower(): int(v)
+                        for k, v in raw_counts.items() if is_int(v)}
     coverage = {str(r.get("id")): r for r in _open_item_rows(report)}
     findings = {str(f.get("id")): f
                 for f in _open_item_rows(report.get("findings") if isinstance(report, dict) else [])}
@@ -6910,8 +6926,13 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
     for fid, row in sorted(coverage.items()):
         # A documented ledger row carries `verdict` (confirmed/manual-required)
         # where a coverage table carries `final_status`; read both.
-        status = str(row.get("final_status") or row.get("status")
-                     or row.get("verdict") or "")
+        # Normalize the cell with the SAME vocabulary the revision-ledger gate
+        # uses: `Manual-Required` passed that gate but never became an open
+        # item because this test compared the raw cell to lowercase tokens
+        # (F24).
+        status = _ledger_final_status(row) or str(
+            row.get("final_status") or row.get("status")
+            or row.get("verdict") or "").strip().lower()
         f = findings.get(fid) or {}
         item = {"id": fid, "status": status,
                 "check": f.get("check") or row.get("check"),
@@ -6953,7 +6974,9 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
             else:
                 info["manual_steps_items"] = int(_n)
     csvp = outdir / MANUAL_TODO_CSV_NAME
-    if csvp.is_file():
+    # A planted symlink must not be parsed/republished as the agent's TODO
+    # inventory (F23).
+    if csvp.is_file() and not csvp.is_symlink():
         try:
             info["manual_todo_csv"] = csvp.relative_to(ctx.root).as_posix()
         except ValueError:
@@ -7010,6 +7033,8 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
     if oi.get("manual_todo_csv"):
         src = ctx.root / str(oi.get("manual_todo_csv"))
         try:
+            if src.is_symlink():
+                raise csv.Error("MANUAL_TODO.csv is a symlink; refusing to republish it")
             if src.stat().st_size > MANUAL_TODO_MAX_BYTES:
                 raise csv.Error("MANUAL_TODO.csv is too large")
             with open(src, "r", encoding="utf-8-sig", newline="") as f:

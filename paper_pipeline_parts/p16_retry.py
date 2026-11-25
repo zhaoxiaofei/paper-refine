@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 16/25 of the pipeline -- executed by the
+# Part 16/26 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -12,12 +12,23 @@ import glob
 # =====================================================================
 
 def dir_size(path: Path) -> int:
-    """Bytes used by a directory tree (0 when it does not exist)."""
+    """Bytes used by a directory tree's own regular files (0 when absent).
+
+    A symlink is skipped: `Path.is_file()`/`Path.stat()` FOLLOW it, so a link to
+    a huge outside file was counted here while `rmtree_force` unlinks only the
+    link, and prune's dry-run/`reclaimed` total reported bytes it never frees
+    (F084).
+    """
     total = 0
-    if not path.is_dir():
+    if path.is_symlink() or not path.is_dir():
+        # A symlinked ROOT was followed by is_dir()/rglob, so prune reported
+        # outside bytes as reclaimed while rmtree_force only unlinked the link
+        # (F118).
         return 0
     for p in path.rglob("*"):
         try:
+            if p.is_symlink():
+                continue
             if p.is_file():
                 total += p.stat().st_size
         except OSError:
@@ -101,7 +112,7 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
         # metacharacter in it (`*`, `?`, `[...]`) used to make this glob match
         # OTHER runs' attempt archives and delete them as this run's.
         for arch in sorted(ctx.runs_dir.glob(f"{glob.escape(str(rec['id']))}_try*_failed")):
-            if arch.is_dir():
+            if arch.is_dir() and not arch.is_symlink():
                 archives.append((rec["id"], r, arch, dir_size(arch)))
     total = sum(t[3] for t in targets) + sum(t[3] for t in archives)
     print(f"[prune] root: {ctx.root}")
@@ -396,6 +407,11 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
     rebuild_failures = []
     for rec in targets:
         reset_run_record(rec)
+        # Persist the reset BEFORE the sandbox is rebuilt/moved: a
+        # KeyboardInterrupt or SIGKILL during materialization used to leave
+        # state.json with the old status while the live sandbox was already
+        # moved to the failed archive (F107).
+        ctx.save_state()
         blocked = unmet_deps(ctx, rec)
         if blocked:
             rec["status"] = "stale"

@@ -66,6 +66,7 @@ from agent_common.agent_cli import build_dsh_argv as _build_dsh_argv
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import paper_dsh_runtime
+    import paper_agent_runtime_patch  # noqa: F401  (F024/F025, parent-tracked)
 finally:
     sys.path.pop(0)
 
@@ -321,7 +322,17 @@ def _pair_problem(cfg: dict) -> str:
         if not cfg.get("endpoint"):
             return "empty custom endpoint URL"
         if not cfg.get("base_url"):
-            return (f"cannot parse endpoint URL {cfg.get('endpoint')!r}: it must be "
+            # The raw value can carry userinfo/query credentials; the message is
+            # written to stderr and must not echo them (F002). `redact_endpoint_url`
+            # uses `urlsplit`, which raises on an unparsable value (a bad IPv6
+            # literal), so a malformed endpoint fell through as a traceback
+            # instead of the documented usage error; strip it textually then.
+            _endpoint_text = str(cfg.get("endpoint"))
+            try:
+                _shown = rt.redact_endpoint_url(str(cfg.get('endpoint')))
+            except ValueError:
+                _shown = rt._safe_endpoint_text(_endpoint_text)
+            return (f"cannot parse endpoint URL {_shown!r}: it must be "
                     f"an http(s) URL with a host")
         credential = rt.endpoint_credentials(str(cfg.get("endpoint")))
         if credential:
@@ -410,7 +421,19 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
                 with contextlib.suppress(OSError):
                     self.wfile.write(raw)
                 return
-            raw = e.read()
+            try:
+                raw = e.read()
+            except (http.client.HTTPException, OSError) as read_exc:
+                raw = json.dumps({"error": {"message":
+                                           "custom endpoint proxy could not read the "
+                                           f"upstream HTTP {e.code} body: {read_exc}"}}).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                with contextlib.suppress(OSError):
+                    self.wfile.write(raw)
+                return
             self.send_response(e.code)
             ctype = e.headers.get("Content-Type") if e.headers else None
             self.send_header("Content-Type", ctype or "application/json")
@@ -445,7 +468,10 @@ class _PrepProxyHandler(http.server.BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
+            # A truncated chunked/Content-Length body raises IncompleteRead (an
+            # HTTPException), which escaped and killed the client connection
+            # with a traceback (F051).
             pass
         finally:
             with contextlib.suppress(OSError):
@@ -577,10 +603,18 @@ def dsh_argv(cfg: dict) -> tuple:
         return [], {}, str(exc)
     patch = ""
     if text:
-        fd, patch = tempfile.mkstemp(prefix="paper-model-", suffix=".patch.yml")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        try:
+            fd, patch = tempfile.mkstemp(prefix="paper-model-", suffix=".patch.yml")
+        except OSError as exc:
+            return [], {}, f"could not create the DSH patch file: {exc}"
+        # Record the path BEFORE writing: a failed write is then cleaned up by
+        # `_cleanup()` instead of leaving a partial patch behind (F80).
         _PATCH_TMP = patch
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as exc:
+            return [], {}, f"could not write the DSH patch file: {exc}"
     env = dict(os.environ, DSH_HOME=home)
     if cfg["family"] == "endpoint":
         env[cfg["api_key_env"]] = cfg.get("api_key") or "dummy"
@@ -631,7 +665,7 @@ def _print_probe(cfg: dict) -> int:
               "claude-code": "claude"}.get(cfg["harness"], "")
     print(f"harness: {cfg['harness']}")
     if cfg["family"] == "endpoint":
-        print(f"endpoint: {cfg['endpoint']}")
+        print(f"endpoint: {rt.redact_endpoint_url(str(cfg['endpoint']))}")
         print(f"base:    {cfg['base_url']}")
         print(f"model:   {cfg.get('model_name') or '(unresolved)'}")
         print(f"key:     {cfg['api_key_env']} "
@@ -645,6 +679,10 @@ def _print_probe(cfg: dict) -> int:
         print(f"key:     DEEPSEEK_API_KEY "
               f"{'set' if cfg['deepseek_key'] else 'NOT set'}")
     problem = _pair_problem(cfg) or _key_problem(cfg)
+    if binary and not shutil.which(binary):
+        # The probe prints the absence but used to report `problem: none` and
+        # exit 0, so an unusable harness passed `--probe` (F090).
+        problem = problem or f"{binary} is not on PATH"
     if problem:
         print(f"problem: {problem}")
         return 1

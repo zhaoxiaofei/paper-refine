@@ -745,13 +745,30 @@ function mergePatch(existing, block) {
 function backup(file) {
   const stamp = new Date().toISOString()
     .replace(/[-:]/g, '').replace('T', '-').replace('Z', '');
-  let target = `${file}.bak-codex-mcp-${stamp}`;
-  let suffix = 2;
-  while (fs.existsSync(target)) {
-    target = `${file}.bak-codex-mcp-${stamp}-${suffix++}`;
+  const source = fs.readFileSync(file);
+  // `wx` is O_CREAT|O_EXCL: it never follows a symlink planted at the
+  // predictable backup name. The old existsSync loop was false for a DANGLING
+  // symlink, and writeFileSync then created the link target with the backup
+  // bytes (the generated patch can carry API keys).
+  for (let suffix = 1; suffix <= 100; suffix += 1) {
+    const target = suffix === 1
+      ? `${file}.bak-codex-mcp-${stamp}`
+      : `${file}.bak-codex-mcp-${stamp}-${suffix}`;
+    let fd;
+    try {
+      fd = fs.openSync(target, 'wx', 0o600);
+    } catch (error) {
+      if (error.code === 'EEXIST') continue;
+      throw new Error(`could not create the backup ${target} (${error.code || error.message})`);
+    }
+    try {
+      fs.writeFileSync(fd, source);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return target;
   }
-  fs.writeFileSync(target, fs.readFileSync(file), { mode: 0o600 });
-  return target;
+  throw new Error(`could not find a free backup name beside ${file}`);
 }
 
 function atomicWrite(file, text) {
@@ -856,6 +873,17 @@ function main() {
   }
   if (!fs.existsSync(profileDir)) {
     die(`DSH profile "${opts.profile}" does not exist at ${profileDir}`);
+  }
+  // The lexical prefix check above does not contain a SYMLINKED profile
+  // directory: `profiles/<name> -> /outside` passes it, and the write below
+  // would land outside `<dsh-home>/profiles`. Compare the real paths too.
+  const realProfilesRoot = realpathOrNull(profilesRoot);
+  const realProfileDir = realpathOrNull(profileDir);
+  if (realProfilesRoot === null || realProfileDir === null
+      || (realProfileDir !== realProfilesRoot
+          && !realProfileDir.startsWith(realProfilesRoot + path.sep))) {
+    die(`invalid --profile ${JSON.stringify(opts.profile)}: its directory resolves ` +
+        `outside ${profilesRoot}`);
   }
   if (!fs.existsSync(patchFile)) {
     die(`${patchFile} does not exist; initialize the profile with "dsh ${opts.profile} --from-default-profile headless" first`);

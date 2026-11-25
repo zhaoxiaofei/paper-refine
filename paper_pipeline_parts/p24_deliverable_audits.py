@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 24/25 of the pipeline -- executed by the loader, in order, in the
+# Part 24/26 of the pipeline -- executed by the loader, in order, in the
 # loader's own module globals. Imports and names defined by earlier parts are
 # therefore in scope exactly as they were in the single-file source.
 from __future__ import annotations

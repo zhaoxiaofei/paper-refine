@@ -269,8 +269,7 @@ def test_f84_set_revision_mode_guided_off() -> None:
     setup = subprocess.run(
         [sys.executable, str(WS / "paper_pipeline.py"), "setup", "--source", str(src),
          "--root", str(root / "root"), "--rounds", "1", "--rewrites", "0",
-         "--revises", "1", "--judges", "1", "--no-guided-review",
-         "--revision-audit", "off"],
+         "--revises", "1", "--judges", "1", "--no-guided-review"],
         capture_output=True, text=True, timeout=300)
     check("F84 the --no-guided-review root is created", setup.returncode == 0,
           (setup.stdout + setup.stderr)[-300:])

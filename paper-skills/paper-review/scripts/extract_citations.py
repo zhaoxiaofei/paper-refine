@@ -271,7 +271,10 @@ FIG_CAPTION_RE = re.compile(
 TABLE_CAPTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:extended\s+data|supplementary\s+)?tables?\.?\s*"
     r"(?:s\d+|\d+[a-z]?)\s*" + CAP_SEP, re.I)
-NUM_ENTRY_RE = re.compile(r"^\s*(?:[\[(]?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
+# A bracketed label may be glued to its entry (`[1]Smith`); a bare ordinal
+# still needs whitespace, or a decimal-leading prose sentence (`3.5-fold ...`)
+# reads as a numbered entry and extends the reference region (R01).
+NUM_ENTRY_RE = re.compile(r"^\s*(?:[\[(]\d{1,3}[\].)]\s*|\d{1,3}[.)\]]\s+)")
 BULLET_ENTRY_RE = re.compile(r"^\s*[-*•]\s+\S")
 YEAR_RE = re.compile(r"\b(?:1[5-9]|20)\d{2}[a-z]?\b")
 ENTRY_HINT_RE = re.compile(
@@ -497,10 +500,17 @@ def main():
     out = os.path.abspath(args.out) if args.out else os.path.dirname(work.rstrip("/"))
     corpus = os.path.join(work, "corpus")
     art_dir = os.path.join(out, "artifacts")
-    os.makedirs(art_dir, exist_ok=True)
+    # Validate --work BEFORE creating anything: an invalid WORK used to leave a
+    # fresh artifact tree behind (F84). A symlinked artifacts directory is a
+    # write outside the work tree; refuse it rather than follow it (F77).
     if not os.path.isdir(corpus):
         print("ERROR: corpus dir not found: %s. Run convert_corpus.py first." % corpus)
         sys.exit(2)
+
+    if os.path.islink(art_dir) or (os.path.exists(art_dir) and not os.path.isdir(art_dir)):
+        print("ERROR: artifacts path is a symlink or not a directory: %s" % art_dir)
+        sys.exit(2)
+    os.makedirs(art_dir, exist_ok=True)
 
     callouts = []       # every in-text citation instance
     ref_entries = []    # every reference-list entry

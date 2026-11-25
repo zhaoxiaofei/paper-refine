@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/25 of the pipeline -- executed by the
+# Part 09/26 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -2428,7 +2428,10 @@ def _ensure_template_stage_for_run(ctx: Ctx, args, *, agent_command=None,
     # `--manual` names a session the operator fills in; otherwise the
     # harness/model pair (or an explicit --agent-cmd) labels an automated one.
     # The legacy --agent shortcut is gone.
-    manual_requested = bool(getattr(args, "manual", False))
+    # `--manual` is the run flag; `conform --agent manual` (and an older direct
+    # caller) still names the same staging-only session on `args.agent`.
+    manual_requested = bool(getattr(args, "manual", False)
+                            or str(getattr(args, "agent", "") or "").strip() == "manual")
     agent = agent_label or ("manual" if manual_requested
                             else "the model/harness pair")
     sb = ctx.root / TEMPLATE_REWRITE_DIRNAME
@@ -2937,7 +2940,11 @@ def cmd_add_venue(args) -> None:
         except (OSError, ValueError, VenueProfileError) as e:
             die(f"add-venue: the staged profile {staged_profile.name} does not validate "
                 f"({e}); nothing was published to {dest}", code=1)
-    quality_problem = write_quality_problem(sb, "add-venue")
+    # A staging may put the store's layout under `store/` (the documented
+    # layout) or at the sandbox root (the legacy layout the publisher still
+    # reads). Audit the bytes the publisher will actually install.
+    _art_root = "store" if (sb / "store").is_dir() else "."
+    quality_problem = write_quality_problem(sb, "add-venue", output=_art_root)
     if quality_problem:
         agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
         if agent == "manual":
@@ -2951,7 +2958,7 @@ def cmd_add_venue(args) -> None:
             die("add-venue publication blocked: " + str(exc))
     # Bounded repair may have changed the profile: revalidate final bytes
     # before replacing any file in the shared store.
-    final_profile = sb / "store" / f"{vid}{VENUE_PROFILE_SUFFIX}"
+    final_profile = sb / _art_root / f"{vid}{VENUE_PROFILE_SUFFIX}"
     if not final_profile.is_file():
         die("add-venue: audited staged store has no profile; nothing was published")
     try:

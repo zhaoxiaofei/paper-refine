@@ -71,6 +71,16 @@ def _cleanup_tmpdirs() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _audit_accepted(ctx, rec):
+    """Record the audit chain a consumed revise arm must carry (Rule 1C)."""
+    rec["revision_audit"] = {"status": "done", "rows": 0}
+    rec["revision_chain"] = "complete"
+    rec["write_quality"] = {
+        "status": "done", "role": "revise", "sessions": [], "repairs": 0,
+        "artifact_digest": np._write_owned_digest(ctx.sandbox_of(rec) / np.REVISED_DIR),
+        "input_digests": {}}
+
+
 def tmpdir(tag: str) -> Path:
     p = Path(tempfile.mkdtemp(prefix=f"c2_{tag}_"))
     _TMPDIRS.append(p)
@@ -328,6 +338,13 @@ def test_stale_downstream_inputs_are_reset():
     write(ctx.sandbox_of(rec_a2) / "revised" / "manuscript.md", "# v2\n")
     rec_a2["status"] = "done"
     rec_a2["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "a2")
+    # A consumed revise arm carries its completed audit chain (Rule 1C).
+    rec_a2["revision_audit"] = {"status": "done", "rows": 0}
+    rec_a2["revision_chain"] = "complete"
+    rec_a2["write_quality"] = {
+        "status": "done", "role": "revise", "sessions": [], "repairs": 0,
+        "artifact_digest": np._write_owned_digest(ctx.sandbox_of(rec_a2) / np.REVISED_DIR),
+        "input_digests": {}}
 
     # i2 = w1 <- (a1, a2): a2 is one of its donors
     np.materialize_integrate(ctx, r, 2)
@@ -342,6 +359,12 @@ def test_stale_downstream_inputs_are_reset():
     write(ctx.sandbox_of(rec_a2) / "revised" / "manuscript.md", "# v3 -- really different\n")
     rec_a2["status"] = "done"
     rec_a2["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "a2")
+    rec_a2["revision_audit"] = {"status": "done", "rows": 0}
+    rec_a2["revision_chain"] = "complete"
+    rec_a2["write_quality"] = {
+        "status": "done", "role": "revise", "sessions": [], "repairs": 0,
+        "artifact_digest": np._write_owned_digest(ctx.sandbox_of(rec_a2) / np.REVISED_DIR),
+        "input_digests": {}}
     ctx.save_state()
 
     if not hasattr(np, "revalidate_round_inputs"):
@@ -389,6 +412,7 @@ def test_healthy_round_is_not_reset():
     write(ctx.sandbox_of(a2) / "revised" / "manuscript.md", "# v2\n")
     a2["status"] = "done"
     a2["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "a2")
+    _audit_accepted(ctx, a2)
     np.materialize_integrate(ctx, r, 1)
     np.materialize_integrate(ctx, r, 2)
     np.materialize_integrate(ctx, r, 3)
@@ -474,6 +498,7 @@ def test_judge_inputs_are_revalidated():
     write(ctx.sandbox_of(a2) / "revised" / "manuscript.md", "# v2\n")
     a2["status"] = "done"
     a2["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "a2")
+    _audit_accepted(ctx, a2)
     a2["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "a2")
     for k, text in ((1, "# v3\n"), (2, "# v4\n"), (3, "# v5\n")):
         np.materialize_integrate(ctx, r, k)
@@ -495,6 +520,7 @@ def test_judge_inputs_are_revalidated():
     write(ctx.sandbox_of(a2) / "revised" / "manuscript.md", "# v5 -- really different\n")
     a2["status"] = "done"
     a2["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "a2")
+    _audit_accepted(ctx, a2)
     a2["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "a2")
     ctx.save_state()
     reset = np.revalidate_round_inputs(ctx, r)
@@ -580,12 +606,19 @@ def test_integrator_reset_reaches_the_response_letter():
     rev = ctx.run(np.rid_guided_review(r))
     write(ctx.sandbox_of(rev) / "guided_review" / "findings.json", '{"findings": []}\n')
     rev["status"] = "done"
+    # the response plan is written BEFORE the revision (the reviser implements it)
+    dr_sb = ctx.runs_dir / np.rid_response_draft(r)
+    write(dr_sb / "response" / "RESPONSE_DRAFT.json", '{"rows": []}\n')
+    dr = ctx.register(np.rid_response_draft(r), "response_draft", r,
+                      f"runs/{np.rid_response_draft(r)}")
+    dr["status"] = "done"
     # a done revise member (the pool is a1 + a2)
     np.materialize_revise(ctx, r, "a2")
     a2 = ctx.run(np.rid_for_fresh(r, "a2"))
     write(ctx.sandbox_of(a2) / "revised" / "manuscript.md", "# revised\n")
     a2["status"] = "done"
     a2["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "a2")
+    _audit_accepted(ctx, a2)
     a2["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "a2")
     # the integration run itself
     np.materialize_integrate(ctx, r, 1)
@@ -633,6 +666,10 @@ def test_response_target_copy_is_repaired_not_frozen():
     write(rev_sb / "revised" / "CHANGELOG.md", "changes\n")
     rev = ctx.register("r1_a2_revise", "revise", 1, "runs/r1_a2_revise")
     rev["status"] = "done"
+    # A consumed revise run must carry its completed audit chain (Rule 1C):
+    # the fixture is about the response target copy, not about that gate.
+    rev["revision_audit"] = {"status": "done", "rows": 0}
+    rev["revision_chain"] = "complete"
     # the concerns source the response sandbox copies
     con_sb = ctx.runs_dir / "r1_concerns"
     write(con_sb / "concerns" / "JF_concerns.json", '{"concerns": []}\n')

@@ -13,6 +13,7 @@ import importlib.util
 import sys
 import tempfile
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 WS = Path(__file__).resolve().parent.parent
@@ -126,6 +127,111 @@ def test_f15_nested_textbox_paragraph():
           and "Second paragraph." in fmt.text_of(doc), repr(fmt.text_of(doc)))
 
 
+def test_textbox_repairs_preserve_paragraph_ownership():
+    def box(inner):
+        return ('<w:pict><v:shape><v:textbox><w:txbxContent>'
+                f'{inner}</w:txbxContent></v:textbox></v:shape></w:pict>')
+
+    def document(body):
+        return (f'<w:document {W} xmlns:v="urn:schemas-microsoft-com:vml">'
+                f'<w:body>{body}</w:body></w:document>')
+
+    policy = dict(fmt.POLICY_DEFAULTS)
+    break_only = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+    next_body = '<w:p><w:r><w:t>Next body paragraph.</w:t></w:r></w:p>'
+    host = f'<w:p><w:r><w:t>Host text.</w:t>{box(break_only)}</w:r></w:p>'
+    xml = document(host + next_body)
+    fixed, _, _ = fmt.fix_document(xml, {}, policy)
+    check("a text-box page break stays inside its own paragraph", fixed == xml)
+    report = fmt.analyse_document(xml, {}, policy, "d.docx")
+    check("no FMT-S1 repair is proposed for the box",
+          not any(row["rule"] == "FMT-S1" for row in report["rows"]))
+
+    inner = '<w:p><w:pPr/><w:r><w:t>Box text.</w:t></w:r></w:p>'
+    drawing_only = f'<w:p><w:r>{box(inner)}</w:r></w:p>'
+    fixed, _, _ = fmt.fix_document(document(break_only + drawing_only + next_body), {}, policy)
+    body = ET.fromstring(fixed).find(f"{{{W_NS}}}body")
+    check("a body break before a drawing-only host goes onto that host",
+          len(body) == 2
+          and body[0].find(f"{{{W_NS}}}pPr/{{{W_NS}}}pageBreakBefore") is not None
+          and body[1].find(f"{{{W_NS}}}pPr/{{{W_NS}}}pageBreakBefore") is None
+          and inner in fixed)
+
+    target = ('<w:p><!-- keep <w:pPr/> --><?editor keep?>'
+              '<w:pPr><w:keepNext/></w:pPr>'
+              f'<w:r>{box(inner)}</w:r></w:p>')
+    fixed, _, _ = fmt.fix_document(document(break_only + target + next_body), {}, policy)
+    body = ET.fromstring(fixed).find(f"{{{W_NS}}}body")
+    properties = body[0].findall(f"{{{W_NS}}}pPr")
+    check("comments and processing instructions leave a single host property element",
+          len(properties) == 1
+          and properties[0].find(f"{{{W_NS}}}pageBreakBefore") is not None
+          and properties[0].find(f"{{{W_NS}}}keepNext") is not None
+          and '<!-- keep <w:pPr/> --><?editor keep?>' in fixed)
+
+    for value in ('"0"', "'false'"):
+        disabled_break = f'<w:pageBreakBefore w:val={value}/>'
+        commented_break = f'<!-- {disabled_break} -->'
+        target = (f'<w:p><w:pPr>{commented_break}{disabled_break}</w:pPr>'
+                  f'<w:r>{box(inner)}</w:r></w:p>')
+        fixed, _, _ = fmt.fix_document(document(break_only + target + next_body), {}, policy)
+        body = ET.fromstring(fixed).find(f"{{{W_NS}}}body")
+        breaks = body[0].findall(f"{{{W_NS}}}pPr/{{{W_NS}}}pageBreakBefore")
+        check("a relocated body break enables the host's explicit false value",
+              len(body) == 2 and len(breaks) == 1 and not breaks[0].attrib
+              and commented_break in fixed and inner in fixed, value)
+
+    inner_url = ('<w:p><w:r><w:rPr><w:i/></w:rPr>'
+                 '<w:t>https://example.org/box</w:t></w:r></w:p>')
+    outer_url = ('<w:p><w:r><w:rPr><w:color w:val="FF0000"/></w:rPr>'
+                 f'<w:t>https://example.org/body</w:t>{box(inner_url)}</w:r></w:p>')
+    fixed, _, _ = fmt.fix_document(document(outer_url), {}, policy)
+    try:
+        root = ET.fromstring(fixed)
+    except ET.ParseError as exc:
+        check("host and nested URL edits leave valid XML", False, str(exc))
+        return
+    check("host and nested URL styling is fixed without overlapping edits",
+          "https://example.org/body" in fixed and "https://example.org/box" in fixed
+          and root.find(f".//{{{W_NS}}}color") is None
+          and root.find(f".//{{{W_NS}}}i") is None)
+
+    leading_xml = '<!-- keep <w:rPr/> --><?editor keep?>'
+    styled_url = (f'<w:p><w:r>{leading_xml}<w:rPr><w:i/></w:rPr>'
+                  '<w:t>https://example.org/styled</w:t></w:r></w:p>')
+    plain_url = '<w:p><w:r><w:t>https://example.org/plain</w:t></w:r></w:p>'
+    xml = document(styled_url + plain_url)
+    report = fmt.analyse_document(xml, {}, policy, "d.docx")
+    fixed, _, _ = fmt.fix_document(xml, {}, policy)
+    check("URL styling is found and repaired after comments and processing instructions",
+          any(row["rule"] == "FMT-T7b" for row in report["rows"])
+          and leading_xml in fixed and '<w:i/>' not in fixed)
+
+    # A COMMENTED-OUT property is not the live one: `ppr_of`/`rpr_of` must skip
+    # it, or the scanner reads the comment while the fixer repairs the live pPr
+    # and the re-scan keeps the row, making `fix` reject the whole document.
+    commented = document(
+        '<w:p><!-- <w:pPr><w:pStyle w:val="Heading1"/></w:pPr> -->'
+        '<w:pPr><w:keepLines/></w:pPr><w:r><w:t>Body paragraph.</w:t></w:r></w:p>')
+    report = fmt.analyse_document(commented, {}, policy, "d.docx")
+    check("a commented pPr does not make the body paragraph a heading",
+          not any(row["rule"] == "FMT-T3a" for row in report["rows"]),
+          str(report["rows"]))
+    fixed, _, _ = fmt.fix_document(commented, {}, policy)
+    leftover = [row["rule"] for row in fmt.analyse_document(fixed, {}, policy, "d.docx")["rows"]
+                if row["fix"] == "mechanical"]
+    check("the scan and the fixer read the same live pPr, so no mechanical row is left",
+          not leftover, f"{leftover} in {fixed}")
+
+    live_heading = document(
+        '<w:p><!-- <w:pPr><w:pStyle w:val="Caption"/></w:pPr> -->'
+        '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>'
+        '<w:r><w:t>Real heading</w:t></w:r></w:p>')
+    fixed, _, _ = fmt.fix_document(live_heading, {}, policy)
+    check("the live heading after a commented pPr still gets keepNext",
+          "<w:pStyle w:val=\"Heading1\"/><w:keepNext/><w:keepLines/>" in fixed, fixed)
+
+
 def test_f16_fld_simple():
     """F16: w:fldSimple is part of the field inventory in_field() consults."""
     para = ('<w:p><w:r><w:fldSimple w:instr=" ADDIN ZOTERO_ITEM CSL_CITATION '
@@ -177,6 +283,7 @@ def main() -> int:
     test_f13_tab_stops()
     test_f14_alternate_content_runs()
     test_f15_nested_textbox_paragraph()
+    test_textbox_repairs_preserve_paragraph_ownership()
     test_f16_fld_simple()
     test_f18_unreadable_baseline()
     test_f19_styles_dtd()

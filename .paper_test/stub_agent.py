@@ -246,8 +246,13 @@ def fill_seeded_tables(dirp: Path) -> None:
                         cells = cells[:-1]
                 row_no = j - start
                 rule = cell(cells, "rule")
-                reason = (f"OK — {rule or 'row ' + str(row_no)}: reviewed against its own bar "
-                          f"({p.stem} row {row_no})")
+                # The reason must satisfy the pipeline's own deletion-audit
+                # vocabulary: `OK — <why no fact is lost>` needs BOTH a claim
+                # that nothing was lost and a named location (F041), so a bare
+                # "reviewed against its own bar" is not a closure the product
+                # accepts. Name the row as the location and state the claim.
+                reason = (f"OK — {rule or 'row ' + str(row_no)}: the content survives in "
+                          f"the merged text ({p.stem} row {row_no})")
                 changed = False
                 for k, key in enumerate(header):
                     if k >= len(cells):
@@ -804,12 +809,24 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
         # PAPER_STUB_RESPONSE_ADDRESSED=1 asks for the old addressed-with-change
         # map, for the tests that exercise that path.
         addressed = bool(os.environ.get("PAPER_STUB_RESPONSE_ADDRESSED"))
+        changes = []
+        if files and addressed:
+            # The spans are real claims the postcheck verifies verbatim, so use
+            # words the two packages actually carry (never an invented "a -> b").
+            _f0 = files[0]
+            _text = (target / _f0).read_text(encoding="utf-8", errors="replace")
+            _prev = sb / "previous_package" / _f0
+            _ptext = (_prev.read_text(encoding="utf-8", errors="replace")
+                      if _prev.is_file() else "")
+            _words = re.findall(r"[A-Za-z]{3,}", _text)
+            _pick = ([w for w in _words if not _ptext or w in _ptext] or _words)
+            if len(_pick) >= 2:
+                changes = [{"file": _f0, "location": "whole file",
+                            "before": _pick[0], "after": _pick[1]}]
+            else:
+                addressed = False
         mapped.append({"id": cid, "status": "addressed" if addressed else "planned",
-                       "response": "stub",
-                       "changes": ([{"file": files[0], "location": "whole file",
-                                     "before": "a", "after": "b"}]
-                                   if files and addressed else []),
-                       "new_data": []})
+                       "response": "stub", "changes": changes, "new_data": []})
     (out / "RESPONSE_TO_REVIEWERS.md").write_text("\n".join(md), encoding="utf-8")
     write_json(out / "response_map.json",
                {"journal_from": "stub-journal", "target_journal": "stub-target",

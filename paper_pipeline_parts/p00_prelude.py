@@ -1,4 +1,4 @@
-# Part 00/25 of the pipeline -- the shared prelude, executed by the loader
+# Part 00/26 of the pipeline -- the shared prelude, executed by the loader
 # before every other part.
 from __future__ import annotations
 
@@ -35,8 +35,19 @@ from urllib.parse import quote as url_quote, unquote as url_unquote
 import zipfile
 from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# One heading-style predicate for every pipeline reader: the formatter already
+# accepts `heading1`/`H1`/bare levels, but these readers used a case-sensitive
+# `startswith("Heading")`, so a legal style id was not a heading and front
+# matter/reference classification differed between readers (F13, 2026-11-23).
+_DOCX_HEADING_STYLE_ID_RE = re.compile(r"(?i)^(?:heading[\s_-]*|h)[1-9]$|^[1-9]$")
+
+
+def _style_id_is_heading(style) -> bool:
+    """True when a `w:pStyle` id names a heading level (case-insensitive)."""
+    return bool(_DOCX_HEADING_STYLE_ID_RE.match(str(style or "").strip()))
 
 # 3.0.0 -- pool/integration release: every round is planned with M REWRITTEN
 # candidates (w1..wM, staged first, before the review) and N
@@ -261,6 +272,36 @@ from pathlib import Path
 #     order that a Word/Zotero refresh rewrites -- FMT-Z1..Z5 -- with the
 #     `zotero-check` CLI and a version-to-version parity gate), each with its own
 #     coverage row and artifact; the judge's frozen map is unchanged.
+# 3.11.7 -- A STAGE THE BACKEND CANNOT RESUME CONTINUES IN ITS OWN SANDBOX, AND
+#   FAILURES ARE CLASSIFIED ON THE TRANSCRIPT TAIL. `resume_gate` returns a
+#   SANDBOX continuation -- the stage's own command as a fresh process in the
+#   SAME sandbox -- when the backend has no CLI resume form (a custom
+#   `--agent-cmd`) and for `context_overflow`/`runaway`, where resending the CLI
+#   session can only repeat the failure; the sandbox is neither rebuilt nor paid
+#   for again. `_read_stream_capped` keeps a bounded TAIL as well as the 16 MiB
+#   head, so the failure is classified from the end of the transcript. A repair
+#   plan row naming `revised/<document>` is normalised to the manifest key, a
+#   one-or-two-character correction of an e-mail DOMAIN (same local part) is a
+#   correction rather than a removed contact fact, and the run banner names the
+#   effective `--agent-cmd`. Later 3.11.7 fix waves add bounded reads for
+#   agent-written files (the shared byte budget plus regular-file/no-follow
+#   guards), UTF-16 DOCX part decoding, PKG-23 software-vs-numeric citation
+#   handling (bracket citations included), the README cover-letter bound aligned
+#   with the venue profile, resumed-session accounting, DOCX MCP containment and
+#   process-tree kill safety, seeded-row identity pins, and removal/redline/
+#   audit/ranking evidence repairs.
+# 3.11.6 -- `--almost-fail` BECOMES `--tolerate-fail`, AND A TOLERATED STAGE USES
+#   ITS BEST FAILED TRIAL. The policy now records the trial with the most
+#   required-output files (then the fewest FAIL messages) as the one the round
+#   proceeds on, names it on the round and in the decision, and keeps the
+#   result PROVISIONAL: a tolerated same-sandbox continuation is not retried as
+#   a fresh attempt, and a re-drive clears the stale record. Setup/retry/report
+#   wording and the switch itself were renamed with it.
+# 3.11.5 -- A NON-BLOCKING FAILURE POLICY FOR EXHAUSTED STAGES (`--almost-fail`,
+#   renamed `--tolerate-fail` in 3.11.6). A stage that exhausted its retry budget
+#   no longer leaves the whole round incomplete when a usable trial exists; the
+#   close is recorded as a tolerated failure and is never certified as a clean
+#   panel result.
 # 3.11.4 -- THE SESSION TURN CAP IS 3000 BY DEFAULT, AND THE ORCHESTRATOR
 #   ENFORCES IT. A long-horizon stage (a thesis revision) legitimately runs
 #   thousands of model turns, but the pipeline itself had NO turn bound: the
@@ -321,8 +362,9 @@ from pathlib import Path
 #   gate; it is shared text, so `--execution-profile high` and `medium` stay
 #   normatively identical (rule 12).
 # 3.11.0 -- MODEL / HARNESS SPLIT (`--agent-model` + `--agent-harness`, and the
-#   same pair for judges). The old `--agent` / `--judge-agent` names remain as
-#   legacy shortcuts with their exact old commands. The new axes are:
+#   same pair for judges). The old `--agent` / `--judge-agent` names were
+#   REPLACED by these axes and are no longer accepted as shortcuts; see
+#   `docs/agent-harnesses.md` for the current spellings. The new axes are:
 #     * harness: dsh (default), gpt-codex, claude-code;
 #     * model: deepseek-flash (default), gpt-sol, gpt-terra, claude-opus,
 #       claude-sonnet, qwen38-27b, dots3-note-preview, OR an arbitrary
@@ -419,6 +461,10 @@ STATE_VERSION = 3
 PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
                          "paper_redlines_adapter.py", "paper_qwen_agent.py",
                          "paper_dots_agent.py", "paper_model_agent.py", "paper_dsh_runtime.py",
+                         # The adapters import this parent-tracked compatibility
+                         # module (F024/F025, review R06); a root that copies the
+                         # adapters without it cannot import them.
+                         "paper_agent_runtime_patch.py",
                          # The render/track shims are read beside the running
                          # driver (`visual_renderer_choices`), so a root that
                          # lacks them silently loses the highest-fidelity
@@ -464,6 +510,7 @@ PIPELINE_REQUIRED_PARTS = (
     "paper_pipeline_parts/p22_resume_continuation.py",
     "paper_pipeline_parts/p23_postchecks_mcp.py",
     "paper_pipeline_parts/p24_deliverable_audits.py",
+    "paper_pipeline_parts/p25_write_quality.py",
     # The FORMATTER's ordered parts are a separate tree with the same
     # all-or-nothing requirement: `paper_docx_format.py` executes whatever
     # `p[0-9][0-9]_*.py` it finds and has no completeness check of its own, so a
@@ -477,6 +524,12 @@ PIPELINE_REQUIRED_PARTS = (
     "paper_docx_format_parts/p03_report_cli.py",
 )
 PIPELINE_REQUIRED_ASSET_FILES = (
+    # The adapters import these three unconditionally at module load; omitting
+    # them let a trimmed bundle pass the freeze preflight and die later with
+    # ModuleNotFoundError (F02).
+    "agent-common/agent_common/__init__.py",
+    "agent-common/agent_common/agent_cli.py",
+    "agent-common/agent_common/chat.py",
     "agent-common/agent_common/model_runtime.py",
     "agent-common/agent_common/llm_retry.py",
     "agent-common/agent_common/llm_policy.json",
@@ -485,6 +538,29 @@ PIPELINE_REQUIRED_ASSET_FILES = (
     "paper_pipeline_parts/ranking.py",
     "paper_pipeline_parts/decision_report.py",
     MANUSCRIPT_WORDS_FILE,
+    # The stage prompts tell every session to READ these skill documents and to
+    # RUN the listed scripts. `copy_asset_dirs` silently skips a missing source
+    # directory, so without these entries a trimmed checkout passed the
+    # incomplete-bundle preflight and produced dangling prompt paths (F073,
+    # AGENTS Rule 11).
+    "paper-skills/paper-review/SKILL.md",
+    "paper-skills/paper-review/references/sweeps.md",
+    "paper-skills/paper-review/references/discovery.md",
+    "paper-skills/paper-review/scripts/convert_corpus.py",
+    "paper-skills/paper-review/scripts/enumerate_conventions.py",
+    "paper-skills/paper-review/scripts/count_words.py",
+    # The prompts tell the review session to RUN these five extractors and to
+    # carry their shared companion; a trimmed checkout passed the bundle
+    # preflight and then pointed at missing scripts (F070).
+    "paper-skills/paper-review/scripts/extract_acronyms.py",
+    "paper-skills/paper-review/scripts/extract_citations.py",
+    "paper-skills/paper-review/scripts/extract_numbers.py",
+    "paper-skills/paper-review/scripts/extract_occurrences.py",
+    "paper-skills/paper-review/scripts/evidence_names.py",
+    "paper-skills/paper-revise/SKILL.md",
+    "paper-skills/paper-revise/references/ledger.md",
+    "paper-skills/paper-revise/references/edit_rules.md",
+    "paper-skills/paper-revise/scripts/revision_token.py",
 )
 # venue_profiles/ is a RUNTIME asset too (load_precedence reads the root's copy
 # before the maintained one), but a trimmed checkout may legitimately omit it

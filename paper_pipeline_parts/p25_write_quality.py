@@ -1,4 +1,4 @@
-# Part 20/21 of the pipeline -- executed by the loader in its own globals.
+# Part 25/26 of the pipeline -- executed by the loader in its own globals.
 # Mandatory independent quality gates for non-revision LLM authors.
 #
 # Revision arms use the existing, separately enforced revision-audit chain.
@@ -31,8 +31,12 @@ def _write_digest(root: Path) -> str:
 def _write_owned_digest(root: Path) -> str:
     # Difference-tracking copies are deterministic orchestrator auxiliaries,
     # never the authored artifact, submitted corpus or a scored improvement.
+    # The audit's own `write_quality/` record is bookkeeping, not authored
+    # bytes: a store-less staging (the legacy add-venue root layout) is audited
+    # in place, and the record must not change the digest it certifies.
     owned = {rel: digest for rel, digest in _write_manifest(root).items()
-             if not _is_aux_doc(Path(rel).name)}
+             if not _is_aux_doc(Path(rel).name)
+             and not rel.startswith(WRITE_QUALITY_DIR + "/")}
     return hashlib.sha256(json.dumps(owned, sort_keys=True).encode()).hexdigest()
 
 
@@ -326,14 +330,14 @@ def audit_write_output(sb: Path, rec: dict, cmd: list, timeout: int,
     return result
 
 
-def write_quality_problem(sb: Path, kind: str, rec: dict = None) -> str:
+def write_quality_problem(sb: Path, kind: str, rec: dict = None, output: str = None) -> str:
     """Require a passing audit of the exact current artifact, not a stale flag."""
     try:
         record = (rec.get("write_quality") or {}) if rec is not None else _write_read_json(
             sb / WRITE_QUALITY_DIR / "RESULT.json")
         if record.get("status") != "done" or record.get("role") != kind:
             return "mandatory independent write audit is incomplete"
-        output = WRITE_ARTIFACTS.get(kind, REVISED_DIR)
+        output = output or WRITE_ARTIFACTS.get(kind, REVISED_DIR)
         if record.get("artifact_digest") != _write_owned_digest(sb / output):
             return "mandatory independent write audit is stale: artifact bytes changed"
         inputs = record.get("input_digests")

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 02/25 of the pipeline -- executed by the
+# Part 02/26 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -448,6 +448,13 @@ def journal_feedback_files(ctx: Ctx) -> list:
             continue
         rel = p.relative_to(ctx.pristine).as_posix()
         if is_original_submission_rel(rel):
+            continue
+        # The fallback may still read a legacy `raw_data/` name (the dedicated
+        # area is preferred), but an INERT disabled evidence area and an
+        # author's own README are never the journal's letter. (A full
+        # is_non_manuscript_rel() filter would also drop the documented
+        # raw_data fallback.)
+        if is_disabled_evidence_rel(rel) or is_non_submitted_readme_name(p.name):
             continue
         if evidence_area_of(rel) == LLM_FEEDBACK_DIR:
             # The LLM review is its own stream (`journal_llm_feedback_files`),
@@ -995,6 +1002,49 @@ DEFAULT_STRICT_ARTIFACTS = True
 ARTIFACT_POLICY_FIX = "fix"
 ARTIFACT_POLICIES = ("on", ARTIFACT_POLICY_FIX, "off")
 DEFAULT_ARTIFACT_POLICY = "on"
+# `--tolerate-fail` is the benchmark/collection mode (`--no-tolerate-fail`
+# restores the default): a stage that exhausts its retry budget is recorded and
+# printed as TOLERATED_FAIL and the run's BEST FAILED TRIAL is used (the trial
+# with the most required output files, then the fewest FAIL messages), so the
+# pipeline continues with its most complete attempt instead of terminating. The
+# result stays PROVISIONAL and is never certified. It is OFF by default; the off
+# path is the historical strict behaviour (a failed stage leaves the round
+# incomplete and `run` exits 3).
+TOLERATED_FAIL_STATUS = "TOLERATED_FAIL"
+TOLERATE_FAIL_MODES = ("on", "off")
+DEFAULT_TOLERATE_FAIL = "off"
+_TOLERATE_FAIL_ACTIVE = False
+
+
+def set_tolerate_fail_active(flag: bool) -> None:
+    """Record the invocation's mode for output paths that have no `ctx`."""
+    global _TOLERATE_FAIL_ACTIVE
+    _TOLERATE_FAIL_ACTIVE = bool(flag)
+
+
+def tolerate_fail_of(ctx=None) -> bool:
+    """Is an exhausted stage tolerated (best failed trial used) instead of FAIL?
+
+    The per-invocation `run` override wins over the root's recorded policy,
+    exactly like the content-edit policy pairs; a root without the key reads the
+    strict default (`off`).  A root written by the older boolean feature carries
+    `almost_fail: on|off`; it is read as the same policy.  A caller without a
+    `ctx` (the sandbox self-check client, a report helper) reads the mode the
+    invocation activated.
+    """
+    override = getattr(ctx, "_tolerate_fail_override", None)
+    if override is not None:
+        return bool(override)
+    if ctx is None:
+        return bool(_TOLERATE_FAIL_ACTIVE)
+    cfg = getattr(ctx, "cfg", None) or {}
+    raw = str(cfg.get("tolerate_fail") or cfg.get("almost_fail") or "").strip().lower()
+    return raw == "on"
+
+
+def failure_status(ctx=None) -> str:
+    """The console status word for a failed attempt (`FAIL` / `TOLERATED_FAIL`)."""
+    return TOLERATED_FAIL_STATUS if tolerate_fail_of(ctx) else "FAIL"
 DEFAULT_RESIDUAL_GATE = True
 # How many identifier lookups one stage may spend. Each lookup is one or more
 # requests (a DOI asks Crossref, then DataCite, then the handle registry) with a
@@ -1193,10 +1243,16 @@ TRACKING_AUX_NAME_RE = re.compile(
     r"\.(?:docx|tex|bib|pdf)$", re.IGNORECASE)
 # Trailing version token on a basename stem: the CURRENT content-hash token
 # ("-4f3a9c1"/"_4f3a9c1", 7 lowercase hex characters) or the LEGACY version
-# tokens ("-b", "_v2", "-v10", case-insensitive) that older packages carry.
+# tokens ("-b", "_v2", "-v10") that older packages carry. The legacy
+# single-letter alternative is LOWERCASE only: the legacy increments were
+# "-a"/"-b"-style arm letters, while an uppercase trailing letter is an
+# IDENTITY label (`Appendix_A.docx`, `Figure_B.pdf`) and must not be renamed to
+# `Appendix_<token>.docx` nor stripped from the hashed bytes (F171). The
+# shipped `paper-revise/scripts/revision_token.py` narrows the same alternative
+# to `[a-z]`, and the two readers must agree on one package.
 # A PLAIN trailing number ("-1", "-3") is NOT a version token: SI-Table-1.csv
 # and Figure-3.xlsx are distinct documents and must never be merged.
-DOC_TOKEN_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+|[-_][A-Za-z])$")
+DOC_TOKEN_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+|[-_][a-z])$")
 # Source/provenance suffixes that describe where a document came from, not a
 # different submission role. A content-token rename may legitimately change
 # these (`mainText-FrontiersTemplate-zotero-<old>` ->
@@ -1418,13 +1474,43 @@ def _check_rounds_bound(rounds: int) -> int:
     return rounds
 
 
+def _split_round_list(text: str) -> list:
+    """Split a CLI/config round list, keeping underscores that belong to a number.
+
+    `_` between digits is the historical list separator (`1_2` -> 1, 2; F69), but
+    Python integer literals use `_` as a digit-group separator, and a documented
+    literal must stay ONE value (`1_000` is 1000, `0xFFFF_FFFF` is one mask;
+    F119). A base-prefixed token is always one literal; a decimal token keeps an
+    underscore only when it groups exactly three digits (the conventional
+    spelling). Any other underscore keeps the historical separator meaning.
+    """
+    out = []
+    for part in re.split(r"[,;\s]+", text.strip()):
+        if not part:
+            continue
+        if re.fullmatch(r"0[xXoObB][0-9A-Fa-f_]+", part):
+            out.append(part)
+            continue
+        pieces = part.split("_")
+        merged = [pieces[0]]
+        for nxt in pieces[1:]:
+            if len(nxt) == 3 and nxt.isdigit():
+                merged[-1] += "_" + nxt
+            else:
+                merged.append(nxt)
+        out.extend(merged)
+    return out
+
+
 def parse_round_counts(values, rounds: int, flag: str) -> list:
     """Normalize a per-round count list to exactly `rounds` entries.
 
     The CLI accepts either a single integer ("--rewrites 3") or a comma/space
     separated list of length n = --rounds ("--rewrites 2,1"). A list shorter
     than n is EXTENDED BY REPEATING ITS LAST ELEMENT; a longer one is truncated
-    to the first n entries (the extra entries would never be reached).
+    to the first n entries (the extra entries would never be reached). An
+    underscore is part of the number when it groups three digits ("1_000");
+    otherwise it separates entries ("1_2"), the historical spelling.
     """
     vals = []
     for v in (values if isinstance(values, (list, tuple)) else [values]):
@@ -1432,9 +1518,7 @@ def parse_round_counts(values, rounds: int, flag: str) -> list:
             continue
         # A command-line value arrives as ONE string ("3", "2,1", "2, 1"); a
         # config value may already be a list of ints. Both shapes are accepted.
-        # `_` is a separator too: `int("1_2")` is 12, so without this a list
-        # written as `1_2` silently became ONE round count of twelve.
-        parts = re.split(r"[,;_\s]+", str(v).strip()) if isinstance(v, str) else [v]
+        parts = _split_round_list(str(v)) if isinstance(v, str) else [v]
         vals.extend(p for p in parts if str(p).strip() != "")
     counts = []
     for v in vals:
@@ -1494,9 +1578,13 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
 
     Same shape rules as parse_round_counts (one value or a comma-separated list;
     a shorter list is extended by repeating its last element, a longer one is
-    truncated), but each entry is an unsigned 32-bit mask written in any Python
-    integer literal form: decimal ("5"), hexadecimal ("0xFFFFFFFF", the default),
-    octal or binary. The mask addresses the round's pool in canonical order
+    truncated), but each entry is an unsigned 32-bit mask written as a Python
+    integer literal: decimal ("5"), hexadecimal ("0xFFFFFFFF", the default),
+    octal or binary. A base-prefixed literal may carry `_` digit groups
+    ("0xFFFF_FFFF"), and a decimal literal may use the conventional
+    three-digit grouping ("1_000"); a bare `_` between short decimal groups
+    keeps the historical list-separator spelling ("1_2" = masks 1 and 2).
+    The mask addresses the round's pool in canonical order
     [a1, w1..wM, a2..a{1+N}]: bit (k-1) selects the integration arm i<k> of the
     k-th member (see INTEGRATOR_ALL).
     """
@@ -1505,10 +1593,8 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
         if v is None:
             continue
         # A command-line value arrives as ONE string ("5", "0xFF,3"); a config
-        # value may already be a list of ints. Both shapes are accepted. `_` is
-        # a list separator here exactly as in parse_round_counts: without it
-        # `1_2` was one mask of int("1_2", 0) == 12.
-        parts = re.split(r"[,;_\s]+", str(v).strip()) if isinstance(v, str) else [v]
+        # value may already be a list of ints. Both shapes are accepted.
+        parts = _split_round_list(str(v)) if isinstance(v, str) else [v]
         vals.extend(p for p in parts if str(p).strip() != "")
     masks = []
     for v in vals:
@@ -2295,6 +2381,36 @@ PREFER_REWRITE_OVER_DELETION = "prefer_rewrite_over_deletion"
 SOFT_DELETIONS = "soft_deletions"
 
 
+def content_edit_flag(value, default: bool = True) -> bool:
+    """One content-edit switch from a run-record/config value.
+
+    A run record can carry the documented string spellings ('off', 'false');
+    `bool('false')` is True and silently widened a strict record, so every
+    reader of the same key must parse it the same way (F132).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    truthy = text in _CONTENT_EDIT_ON
+    return truthy if truthy else text not in _CONTENT_EDIT_OFF
+
+
+def content_edit_prefer_flag(value, default: bool = False) -> bool:
+    """One `prefer_rewrite_over_deletion` value; only explicit ON is on."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    return text in _CONTENT_EDIT_ON
+
+
 def prefer_rewrite_over_deletion(ctx=None) -> bool:
     """Is the prefer-rewrite-over-deletion mode on for this invocation?
 
@@ -2353,8 +2469,15 @@ def soft_deletions_allowed(ctx=None, rec=None) -> bool:
     invocation must not judge it under a different one.
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
-    if isinstance(policy, dict) and SOFT_DELETIONS in policy:
-        return content_edit_prefer_flag(policy[SOFT_DELETIONS])
+    if isinstance(policy, dict):
+        # `content_edit_policy_record` writes the soft key only when the stage
+        # was prompted with it ON (or when it differed from the live config at
+        # stage start). A dict WITHOUT the key therefore means the historical
+        # default OFF, which is what the prompt stated; falling back to today's
+        # config judged a resumed stage under a policy it never saw (F046).
+        if SOFT_DELETIONS in policy:
+            return content_edit_prefer_flag(policy[SOFT_DELETIONS])
+        return False
     return soft_deletions(ctx)
 
 
@@ -2488,21 +2611,8 @@ def content_edit_policy_allowed(ctx=None, rec=None) -> tuple:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict):
-        def _flag(value, default=True) -> bool:
-            # A run record can carry the documented string spellings ('off',
-            # 'false'); bool('false') is True and widened a strict stage into
-            # the permissive policy (F153).
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, (int, float)):
-                return bool(value)
-            text = str(value or "").strip().lower()
-            if not text:
-                return default
-            return text not in _CONTENT_EDIT_OFF
-
-        return (_flag(policy.get("insertions", True)),
-                _flag(policy.get("deletions", True)))
+        return (content_edit_flag(policy.get("insertions", True)),
+                content_edit_flag(policy.get("deletions", True)))
     return insertions_enabled(ctx), deletions_enabled(ctx)
 
 
@@ -2514,8 +2624,13 @@ def prefer_rewrite_allowed(ctx=None, rec=None) -> bool:
     the context. This is the same binding rule as `content_edit_policy_allowed`.
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
-    if isinstance(policy, dict) and PREFER_REWRITE_OVER_DELETION in policy:
-        return bool(policy[PREFER_REWRITE_OVER_DELETION])
+    if isinstance(policy, dict):
+        if PREFER_REWRITE_OVER_DELETION in policy:
+            return content_edit_prefer_flag(policy[PREFER_REWRITE_OVER_DELETION])
+        # The record was written with prefer OFF (the record omits the key for
+        # that historical default). Falling back to a later invocation's ON
+        # config judged the stage under a policy its prompt never stated (F71).
+        return False
     return prefer_rewrite_over_deletion(ctx)
 
 
@@ -5017,6 +5132,8 @@ def _manual_csv_matches(path: Path, rows: list) -> bool:
     expected = [list(MANUAL_TODO_COLUMNS)] + [
         [r[c] for c in MANUAL_TODO_COLUMNS] for r in _manual_todo_csv_rows(rows)]
     try:
+        if path.is_symlink():
+            return False
         if path.stat().st_size > MANUAL_TODO_MAX_BYTES:
             return False
         with open(path, "r", encoding="utf-8-sig", newline="") as f:
@@ -6100,7 +6217,7 @@ D10. AN OPAQUE IDENTIFIER OR EXTERNALLY-ASSIGNED FACT IS NOT AN EDITABLE SURFACE
 
 ADOPTED_SWEEPS_BLOCK = """
 
-=== THE ADOPTED CHECKS (the same checklist every session evaluates against) ===
+=== THE ADOPTED CHECKS (the judge panel's frozen M1-M24/J1-J4 map; see the scope note below) ===
   M1-M17  mechanical sweeps: acronyms, citations, display items, numbers/metrics, mandatory
           items, hygiene, cross-references, terminology, file hygiene, reference format, SI
           formatting, authors, reporting summary, cross-document metadata, numeric totals,
@@ -6134,6 +6251,12 @@ ADOPTED_SWEEPS_BLOCK = """
   J1-J4   scope fit and significance; scientific/statistical rigor; writing quality and claim
           calibration -- overclaiming AND underclaiming (the Q1-Q12 rubric); plagiarism,
           AI-content and policy compliance.
+  The JUDGE PANEL's frozen map is exactly this M1-M24/J1-J4 set: identical
+  scrutiny across versions is what keeps the panel calibrated, so it is never
+  extended. The GUIDED REVIEW, its audit and the path that applies its findings
+  additionally run M25-M36 and J5 in their own phase blocks (each with its own
+  artifact and coverage row); this shared block does not replace them, and a
+  session that carries those phase blocks must run them too.
   EVERY two-sided check runs in BOTH directions, and a check reported from one side only has not
   been run: claim strength (overclaim / underclaim), content (lost / invented), items (missing /
   unneeded), pointers (claim without its evidence / printed or promised content the text never

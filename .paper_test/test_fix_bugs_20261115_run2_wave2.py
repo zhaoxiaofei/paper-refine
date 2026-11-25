@@ -65,12 +65,17 @@ def test_content_policy():
              "norm": "body weight remained stable throughout the study period.",
              "tokens": set("body weight remained stable throughout the study "
                             "period.".split())}]
-    cand = [dict(base[0], text="In the high-dose cohort, the neoplasm shrank by two "
-                               "fifths relative to baseline.",
-                 norm="in the high-dose cohort, the neoplasm shrank by two fifths "
-                      "relative to baseline.",
-                 tokens=set("in the high-dose cohort, the neoplasm shrank by two "
-                            "fifths relative to baseline.".split())),
+    # F001 of the 2026-11-19 wave narrows the positional pass: a sentence
+    # rewritten at the same slot is a rewrite only when it still carries the
+    # original content (similarity floor). This fixture is a full-sentence
+    # rewrite of the SAME claim; an unrelated same-slot replacement is the
+    # defect F001 rejects.
+    cand = [dict(base[0], text="The treatment lowered tumour volume by 40 percent in "
+                               "the high dose group.",
+                 norm="the treatment lowered tumour volume by 40 percent in the high "
+                      "dose group.",
+                 tokens=set("the treatment lowered tumour volume by 40 percent in the "
+                            "high dose group.".split())),
             dict(base[1])]
     missing, added = pp._match_content_units(base, cand)
     check("F047 a same-line full rewrite anchors by sentence slot",

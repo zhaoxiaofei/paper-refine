@@ -68,6 +68,24 @@ def run_add_venue(args):
         return int(e.code or 0), out.getvalue()
 
 
+def mark_audited(sb):
+    """Record the mandatory independent audit a publishable staging carries.
+
+    The publish path requires an acceptance record bound to the exact staged
+    store bytes (Rule 1C); these fixtures exercise publication, not the audit,
+    so they stage the record the auditor would have written.
+    """
+    _out = sb / ("store" if (sb / "store").is_dir() else ".")
+    q = {"status": "done", "role": "add-venue", "sessions": [], "repairs": 0,
+         "artifact_digest": pp._write_owned_digest(_out),
+         "input_digests": {p.name: pp._write_input_digest(p) for p in sb.iterdir()
+                           if p.name not in (pp.WRITE_QUALITY_DIR, "store")
+                           and not p.name.startswith("_")}}
+    wq = sb / pp.WRITE_QUALITY_DIR
+    wq.mkdir(parents=True, exist_ok=True)
+    (wq / "RESULT.json").write_text(json.dumps(q), encoding="utf-8")
+
+
 def stage(sb, vid="demo", label="DEMO", status="complete", error=None):
     (sb / "store").mkdir(parents=True, exist_ok=True)
     (sb / "store" / f"{vid}.json").write_text(
@@ -75,6 +93,7 @@ def stage(sb, vid="demo", label="DEMO", status="complete", error=None):
     (sb / "_pipeline_done.json").write_text(
         json.dumps({"stage": "add-venue", "status": status, "error": error}),
         encoding="utf-8")
+    mark_audited(sb)
 
 
 class _Ctx:
@@ -177,6 +196,7 @@ def test_f24_f25():
     (sb / "_pipeline_done.json").write_text(
         json.dumps({"stage": "add-venue", "status": "complete", "error": None}),
         encoding="utf-8")
+    mark_audited(sb)
     store = d / "store"
     store.mkdir()
     (store / "demo.json").write_text(json.dumps({"id": "demo", "label": "OLD"}),

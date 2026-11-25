@@ -115,7 +115,10 @@ serveStdio(() => {
       // path beside the REAL input, passed explicitly because the staged input
       // is not the path docx2pdf.sh would derive it from.
       let spawnPath = abs;
-      let finalPdf = '';
+      // The converter derives the PDF from its input; compute that path in the
+      // NON-containment branch too, so the Windows-pid fallback file has a
+      // destination (F73).
+      let finalPdf = abs.replace(/\.docx$/i, '.pdf');
       let stagingDir = '';
       if (ALLOWED_ROOTS.length) {
         try {
@@ -178,6 +181,7 @@ serveStdio(() => {
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(key, next);
+      let keepWindowsPidFile = false;
       try {
         // 调用 docx2pdf.sh 脚本；脚本内部会处理路径转换和 PowerShell 调用。
         const { stdout, stderr } = await next;
@@ -209,16 +213,22 @@ serveStdio(() => {
           }],
         };
       } catch (error) {
+        // A failed tree kill leaves powershell.exe/Word alive; keep the pid
+        // file, the only record taskkill needs, and name it in the error (F82).
+        keepWindowsPidFile = /tree kill incomplete/.test(String(error.message || ''));
+        const pidNote = keepWindowsPidFile && windowsPidFile
+          ? `\n[windows pids retained for manual taskkill: ${windowsPidFile}]`
+          : '';
         return {
           content: [{
             type: 'text',
             text: `转换失败: ${error.message}\n标准输出: ${error.stdout ?? ''}\n` +
-                  `标准错误: ${error.stderr ?? ''}`,
+                  `标准错误: ${error.stderr ?? ''}${pidNote}`,
           }],
           isError: true,
         };
       } finally {
-        if (windowsPidFile) {
+        if (windowsPidFile && !keepWindowsPidFile) {
           try { rmSync(windowsPidFile, { force: true }); } catch { /* gone */ }
         }
         if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });

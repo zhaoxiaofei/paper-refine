@@ -219,7 +219,12 @@ CELL_TOKENS = re.compile(r"<w:tc(?=[\s/>])|</w:tc\s*>")
 # `(?<!/)` guard the tag was read as an opening one and the lazy body ran to the
 # NEXT run's `</w:t>`, so `text_of` returned literal markup and the writer
 # escaped it into the first run, deleting the following run wrapper.
-TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t\s*>", re.S)
+#
+# The attribute class is QUOTE-AWARE: XML permits `>` inside a quoted attribute
+# value (`w:rsidR="a>b"`), and `[^>]*` split the tag there, so `text_of`
+# returned the rest of the attribute text as manuscript text (F08, 2026-11-23).
+_XML_ATTRIBUTES = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
+TEXT_RE = re.compile(r"<w:t(?:\s" + _XML_ATTRIBUTES + r")?(?<!/)>.*?</w:t\s*>", re.S)
 # A soft break/tab inside a paragraph (`<w:br/>`, `<w:cr/>`, `<w:tab/>`).
 # `text_of` renders each as a NEWLINE: it is a delimiter, not content, so every
 # text comparison still sees the same words AND the line-edge rules see the
@@ -234,7 +239,7 @@ NON_TEXT_TOKENS = re.compile(r"<w:(?:noBreakHyphen|sym)(?=[\s/>])[^>]*/?>")
 # The same walk, in DOCUMENT ORDER, for the callers that need both kinds of
 # piece at once (the text writer splices a fragment's new text at its own
 # offset, so a break counts as one character exactly like `text_of` says).
-_FRAG_OR_BREAK_PATTERN = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t\s*>"
+_FRAG_OR_BREAK_PATTERN = re.compile(r"<w:t(?:\s" + _XML_ATTRIBUTES + r")?(?<!/)>(?s:.*?)</w:t\s*>"
                                     r"|<w:(?:br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>",
                                     re.S)
 # The tab-STOP definitions a paragraph carries in `<w:pPr><w:tabs>`: `<w:tab>`
@@ -701,6 +706,40 @@ def _mask_noncontent(xml: str) -> str:
     return _blank_spans(text, spans)
 
 
+def _tag_end(text: str, start: int) -> int:
+    """Index of the `>` that CLOSES the tag beginning at `start`, quote-aware.
+
+    A legal attribute value may contain `>` (and even `/>`): `find('>')` split
+    the tag at that byte, so a paragraph with `w:rsidR="a/>b"` looked
+    self-closing and its content/close tag were skipped (F49).
+    """
+    quote = ""
+    for i in range(start, len(text)):
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == ">":
+            return i
+    return -1
+
+
+def _text_token_text(tok: str) -> str:
+    """Decoded text between a `<w:t ...>` open tag and its close tag.
+
+    `find(">")` is not the open tag's end: XML permits `>` inside a quoted
+    attribute value, so the shared walkers must use the quote-aware `_tag_end`
+    (F08, 2026-11-23).
+    """
+    start = _tag_end(tok, 0)
+    end = tok.rfind("<")
+    if start < 0 or end <= start:
+        return ""
+    return unesc(tok[start + 1:end])
+
+
 def _spans(xml: str, tokens: re.Pattern) -> list:
     """(start, end, text) for balanced elements; nested elements each get a span."""
     text = _mask_noncontent(xml)
@@ -715,7 +754,7 @@ def _spans(xml: str, tokens: re.Pattern) -> list:
                 out.append((start, m.end(), xml[start:m.end()]))
                 start, depth = None, 0
             continue
-        tag_end = text.find(">", m.start())
+        tag_end = _tag_end(text, m.start())
         if tag_end == -1:
             break
         if depth == 0:
@@ -741,7 +780,7 @@ def _paragraph_offsets(xml: str) -> list:
                 offsets[stack.pop()][1] = m.end()
             continue
         start = m.start()
-        tag_end = text.find(">", start)
+        tag_end = _tag_end(text, start)
         if tag_end == -1:
             break
         parent = offsets[stack[-1]][0] if stack else None
@@ -822,7 +861,7 @@ def text_of(frag: str) -> str:
             # the surrounding words do not fuse.
             parts.append("\ufffd")
         else:
-            parts.append(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
+            parts.append(_text_token_text(tok))
     return "".join(parts)
 
 
@@ -989,7 +1028,10 @@ def attr(frag: str | None, name: str) -> str | None:
     m = re.search(rf"w:{name}\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", frag)
     if not m:
         return None
-    return m.group(1) if m.group(1) is not None else m.group(2)
+    # An attribute VALUE is decoded XML text: `Emph&amp;A` is the style id
+    # `Emph&A`, which is the key `parse_styles`/`style_chain` use. Returning the
+    # raw entity made a run style unresolved (F058).
+    return unesc(m.group(1) if m.group(1) is not None else m.group(2))
 
 
 def elem(frag: str | None, tag: str) -> str | None:
@@ -1011,13 +1053,15 @@ def elem(frag: str | None, tag: str) -> str | None:
     # Masking is length-preserving, so the returned slice is the live element's
     # own bytes.
     masked = _mask_noncontent(frag)
-    m = re.search(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}>",
+    # XML permits whitespace before the `>` of an end tag (`</w:b >`); an exact
+    # close missed the live element and writers then inserted a DUPLICATE
+    # property child (F060).
+    m = re.search(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}\s*>",
                   masked, re.S)
     return frag[m.start():m.end()] if m else None
 
 
 _XML_MISC = r"<!--(?:[^-]|-(?!->))*-->|<\?(?:[^?]|\?(?!>))*\?>"
-_XML_ATTRIBUTES = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
 _CHILD_TAG_RE = re.compile(rf"{_XML_MISC}|<(/?)([A-Za-z0-9:_.-]+)(?=[\s/>])({_XML_ATTRIBUTES})>")
 
 # Namespace declarations and QName-valued mc: attributes. `_CANON_TAG_RE` is
@@ -1207,11 +1251,44 @@ def canonicalize_ooxml_prefixes(xml: str) -> str:
             out += " /"
         return out
 
+    # A DEFAULT namespace binds by scope: `renames[""]` is the ROOT default and
+    # applying it to every unprefixed element renamed a nested
+    # `<foo xmlns="urn:example">` to `<w:foo>`, silently moving it into the
+    # Word namespace (F48). Track the in-scope default and rename an unprefixed
+    # name only when that default is the namespace `renames[""]` stands for.
+    default_stack = [None]
+    canonical_for_default = {"w": W_NS, "mc": MC_NS}
+
+    def _scoped_default_name(name, default_uri):
+        if ":" in name:
+            return _canonical_name(name, renames)
+        target = next((p for p, u in canonical_for_default.items()
+                       if u == default_uri and renames.get("") == p), None)
+        if target:
+            return f"{target}:{name}"
+        return name
+
+    def _default_decl(attrs):
+        for _n, _v in _iter_attrs(attrs):
+            if _n == "xmlns":
+                return _v or ""
+        return None
+
     def canon_tag(m):
         if m.group(2) is None:             # comment / processing instruction
             return m.group(0)
         closing, name, attrs = m.group(1), m.group(2), m.group(3)
-        new_name = _canonical_name(name, renames)
+        self_closing = (not closing) and attrs.rstrip().endswith("/")
+        if closing:
+            new_name = _scoped_default_name(name, default_stack[-1])
+            if len(default_stack) > 1:
+                default_stack.pop()
+        else:
+            decl = _default_decl(attrs)
+            uri = decl if decl is not None else default_stack[-1]
+            new_name = _scoped_default_name(name, uri)
+            if not self_closing:
+                default_stack.append(uri)
         new_attrs = rewrite_attrs(attrs)
         return f"<{closing}{new_name}{new_attrs}>"
 
@@ -1309,7 +1386,9 @@ def ppr_style(ppr: str | None) -> str | None:
     if el is None:
         return None
     value = attr(el, "val")
-    return unesc(value) if value else "1"
+    # `attr()` already decodes the XML entity, so the id is returned as-is:
+    # decoding twice turned the literal id `A&amp;B` into `A&B` (F47).
+    return value if value else "1"
 
 
 def para_style(para: str) -> str | None:
@@ -1345,7 +1424,9 @@ def _fld_simple_instruction(tag: str) -> str:
     value = attr(tag, "instr")
     if value is None:
         return ""
-    return unesc(value).strip()
+    # attr() now decodes the attribute VALUE once; a second unesc() decoded
+    # `&amp;quot;` into a quote instead of the literal `&quot;` (F50).
+    return value.strip()
 
 
 def field_ranges(xml: str) -> list:
@@ -1478,7 +1559,7 @@ def field_result_text_ranges(para: str, doc_spans=None, para_start: int = 0) -> 
             # could land inside a live Zotero field result.
             pos += 1
             continue
-        text = unesc(tok[tok.find(">") + 1:tok.rfind("<")])
+        text = _text_token_text(tok)
         runs.append((m.start(), m.end(), pos, pos + len(text)))
         pos += len(text)
     if doc_spans is None:
@@ -1527,8 +1608,12 @@ ZOTERO_FIELD_TOKEN_RE = re.compile(
     # `([^>]*)>` would otherwise swallow its closing `/>` as an attribute and
     # run its lazy body to the NEXT simple field's closing tag (one field read
     # as two, with the wrong instruction).
-    r"|<w:fldSimple\b([^>]*?)/>"
-    r"|<w:fldSimple\b([^>]*)>(.*?)</w:fldSimple\s*>"
+    # A legal attribute value may contain `>` (`w:instr="...{a->b}"`); a
+    # `[^>]*` reader truncated the tag and the field was inventoried as
+    # `other` with an empty instruction (F55). `_XML_ATTRIBUTES` consumes a
+    # quoted value as a unit.
+    r"|<w:fldSimple\b(" + _XML_ATTRIBUTES + r")/>"
+    r"|<w:fldSimple\b(" + _XML_ATTRIBUTES + r")>(.*?)</w:fldSimple\s*>"
     # A soft break/tab is a text delimiter in a field result too: `text_of()`
     # renders it as a newline, so the inventory must not join the words it
     # separates ("Smith\n2020" is not "Smith2020").
@@ -1624,7 +1709,9 @@ def zotero_field_report(xml: str) -> dict:
             # literal text `&quot;`, not a quote); the extra `.replace(...)`
             # decoded it a second time.
             _instr_raw = attr(attrs, "instr")
-            instr = unesc(_instr_raw) if _instr_raw is not None else ""
+            # attr() already decoded the VALUE once (F058); a second unesc here
+            # turned the literal `&quot;` into a quote (F50).
+            instr = _instr_raw if _instr_raw is not None else ""
             fields.append({"begin": m.start(), "end": m.end(), "instr": [instr],
                            "separate": m.start(),
                            "result": [text_of(body)]})
@@ -2091,7 +2178,9 @@ def docx_style_ids(path: Path) -> list:
     for tag in re.findall(r"<w:style\b[^>]*>", _mask_noncontent(xml)):
         sid = attr(tag, "styleId")
         if sid:
-            ids.add(unesc(sid))
+            # `attr()` decoded the entity already; a second `unesc()` made the
+            # literal id `A&amp;B` read as `A&B` (F47).
+            ids.add(sid)
     return sorted(ids)
 
 
@@ -2232,7 +2321,17 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
     corr = next((p[2] for p in paragraphs(doc)
                  if _CORRESP_RE.match(text_of(p[2]).strip())), "")
     title_style = styles[0] if styles else ""
-    author_style = next((styles[i] for i in range(1, min(4, len(styles)))
+    # The front-matter block ends at Abstract/Keywords; a title split over
+    # several paragraphs pushed the author line past the old fixed 3-paragraph
+    # window, so the report wrongly said the author style was not the
+    # template's (F61).
+    front_end = len(texts)
+    for _i in range(1, len(texts)):
+        _t = str(texts[_i] or "").strip().lower()
+        if _t == "abstract" or _t.startswith("keywords"):
+            front_end = _i
+            break
+    author_style = next((styles[i] for i in range(1, front_end)
                          if "," in texts[i] or " and " in texts[i]), "")
     abstract_style = next((styles[i] for i, t in enumerate(texts)
                            if t.lower() == "abstract"), "")
@@ -2244,14 +2343,16 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
     deep = sum(1 for s in styles if heading_level_of.get(s, 0) > depth)
     container_rows = [t for t, s in zip(texts, styles)
                       if t in tuple(containers or _FOREIGN_CONTAINERS_DEFAULT)
-                      and (s.startswith("Heading") or not s)]
+                      and (_style_kind(s) or not s)]
     out = {"title_style": title_style, "author_style": author_style,
            "abstract_style": abstract_style, "keywords_style": keywords_style,
            "first_header": bool(first_header), "logo_header": logo,
            "first_footer": bool(part("footer", "first") or part("footer", "default")),
            "correspondence": bool(corr),
            "correspondence_bold": bool(corr and _label_is_bold(corr)),
-           "correspondence_lines": (corr.count("<w:br") if corr else None),
+           "correspondence_lines": (len(re.findall(r"<w:(?:br|cr)(?=[\s/>])",
+                                                      _mask_noncontent(corr)))
+                                    if corr else None),
            "even_odd": is_on(settings, "evenAndOddHeaders"),
            "deep_headings": deep,
            "heading3": sum(1 for s in styles if heading_level_of.get(s) == 3),
@@ -2686,7 +2787,7 @@ def split_run_text_span(run: str, start: int, end: int):
     if re.fullmatch(
             r"\s*<w:r(?=[\s/>])[^>]*>\s*"
             r"(?:<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s/>])[\s\S]*?</w:rPr>)?\s*"
-            r"</w:r>\s*", run[:tm.start()] + run[tm.end():]) is None:
+            r"</w:r\s*>\s*", run[:tm.start()] + run[tm.end():]) is None:
         return None
     text = unesc(tm.group(2))
     if text != text_of(run):
