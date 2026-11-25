@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 16/24 of the pipeline -- executed by the
+# Part 16/25 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -86,7 +86,9 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
         rrec = ctx.round_get(r) or {}
         if str(rrec.get("status")) != "done":
             continue
-        for rid in (rid_feedback(r), rid_concerns(r), rid_response(r)):
+        for rid in (rid_feedback(r), rid_concerns(r), rid_concern_audit(r),
+                    rid_concern_repair(r), rid_response_draft(r), rid_response(r),
+                    rid_response_audit(r), rid_response_repair(r)):
             if ctx.run(rid) is not None:
                 keep_ids.add(rid)
         if rrec.get("scoped") and rrec.get("journal_mode"):

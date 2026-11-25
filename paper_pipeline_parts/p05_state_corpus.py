@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 05/24 of the pipeline -- executed by the
+# Part 05/25 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -47,8 +47,47 @@ def rid_concerns(r: int) -> str:
 
 
 def rid_response(r: int) -> str:
-    """The response-to-reviewers run (modes 2-4; option 1 writes no letter)."""
+    """The FINAL response-to-reviewers run (modes 2-4; option 1 writes no letter)."""
     return f"r{r}_response"
+
+
+def rid_response_draft(r: int) -> str:
+    """The point-by-point response PLAN, written BEFORE the manuscript revision.
+
+    It fixes the authors' intended answer and the reviewer's verbatim quotation
+    first; the reviser implements it, and `r<r>_response` later reconciles the
+    same letter with the final package (actual changes/status).
+    """
+    return f"r{r}_response_draft"
+
+
+def rid_concern_audit(r: int) -> str:
+    """The independent audit of the generated concern ledger.
+
+    It disposes every concern (confirmed / defective / dropped) against the
+    human feedback and writes only `concern_audit/`; it generates no concern.
+    """
+    return f"r{r}_concern_audit"
+
+
+def rid_concern_repair(r: int) -> str:
+    """The repair of the generated concern ledger (one pass).
+
+    It consumes `r<r>_concern_audit`, re-validates every row, corrects/removes
+    only confirmed defects, regenerates the JF finding list, and writes the
+    repaired ledger the revision and response sessions consume.
+    """
+    return f"r{r}_concern_repair"
+
+
+def rid_response_audit(r: int) -> str:
+    """The independent audit of the response-to-reviewers deliverable."""
+    return f"r{r}_response_audit"
+
+
+def rid_response_repair(r: int) -> str:
+    """The one-pass repair of the response letter + response map."""
+    return f"r{r}_response_repair"
 
 
 def rid_audit(r: int) -> str:
@@ -302,6 +341,10 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         # general review; the materializer records which run that is, so the
         # retry/rebuild path never blocks on a run this root does not have.
         deps = [rid_a1(r), rec.get("upstream_run_id") or rid_guided_review(r)]
+        if ctx is not None and journal_has_feedback(ctx) and journal_needs_response(ctx):
+            # The reviser (scoped or resubmit) implements the point-by-point
+            # response plan written before it.
+            deps.append(rid_response_draft(r))
         # `register()` initializes inputs_manifest to None; `.get(k, {})` does
         # not cover an existing None, and the AttributeError used to break
         # retry/rebuild for a registered-but-unmaterialized revise run.
@@ -310,6 +353,11 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         return deps
     if kind in ("feedback", "concerns"):
         return [rid_a1(r)]
+    if kind == "concern_audit":
+        return [rid_concerns(r)]
+    if kind == "concern_repair":
+        # The repair applies the audit's plan to the generated ledger.
+        return [rid_concerns(r), rid_concern_audit(r)]
     if kind == "response":
         # The response letter consumes BOTH the concern ledger and the final
         # package: the ledger run is upstream_run_id, the scoped revision run is
@@ -319,7 +367,19 @@ def upstream_deps(rec: dict, ctx=None) -> list:
             deps.append(rec["upstream_run_id"])
         if rec.get("package_run_id"):
             deps.append(rec["package_run_id"])
+        if rec.get("draft_run_id"):
+            deps.append(rec["draft_run_id"])
         return deps
+    if kind == "response_draft":
+        # The plan consumes the concern ledger of THIS mode: the repaired one
+        # in major/minor, the FEEDBACK one in resubmit.
+        if ctx is None:
+            return [rid_concerns(r)]
+        return [_concern_source_rid(ctx, r)]
+    if kind == "response_audit":
+        return [rid_response(r)]
+    if kind == "response_repair":
+        return [rid_response(r), rid_response_audit(r)]
     if kind == "integrate":
         # every pool member is a donor, so EVERY pool run must be done first
         pool = list(rec.get("pool_ids") or [])
@@ -6211,9 +6271,16 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     rid = rid_for_fresh(r, vid)
     sb = ctx.runs_dir / rid
     if journal_is_scoped(ctx):
-        # A major/minor revision consumes the concerns run's finding list, not a
-        # general review: that is what keeps the edits concern-scoped.
-        merge_rid, review_only = rid_concerns(r), False
+        # A major/minor revision consumes the CONCERN-REPAIRED ledger and
+        # finding list, not a general review: that is what keeps the edits
+        # concern-scoped AND human-grounded. When the concern audit/repair
+        # chain is off, the generated concerns are consumed unaudited (the
+        # skip is recorded by the scheduler).
+        _crepair = ctx.run(rid_concern_repair(r))
+        merge_rid = (rid_concern_repair(r)
+                     if _crepair is not None and _crepair.get("status") == "done"
+                     else rid_concerns(r))
+        review_only = False
     else:
         # ONE policy for "which run defines the round's frozen review" (p19),
         # shared with the auditor: the guided review (or its split session B)
@@ -6251,6 +6318,12 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
             ensure_copy(src_sb / "concerns", sb / "concerns")
         if (src_sb / "feedback").is_dir():
             ensure_copy(src_sb / "feedback", sb / "feedback")
+    draft_manifest = None
+    if journal_has_feedback(ctx) and journal_needs_response(ctx):
+        _draft = _require_done(ctx, rid_response_draft(r),
+                               "the reviser implements the point-by-point response plan")
+        ensure_copy(ctx.sandbox_of(_draft) / "response", sb / "response_plan")
+        draft_manifest = hash_manifest(sb / "response_plan")
     aud_manifest = None
     if audit_enabled(ctx) and not journal_is_scoped(ctx):
         # The reviser acts on the AUDITED list: the auditor's drops (with their
@@ -6314,6 +6387,12 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                soft_deletions=_rem_ok))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
+    if journal_is_scoped(ctx) and _crepair is None:
+        rec["concern_audit"] = {
+            "status": "skipped",
+            "reason": ("the concern audit/repair chain is off (--concern-audit off); "
+                       "the scoped revision consumed the generated ledger unaudited"),
+        }
     rec["seeded_skeletons"] = skeleton_seed
     _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok, _rem_ok)
     if _policy_rec is None:
@@ -6332,6 +6411,8 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                           follow_dir_links=True)
     if (sb / "concerns").is_dir():
         rec["inputs_manifest"]["concerns"] = hash_manifest(sb / "concerns")
+    if draft_manifest is not None:
+        rec["inputs_manifest"]["response_plan"] = draft_manifest
     if aud_manifest is not None:
         rec["inputs_manifest"]["audit"] = aud_manifest
     return rec

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 02/24 of the pipeline -- executed by the
+# Part 02/25 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -99,16 +99,19 @@ JOURNAL_MODES = {
     JOURNAL_MODE_MAJOR: {
         "option": 3,
         "label": "major revision: concern-scoped edits only at the same journal; "
-                 "response to reviewers required; no rewrites",
+                 "response to reviewers required; no rewrites; human feedback only",
         "feedback": True, "response": True, "rewrites": False, "scoped": True,
-        "streams": ("human", "llm"),
+        # CONCERN-SCOPED PROVENANCE. A major/minor revision may fix only what a
+        # HUMAN reviewer raised. The LLM review area is not staged and cannot be
+        # a concern source, so no `feedback/llm/` row can become a finding.
+        "streams": ("human",),
     },
     JOURNAL_MODE_MINOR: {
         "option": 4,
         "label": "minor revision: concern-scoped edits only at the same journal; "
-                 "response to reviewers required; no rewrites",
+                 "response to reviewers required; no rewrites; human feedback only",
         "feedback": True, "response": True, "rewrites": False, "scoped": True,
-        "streams": ("human", "llm"),
+        "streams": ("human",),
     },
     JOURNAL_MODE_LLM: {
         "option": 5,
@@ -912,7 +915,9 @@ DEFAULT_PUBLISH_FLATTEN_ZOTERO = False
 # `a`/`w`/`i` are the short spellings used in the round plan.
 ONLY_STAGES = ("rewrite", "guided_review", "cold_start_review", "audit", "revise",
                "integrate",
-               "judge", "feedback", "concerns", "response", "conform")
+               "judge", "feedback", "concerns", "concern_audit", "concern_repair",
+               "response_draft", "response", "response_audit", "response_repair",
+               "conform")
 # Short spellings for ONE stage each (`merge` is the integration step's name in
 # the round plan). `review` is NOT here: it names the review STEP and lives in
 # ONLY_STAGE_GROUPS below.
@@ -923,9 +928,14 @@ ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite",
                 "merge": "integrate", "merges": "integrate",
                 "j": "judge", "judges": "judge",
                 "fb": "feedback", "feedbacks": "feedback",
-                "concern": "concerns",
+                "concern": "concerns", "concerns": "concerns",
+                "ca": "concern_audit", "concern-audit": "concern_audit",
+                "cr": "concern_repair", "concern-repair": "concern_repair",
+                "rd": "response_draft", "response-draft": "response_draft",
                 "resp": "response", "responses": "response",
-                "response-to-reviewers": "response"}
+                "response-to-reviewers": "response",
+                "ra": "response_audit", "response-audit": "response_audit",
+                "rr": "response_repair", "response-repair": "response_repair"}
 # `review` names the round's REVIEW STEP, which is BOTH discovery passes: the
 # guided (checklist) review and the cold-start (unanchored) review. Selecting it
 # selects both; selecting either stage name selects only that one.

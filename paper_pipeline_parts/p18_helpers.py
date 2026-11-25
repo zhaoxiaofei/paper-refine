@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 18/24 of the pipeline -- executed by the loader AFTER the command
+# Part 18/25 of the pipeline -- executed by the loader AFTER the command
 # functions, in the loader's own module globals. These are pure helpers
 # (no module-level side effects): the lower-numbered parts call them at
 # runtime, so they may live after the CLI definitions. Split out of
@@ -1292,7 +1292,9 @@ class OnlySpec:
         # their own classes.
         if vid == "cold_start_review":
             return "cold_start_review"
-        if vid in ("audit", "feedback", "concerns", "response"):
+        if vid in ("audit", "feedback", "concerns", "concern_audit",
+                   "concern_repair", "response_draft", "response",
+                   "response_audit", "response_repair"):
             return vid
         if vid == "conform":
             return "conform"
@@ -1460,7 +1462,9 @@ def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
         # `r1_w2` / `r1_guided_review` / `r1_audit`: ONE session of one round (a
         # `_j<k>` tail makes it a judge session); the old spellings still work.
         sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(w\d+|a\d+|i\d+|guided_review|"
-                           r"cold_start_review|audit|feedback|concerns|response|"
+                           r"cold_start_review|audit|feedback|concerns|concern_audit|"
+                           r"concern_repair|response_draft|response|response_audit|"
+                           r"response_repair|"
                            r"rewriter\d+|reviser\d+|integrator\d+|reviewer|reviewer_b|"
                            r"review_b)((?:[_:/.-](?:b|j\d+))?)",
                            token)
@@ -1664,7 +1668,9 @@ def _add_session_id(spec: "OnlySpec", r, session_id: str, part: str,
         die(f"{flag}: {part!r} names a1, the round base COPY -- it has no agent session "
             f"(use `reviser1` for the first reviser, which edits a1 into a2)", code=2)
     if not re.fullmatch(r"(?:w\d+|a\d+|i\d+|guided_review|guided_review_b|"
-                        r"cold_start_review|audit|feedback|concerns|response)", sid):
+                        r"cold_start_review|audit|feedback|concerns|concern_audit|"
+                        r"concern_repair|response_draft|response|response_audit|"
+                        r"response_repair)", sid):
         die(f"{flag}: {part!r} is not a session this pipeline knows (use a stage name, or a "
             f"session such as `rewriter1`, `reviser1`, `integrator1`, `review`, `audit`, `w2`, "
             f"`w2_j1`, `r1_w2`, `r1_judge_w2_j1`)", code=2)
@@ -1755,7 +1761,9 @@ def _session_token(raw: str, part: str, flag: str = "--only") -> str:
     if m:
         return "guided_review_b" if m.group(2) else "guided_review"
     if re.fullmatch(r"(?:a1|w\d+|a\d+|i\d+|orig|guided_review|guided_review_b|"
-                    r"cold_start_review|audit|feedback|concerns|response)", tok):
+                    r"cold_start_review|audit|feedback|concerns|concern_audit|"
+                    r"concern_repair|response_draft|response|response_audit|"
+                    r"response_repair)", tok):
         if tok == "a1":
             die(f"{flag}: {part!r} names a1, the round base COPY -- it has no agent session "
                 f"(use `reviser1` for the first reviser, which edits a1 into a2)", code=2)
